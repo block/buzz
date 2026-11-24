@@ -14,9 +14,6 @@ const Curve sectionExpandCurve = Cubic(0.23, 1, 0.32, 1);
 /// Easing for the closing section body.
 const Curve sectionCollapseCurve = Curves.easeInCubic;
 
-/// Subtle vertical compression at the collapsed end of the transition.
-const double sectionCollapsedScaleY = 0.98;
-
 /// Shared Channels and Me section expansion, including reduced-motion support.
 class CollapsibleSectionBody extends HookWidget {
   final bool expanded;
@@ -90,22 +87,13 @@ class CollapsibleSectionBody extends HookWidget {
         child: shouldRender.value ? child : const SizedBox.shrink(),
         builder: (context, child) {
           final value = curvedAnimation.value.clamp(0.0, 1.0);
-          final scaleY =
-              sectionCollapsedScaleY + ((1 - sectionCollapsedScaleY) * value);
 
           return Align(
             alignment: Alignment.topCenter,
             heightFactor: value,
-            child: Opacity(
-              opacity: value,
-              child: Transform.scale(
-                alignment: Alignment.topCenter,
-                scaleY: scaleY,
-                child: ExcludeSemantics(
-                  excluding: !expanded,
-                  child: IgnorePointer(ignoring: !expanded, child: child),
-                ),
-              ),
+            child: ExcludeSemantics(
+              excluding: !expanded,
+              child: IgnorePointer(ignoring: !expanded, child: child),
             ),
           );
         },

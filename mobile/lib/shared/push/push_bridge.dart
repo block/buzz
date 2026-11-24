@@ -256,7 +256,10 @@ Future<void> shareSelectedCommunityWithNotifications(
 /// Pulls a notification response that arrived before the Flutter method
 /// handler was installed.
 Future<void> syncPendingBuzzPushNotificationResponse() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  if (defaultTargetPlatform != TargetPlatform.iOS &&
+      defaultTargetPlatform != TargetPlatform.android) {
+    return;
+  }
   try {
     final arguments = await _channel.invokeMapMethod<dynamic, dynamic>(
       'takePendingNotificationResponse',
@@ -457,6 +460,15 @@ Future<BuzzPushEndpointGrant?> enrollBuzzPush(
       );
     } on AndroidPushAttestationUnavailable catch (error) {
       pushUnavailableReason.value = error.reason;
+      rethrow;
+    } on AndroidPushGatewayResponseInvalid catch (error, stackTrace) {
+      // As on iOS, only a reply the app cannot read is reported; refusals and
+      // transport failures are routine.
+      diagnostics.reportError(
+        error,
+        stackTrace,
+        operation: DiagnosticOperation.pushGatewayResponse,
+      );
       rethrow;
     }
     if (enrolled == null) return null;

@@ -124,7 +124,7 @@ class ProfileEditPage extends HookConsumerWidget {
       bool multiline = false,
     }) async {
       if (defaultTargetPlatform == TargetPlatform.iOS) {
-        final sheetTheme = utilitySurfaceThemeData(Theme.of(context));
+        final sheetTheme = utilitySheetThemeData(Theme.of(context));
         try {
           await IosProfileTextEditor.presentUntilSaved(
             title: title,

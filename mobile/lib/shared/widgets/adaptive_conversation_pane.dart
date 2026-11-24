@@ -183,11 +183,13 @@ class AdaptiveConversationPane extends HookConsumerWidget {
     this.listWidthFraction,
     this.preferredListWidth,
     this.persistentSelection = false,
+    this.requireFoldForSplit = false,
     this.listToolbarSlots = 0,
     super.key,
   });
 
   final bool persistentSelection;
+  final bool requireFoldForSplit;
 
   /// Rail slots reserved for workspace controls that stay active in wide mode.
   final int listToolbarSlots;
@@ -244,7 +246,9 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                 ? stripWidth
                 : 0.0;
             final contentWidth = constraints.maxWidth - stripWidth;
-            final wide = usesConversationPanes(context, strip: strip);
+            final wide =
+                (!requireFoldForSplit || strip != null) &&
+                usesConversationPanes(context, strip: strip);
             final book = wide ? bookDivisionOf(context) : null;
             final selected = controller.selectedId;
             if (ownerRoute != null) {
@@ -640,6 +644,7 @@ class AdaptiveConversationDestination extends HookConsumerWidget {
     this.listWidthFraction,
     this.controller,
     this.persistentSelection = false,
+    this.requireFoldForSplit = false,
     this.listToolbarSlots = 0,
     this.preferredListWidth,
     super.key,
@@ -648,6 +653,7 @@ class AdaptiveConversationDestination extends HookConsumerWidget {
   /// Optional list share of the usable width; defaults to the compact sidebar.
   final ConversationPaneController? controller;
   final bool persistentSelection;
+  final bool requireFoldForSplit;
 
   /// Rail slots reserved for workspace controls that stay active in wide mode.
   final int listToolbarSlots;
@@ -677,6 +683,7 @@ class AdaptiveConversationDestination extends HookConsumerWidget {
             active: DuoToolbarScope.maybeOf(context)?.active ?? true,
             controller: controller,
             persistentSelection: persistentSelection,
+            requireFoldForSplit: requireFoldForSplit,
             listToolbarSlots: listToolbarSlots,
             emptyLabel: emptyLabel,
             listWidthFraction: listWidthFraction,

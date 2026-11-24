@@ -6,7 +6,7 @@ const _version = 3;
 const _maxDatabasePages = 11520; // 45 MiB at 4 KiB per page.
 const _maxWindowBytes = 2 * 1024 * 1024;
 
-enum _DiskAction { read, inspect, touch, save, removeChannel }
+enum _DiskAction { read, inspect, touch, save, removeChannel, relayAuthor }
 
 final class _DiskRequest {
   const _DiskRequest({
@@ -38,12 +38,14 @@ final class _DiskResult {
     this.pruned = const {},
     this.reset = false,
     this.recencyFailure,
+    this.relayAuthor,
   });
 
   final List<NostrEvent>? events;
   final Map<String, bool> pruned;
   final bool reset;
   final StackTrace? recencyFailure;
+  final String? relayAuthor;
 }
 
 String _path(String directory, String scope) =>
@@ -109,6 +111,11 @@ _DiskResult _accessDatabase(_DiskRequest request) {
       _DiskAction.touch => _touchPage(db, request.page),
       _DiskAction.save => _saveWithEviction(db, request, wires, byteSize),
       _DiskAction.removeChannel => _removeChannel(db, request),
+      _DiskAction.relayAuthor => _DiskResult(
+        relayAuthor:
+            db.select('SELECT pubkey FROM relay_author').firstOrNull?['pubkey']
+                as String?,
+      ),
     };
   } on SqliteException catch (error) {
     if (!_isInvalidDatabase(error)) rethrow;

@@ -1706,15 +1706,16 @@ fn events_insert_tails(source: &str) -> Vec<String> {
     tails
 }
 
-/// An events insert must run both follow-ups: the push enqueue and the
-/// pre-commit TTL refresh. `after_admitted_insert` does both; a writer that
-/// inserts inside a savepoint calls the two halves separately.
+/// An events insert must run every follow-up: the push enqueue, the search
+/// outbox row and the pre-commit TTL refresh. `after_admitted_insert` does
+/// all three; a writer that inserts inside a savepoint calls them separately.
 ///
 /// Only real calls count: a hook in a comment or a string literal does not.
 fn runs_event_follow_ups(function_source: &str) -> bool {
     let code = mask_comments_and_literals(function_source);
     code.contains("event_follow_up::after_admitted_insert(")
         || (code.contains("event_follow_up::enqueue_push_match(")
+            && code.contains("search_outbox::enqueue_in_transaction(")
             && code.contains(".record_channel_event("))
 }
 
@@ -1759,6 +1760,16 @@ pub(crate) async fn hooked_writer(tx: &mut AdmittedTx) {
         .await
         .expect("follow up");
 }
+pub(crate) async fn unsearched_writer(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(tx.conn())
+        .await
+        .expect("write");
+    crate::store::event_follow_up::enqueue_push_match(tx.conn(), community, id, kind)
+        .await
+        .expect("enqueue");
+    tx.record_channel_event(channel, kind);
+}
 pub(crate) async fn savepoint_writer(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
         .execute(tx.conn())
@@ -1767,6 +1778,9 @@ pub(crate) async fn savepoint_writer(tx: &mut AdmittedTx) {
     crate::store::event_follow_up::enqueue_push_match(tx.conn(), community, id, kind)
         .await
         .expect("enqueue");
+    crate::search_outbox::enqueue_in_transaction(tx, id, created_at, kind)
+        .await
+        .expect("search");
     tx.record_channel_event(channel, kind);
 }
 pub(crate) async fn mention_writer(tx: &mut AdmittedTx) {
@@ -1900,6 +1914,7 @@ mod tests {
             "pub(crate) async fn unhooked_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn quoted_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn push_only_writer(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn unsearched_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn lowercase_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn continued_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_under_doc_mention(tx: &mut AdmittedTx) {",
@@ -1915,7 +1930,7 @@ mod tests {
             "pub(crate) async fn writer_after_raw_string_example(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_after_test_helper(tx: &mut AdmittedTx) {",
         ],
-        "an events insert must run the push enqueue and record the TTL refresh"
+        "an events insert must run the push enqueue, queue the search row and record the TTL refresh"
     );
 }
 

@@ -153,11 +153,6 @@ Future<void> showMessageActions({
                     // Triage: come back to this message later.
                     SheetActionSection(
                       children: [
-                        _MarkReadUnreadTile(
-                          message: message,
-                          channelId: channelId,
-                          currentPubkey: currentPubkey,
-                        ),
                         _FollowThreadTile(
                           message: message,
                           channelId: channelId,
@@ -505,12 +500,13 @@ Future<void> _shareImage(
 }
 
 /// Reuses the gallery's downloads, permissions and message authority for UIKit.
+/// [canManageMessage] is read when the gallery opens and before a delete.
 NativePhotoActions nativeImageActions({
   required BuildContext context,
   required WidgetRef ref,
   required TimelineMessage message,
   required String channelId,
-  required bool canManageMessage,
+  required bool Function() canManageMessage,
 }) => NativePhotoActions(
   canDelete: canManageMessage,
   perform: (action, url) async {
@@ -537,7 +533,7 @@ NativePhotoActions nativeImageActions({
           await Clipboard.setData(ClipboardData(text: url));
           return 'Image link copied';
         case 'delete':
-          if (!canManageMessage) return 'You cannot delete this message';
+          if (!canManageMessage()) return 'You cannot delete this message';
           await ref
               .read(channelActionsProvider)
               .deleteMessage(channelId: channelId, eventId: message.id);
@@ -607,18 +603,12 @@ String messageLinkFor({
 class _MarkReadUnreadTile extends ConsumerWidget {
   final TimelineMessage message;
   final String channelId;
-  final String? currentPubkey;
 
-  const _MarkReadUnreadTile({
-    required this.message,
-    required this.channelId,
-    required this.currentPubkey,
-  });
+  const _MarkReadUnreadTile({required this.message, required this.channelId});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final readState = ref.watch(readStateProvider);
-    if (!readState.isReady) return const SizedBox.shrink();
 
     final unread = messageActionShowsUnread(
       ref,
@@ -627,9 +617,9 @@ class _MarkReadUnreadTile extends ConsumerWidget {
       message: message,
     );
 
-    return ListTile(
-      leading: Icon(unread ? BuzzIcons.mailCheck : BuzzIcons.mailOpen),
-      title: Text(unread ? 'Mark read' : 'Mark unread'),
+    return _MessageQuickActionTile(
+      icon: unread ? BuzzIcons.mailCheck : BuzzIcons.mailOpen,
+      label: unread ? 'Mark read' : 'Mark unread',
       onTap: () {
         if (!_selectMessageAction(context)) return;
         final notifier = ref.read(readStateProvider.notifier);
@@ -740,6 +730,8 @@ class _MessageQuickActionsRow extends ConsumerWidget {
     final startsThreads = ref.watch(channelStartsThreadsProvider(channelId));
 
     final tiles = <Widget>[
+      if (ref.watch(readStateProvider.select((state) => state.isReady)))
+        _MarkReadUnreadTile(message: message, channelId: channelId),
       if (messages != null && startsThreads)
         _MessageQuickActionTile(
           icon: BuzzIcons.messageSquareReply,

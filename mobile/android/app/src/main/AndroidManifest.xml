@@ -64,6 +64,14 @@
                 android:name="flutter_deeplinking_enabled"
                 android:value="false" />
         </activity>
+        <!-- Receives the push gateway's wake from FCM. -->
+        <service
+            android:name=".PushWakeService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
         <!-- Diagnostic reporting (docs/mobile-diagnostic-reporting.md). The
              Sentry SDK starts from Dart, and only when the build has a
              destination, so its startup provider never runs. -->

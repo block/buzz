@@ -120,6 +120,7 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "relay_invites",
     "relay_members",
     "scheduled_workflow_fires",
+    "search_outbox",
     "thread_metadata",
     "users",
     "workflow_approvals",
@@ -160,6 +161,7 @@ pub const PENDING_SCOPED_TABLES: &[&str] = &[
     "identity_retirement_actions",
     "identity_retirement_holds",
     "identity_retirement_workflows",
+    "search_backfill",
 ];
 
 /// Tenant tables an expand migration may add between a deletion's approval
@@ -176,6 +178,8 @@ pub const APPROVAL_FORWARD_TABLES: &[&str] = &[
     "identity_retirement_actions",
     "identity_retirement_holds",
     "identity_retirement_workflows",
+    "search_backfill",
+    "search_outbox",
 ];
 
 /// Control-plane tables with community provenance that the tenant purge does
@@ -201,6 +205,7 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "scheduled_workflow_fires",
     "workflow_runs",
     "push_wake_outbox",
+    "search_outbox",
     "join_policy_acceptances",
     "media_uploaders",
     "media_publications",
@@ -4863,6 +4868,9 @@ pub(crate) mod postgres_tests {
         crate::migration::run_migrations_through(&db.pool, 89)
             .await
             .expect("migrate with fence objects present");
+        crate::migration::create_tenant_tables_added_after_fence_retirement(&db.pool)
+            .await
+            .expect("tenant tables added since");
         let store = db.deletion_store();
         let community = db
             .ensure_configured_community("optional-fences.example")
@@ -5008,6 +5016,9 @@ DROP FUNCTION community_deletion_lock_key(UUID);
         crate::migration::run_migrations_through(&db.pool, 86)
             .await
             .expect("phase-one schema");
+        crate::migration::create_tenant_tables_added_after_fence_retirement(&db.pool)
+            .await
+            .expect("tenant tables added since");
         let community = db
             .ensure_configured_community("optional-guards.example")
             .await
@@ -9702,6 +9713,69 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         .expect("connect scratch database");
         let store = db.deletion_store();
         (db, store, scratch)
+    }
+
+    /// Once a community is fenced for deletion, admission refuses its writes
+    /// (and so its outbox rows) and claims skip it; the purge removes its
+    /// outbox rows and keeps another community's.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn search_outbox_is_fenced_and_purged() {
+        let (db, store) = store().await;
+        crate::search_outbox::enable(&db.pool)
+            .await
+            .expect("enable outbox");
+        let (request, inventory) = inventoried_request(&db, &store).await;
+        let community = request.community_id;
+        let bystander = db
+            .ensure_configured_community(&format!("bystander-{}.example", Uuid::new_v4().simple()))
+            .await
+            .expect("bystander community")
+            .id;
+        let keys = nostr::Keys::generate();
+        let message = |content: &str| {
+            nostr::EventBuilder::new(nostr::Kind::Custom(9), content)
+                .sign_with_keys(&keys)
+                .expect("sign")
+        };
+        for owner in [community, bystander] {
+            db.insert_event(owner, &message("queued"), None)
+                .await
+                .expect("insert");
+        }
+        let queued = |owner: CommunityId| {
+            let pool = db.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM search_outbox WHERE community_id = $1",
+                )
+                .bind(owner.as_uuid())
+                .fetch_one(&pool)
+                .await
+                .expect("count outbox rows")
+            }
+        };
+
+        let token = fence_and_drain(&store, &request, &inventory).await;
+        db.insert_event(community, &message("after fence"), None)
+            .await
+            .expect_err("a fenced community admits no writes");
+        assert_eq!(queued(community).await, 1);
+        let batch = crate::search_outbox::claim_batch(&db.pool, 10, &[])
+            .await
+            .expect("claim")
+            .expect("the bystander's batch");
+        assert_eq!(
+            batch.community(),
+            bystander,
+            "claims skip a fenced community"
+        );
+        drop(batch);
+
+        let deleted = store.purge_postgres(&token).await.expect("purge postgres");
+        assert_eq!(deleted.get("search_outbox"), Some(&1));
+        assert_eq!(queued(community).await, 0);
+        assert_eq!(queued(bystander).await, 1);
     }
 
     /// Approve, claim, fence, drain and remove bindings, leaving the request

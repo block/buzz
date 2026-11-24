@@ -14,7 +14,7 @@ export 'theme_catalog.dart';
 export 'theme_extensions.dart';
 export 'theme_pairs.dart';
 export 'theme_provider.dart';
-export 'text_theme.dart' show bodyExtraSmallTextStyle;
+export 'text_theme.dart' show bodyExtraSmallTextStyle, bodyLargeTextStyle;
 export 'utility_surface_theme.dart';
 export 'mobile_appearance.dart';
 export 'chat_colors.dart';

@@ -149,20 +149,32 @@ void main() {
   test(
     'an unavailable gateway keeps the journal and a refusal clears it',
     () async {
-      gateway.failWith['/v1/installations'] = 503;
-      await expectLater(
-        enroll(),
-        throwsA(
-          isA<AndroidPushGatewayRejection>().having(
-            (e) => e.isTransient,
-            'transient',
-            true,
+      // Even when the refusal's body is too large to read.
+      for (final oversized in [false, true]) {
+        gateway
+          ..oversizeFailures = oversized
+          ..failWith['/v1/installations'] = 503;
+        await expectLater(
+          enroll(),
+          throwsA(
+            isA<AndroidPushGatewayRejection>().having(
+              (e) => e.isTransient,
+              'transient',
+              true,
+            ),
           ),
-        ),
-      );
-      expect(store.value, contains('pendingEnrollment'));
-      expect(keystore.key, isNotNull);
-      gateway.failWith.remove('/v1/installations');
+        );
+        expect(store.value, contains('pendingEnrollment'));
+        expect(keystore.key, isNotNull);
+      }
+
+      gateway.failWith['/v1/installations'] = 403;
+      await expectLater(enroll(), throwsA(isA<AndroidPushGatewayRejection>()));
+      expect(keystore.key, isNull);
+      expect(store.value, isNot(contains('pendingEnrollment')));
+      gateway
+        ..oversizeFailures = false
+        ..failWith.remove('/v1/installations');
 
       gateway.refuseAttestation = true;
       await expectLater(
@@ -498,6 +510,36 @@ void main() {
       expect(gateway.requests, isEmpty);
       expect(keystore.generated, 0);
       expect(await authority.grants(), isEmpty);
+    },
+  );
+
+  test(
+    'the enrolling relay keeps its delegation before the caller lists it',
+    () async {
+      // A community's relay may not be in the desired list yet when its first
+      // enrollment finishes; while it is still wanted, its new delegation is
+      // not swept.
+      final grant = (await authority.enroll(
+        relayOrigin: _relayA,
+        relayPubkey: _keyA,
+        endpoint: 'token-1',
+        stillWanted: () => true,
+        desiredRelays: () => {},
+      ))!;
+      final installation = gateway.installations.values.single;
+      expect(installation.revokedDelegations, isEmpty);
+      expect(grant.generation, 1);
+
+      // An opt-out that lands while the next delegation is in flight sees
+      // that delegation revoked by the same sweep.
+      await authority.enroll(
+        relayOrigin: _relayB,
+        relayPubkey: _keyB,
+        endpoint: 'token-1',
+        stillWanted: () => gateway.bodiesFor('/v1/delegations').length < 2,
+        desiredRelays: () => {_relayA},
+      );
+      expect(installation.revokedDelegations, {'$_keyB/1'});
     },
   );
 
