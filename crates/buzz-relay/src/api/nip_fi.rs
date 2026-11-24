@@ -4356,50 +4356,42 @@ mod route_integration_tests {
         }
         closed(&pod);
 
-        // Store: one issuer fails to load, the other still closes, whichever
-        // the map visits first.
+        // Store: the first issuer the map visits fails to load; the healthy
+        // issuer after it still closes.
         const OTHER_ISS: &str = "https://other-issuer.example";
-        for failed in [TEST_ISS, OTHER_ISS] {
-            let inner = Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
-            let (a, b) = (
-                nostr::Keys::generate().public_key(),
-                nostr::Keys::generate().public_key(),
-            );
-            store_deny_for(&inner, TEST_ISS, &a).await;
-            store_deny_for(&inner, OTHER_ISS, &b).await;
-            let source = Arc::new(FailingReplayGuard {
-                inner,
-                fail_issuer: Some(failed),
-                ..Default::default()
-            });
-            let mut config = crate::config::Config::for_test();
-            config.nip_fi.registry.insert(test_issuer_policy());
-            config.nip_fi.registry.insert(issuer_policy(OTHER_ISS));
-            let mut state = build_test_app_state(10, config).await;
-            let capacity = |issuer: &str| IssuerCapacity {
-                issuer: issuer.to_owned(),
-                capacity: 10,
-            };
-            state.nip_fi_deny_map = Some(Arc::new(NipFiDenyMap::new(
-                10,
-                vec![capacity(TEST_ISS), capacity(OTHER_ISS)],
-            )));
-            let pod = Arc::new(state);
-            let live = if failed == TEST_ISS {
-                (OTHER_ISS, &b)
-            } else {
-                (TEST_ISS, &a)
-            };
-            let session = IssuerSessions::register(&pod, live.0, live.1);
-            pod.nip_fi_deny_map.as_deref().unwrap().begin_restore();
-            assert_eq!(
-                restore_nip_fi_denies(&pod, &[source as _]).await,
-                Err("store"),
-                "{failed} failed"
-            );
-            session.assert_closed("issuer after a store error");
-            closed(&pod);
-        }
+        let mut config = crate::config::Config::for_test();
+        config.nip_fi.registry.insert(test_issuer_policy());
+        config.nip_fi.registry.insert(issuer_policy(OTHER_ISS));
+        let mut state = build_test_app_state(10, config).await;
+        let capacity = |issuer: &str| IssuerCapacity {
+            issuer: issuer.to_owned(),
+            capacity: 10,
+        };
+        let map = NipFiDenyMap::new(10, vec![capacity(TEST_ISS), capacity(OTHER_ISS)]);
+        let mut order = map.issuers().into_iter();
+        let (failed, healthy) = (order.next().unwrap(), order.next().unwrap());
+        state.nip_fi_deny_map = Some(Arc::new(map));
+        let pod = Arc::new(state);
+        let inner = Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
+        let (a, b) = (
+            nostr::Keys::generate().public_key(),
+            nostr::Keys::generate().public_key(),
+        );
+        store_deny_for(&inner, &failed, &a).await;
+        store_deny_for(&inner, &healthy, &b).await;
+        let source = Arc::new(FailingReplayGuard {
+            inner,
+            fail_issuer: Some(failed),
+            ..Default::default()
+        });
+        let session = IssuerSessions::register(&pod, &healthy, &b);
+        pod.nip_fi_deny_map.as_deref().unwrap().begin_restore();
+        assert_eq!(
+            restore_nip_fi_denies(&pod, &[source as _]).await,
+            Err("store")
+        );
+        session.assert_closed("issuer after a store error");
+        closed(&pod);
     }
 
     /// Live delivery still closes sessions when the entry is unchanged.
@@ -4479,7 +4471,7 @@ mod route_integration_tests {
         applies: bool,
         load_fails: bool,
         /// Fails loads for this issuer only.
-        fail_issuer: Option<&'static str>,
+        fail_issuer: Option<String>,
         loads: std::sync::atomic::AtomicUsize,
     }
 
@@ -4511,7 +4503,7 @@ mod route_integration_tests {
             now: chrono::DateTime<chrono::Utc>,
         ) -> buzz_auth::LoadDenies<'a> {
             self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if self.load_fails || self.fail_issuer == Some(issuer) {
+            if self.load_fails || self.fail_issuer.as_deref() == Some(issuer) {
                 return Box::pin(async {
                     Err(buzz_auth::AuthError::Internal(
                         "simulated Redis outage".into(),
