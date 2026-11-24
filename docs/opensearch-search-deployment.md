@@ -18,9 +18,12 @@ Postgres.
    runs, which stops community deletion.
 2. Deploy the release with migration `0106`. Nothing is queued until the
    setting is on.
-3. Set `BUZZ_OPENSEARCH_URL` on every relay. Each relay queues only the
-   messages it stores, so one without the setting leaves gaps. A relay with
-   the setting refuses to start before `0106` has run.
+3. Set `BUZZ_OPENSEARCH_URL` and `BUZZ_OPENSEARCH_PREVIEW=true` on every
+   relay. Each relay queues only the messages it stores, so one without the
+   settings leaves gaps. A relay with them refuses to start before `0106` has
+   run. Until [block/buzz#9862](https://github.com/block/buzz/pull/9862)
+   caps bulk requests, a cluster with a 10 MiB request limit can reject a
+   full batch.
 
 Messages stored before step 3 are not indexed; there is no backfill yet.
 
