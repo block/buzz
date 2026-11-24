@@ -409,7 +409,7 @@ class ChannelActions {
     final owners = {
       if (refusal.ownerOnly || namesakes.isNotEmpty) ?owner,
       for (final key in namesakes) ?sources.factFor(key)?.ownerPubkey,
-    }.difference(keys);
+    };
     if (owners.isNotEmpty) {
       await load(owners);
       sources = _ref.read(identityNameSourcesProvider);

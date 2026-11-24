@@ -812,6 +812,75 @@ void _confirmedJoinCases() {
         );
       });
 
+      for (final ownerOnly in [false, true]) {
+        test('waits for an owner already in the DM before naming '
+            '(${ownerOnly ? 'owner_only' : 'nobody'})', () async {
+          // Bob adds Morgan's Scout to a DM with Morgan, not yet loaded, and
+          // Alice's Scout.
+          const withMorgan = 'dm-morgan';
+          container
+              .read(channelsProvider.notifier)
+              .rememberOpened(
+                Channel(
+                  id: withMorgan,
+                  name: 'DM',
+                  channelType: 'dm',
+                  visibility: 'private',
+                  description: '',
+                  createdBy: me,
+                  createdAt: DateTime(2025),
+                  memberCount: 3,
+                  participantPubkeys: [me, morgan, otherScout],
+                  isMember: true,
+                ),
+              );
+          final cache = container.read(userCacheProvider.notifier)
+            ..put(UserProfile(pubkey: alice, displayName: 'Alice'))
+            ..put(
+              UserProfile(
+                pubkey: scout,
+                displayName: 'Scout',
+                ownerPubkey: morgan,
+              ),
+            )
+            ..put(
+              UserProfile(
+                pubkey: otherScout,
+                displayName: 'Scout',
+                ownerPubkey: alice,
+              ),
+            );
+          session.onProfileRead = (authors) {
+            if (authors.contains(morgan)) {
+              cache.put(UserProfile(pubkey: morgan, displayName: 'Morgan'));
+            }
+          };
+          await expectLater(
+            () {
+              session.dmAddRefusals.add(
+                'forbidden: policy:${ownerOnly ? 'owner_only' : 'nobody'} — '
+                'no (agent $scout)',
+              );
+              return actions.addToDm(
+                channelId: withMorgan,
+                pubkeys: [scout],
+                history: DmHistory.include,
+              );
+            }(),
+            throwsA(
+              isA<DmAgentRefused>().having(
+                (error) => error.toString(),
+                'message',
+                ownerOnly
+                    ? 'Couldn’t add them. Only Morgan can add Morgan’s Scout '
+                          'to a DM.'
+                    : 'Couldn’t add them. Morgan’s Scout can’t be added to a DM.',
+              ),
+            ),
+          );
+        });
+      }
+
       test('names with what it has once profiles run late', () async {
         session.profileReadsHang = true;
         final clock = Stopwatch()..start();
@@ -880,6 +949,9 @@ class _WriterReplicaRelaySession extends _FakeRelaySession {
   /// Whether profile reads never answer.
   bool profileReadsHang = false;
 
+  /// Called with each profile read's authors, before it answers.
+  void Function(List<String> authors)? onProfileRead;
+
   @override
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
@@ -887,6 +959,7 @@ class _WriterReplicaRelaySession extends _FakeRelaySession {
   }) {
     if (filter.kinds case [0]) {
       profileReads.add([...?filter.authors]);
+      onProfileRead?.call([...?filter.authors]);
       if (profileReadsHang) return Completer<List<NostrEvent>>().future;
     }
     return super.fetchHistory(filter, timeout: timeout);
