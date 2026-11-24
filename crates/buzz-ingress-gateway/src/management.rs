@@ -7,6 +7,7 @@
 //!                               Store::apply(operation_id, revision, mutation)
 //!                                 ├─ Applied  ──▶ 200 integration view
 //!                                 ├─ Replayed ──▶ 200 stored response
+//!                                 ├─ Conflict ──▶ 409 operation_conflict
 //!                                 ├─ Stale    ──▶ 409 { current }
 //!                                 └─ NotFound ──▶ 404
 //! ```
@@ -191,15 +192,11 @@ async fn apply(state: &AppState, operation: Operation) -> Response {
     if operation.revision <= 0 {
         return invalid();
     }
-    let integration_id = operation.integration_id;
     match state.store.apply(operation, (state.now)()).await {
-        Ok(ApplyOutcome::Applied(applied)) => {
+        Ok(ApplyOutcome::Applied(applied) | ApplyOutcome::Replayed(applied)) => {
             (StatusCode::OK, Json(applied.response)).into_response()
         }
-        Ok(ApplyOutcome::Replayed(applied)) if applied.integration_id == integration_id => {
-            (StatusCode::OK, Json(applied.response)).into_response()
-        }
-        Ok(ApplyOutcome::Replayed(_)) => error(StatusCode::CONFLICT, "operation_conflict"),
+        Ok(ApplyOutcome::Conflict) => error(StatusCode::CONFLICT, "operation_conflict"),
         Ok(ApplyOutcome::StaleRevision { current }) => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({ "error": "stale_revision", "current": current })),
@@ -345,16 +342,13 @@ async fn get_integration(
         return reject.into_response();
     }
     let now = (state.now)();
-    let integration = match state.store.integration(id).await {
-        Ok(Some(integration)) => integration,
-        Ok(None) => return error(StatusCode::NOT_FOUND, "not_found"),
-        Err(e) => return store_error(e),
-    };
-    let secrets = match state.store.verifying_secrets(id, now).await {
-        Ok(secrets) => secrets,
-        Err(e) => return store_error(e),
-    };
-    Json(IntegrationView::new(&integration, &secrets, now)).into_response()
+    match state.store.integration_with_secrets(id, now).await {
+        Ok(Some((integration, secrets))) => {
+            Json(IntegrationView::new(&integration, &secrets, now)).into_response()
+        }
+        Ok(None) => error(StatusCode::NOT_FOUND, "not_found"),
+        Err(e) => store_error(e),
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -598,6 +592,25 @@ mod tests {
         let other = format!("/v1/integrations/{}", Uuid::new_v4());
         let (status, conflict) =
             call(&fx, &fx.relay, "PUT", &other, &other, Some(put_body(op, 1))).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+        assert_eq!(conflict["error"], "operation_conflict");
+
+        let (status, conflict) =
+            call(&fx, &fx.relay, "PUT", &path, &path, Some(put_body(op, 2))).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+        assert_eq!(conflict["error"], "operation_conflict");
+
+        let disable_path = format!("{path}/disable");
+        let reused = serde_json::json!({ "operation_id": op, "revision": 1 });
+        let (status, conflict) = call(
+            &fx,
+            &fx.relay,
+            "POST",
+            &disable_path,
+            &disable_path,
+            Some(reused),
+        )
+        .await;
         assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
         assert_eq!(conflict["error"], "operation_conflict");
     }

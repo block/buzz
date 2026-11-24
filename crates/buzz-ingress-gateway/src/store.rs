@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use thiserror::Error;
@@ -104,22 +105,65 @@ pub struct Operation {
     pub mutation: Mutation,
 }
 
+impl Operation {
+    /// Hex SHA-256 of everything that identifies this request except secret
+    /// material. A replayed `operation_id` must carry the same fingerprint to
+    /// receive the stored response. The sealed secret is excluded because
+    /// sealing is randomized, and the plaintext is excluded so the idempotency
+    /// table never holds anything derived from a provider secret.
+    pub fn fingerprint(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(self.integration_id.as_bytes());
+        hasher.update(self.revision.to_be_bytes());
+        match &self.mutation {
+            Mutation::PutIntegration {
+                community_host,
+                provider,
+            } => {
+                hasher.update(b"put_integration\0");
+                hasher.update(community_host.as_bytes());
+                hasher.update(b"\0");
+                hasher.update(provider.as_str().as_bytes());
+            }
+            Mutation::PutSecret { grace, .. } => {
+                hasher.update(b"put_secret\0");
+                hasher.update(grace.num_seconds().to_be_bytes());
+            }
+            Mutation::Disable => hasher.update(b"disable\0"),
+            Mutation::Enable => hasher.update(b"enable\0"),
+        }
+        hex::encode(hasher.finalize())
+    }
+}
+
 /// Durable record of an applied operation and the response it produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppliedOperation {
     pub operation_id: Uuid,
     pub integration_id: Uuid,
     pub revision: i64,
+    pub fingerprint: String,
     pub response: serde_json::Value,
     pub applied_at: DateTime<Utc>,
+}
+
+impl AppliedOperation {
+    /// Whether `operation` is a retry of this applied operation rather than a
+    /// different request reusing its `operation_id`.
+    pub fn matches(&self, operation: &Operation) -> bool {
+        self.integration_id == operation.integration_id
+            && self.fingerprint == operation.fingerprint()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyOutcome {
     /// Applied now; `response` is the integration view after the change.
     Applied(AppliedOperation),
-    /// The same `operation_id` was applied before; the stored response is returned.
+    /// The same request was applied before; the stored response is returned.
     Replayed(AppliedOperation),
+    /// `operation_id` was already used by a different request.
+    Conflict,
     /// `revision` is not newer than the current integration revision.
     StaleRevision { current: i64 },
     /// The mutation needs an integration that does not exist.
@@ -300,6 +344,13 @@ pub trait Store: Send + Sync {
     async fn ready(&self) -> Result<(), StoreError>;
     /// Look up an integration by id.
     async fn integration(&self, id: Uuid) -> Result<Option<Integration>, StoreError>;
+    /// An integration and its verifying secrets read from one snapshot, so a
+    /// concurrent write cannot pair one revision with another's secrets.
+    async fn integration_with_secrets(
+        &self,
+        id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<Option<(Integration, Vec<IntegrationSecret>)>, StoreError>;
     /// Secrets that still verify at `now`, newest first.
     async fn verifying_secrets(
         &self,
@@ -491,6 +542,23 @@ struct MemoryState {
 #[derive(Default)]
 pub struct MemoryStore(Mutex<MemoryState>);
 
+fn verifying_from(
+    s: &MemoryState,
+    integration_id: Uuid,
+    now: DateTime<Utc>,
+) -> Vec<IntegrationSecret> {
+    s.secrets
+        .get(&integration_id)
+        .map(|secrets| {
+            secrets
+                .iter()
+                .filter(|secret| secret.verifies_at(now))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[async_trait]
 impl Store for MemoryStore {
     async fn ready(&self) -> Result<(), StoreError> {
@@ -505,22 +573,25 @@ impl Store for MemoryStore {
         Ok(s.integrations.get(&id).cloned())
     }
 
+    async fn integration_with_secrets(
+        &self,
+        id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<Option<(Integration, Vec<IntegrationSecret>)>, StoreError> {
+        let s = self.0.lock().map_err(|_| StoreError::Unavailable(None))?;
+        Ok(s.integrations
+            .get(&id)
+            .cloned()
+            .map(|integration| (integration, verifying_from(&s, id, now))))
+    }
+
     async fn verifying_secrets(
         &self,
         integration_id: Uuid,
         now: DateTime<Utc>,
     ) -> Result<Vec<IntegrationSecret>, StoreError> {
         let s = self.0.lock().map_err(|_| StoreError::Unavailable(None))?;
-        Ok(s.secrets
-            .get(&integration_id)
-            .map(|secrets| {
-                secrets
-                    .iter()
-                    .filter(|secret| secret.verifies_at(now))
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default())
+        Ok(verifying_from(&s, integration_id, now))
     }
 
     async fn applied_operation(
@@ -538,7 +609,11 @@ impl Store for MemoryStore {
     ) -> Result<ApplyOutcome, StoreError> {
         let mut s = self.0.lock().map_err(|_| StoreError::Unavailable(None))?;
         if let Some(applied) = s.operations.get(&operation.operation_id) {
-            return Ok(ApplyOutcome::Replayed(applied.clone()));
+            return Ok(if applied.matches(&operation) {
+                ApplyOutcome::Replayed(applied.clone())
+            } else {
+                ApplyOutcome::Conflict
+            });
         }
         let mut secrets = s
             .secrets
@@ -561,6 +636,7 @@ impl Store for MemoryStore {
             operation_id: operation.operation_id,
             integration_id: operation.integration_id,
             revision: operation.revision,
+            fingerprint: operation.fingerprint(),
             response,
             applied_at: now,
         };
@@ -767,8 +843,20 @@ mod tests {
         };
         assert_eq!(applied.response["revision"], 1);
         assert_eq!(applied.response["has_secret"], false);
-        let again = store.apply(op, at(5)).await.unwrap();
+        let again = store.apply(op.clone(), at(5)).await.unwrap();
         assert_eq!(again, ApplyOutcome::Replayed(applied.clone()));
+        let mut reused = put(id, 2);
+        reused.operation_id = op.operation_id;
+        assert_eq!(
+            store.apply(reused, at(6)).await.unwrap(),
+            ApplyOutcome::Conflict
+        );
+        let mut other_integration = put(Uuid::new_v4(), 1);
+        other_integration.operation_id = op.operation_id;
+        assert_eq!(
+            store.apply(other_integration, at(7)).await.unwrap(),
+            ApplyOutcome::Conflict
+        );
         assert_eq!(
             store.applied_operation(applied.operation_id).await.unwrap(),
             Some(applied)
