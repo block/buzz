@@ -48,7 +48,7 @@ Each listed tag has exactly two string elements and occurs once, except optional
 
 Relays MUST reject invalid envelopes, unsupported envelope versions, and events with more than 256 tags. Normal event-size and write quotas apply.
 
-Clients place fields needed for filtering in client-defined tags. The relay matches tag names and values without interpreting their meaning; `content` remains opaque text. Client-defined tags cannot override the envelope or grant access.
+Clients place fields needed for filtering in client-defined tags. The generic artifact query matches tag names and values without interpreting their meaning. A protocol that defines an artifact type MAY require the relay to validate its content and tags before accepting a revision. Client-defined tags cannot override the envelope or grant access.
 
 ## Identity and edits
 
@@ -73,9 +73,15 @@ Write permission means permission to post a kind-9 message in the channel, inclu
 | Create, update, delete, or restore | Write in the home channel. |
 | Move | Write in both source and destination. |
 
-These rules apply to every type and do not depend on who created the artifact. DM participants are peers. The relay determines channel type from the stored channel, not from an artifact tag.
+These are the baseline rules for every type and do not depend on who created the artifact. DM participants are peers. The relay determines channel type from the stored channel, not from an artifact tag.
 
 Relationship tags organize work without changing access. Linking a task to a project does not move it or share it. References to repositories or other services retain those services' access and action permissions. Errors MUST NOT disclose inaccessible artifact details.
+
+### Type-specific write permissions
+
+A protocol that defines an artifact type MAY require one or more channel roles in addition to the baseline write checks. A relay implementing that type MUST enforce the role requirement on create, update, delete, and restore in the home channel. For a move, it MUST enforce the same requirement in both the source and destination, as well as any restrictions on moves defined by the type. It MUST use the writer's current roles in the relevant channel and the artifact's immutable type for existing revisions. The relay MUST deny the mutation if it cannot establish a qualifying role in each required channel.
+
+The type's protocol defines the allowed roles. The relay MUST NOT take the policy or the writer's role from event tags or content. Types without an additional requirement use the baseline rules above. Read access remains governed by channel read permission. A relay MUST NOT advertise support for a type that requires restricted writes unless every backend that accepts revisions for it enforces that policy.
 
 ## Moving and deleting
 
@@ -188,7 +194,7 @@ d = UUIDv8( first 16 bytes of SHA-256("nip-ar-artifact\0" + h + "\0" + type + "\
 
 `h` is the home channel at creation, `type` is the artifact type, and `key` is a client-chosen name, unique within that type and channel (for example a config entry name). Version and variant bits are set as in RFC 9562.
 
-A derived `d` is a name, not a proof of authorship. Anyone who can write in `h` can create it first. Readers decide which authors to trust, as with every artifact.
+A derived `d` is a name, not a proof of authorship. Anyone who has permission to create that type in `h` can create it first. Readers decide which authors to trust, as with every artifact.
 
 **Ensure (create or restore, safe to retry).** To make "this record exists with this content" true, a client:
 
