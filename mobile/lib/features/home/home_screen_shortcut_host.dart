@@ -53,9 +53,11 @@ class HomeScreenShortcutHost extends HookConsumerWidget {
       return () => unawaited(publishHomeScreenShortcuts(const []));
     }, const []);
     useEffect(() {
-      // A failed read can hold another community's Bestie, so keep the
-      // last published menu until this community's Bestie is known.
-      if (bestie.isLoading || bestie.hasError) return null;
+      final bestieKnown = !bestie.isLoading && !bestie.hasError;
+      // A failed read can hold another community's Bestie, so once this Home
+      // has published, keep that menu until this community's Bestie is known.
+      // Until then, offer New chat and New DM without it.
+      if (!bestieKnown && published.value != null) return null;
       // New chat and New DM stay listed while their actions are briefly
       // unavailable (loading, or a New chat already open); a tap waits.
       final items = [
