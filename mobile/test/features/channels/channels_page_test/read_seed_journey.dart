@@ -115,7 +115,7 @@ void _readSeedJourney(
     );
     expect(
       tester.widget<Text>(find.text('channel-1')).style?.fontWeight,
-      FontWeight.w500,
+      FontWeight.w400,
     );
     final saved = ReadStateStorage(prefs).readJournal(
       '${keys.public}:${Uri.encodeComponent('https://seed.example')}',

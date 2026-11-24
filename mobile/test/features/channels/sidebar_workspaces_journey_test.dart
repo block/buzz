@@ -48,7 +48,7 @@ void main() {
     relay.session.debugRelayUrl = 'https://relay.example';
     _viewer = relay.pubkey;
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    var soloActivityReads = 0;
+    var failNextSoloActivityRead = false;
     // Before desktop's unified record, the legacy Team sections apply.
     relay.stored.add(
       relay.event('channel-sections', {
@@ -79,7 +79,8 @@ void main() {
           ),
           channelsProvider.overrideWith(_Channels.new),
           channelFilterActivityProvider('solo-scratch').overrideWith((_) async {
-            if (soloActivityReads++ == 0) {
+            if (failNextSoloActivityRead) {
+              failNextSoloActivityRead = false;
               throw StateError('Activity unavailable');
             }
             return now - 8 * 86400;
@@ -365,6 +366,7 @@ void main() {
     expect(inList('solo-scratch'), findsNothing);
     expect(relay.published, isEmpty);
     await openDisplay();
+    failNextSoloActivityRead = true;
     await choose(view, 'Active');
     await choose(
       find.byKey(const ValueKey('messages-display-Active in the past')),

@@ -2,9 +2,14 @@ part of '../channels_page.dart';
 
 /// Observes route visibility without rebuilding the channel inventory.
 class _ActivityRecovery extends HookConsumerWidget {
-  const _ActivityRecovery({required this.activity, required this.child});
+  const _ActivityRecovery({
+    required this.activity,
+    required this.child,
+    required this.toolbarInset,
+  });
   final Map<String, AsyncValue<int?>> activity;
   final Widget child;
+  final double toolbarInset;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -87,26 +92,29 @@ class _ActivityRecovery extends HookConsumerWidget {
           late final OverlayEntry entry;
           entry = OverlayEntry(
             builder: (_) => IosCompositionLayer(
-              child: Stack(
-                children: [
-                  ReconnectCapsule(
-                    visible: failures.isNotEmpty,
-                    message: 'Some activity couldn’t load',
-                    actionLabel: 'Retry',
-                    onHidden: () {
-                      WidgetsBinding.instance.addPostFrameCallback((_) {
-                        if (identical(notice.value, entry) &&
-                            failures.isEmpty) {
-                          removeNotice();
-                        }
-                      });
-                    },
-                    onSignIn: () {
-                      if (!context.mounted) return;
-                      retryFailures();
-                    },
-                  ),
-                ],
+              child: Padding(
+                padding: EdgeInsets.only(top: toolbarInset),
+                child: Stack(
+                  children: [
+                    ReconnectCapsule(
+                      visible: failures.isNotEmpty,
+                      message: 'Some activity couldn’t load',
+                      actionLabel: 'Retry',
+                      onHidden: () {
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          if (identical(notice.value, entry) &&
+                              failures.isEmpty) {
+                            removeNotice();
+                          }
+                        });
+                      },
+                      onSignIn: () {
+                        if (!context.mounted) return;
+                        retryFailures();
+                      },
+                    ),
+                  ],
+                ),
               ),
             ),
           );
