@@ -2,6 +2,7 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/dm_channel_labels.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
+import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 String _key(int number) => number.toRadixString(16).padLeft(64, '0');
@@ -167,4 +168,41 @@ void main() {
       );
     },
   );
+
+  test('a DM is named by its people, never its agents, unless it has none', () {
+    final me = _key(1);
+    final ana = _key(2), ben = _key(3), cy = _key(4), dee = _key(5);
+    final bot = _key(6), helper = _key(7), unloaded = _key(8);
+    final names = IdentityNameSources(
+      profiles: {
+        for (final (key, name) in [
+          (ana, 'Ana'),
+          (ben, 'Ben'),
+          (cy, 'Cy'),
+          (dee, 'Dee'),
+        ])
+          key: UserProfile(pubkey: key, displayName: name),
+        bot: UserProfile(pubkey: bot, displayName: 'Bot', ownerPubkey: me),
+        helper: UserProfile(
+          pubkey: helper,
+          displayName: 'Helper',
+          ownerPubkey: me,
+        ),
+      },
+    );
+    String label(List<String> keys) => resolveDmChannelDisplayLabel(
+      _dm('dm', keys: [me, ...keys]),
+      currentPubkey: me,
+      names: names,
+    );
+
+    // People and agents: only the people.
+    expect(label([bot, ana]), 'Ana');
+    // Only agents: no other person, so the agents.
+    expect(label([bot, helper]), 'Bot, Helper');
+    // More than three people and agents: "+N more" counts people only.
+    expect(label([bot, ana, ben, helper, cy, dee]), 'Ana, Ben, Cy, +1 more');
+    // A profile not loaded yet is named until it says it is an agent.
+    expect(label([bot, unloaded]), shortPubkey(unloaded));
+  });
 }

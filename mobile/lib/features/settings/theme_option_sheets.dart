@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/theme/theme.dart';
@@ -22,7 +23,7 @@ String appearanceModeLabel(ThemeMode mode) =>
 Future<void> showAccentColorPickerSheet({
   required BuildContext context,
   required ColorScheme colorScheme,
-  required int selectedIndex,
+  required int? pickedIndex,
   required ValueChanged<int> onSelected,
 }) => showBuzzModalBottomSheet<void>(
   context: context,
@@ -33,27 +34,34 @@ Future<void> showAccentColorPickerSheet({
         DuoToolbarScope.maybeOf(context)?.strip != null &&
         usesConversationPanes(context),
     colorScheme: colorScheme,
-    initialIndex: selectedIndex,
+    pickedIndex: pickedIndex,
     onSelected: onSelected,
   ),
 );
 
-class _AccentColorPicker extends HookWidget {
+class _AccentColorPicker extends HookConsumerWidget {
   const _AccentColorPicker({
     required this.colorScheme,
     required this.compact,
-    required this.initialIndex,
+    required this.pickedIndex,
     required this.onSelected,
   });
 
   final ColorScheme colorScheme;
   final bool compact;
-  final int initialIndex;
+
+  /// The swatch the user already tapped, or null to follow the saved color.
+  final int? pickedIndex;
   final ValueChanged<int> onSelected;
 
   @override
-  Widget build(BuildContext context) {
-    final selected = useState(initialIndex);
+  Widget build(BuildContext context, WidgetRef ref) {
+    final picked = useState(pickedIndex);
+    // Until a tap, the marker follows the saved color, including a sync.
+    final saved = ref.watch(
+      communityThemeProvider.select((t) => chatColorIndex(t.accent)),
+    );
+    final selected = picked.value ?? saved;
     return SafeArea(
       top: false,
       child: Padding(
@@ -83,10 +91,10 @@ class _AccentColorPicker extends HookWidget {
               itemBuilder: (context, index) => _AccentSheetOption(
                 index: index,
                 color: chatColorForScheme(colorScheme, index),
-                selected: selected.value == index,
+                selected: selected == index,
                 onTap: () {
                   unawaited(HapticFeedback.selectionClick());
-                  selected.value = index;
+                  picked.value = index;
                   onSelected(index);
                 },
               ),

@@ -66,10 +66,10 @@ void agentPrefillTests() {
       prefillScopeMessages: scope,
       onSend: (_, mentions, {mediaTags = const []}) async => sent = mentions,
     );
-    // The collapsed composer previews its trimmed text, or the hint.
+    // The collapsed composer previews its full text, or the hint.
     String text() => find.byType(TextField).evaluate().isNotEmpty
         ? tester.widget<TextField>(find.byType(TextField)).controller!.text
-        : find.text('@$agentName').evaluate().isNotEmpty
+        : find.text('@$agentName ').evaluate().isNotEmpty
         ? '@$agentName '
         : find.text('Message').evaluate().isNotEmpty
         ? ''
@@ -92,7 +92,7 @@ void agentPrefillTests() {
     expect(savedDraft(), isNull);
 
     // Typing makes it the viewer's draft, and its agent sends.
-    await tester.tap(find.text('@Scout'));
+    await tester.tap(find.text('@Scout '));
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), '@Scout hi');
     await tester.pumpAndSettle();
@@ -179,8 +179,8 @@ void agentPrefillTests() {
     // No key reaches the composer text; each chip shows its qualified
     // label, and each stays bound to its own agent.
     const prefill = '@Jitter @Jitter ';
-    expect(find.text(prefill.trim()), findsOneWidget);
-    await tester.tap(find.text(prefill.trim()));
+    expect(find.text(prefill), findsOneWidget);
+    await tester.tap(find.text(prefill));
     await tester.pumpAndSettle();
     expect(
       tester.widget<TextField>(find.byType(TextField)).controller!.text,
@@ -270,14 +270,14 @@ void agentPrefillTests() {
     ];
     await tester.pumpWidget(build());
     await tester.pumpAndSettle();
-    expect(shows('@Scout'), isTrue);
+    expect(shows('@Scout '), isTrue);
     scope = [
       ...scope,
       message('2', 20, [person]),
     ];
     await tester.pumpWidget(build());
     await tester.pumpAndSettle();
-    expect(shows('@Scout'), isFalse);
+    expect(shows('@Scout '), isFalse);
     expect(shows('Message'), isTrue);
 
     // So does the last tagged agent leaving the channel.
@@ -287,10 +287,10 @@ void agentPrefillTests() {
     ];
     await tester.pumpWidget(build());
     await tester.pumpAndSettle();
-    expect(shows('@Scout'), isTrue);
+    expect(shows('@Scout '), isTrue);
     dropAgent();
     await tester.pumpAndSettle();
-    expect(shows('@Scout'), isFalse);
+    expect(shows('@Scout '), isFalse);
     expect(shows('Message'), isTrue);
 
     // Text the viewer wrote is theirs, and stays.
@@ -298,7 +298,7 @@ void agentPrefillTests() {
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pumpWidget(build());
     await tester.pumpAndSettle();
-    await tester.tap(find.text('@Scout'));
+    await tester.tap(find.text('@Scout '));
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), '@Scout hi');
     await tester.pumpAndSettle();

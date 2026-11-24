@@ -4,4 +4,10 @@
          to allow setting breakpoints, to provide hot reload, etc.
     -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <application>
+        <!-- Delivers a push wake locally; see PushWakeDebugReceiver. -->
+        <receiver
+            android:name=".PushWakeDebugReceiver"
+            android:exported="true" />
+    </application>
 </manifest>

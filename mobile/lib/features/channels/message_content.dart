@@ -554,12 +554,12 @@ class MessageContent extends HookConsumerWidget {
                           shape: const _MessageBubbleShape(),
                           child: Padding(
                             padding: EdgeInsets.fromLTRB(
-                              Grid.xs,
-                              Grid.xxs,
-                              Grid.xs,
+                              messageBubbleHorizontalInset,
+                              messageBubbleVerticalInset,
+                              messageBubbleHorizontalInset,
                               hasReactions && index == segments.length - 1
                                   ? Grid.xs
-                                  : Grid.xxs,
+                                  : messageBubbleVerticalInset,
                             ),
                             child: Theme(
                               data: Theme.of(context).copyWith(
@@ -1116,16 +1116,16 @@ class _MessageCodeBlock extends HookWidget {
             ChatColors.of(context).outgoing,
           );
     return Container(
-      // In a bubble, the vertical margin brings the bubble's 8px vertical
-      // padding up to its 16px side padding, so the block is inset evenly and
-      // its corners stay concentric with the bubble's.
       margin: bubble
-          ? const EdgeInsets.symmetric(vertical: Grid.xs - Grid.xxs)
+          ? const EdgeInsets.symmetric(
+              vertical:
+                  messageBubbleHorizontalInset - messageBubbleVerticalInset,
+            )
           : const EdgeInsets.only(top: Grid.half),
       decoration: BoxDecoration(
         color: surface,
         borderRadius: BorderRadius.circular(
-          bubble ? Radii.container - Grid.xs : 12,
+          bubble ? Radii.container - messageBubbleHorizontalInset : 12,
         ),
         border: Border.all(
           color:

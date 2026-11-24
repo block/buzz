@@ -131,7 +131,7 @@ class _AttachmentMenuLayout {
 
   factory _AttachmentMenuLayout.from(BuildContext context) {
     final textPainter = TextPainter(
-      text: TextSpan(text: 'Camera', style: context.textTheme.titleMedium),
+      text: TextSpan(text: 'Camera', style: channelTitleTextStyle),
       textDirection: Directionality.of(context),
       textScaler: MediaQuery.textScalerOf(context),
       maxLines: 1,
@@ -747,9 +747,8 @@ class _AttachmentMenuItem extends StatelessWidget {
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: context.textTheme.titleMedium?.copyWith(
+                    style: channelTitleTextStyle.copyWith(
                       color: context.colors.onSurface,
-                      fontWeight: FontWeight.w400,
                     ),
                   ),
                 ),
@@ -845,18 +844,18 @@ class _AttachmentStrip extends StatelessWidget {
                                     color: context.colors.onSurfaceVariant,
                                   ),
                                   const SizedBox(height: Grid.quarter),
-                                  Text(
-                                    attachment.file.name.isEmpty
-                                        ? 'File'
-                                        : attachment.file.name,
-                                    maxLines: 2,
-                                    textAlign: TextAlign.center,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: context.textTheme.labelSmall
-                                        ?.copyWith(
-                                          color:
-                                              context.colors.onSurfaceVariant,
-                                        ),
+                                  Flexible(
+                                    child: Text(
+                                      attachment.file.name.isEmpty
+                                          ? 'File'
+                                          : attachment.file.name,
+                                      maxLines: 2,
+                                      textAlign: TextAlign.center,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: messageBylineTextStyle.copyWith(
+                                        color: context.colors.onSurfaceVariant,
+                                      ),
+                                    ),
                                   ),
                                 ],
                               ),

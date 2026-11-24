@@ -1,11 +1,19 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/push/android_push_authority.dart';
+import 'package:buzz/shared/push/android_push_gateway.dart';
 import 'package:buzz/shared/push/android_push_keystore.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 import '../../helpers/android_push_fakes.dart';
+import '../../helpers/recording_diagnostics.dart';
 
 const _channel = MethodChannel('buzz/push_registration');
 
@@ -189,6 +197,66 @@ void main() {
     expect(pushUnavailableReason.value, isNotNull);
   });
 
+  test('only a gateway reply the app cannot read is reported', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    fcmDeviceToken.value = 'fcm-token';
+    final diagnostics = RecordingDiagnostics();
+
+    Future<void> enroll() => enrollBuzzPush(
+      'wss://relay.example/',
+      'https://gateway.example/',
+      relayOrigin: 'wss://relay.example',
+      relayPubkey: 'a' * 64,
+      desiredRelays: () => {'wss://relay.example'},
+      diagnostics: diagnostics,
+    ).then((_) {});
+
+    for (final (reply, reported) in [
+      // A refusal and gateway trouble are routine.
+      (http.Response(jsonEncode({'error': 'unavailable'}), 503), false),
+      // Even when the refusal's body is too large to read.
+      (http.Response('x' * 65537, 503), false),
+      // A challenge with no fields, and a body that is not JSON, are not.
+      (http.Response(jsonEncode({}), 200), true),
+      (http.Response('<html>', 200), true),
+      (http.Response('x' * 65537, 200), true),
+    ]) {
+      diagnostics.errors.clear();
+      debugAndroidPushAuthority = AndroidPushAuthority(
+        keystore: FakeAndroidKeystore(),
+        gateway: AndroidPushGatewayClient(
+          baseUrl: Uri.parse('https://push.example'),
+          client: MockClient((_) async => reply),
+        ),
+        store: _MemoryStore(),
+        sleep: (_) async {},
+      );
+      await expectLater(enroll(), throwsA(anything));
+      expect(diagnostics.errors, [
+        if (reported)
+          (
+            AndroidPushGatewayResponseInvalid,
+            DiagnosticOperation.pushGatewayResponse,
+          ),
+      ], reason: '${reply.statusCode} ${reply.body.length} bytes');
+    }
+  });
+
+  test('a gateway call that times out is aborted, not abandoned', () async {
+    final aborted = Completer<void>();
+    final gateway = AndroidPushGatewayClient(
+      baseUrl: Uri.parse('https://push.example'),
+      timeout: const Duration(milliseconds: 10),
+      client: _HangingClient(aborted),
+    );
+
+    await expectLater(
+      gateway.post('/v1/installations/challenges', {'v': 1}),
+      throwsA(isA<TimeoutException>()),
+    );
+    await aborted.future.timeout(const Duration(seconds: 1));
+  });
+
   test('enrolling without a token fails loudly', () async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
 
@@ -213,4 +281,20 @@ class _MemoryStore implements AndroidPushStateStore {
 
   @override
   Future<void> write(String? next) async => value = next;
+}
+
+/// Never answers, and completes [aborted] when the request's abort trigger
+/// fires.
+class _HangingClient extends http.BaseClient {
+  _HangingClient(this.aborted);
+
+  final Completer<void> aborted;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) {
+    final trigger = (request as http.Abortable).abortTrigger;
+    if (trigger == null) throw StateError('the request is not abortable');
+    trigger.then((_) => aborted.complete());
+    return Completer<http.StreamedResponse>().future;
+  }
 }

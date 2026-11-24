@@ -8,6 +8,7 @@ import '../channels/channel_management_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'channel.dart';
+import 'composer_send_origin.dart';
 import 'me/me_messages_provider.dart';
 import 'channel_messages_provider.dart';
 import 'message_mention_pubkeys.dart';
@@ -135,6 +136,7 @@ class SendMessage {
           localMessage = event;
           _markLocalMessageForAnimation(channelId, event.id);
           _addLocalMessage(channelId, event);
+          ComposerSendOrigin.didInsertLocalMessage();
         },
         mayPublish: mayPublish,
       );

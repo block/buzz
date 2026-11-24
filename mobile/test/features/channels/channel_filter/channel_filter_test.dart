@@ -13,6 +13,39 @@ import 'package:nostr/nostr.dart' as nostr;
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test('drops fractional JSON types from preview counts', () {
+    final store = ChannelFilterStore.parse({
+      'version': 1,
+      'previewCounts': {'channels': 10.0, 'dms': 15},
+    });
+    expect(store.countFor('channels'), 5);
+    expect(store.countFor('dms'), 15);
+  });
+  test(
+    'section count survives Active and is independent of other sections',
+    () {
+      var store = ChannelFilterStore.empty();
+      expect(store.limitFor('channels'), 5);
+      for (final count in sectionCounts) {
+        store = store.edit(
+          'channels',
+          ChannelFilterMode.unreads,
+          previewCount: count,
+        );
+        store = ChannelFilterStore.parse(store.toJson());
+        expect(store.limitFor('channels'), count == 0 ? isNull : count);
+        store = store.edit(
+          'channels',
+          ChannelFilterMode.active,
+          windowSeconds: 86400,
+        );
+        expect(store.limitFor('channels'), isNull);
+        store = store.edit('channels', ChannelFilterMode.all);
+        expect(store.countFor('channels'), count);
+        expect(store.limitFor('dms'), 5);
+      }
+    },
+  );
   test(
     'activity provider reads history and excludes a quiet channel from Active',
     () async {
