@@ -308,6 +308,7 @@ impl RelayInfo {
                     "max_events": buzz_core::artifact_sync::MAX_SYNC_EVENTS,
                 },
                 "websocket_query_extensions": true,
+                "admin_types": buzz_core::artifact::ADMIN_TYPES,
                 "max_tags": buzz_core::artifact::MAX_TAGS,
                 "max_tag_name_bytes": buzz_core::artifact::MAX_TAG_NAME_BYTES,
                 "max_tag_value_bytes": buzz_core::artifact::MAX_TAG_VALUE_BYTES,
