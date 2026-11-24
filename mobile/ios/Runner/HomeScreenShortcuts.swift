@@ -43,6 +43,10 @@ final class HomeScreenShortcuts {
         }
         UIApplication.shared.shortcutItems = shortcuts
         result(nil)
+      case "discard":
+        UIApplication.shared.shortcutItems = []
+        self?.pending = nil
+        result(nil)
       case "takePending":
         result(self?.pending)
         self?.pending = nil
@@ -59,11 +63,16 @@ final class HomeScreenShortcuts {
     open(item.type)
   }
 
-  /// Runs the quick action a `buzz://shortcut/<type>` link names. Returns
-  /// false for other links.
+  /// Runs the quick action a `buzz://shortcut/<type>` link names, while that
+  /// action is published on the app icon. Returns false for other links.
+  ///
+  /// Home publishes the actions and signing out clears them, so a link opened
+  /// while signed out can't queue an action for the next account to sign in.
   @discardableResult
   func open(_ url: URL) -> Bool {
-    guard let type = ShortcutLink.type(of: url) else { return false }
+    guard let type = ShortcutLink.type(of: url),
+      UIApplication.shared.shortcutItems?.contains(where: { $0.type == type }) == true
+    else { return false }
     return open(type)
   }
 

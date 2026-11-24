@@ -53,6 +53,7 @@ import 'shared/auth/auth.dart';
 import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/emoji/emoji_burst.dart';
 import 'shared/relay/relay.dart';
+import 'shared/shortcuts/home_screen_shortcuts.dart';
 import 'shared/theme/theme.dart';
 import 'shared/widgets/buzz_loading_indicator.dart';
 import 'shared/widgets/buzz_toast_host.dart';
@@ -384,6 +385,15 @@ class App extends HookConsumerWidget {
       });
       return null;
     }, const []);
+
+    // A quick action menu can outlive its session (the app stopped during
+    // sign-out), and a tap on it can wait for Home. Neither may run in the
+    // next account to sign in.
+    final signedOut = authState.value?.status == AuthStatus.unauthenticated;
+    useEffect(() {
+      if (signedOut) unawaited(discardHomeScreenShortcuts());
+      return null;
+    }, [signedOut]);
 
     // Eagerly initialize websocket session and lifecycle observer when
     // authenticated. These providers connect and manage the websocket.

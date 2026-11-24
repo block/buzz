@@ -762,7 +762,9 @@ void main() {
       await tester.pumpWidget(const SizedBox());
       await bestieUpdates.close();
     });
-    bestieUpdates.add(bestie);
+    // Until the Bestie read succeeds, the menu still offers New chat and
+    // New DM.
+    bestieUpdates.addError(StateError('Bestie read failed'));
     ValueNotifier<VoidCallback?>? chat;
     var homeBuilds = 0;
     var created = 0;
@@ -777,6 +779,11 @@ void main() {
         },
       ),
     );
+    await tester.pumpAndSettle();
+    expect(published, [
+      ['New chat', 'New DM'],
+    ]);
+    bestieUpdates.add(bestie);
     await tester.pumpAndSettle();
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     // A tap that launched the app waits for its destination to be ready.
