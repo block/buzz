@@ -26,6 +26,64 @@ void main() {
       expect(startingMeChatTitle(message), title);
     }
   });
+  test('a media or link first message keeps its stored name and reads as a '
+      'title', () {
+    // As the composer sends attachments: Markdown after the text, pointing at
+    // a content-addressed relay URL longer than a title.
+    final media = 'https://relay.example.org/media/${'4a' * 32}';
+    const page = 'https://www.example.com/releases/2026/11/notes';
+    for (final (message, stored, shown) in [
+      // The reported chat: only a video. Desktop renames a chat only while
+      // its name is still this literal, so it must stay what is stored.
+      (
+        '\n![video]($media.mp4)',
+        '![video]($media.mp4)'.substring(0, 80),
+        'Video',
+      ),
+      ('\n![image]($media.jpg)', null, 'Image'),
+      ('\n![audio]($media.m4a)', null, 'Audio'),
+      ('\n[voice-note-1732.mp4]($media.mp4)', null, 'Audio'),
+      ('\n[report.pdf]($media.pdf)', null, 'report.pdf'),
+      // Several attachments fit a title only at short addresses; at a
+      // relay's, the cut leaves the first.
+      ('\n![image]($media.jpg)\n![image]($media.png)', null, 'Image'),
+      ('\n![image](https://x.y/a)\n![image](https://x.y/b)', null, '2 images'),
+      (
+        '\n![video](https://x.y/a.mp4)\n![video](https://x.y/b.mp4)',
+        null,
+        '2 videos',
+      ),
+      (
+        '\n![image](https://x.y/a)\n![video](https://x.y/b)\n![audio](https://x.y/c)',
+        null,
+        '3 attachments',
+      ),
+      // Text keeps its words, without the media beside it.
+      ('Look at this\n![image]($media.jpg)', null, 'Look at this'),
+      ('![image](https://x.y/a) before and after', null, 'before and after'),
+      // The cut can land in a trailing attachment's address, at its opening
+      // bracket, or inside its label.
+      for (final length in [69, 70, 71, 74])
+        ('${'x' * length}\n![image]($media.jpg)', null, 'x' * length),
+      // Only web addresses: the site of one, or how many.
+      (page, page, 'Link to example.com'),
+      ('<$page>', null, 'Link to example.com'),
+      ('[$page]($page)', null, 'Link to example.com'),
+      ('$page/${'a' * 80}', null, 'Link to example.com'),
+      ('$page https://example.org/b', null, '2 links'),
+      // A link with its own label reads as the label, cut off or not.
+      ('[Release notes]($page)', null, 'Release notes'),
+      ('[Release notes]($media)', null, 'Release notes'),
+      ('Read [the guide]($page) first', null, 'Read the guide first'),
+      // An address among other words stays as written.
+      ('Summarize $page', 'Summarize $page', 'Summarize $page'),
+      ('Plan my trip', 'Plan my trip', 'Plan my trip'),
+    ]) {
+      final name = startingMeChatTitle(message);
+      if (stored != null) expect(name, stored, reason: message);
+      expect(readableMeChatTitle(name), shown, reason: message);
+    }
+  });
   test(
     'accepted first message survives a lost acknowledgement and restart',
     () async {

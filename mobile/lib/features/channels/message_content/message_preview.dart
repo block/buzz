@@ -116,11 +116,7 @@ class MessagePreview extends HookConsumerWidget {
                 ),
               ),
               PreviewMedia(:final kind) => TextSpan(
-                text: switch (kind) {
-                  MessageMediaKind.image => 'Image',
-                  MessageMediaKind.video => 'Video',
-                  MessageMediaKind.audio => 'Audio',
-                },
+                text: previewMediaLabel(kind),
                 style: mutedStyle,
               ),
             },

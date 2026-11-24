@@ -93,6 +93,13 @@ final class PreviewMedia extends PreviewPiece {
   String toString() => 'PreviewMedia(${kind.name})';
 }
 
+/// The word a preview shows in place of media of [kind].
+String previewMediaLabel(MessageMediaKind kind) => switch (kind) {
+  MessageMediaKind.image => 'Image',
+  MessageMediaKind.video => 'Video',
+  MessageMediaKind.audio => 'Audio',
+};
+
 /// The pieces of a [maxLines] preview of Markdown [content], without parsing
 /// it as Markdown.
 ///
@@ -305,6 +312,25 @@ String _unwrapEmphasis(String shielded) {
 
 final _hasDelimiter = RegExp(r'[*_~<]');
 
+/// The kind a link's own label names when neither an `imeta` tag nor the
+/// URL's extension does. Composers label media by kind, as in `![video](…)`
+/// or `![audio](…)`, or by a video's file name, and attach a voice note as a
+/// link to its `voice-note-….mp4` file. Any other image is an image; any
+/// other link is not media.
+MessageMediaKind? _labelledKind(bool isImage, String label) {
+  final named = label.toLowerCase();
+  if (!isImage) {
+    return _voiceNoteFile.hasMatch(named) ? MessageMediaKind.audio : null;
+  }
+  if (named == 'audio') return MessageMediaKind.audio;
+  return _videoLabel.hasMatch(named)
+      ? MessageMediaKind.video
+      : MessageMediaKind.image;
+}
+
+final _voiceNoteFile = RegExp(r'^voice-note-.*\.mp4$');
+final _videoLabel = RegExp(r'^video$|\.(?:mp4|webm|mov)$');
+
 // Look ahead so adjacent tokens sharing a colon are both considered.
 final _shortcode = RegExp(r'(?=:([a-z0-9_-]+):)', caseSensitive: false);
 final _qualifier = RegExp(r'\(([0-9a-f]{64})\)');
@@ -412,8 +438,7 @@ class _PreviewBuilder {
       final url = reescapeMarkdownEscapes(match[3]!);
       final imeta = imetaByUrl[normalizeMarkdownDestination(url)];
       final kind =
-          classifyMediaUrl(url, imeta: imeta) ??
-          (isImage ? MessageMediaKind.image : null);
+          classifyMediaUrl(url, imeta: imeta) ?? _labelledKind(isImage, label);
       if (kind != null) {
         add(PreviewMedia(kind));
         continue;

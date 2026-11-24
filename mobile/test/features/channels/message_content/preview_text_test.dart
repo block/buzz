@@ -334,6 +334,25 @@ void main() {
         const PreviewMedia(MessageMediaKind.video),
       ]);
     });
+
+    test('media with no metadata or extension is the kind its label names', () {
+      const url = 'https://x.y/media/abc';
+      for (final (link, kind) in [
+        ('![video]($url)', MessageMediaKind.video),
+        ('![Clip.MOV]($url)', MessageMediaKind.video),
+        ('![audio]($url)', MessageMediaKind.audio),
+        ('![image]($url)', MessageMediaKind.image),
+        ('![]($url)', MessageMediaKind.image),
+        ('[voice-note-17.mp4]($url)', MessageMediaKind.audio),
+      ]) {
+        expect(_pieces(link), [PreviewMedia(kind)], reason: link);
+      }
+      expect(_pieces('[report.pdf]($url)'), [const PreviewText('report.pdf')]);
+      // The extension still decides when the URL has one.
+      expect(_pieces('![video](https://x.y/a.png)'), [
+        const PreviewMedia(MessageMediaKind.image),
+      ]);
+    });
   });
 
   test('an identity link previews the name its key resolves to', () {

@@ -1473,20 +1473,29 @@ void main() {
       await tester.pumpAndSettle();
       final stale = await details;
       expect(stale.labels, isEmpty);
+      // Until refreshed as a Solo chat, the name is an ordinary channel's.
+      expect(stale.name, _SoloMetadataRelaySession.name);
       session.solo = true;
       await tester.tap(find.text('Open refreshed Solo'));
       await tester.pumpAndSettle();
+      // A Solo chat started with only a video is titled for it, in the list
+      // and in the open chat's header.
+      expect(
+        container.read(channelsProvider).requireValue.single.name,
+        'Video',
+      );
+      expect(find.text('Video'), findsWidgets);
+      expect(find.textContaining('![video]'), findsNothing);
       await tester.widget<ComposeBar>(find.byType(ComposeBar)).onSend(
         'After refresh',
         ['agent'],
       );
       expect(solo.sent, ['After refresh']);
-      expect(
-        (await container.read(
-          channelDetailsProvider(_channelId).future,
-        )).labels,
-        ['buzz.solo'],
+      final refreshed = await container.read(
+        channelDetailsProvider(_channelId).future,
       );
+      expect(refreshed.labels, ['buzz.solo']);
+      expect(refreshed.name, 'Video');
       session.solo = false;
       final refresh = container.read(channelsProvider.notifier).refresh();
       await tester.pumpAndSettle();
@@ -24091,6 +24100,10 @@ class _SoloMetadataRelaySession extends RelaySessionNotifier {
       ...await fetchHistory(filter, timeout: timeout),
   ];
   bool solo = false;
+
+  /// The stored name of a chat started with only a video: the start of that
+  /// message's Markdown.
+  static const name = '![video](https://relay.example.org/media/4a4a4a4a4a4a4a';
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
   @override
@@ -24123,7 +24136,7 @@ class _SoloMetadataRelaySession extends RelaySessionNotifier {
           kind: 39000,
           tags: [
             ['d', _channelId],
-            ['name', 'Solo'],
+            ['name', name],
             ['private'],
             if (solo) ...[
               for (final tag in fixture['identity_tags'] as List)

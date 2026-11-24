@@ -419,7 +419,7 @@ ChannelDetails channelDetailsFromEvent(NostrEvent event) {
   );
   return ChannelDetails(
     id: data.id,
-    name: data.name,
+    name: shownChannelName(data),
     channelType: data.channelType,
     labels: data.labels,
     visibility: data.visibility,
