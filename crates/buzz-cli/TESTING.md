@@ -194,6 +194,13 @@ echo "# Canvas from stdin" | buzz canvas set --channel "$CHANNEL_ID" --content -
 # canvas get
 buzz canvas get --channel "$CHANNEL_ID"
 # Expected: raw markdown string, or: null
+
+# canvas set guarded by the head it read
+HEAD=$(buzz canvas history --channel "$CHANNEL_ID" --limit 1 | jq -r '.[0].event_id')
+buzz canvas set --channel "$CHANNEL_ID" --content "# Guarded" --expected "$HEAD" | jq .
+# Expected: {"event_id":"...","accepted":true,...}
+buzz canvas set --channel "$CHANNEL_ID" --content "# Stale" --expected "$HEAD"; echo "exit $?"
+# Expected: {"error":"conflict",...} on stderr, exit 5, canvas unchanged
 ```
 
 ### 6.3 Messages
@@ -599,7 +606,7 @@ buzz channels delete --channel "$FORUM_ID" | jq .
 | 21 | `channels add-member` | ☐ | Needs admin:channels |
 | 22 | `channels remove-member` | ☐ | Needs admin:channels |
 | 23 | `canvas get` | ☐ | |
-| 24 | `canvas set` | ☐ | Direct and stdin |
+| 24 | `canvas set` | ☐ | Direct, stdin and `--expected` |
 | 25 | `reactions add` | ☐ | |
 | 26 | `reactions remove` | ☐ | |
 | 27 | `reactions get` | ☐ | |

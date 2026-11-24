@@ -1123,6 +1123,13 @@ pub enum CanvasCmd {
         /// Canvas content (markdown; use '-' to read from stdin)
         #[arg(long)]
         content: String,
+        /// Replace only if this revision (64-char hex event ID) is still the
+        /// head, or `none` to create only when no canvas exists. Take it from
+        /// `canvas history --limit 1` and read that revision with
+        /// `canvas get --revision`. A moved head exits 5 (conflict). Without
+        /// it, set replaces whatever is current.
+        #[arg(long)]
+        expected: Option<String>,
     },
     /// List canvas revision history for a channel, newest first
     History {
