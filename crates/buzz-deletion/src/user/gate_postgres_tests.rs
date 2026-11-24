@@ -6,7 +6,6 @@ use buzz_db::entity_deletion::{EntityDeletionStore, EntityInspection, EntityStag
 use buzz_db::Db;
 use nostr::ToBech32;
 use serde_json::{json, Value};
-use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -14,8 +13,6 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-const INITIAL_TOKEN: &str = "initial-test-token";
-const ROTATED_TOKEN: &str = "rotated-test-token";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Fixture {
@@ -24,7 +21,6 @@ struct Fixture {
     id: Uuid,
     pubkey: String,
     listener: TcpListener,
-    token_file: PathBuf,
 }
 
 impl Fixture {
@@ -52,15 +48,12 @@ impl Fixture {
             .await
             .unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let token_file = std::env::temp_dir().join(format!("buzz-identity-gate-{}", request.id));
-        std::fs::write(&token_file, INITIAL_TOKEN).unwrap();
         Self {
             db,
             store,
             id: request.id,
             pubkey: subject.to_hex(),
             listener,
-            token_file,
         }
     }
 
@@ -70,7 +63,6 @@ impl Fixture {
             &format!("{origin}/api/goose/v1/identity/block-user-auth-login"),
             &format!("{origin}/api/goose/v1/identity/delete-user-auth-login"),
             &format!("{origin}/api/goose/v1/identity/delete-builderlab-account"),
-            self.token_file.clone(),
             HTTP_TIMEOUT,
         )
         .unwrap();
@@ -113,9 +105,9 @@ impl Fixture {
         json!({"request_id": self.id, "pubkey": self.pubkey})
     }
 
-    async fn accept_post(&self, path: &str, token: &str, expected_body: &Value) -> TcpStream {
+    async fn accept_post(&self, path: &str, expected_body: &Value) -> TcpStream {
         let mut stream = self.accept().await;
-        assert_post(&mut stream, path, token, expected_body).await;
+        assert_post(&mut stream, path, expected_body).await;
         stream
     }
 
@@ -134,13 +126,7 @@ impl Fixture {
     }
 }
 
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.token_file);
-    }
-}
-
-async fn assert_post(stream: &mut TcpStream, path: &str, token: &str, expected_body: &Value) {
+async fn assert_post(stream: &mut TcpStream, path: &str, expected_body: &Value) {
     timeout(HTTP_TIMEOUT, async {
         let mut request = BufReader::new(stream).take(16 * 1024);
         let mut line = String::new();
@@ -162,7 +148,10 @@ async fn assert_post(stream: &mut TcpStream, path: &str, token: &str, expected_b
                 authorization = Some(value.trim().to_owned());
             }
         }
-        assert_eq!(authorization, Some(format!("Bearer {token}")));
+        assert!(
+            authorization.is_none(),
+            "worker must use transport identity"
+        );
         let length = length.unwrap();
         assert!(length <= 16 * 1024);
         let mut body = vec![0; length];
@@ -240,11 +229,7 @@ async fn identity_revocation_is_saved_without_starting_cleanup_or_repeating_http
     let receipt = receipt(&f.subject());
     let (result, ()) = tokio::join!(f.run("worker-a", &options), async {
         let revoke = f
-            .accept_post(
-                "/api/goose/v1/identity/block-user-auth-login",
-                INITIAL_TOKEN,
-                &f.subject(),
-            )
+            .accept_post("/api/goose/v1/identity/block-user-auth-login", &f.subject())
             .await;
         let saved = f.inspect().await;
         assert_eq!(
@@ -288,11 +273,7 @@ async fn lost_revocation_response_requires_inspection_after_restart() {
     let options = f.options();
     let (result, ()) = tokio::join!(f.run("worker-a", &options), async {
         let stream = f
-            .accept_post(
-                "/api/goose/v1/identity/block-user-auth-login",
-                INITIAL_TOKEN,
-                &f.subject(),
-            )
+            .accept_post("/api/goose/v1/identity/block-user-auth-login", &f.subject())
             .await;
         // The server can have acted even though its response is lost.
         drop(stream);
@@ -303,7 +284,6 @@ async fn lost_revocation_response_requires_inspection_after_restart() {
         only_current_gate(&failed).metadata_json["waiting"]["reason"],
         "inspect_block_outcome"
     );
-    std::fs::write(&f.token_file, ROTATED_TOKEN).unwrap();
     assert!(f
         .run("worker-b", &options)
         .await
@@ -348,6 +328,7 @@ async fn unconfirmed_revocation_stays_on_the_gate_without_saving_a_receipt() {
             Some(("identity_blocked", Value::Null)),
         ),
         ("accepted only", "202 Accepted", None),
+        ("mesh denied", "403 Forbidden", None),
     ] {
         let f = Fixture::new().await;
         let options = f.options();
@@ -357,11 +338,7 @@ async fn unconfirmed_revocation_stays_on_the_gate_without_saving_a_receipt() {
         }
         let (result, ()) = tokio::join!(f.run("worker-a", &options), async {
             let revoke = f
-                .accept_post(
-                    "/api/goose/v1/identity/block-user-auth-login",
-                    INITIAL_TOKEN,
-                    &f.subject(),
-                )
+                .accept_post("/api/goose/v1/identity/block-user-auth-login", &f.subject())
                 .await;
             respond_with_status(revoke, status, &invalid).await;
         });
@@ -379,7 +356,7 @@ async fn unconfirmed_revocation_stays_on_the_gate_without_saving_a_receipt() {
     }
 }
 
-async fn at_final_stage() -> Fixture {
+async fn at_final_stage(login_deleted: bool) -> Fixture {
     use crate::user::transition::UserDeletionTransition;
     use buzz_db::entity_deletion::NextStage;
     let f = Fixture::new().await;
@@ -410,6 +387,19 @@ async fn at_final_stage() -> Fixture {
     };
     assert_eq!(row.stage, "purge_builderlab");
     assert_eq!(row.target_community_id, None);
+    if login_deleted {
+        let mut login = f.subject();
+        login["auth0_deleted"] = json!(true);
+        f.store.start_stage(&lease, row.id).await.unwrap();
+        f.store
+            .save_stage_waiting(
+                &lease,
+                row.id,
+                json!({"reason":"login_deleted", "login_receipt":login}),
+            )
+            .await
+            .unwrap();
+    }
     assert!(f.store.release(&lease).await.unwrap());
     f
 }
@@ -424,7 +414,7 @@ async fn independent_deletions_require_ordered_matching_confirmations() {
         "account_conflict",
         "success",
     ] {
-        let f = at_final_stage().await;
+        let f = at_final_stage(false).await;
         let mut options = f.options();
         if case != "success" {
             assert_eq!(f.run("waiting", &options).await.unwrap(), 1);
@@ -432,20 +422,16 @@ async fn independent_deletions_require_ordered_matching_confirmations() {
         }
         options.cleanup_verified = true;
         if case == "success" {
-            std::fs::remove_file(&f.token_file).unwrap();
-            assert!(f.run("missing-token", &options).await.is_err());
+            options.identity = None;
+            assert!(f.run("missing-config", &options).await.is_err());
             f.assert_no_more_http().await;
-            std::fs::write(&f.token_file, INITIAL_TOKEN).unwrap();
+            options.identity = f.options().identity;
         }
         let mut body = f.subject();
         body["cleanup_verified"] = json!(true);
         let (result, ()) = tokio::join!(f.run("delete", &options), async {
             let stream = f
-                .accept_post(
-                    "/api/goose/v1/identity/delete-user-auth-login",
-                    INITIAL_TOKEN,
-                    &body,
-                )
+                .accept_post("/api/goose/v1/identity/delete-user-auth-login", &body)
                 .await;
             if case == "login_failed" {
                 drop(stream);
@@ -456,19 +442,12 @@ async fn independent_deletions_require_ordered_matching_confirmations() {
             if case == "login_wrong_target" {
                 login["pubkey"] = json!("another-user");
             }
-            if case == "success" {
-                std::fs::remove_file(&f.token_file).unwrap();
-            }
             respond(stream, &login).await;
-            if case == "login_wrong_target" || case == "success" {
+            if case == "login_wrong_target" {
                 return;
             }
             let stream = f
-                .accept_post(
-                    "/api/goose/v1/identity/delete-builderlab-account",
-                    INITIAL_TOKEN,
-                    &body,
-                )
+                .accept_post("/api/goose/v1/identity/delete-builderlab-account", &body)
                 .await;
             if case == "account_lost" {
                 drop(stream);
@@ -483,21 +462,6 @@ async fn independent_deletions_require_ordered_matching_confirmations() {
             respond(stream, &account).await;
         });
         if case == "success" {
-            assert!(result.unwrap_err().to_string().contains("token file"));
-            f.assert_no_more_http().await;
-            std::fs::write(&f.token_file, ROTATED_TOKEN).unwrap();
-            let (result, ()) = tokio::join!(f.run("resume-account", &options), async {
-                let stream = f
-                    .accept_post(
-                        "/api/goose/v1/identity/delete-builderlab-account",
-                        ROTATED_TOKEN,
-                        &body,
-                    )
-                    .await;
-                let mut account = f.subject();
-                account["account_deleted"] = json!(true);
-                respond(stream, &account).await;
-            });
             assert_eq!(result.unwrap(), 0);
             assert_eq!(f.inspect().await.request.status, "completed");
             assert_eq!(f.run("again", &options).await.unwrap(), 0);
@@ -521,7 +485,6 @@ async fn swapped_deletion_routes_are_rejected_before_http() {
         &format!("{base}/block-user-auth-login"),
         &format!("{base}/delete-user-auth-login"),
         &format!("{base}/delete-builderlab-account"),
-        "unused".into(),
         HTTP_TIMEOUT,
     )
     .is_ok());
@@ -529,7 +492,6 @@ async fn swapped_deletion_routes_are_rejected_before_http() {
         &format!("{base}/block-user-auth-login"),
         &format!("{base}/delete-builderlab-account"),
         &format!("{base}/delete-user-auth-login"),
-        "unused".into(),
         HTTP_TIMEOUT,
     )
     .is_err());
@@ -538,4 +500,43 @@ async fn swapped_deletion_routes_are_rejected_before_http() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn restart_after_confirmed_login_deletion_only_sends_account_request() {
+    let f = at_final_stage(true).await;
+    let mut options = f.options();
+    options.cleanup_verified = true;
+    let mut body = f.subject();
+    body["cleanup_verified"] = json!(true);
+    let (result, ()) = tokio::join!(f.run("restart", &options), async {
+        let stream = f
+            .accept_post("/api/goose/v1/identity/delete-builderlab-account", &body)
+            .await;
+        let mut account = f.subject();
+        account["account_deleted"] = json!(true);
+        respond(stream, &account).await;
+    });
+    assert_eq!(result.unwrap(), 0);
+    f.assert_no_more_http().await;
+}
+
+#[test]
+fn cleartext_remote_endpoints_require_a_cluster_service_address() {
+    for (host, valid) in [
+        ("identity.accounts.svc.cluster.local", true),
+        ("identity.example.org", false),
+        ("identity.svc.cluster.local", false),
+        ("identity.accounts.svc.cluster.local.example.org", false),
+    ] {
+        let base = format!("http://{host}/v1/identity");
+        let config = IdentityGateConfig::new(
+            &format!("{base}/block-user-auth-login"),
+            &format!("{base}/delete-user-auth-login"),
+            &format!("{base}/delete-builderlab-account"),
+            HTTP_TIMEOUT,
+        );
+        assert_eq!(config.is_ok(), valid, "{host}");
+    }
 }

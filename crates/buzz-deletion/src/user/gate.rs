@@ -70,10 +70,9 @@ pub(super) async fn handle(
     let config = options
         .identity
         .as_ref()
-        .context("identity gate requires configured identity URLs and token file")?;
-    let outbound = config
-        .prepare_block(&json!({"request_id":request.id,"pubkey":request.target}))
-        .await?;
+        .context("identity gate requires configured identity URLs")?;
+    let outbound =
+        config.prepare_block(&json!({"request_id":request.id,"pubkey":request.target}))?;
     store.start_stage(lease, row.id).await?;
     store
         .save_stage_waiting(lease, row.id, json!({"reason":"inspect_block_outcome"}))

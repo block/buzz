@@ -63,12 +63,12 @@ pub(super) async fn handle(
     let identity = options
         .identity
         .as_ref()
-        .context("finalization requires configured identity URLs and token file")?;
+        .context("finalization requires configured identity URLs")?;
     let body = json!({"request_id":request.id,"pubkey":request.target,"cleanup_verified":true});
     let login = match saved_login {
         Some(login) => login,
         None => {
-            let outbound = identity.prepare_delete_login(&body).await?;
+            let outbound = identity.prepare_delete_login(&body)?;
             store.start_stage(lease, row.id).await?;
             store
                 .save_stage_waiting(
@@ -94,7 +94,7 @@ pub(super) async fn handle(
             login
         }
     };
-    let account_request = identity.prepare_delete_account(&body).await?;
+    let account_request = identity.prepare_delete_account(&body)?;
     store
         .save_stage_waiting(
             lease,

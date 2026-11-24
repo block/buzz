@@ -537,7 +537,7 @@ async fn real_user_requires_gate_then_global_media_before_community_cleanup() {
         .unwrap_err();
     assert!(error
         .to_string()
-        .contains("identity gate requires configured identity URLs and token file"));
+        .contains("identity gate requires configured identity URLs"));
     assert_eq!(
         store.inspect(request.id).await.unwrap().stage_history[0].status,
         "pending"

@@ -25,14 +25,17 @@ identity service and share its configured API prefix):
 | `BUZZ_USER_DELETION_IDENTITY_BLOCK_URL` | POST endpoint with path `<api.pathPrefix>/v1/identity/block-user-auth-login` |
 | `BUZZ_USER_DELETION_IDENTITY_DELETE_LOGIN_URL` | POST endpoint ending in `<api.pathPrefix>/v1/identity/delete-user-auth-login` |
 | `BUZZ_USER_DELETION_IDENTITY_DELETE_ACCOUNT_URL` | Full POST URL ending in `<api.pathPrefix>/v1/identity/delete-builderlab-account` on the same origin as the block endpoint |
-| `BUZZ_USER_DELETION_IDENTITY_TOKEN_FILE` | File containing the service bearer token; read when preparing each request |
 | `BUZZ_USER_DELETION_IDENTITY_TIMEOUT_SECS` | HTTP deadline, default 30 seconds, range 1–120 |
 
-Endpoints require HTTPS; numeric loopback HTTP addresses are accepted for local
-testing. Redirects and automatic HTTP retries are disabled. Requests/responses
-are limited to 64 KiB and token files to 16 KiB. Service credentials, URLs and
-arbitrary response/error bodies are not included in recorded transport errors.
-The operator provisions the service token and its permissions outside Buzz.
+Run the worker under its dedicated workload identity. Configure mutual TLS and
+a permission rule allowing only that identity to POST to these three routes.
+Point the URLs directly at the identity service. For a Kubernetes mesh, HTTP
+to `<service>.<namespace>.svc.cluster.local` lets the sidecar establish mTLS.
+HTTPS and numeric loopback are also supported. Verify a harmless request is
+accepted from the worker and denied from other workloads and public ingress
+before enabling deletion. Remove any legacy token file setting when switching.
+The client bypasses environment proxies, disables redirects and automatic retries,
+and limits request and response bodies to 64 KiB.
 
 The block endpoint receives `{"request_id":"<UUID>","pubkey":"<hex>"}`.
 The executor sends the approved canonical hex public key; the identity service
@@ -44,7 +47,7 @@ plus `identity_blocked: true`, `identity_revoked: true` and an RFC3339 `revoked_
 must return HTTP 200 with valid JSON; 202 is not completion. The worker saves only the five validated fields in
 `metadata_json.waiting.identity_receipt`. It discards the login subject and free-form message.
 
-The worker validates the routes and prepares credentials before recording an attempt.
+The worker validates the routes and prepares the request before recording an attempt.
 Immediately before sending the block request it saves `inspect_block_outcome`.
 If that marker survives a crash, HTTP error or lost response, check the account and
 revocation state with the identity service operator before any further block call.
@@ -75,7 +78,7 @@ Request IDs correlate calls. After an error, lost response, or interruption,
 inspect the stage's waiting reason and the original login and account before
 taking further action. Re-running the worker leaves an uncertain delete on hold.
 A 409 for a missing account cannot establish which operation removed it.
-The worker saves the verified login receipt before reading the account-call token. If the token mount is missing at this point, restore it and rerun with cleanup confirmation. The worker resumes at account deletion using the saved login receipt.
+The worker saves the verified login receipt before preparing the account request. A restart from that saved receipt resumes at account deletion.
 
 ## Content batches
 

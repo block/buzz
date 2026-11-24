@@ -1,20 +1,18 @@
 //! Generic, bounded HTTP transport. Credentials and server bodies never enter errors.
 
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 
 use anyhow::{ensure, Context, Result};
-use reqwest::{header::HeaderValue, Client, Url};
+use reqwest::{Client, Url};
 use serde_json::Value;
-use tokio::io::AsyncReadExt;
 
 const MAX_BYTES: usize = 64 * 1024;
-const MAX_TOKEN_BYTES: u64 = 16 * 1024;
 
 pub(in crate::user) struct IdentityGateConfig {
     block_url: Url,
     login_url: Url,
     account_url: Url,
-    token_file: PathBuf,
+
     client: Client,
 }
 
@@ -23,16 +21,12 @@ impl IdentityGateConfig {
         block_url: &str,
         login_url: &str,
         account_url: &str,
-        token_file: PathBuf,
+
         timeout: Duration,
     ) -> Result<Self> {
         ensure!(
             timeout >= Duration::from_secs(1) && timeout <= Duration::from_secs(120),
             "identity HTTP timeout must be between 1 and 120 seconds"
-        );
-        ensure!(
-            !token_file.as_os_str().is_empty(),
-            "identity token file is empty"
         );
         let block_url = endpoint(block_url, "/v1/identity/block-user-auth-login")?;
         let login_url = endpoint(login_url, "/v1/identity/delete-user-auth-login")?;
@@ -42,20 +36,15 @@ impl IdentityGateConfig {
             login_url.join(".")? == directory && account_url.join(".")? == directory,
             "identity endpoints must use the same origin and route prefix"
         );
-        let mut builder = Client::builder()
+        let builder = Client::builder()
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
             .timeout(timeout);
-        // Plain HTTP is only allowed to loopback; never send its bearer token
-        // through an ambient proxy outside that machine.
-        if block_url.scheme() == "http" {
-            builder = builder.no_proxy();
-        }
         Ok(Self {
             block_url,
             login_url,
             account_url,
-            token_file,
             client: builder
                 .build()
                 .map_err(|_| anyhow::anyhow!("could not build identity HTTP client"))?,
@@ -73,14 +62,12 @@ impl IdentityGateConfig {
         let block = read("BUZZ_USER_DELETION_IDENTITY_BLOCK_URL")?;
         let login = read("BUZZ_USER_DELETION_IDENTITY_DELETE_LOGIN_URL")?;
         let account = read("BUZZ_USER_DELETION_IDENTITY_DELETE_ACCOUNT_URL")?;
-        let token = read("BUZZ_USER_DELETION_IDENTITY_TOKEN_FILE")?;
+        ensure!(
+            std::env::var_os("BUZZ_USER_DELETION_IDENTITY_TOKEN_FILE").is_none(),
+            "remove the legacy identity token file setting after configuring workload authentication"
+        );
         let timeout = read("BUZZ_USER_DELETION_IDENTITY_TIMEOUT_SECS")?;
-        if block.is_none()
-            && login.is_none()
-            && account.is_none()
-            && token.is_none()
-            && timeout.is_none()
-        {
+        if block.is_none() && login.is_none() && account.is_none() && timeout.is_none() {
             return Ok(None);
         }
         let timeout = timeout
@@ -92,60 +79,30 @@ impl IdentityGateConfig {
             &block.context("missing identity block URL")?,
             &login.context("missing identity delete login URL")?,
             &account.context("missing identity delete account URL")?,
-            PathBuf::from(token.context("missing identity token file")?),
             Duration::from_secs(timeout),
         )?))
     }
 
-    pub(super) async fn prepare_block(&self, body: &Value) -> Result<reqwest::Request> {
-        self.prepare(&self.block_url, body).await
+    pub(super) fn prepare_block(&self, body: &Value) -> Result<reqwest::Request> {
+        self.prepare(&self.block_url, body)
     }
 
-    pub(in crate::user) async fn prepare_delete_login(
-        &self,
-        body: &Value,
-    ) -> Result<reqwest::Request> {
-        self.prepare(&self.login_url, body).await
+    pub(in crate::user) fn prepare_delete_login(&self, body: &Value) -> Result<reqwest::Request> {
+        self.prepare(&self.login_url, body)
     }
 
-    pub(in crate::user) async fn prepare_delete_account(
-        &self,
-        body: &Value,
-    ) -> Result<reqwest::Request> {
-        self.prepare(&self.account_url, body).await
+    pub(in crate::user) fn prepare_delete_account(&self, body: &Value) -> Result<reqwest::Request> {
+        self.prepare(&self.account_url, body)
     }
 
-    async fn prepare(&self, endpoint: &Url, body: &Value) -> Result<reqwest::Request> {
+    fn prepare(&self, endpoint: &Url, body: &Value) -> Result<reqwest::Request> {
         let body = serde_json::to_vec(body)?;
         ensure!(
             body.len() <= MAX_BYTES,
             "identity request exceeds size limit"
         );
-        let file = tokio::fs::File::open(&self.token_file)
-            .await
-            .map_err(|_| anyhow::anyhow!("could not open identity token file"))?;
-        let mut bytes = Vec::new();
-        file.take(MAX_TOKEN_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|_| anyhow::anyhow!("could not read identity token file"))?;
-        ensure!(
-            bytes.len() as u64 <= MAX_TOKEN_BYTES,
-            "identity token exceeds size limit"
-        );
-        let token = std::str::from_utf8(&bytes)
-            .map_err(|_| anyhow::anyhow!("invalid identity bearer token"))?
-            .trim();
-        ensure!(
-            !token.is_empty() && !token.chars().any(char::is_whitespace),
-            "invalid identity bearer token"
-        );
-        let mut auth = HeaderValue::from_str(&format!("Bearer {token}"))
-            .map_err(|_| anyhow::anyhow!("invalid identity bearer token"))?;
-        auth.set_sensitive(true);
         self.client
             .post(endpoint.clone())
-            .header(reqwest::header::AUTHORIZATION, auth)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body)
             .build()
@@ -182,20 +139,28 @@ impl IdentityGateConfig {
 
 fn endpoint(value: &str, path: &str) -> Result<Url> {
     let url = Url::parse(value).map_err(|_| anyhow::anyhow!("invalid identity endpoint URL"))?;
-    let local_http = url.scheme() == "http"
+    // The mesh intercepts a direct connection to the Kubernetes Service and
+    // supplies mutual TLS. Numeric loopback also supports a local sidecar/test.
+    let internal_http = url.scheme() == "http"
         && url.host_str().is_some_and(|host| {
-            host.trim_matches(['[', ']'])
+            let service = host
+                .strip_suffix(".svc.cluster.local")
+                .and_then(|name| name.split_once('.'));
+            service.is_some_and(|(service, namespace)| {
+                !service.is_empty() && !namespace.is_empty() && !namespace.contains('.')
+            }) || host
+                .trim_matches(['[', ']'])
                 .parse::<std::net::IpAddr>()
                 .is_ok_and(|ip| ip.is_loopback())
         });
     ensure!(
-        (url.scheme() == "https" || local_http)
+        (url.scheme() == "https" || internal_http)
             && url.host_str().is_some()
             && url.username().is_empty()
             && url.password().is_none()
             && url.query().is_none()
             && url.fragment().is_none(),
-        "identity endpoint requires HTTPS (or a loopback HTTP address) without credentials, query or fragment"
+        "identity endpoint requires HTTPS or HTTP to a cluster Service or numeric loopback address without credentials, query or fragment"
     );
     ensure!(
         url.path().ends_with(path),

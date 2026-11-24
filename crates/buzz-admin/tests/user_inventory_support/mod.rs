@@ -65,7 +65,7 @@ pub async fn real_workflow_stops_at_gate(url: &str, id: &str) -> Value {
         workflow_refuses(
             url,
             &["run", id, "--delete", "--next-step"],
-            "identity gate requires configured identity URLs and token file",
+            "identity gate requires configured identity URLs",
         )
         .await;
         let stopped = workflow_cli(url, &["inspect", id], true).await;
