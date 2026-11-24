@@ -230,6 +230,7 @@ async fn git_membership_or_grant() {
         .tags([
             Tag::parse(["d", &name]).unwrap(),
             Tag::parse(["buzz-channel", &channel]).unwrap(),
+            Tag::parse(["buzz-protect", "refs/heads/admin-only", "push:admin"]).unwrap(),
         ])
         .sign_with_keys(&owner)
         .unwrap();
@@ -393,6 +394,24 @@ async fn git_membership_or_grant() {
         repo.clone_as(&mut failures, label, temp.path(), agent, tag, read);
         repo.push_as(&mut failures, label, agent, tag, push);
     }
+
+    // The hook must receive the grant's level to enforce the protection.
+    // These requests differ only in grant level and target the same ref.
+    let manage_tag = grant(&owner, &grant_agent, &coordinate, "manage", now + 1_800);
+    repo.push_as(
+        &mut failures,
+        "admin-only",
+        &grant_agent,
+        Some(&push_tag),
+        HookRejected,
+    );
+    repo.push_as(
+        &mut failures,
+        "admin-only",
+        &grant_agent,
+        Some(&manage_tag),
+        Success,
+    );
 
     // The expired tag leaves the agent's direct membership as its source of authority.
     // This agent's owner never joined the channel.
