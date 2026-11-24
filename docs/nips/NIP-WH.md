@@ -58,7 +58,7 @@ Both expressions read two variables:
 event.type == "pull_request" && has(payload.action) && payload.action == "opened"
 ```
 
-The CEL standard library is available. Each expression is at most 4096 bytes and 64 levels deep, and names no variable but these two. CEL is dynamically typed here: the relay refuses a result that is a literal of the wrong type when the revision arrives, and treats any other wrong result as an evaluation error.
+The CEL standard library is available, except the `timestamp` and `duration` functions. Each expression is at most 4096 bytes and 64 levels deep, and names no variable but these two. CEL is dynamically typed here: the relay refuses a result that is a literal of the wrong type when the revision arrives, and treats any other wrong result as an evaluation error.
 
 ## Relay behavior
 
