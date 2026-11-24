@@ -26,6 +26,9 @@ use nostr::{EventBuilder, Keys, Kind, Tag};
 use s3::creds::Credentials;
 use s3::{Bucket, Region};
 
+#[path = "e2e_git/membership_or_grant.rs"]
+mod membership_or_grant;
+
 fn relay_http_url() -> String {
     std::env::var("RELAY_HTTP_URL").unwrap_or_else(|_| "http://localhost:3000".to_string())
 }
@@ -85,8 +88,15 @@ async fn create_test_channel(keys: &Keys) -> String {
 
 /// Run `git` with the Buzz credential helper and isolated config.
 fn git_status(args: &[&str], cwd: &Path, owner_nsec: &str) -> std::process::Output {
+    git_command(args, cwd, owner_nsec)
+        .output()
+        .expect("spawn git")
+}
+
+fn git_command(args: &[&str], cwd: &Path, owner_nsec: &str) -> Command {
     let helper = credential_helper();
-    Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args([
             "-c",
             "credential.useHttpPath=true",
@@ -107,9 +117,10 @@ fn git_status(args: &[&str], cwd: &Path, owner_nsec: &str) -> std::process::Outp
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env_remove("GIT_CONFIG_COUNT")
-        .env("NOSTR_PRIVATE_KEY", owner_nsec)
-        .output()
-        .expect("spawn git")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env_remove("BUZZ_AUTH_TAG")
+        .env("NOSTR_PRIVATE_KEY", owner_nsec);
+    command
 }
 
 /// Run `git` with the Buzz credential helper and isolated config. Asserts the
