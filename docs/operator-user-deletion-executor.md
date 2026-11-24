@@ -1,9 +1,12 @@
 # Run and recover a user-deletion workflow
 
-The workflow orders account gating, media cleanup, and per-community content
-cleanup. Both modes record the account gate as unimplemented and continue.
-Stop writers before destructive runs. Delete mode stops if it reaches
-`purge_profile` or `global_cleanup`, whose workflow delete handlers are unimplemented. Demo requests simulate all stages and
+**Never stop or restart a relay for user deletion, including rehearsals and production.**
+
+The workflow orders account gating, media cleanup, and per-community content,
+account and profile cleanup. Both modes record the account gate as unimplemented and continue.
+The gate does not prevent new writes by the user or their agents. Use read-only mode
+for live data while the gate is unimplemented. Delete mode stops at `global_cleanup`,
+whose workflow delete handler is unimplemented. Demo requests simulate all stages and
 never delete media or content.
 
 Direct `media-batches` and `content-batches` commands remain available for
@@ -26,9 +29,8 @@ read-only run keep independent progress for the same subject.
 
 ## Content batches
 
-Run deletion offline with the relay, workflow engine and external writers stopped.
-Read-only preview does not require stopping them. This command does not install
-a lasting account fence.
+For destructive tests, point the command at a separate disposable database and
+versioned bucket that receive no other writes. Keep serving processes online.
 
 `content-batches` selects the user plus agents owned by that user **in the target
 community**. Ownership in another community does not authorize cleanup here.
@@ -108,7 +110,7 @@ there is no additional service or database-side workflow function.
 | --- | --- |
 | `buzz-deletion/src/user.rs` | Parse command arguments, call the user/shared stores or worker, print results |
 | `buzz-deletion/src/user/worker.rs` | Claim, heartbeat, call transition, dispatch handler, repeat, release |
-| `buzz-deletion/src/user/handlers.rs` | Dispatch real media/content or synthetic demo actions; save outcomes through the shared store |
+| `buzz-deletion/src/user/handlers.rs` | Dispatch user cleanup or synthetic demo actions; save outcomes through the shared store |
 | `buzz-deletion/src/user/transition.rs` | `UserDeletionTransition.get_next_stage`: recover or choose the next saved position |
 | `buzz-deletion/src/user/workflow.rs` | Allowed user stages, result-based branching, community-progress reconstruction |
 | `buzz-db/src/store/entity_deletion/mod.rs` | Shared store definition and exports; no stage policy |
@@ -136,9 +138,8 @@ ensures that the chosen destination follows the user workflow rules.
 
 User submission and inventory interpretation are deliberately separate from
 common workflow storage, even though they use the same tables. User approval
-runs its inventory validator inside the common approval transaction. Future
-real PostgreSQL deletion operations belong in the user-specific database folder;
-only the media handler currently performs real deletion. Existing community deletion
+runs its inventory validator inside the common approval transaction. Media, content,
+account and profile handlers apply their planned operations in delete mode. Existing community deletion
 continues using its existing implementation.
 
 ## The execution contract
@@ -247,9 +248,8 @@ its result may repeat that handler.
 
 Build `buzz-admin`, configure `DATABASE_URL` and the `BUZZ_S3_*` variables, and
 apply the schema using the operator procedure in [database.md](database.md).
-Use a real test public key and versioned test bucket. Stop every writer before
-running with `--delete`; neither the dummy gate nor a database lease prevents
-new uploads. Never point these examples at a live account for a smoke test.
+Use a test public key, an isolated test database and a versioned test bucket.
+Neither the placeholder gate nor a database lease prevents new uploads. Never point these examples at a live account for a smoke test.
 
 The direct command uses the same media implementation without creating a workflow:
 
@@ -267,7 +267,7 @@ REQUEST_ID=$(printf '%s\n' "$REQUEST_JSON" | jq -r '.id')
 INVENTORY_DIGEST=$(printf '%s\n' "$REQUEST_JSON" | jq -r '.inventory_digest')
 ./target/debug/buzz-admin user-deletions approve "$REQUEST_ID" \
   --approved-by operator-b --inventory-digest "$INVENTORY_DIGEST"
-./target/debug/buzz-admin user-deletions run "$REQUEST_ID" --next-step
+./target/debug/buzz-admin user-deletions run "$REQUEST_ID" --next-step --delete
 ./target/debug/buzz-admin user-deletions inspect "$REQUEST_ID"
 ./target/debug/buzz-admin user-deletions run "$REQUEST_ID" --next-step --delete
 ./target/debug/buzz-admin user-deletions inspect "$REQUEST_ID"
@@ -279,9 +279,14 @@ for `gate_user` and advances to `purge_media`. Use `--target demo:example` inste
 submission to exercise the full synthetic workflow without deletion.
 
 The routing requires saved gate success before media, and saved media success
-before community cleanup. A media failure keeps the same stage current; resume
-after the saved retry deadline using the same request ID. A saved completed
-media stage is transitioned without running media again.
+before community cleanup. When a stage fails, fix its reported error and rerun
+the same request after its retry deadline. Use a fresh filename for that attempt:
+
+```bash
+./target/debug/buzz-admin user-deletions run "$REQUEST_ID" --delete --write-row-ids retry-rows.ndjson
+```
+
+The worker resumes the saved stage and skips handlers recorded as completed.
 
 `--next-step` executes one handler, transitions, and releases the lease. Without
 it, an invocation executes up to 100 handlers. The worker prints an inspection
@@ -307,8 +312,7 @@ Every invocation and retry discovers again. Content, account, and profile
 handlers use the utility inside their existing batch transactions with row
 locks when rechecking ownership. Profile cleanup compares against the identities
 that remain after its own committed batches. Media discovers once per invocation
-and uses that snapshot through inventory and deletion. Writers must remain
-stopped throughout the operation.
+and uses that snapshot through inventory and deletion. Concurrent writes can invalidate this snapshot.
 
 Discovery preserves each caller's existing limits: media, content and profile
 allow 10,000 distinct identities including the human; account discovery allows

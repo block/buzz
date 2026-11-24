@@ -30,7 +30,7 @@ pub struct Args {
     /// Print proposals only (default); does not change data, progress, or caches.
     #[arg(long, alias = "read-only", conflicts_with = "delete")]
     print_only: bool,
-    /// Execute printed batches. Stop the relay and external workers first.
+    /// Execute printed batches in isolated test data. Never stop or restart a relay.
     #[arg(long, conflicts_with = "print_only")]
     pub(super) delete: bool,
     /// Maximum explicit row operations per transaction.

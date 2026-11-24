@@ -26,7 +26,7 @@ pub struct Args {
     /// Print selected files without changing the database or storage (default).
     #[arg(long, visible_alias = "print-only", conflicts_with = "delete")]
     pub read_only: bool,
-    /// Delete selected files.
+    /// Delete selected files in an isolated test bucket. Never stop or restart a relay.
     #[arg(long)]
     pub delete: bool,
 }

@@ -226,23 +226,27 @@ async fn handle_remaining_stage(
             }
             Ok(metadata)
         }
-        ("purge_profile", false) => {
+        ("purge_profile", _) => {
             let db = options.db.as_ref().context("missing source database")?;
-            let summary = db
-                .user_deletion_store()
-                .preview_profile_plan(
-                    &ProfileBatchOptions {
-                        community: row
-                            .target_community_id
-                            .context("missing profile community")?,
-                        pubkey: subject.into(),
-                        relay_pubkeys: options.relay_pubkey.iter().cloned().collect(),
-                        batch_size: options.batch_size,
-                        max_items: options.max_items,
-                    },
-                    &mut options.batch_output(row),
-                )
-                .await?;
+            let profiles = db.user_deletion_store();
+            let batch = ProfileBatchOptions {
+                community: row
+                    .target_community_id
+                    .context("missing profile community")?,
+                pubkey: subject.into(),
+                relay_pubkeys: options.relay_pubkey.iter().cloned().collect(),
+                batch_size: options.batch_size,
+                max_items: options.max_items,
+            };
+            let mut output = options.batch_output(row);
+            let summary = if options.delete {
+                let secret = std::env::var("BUZZ_RELAY_PRIVATE_KEY").ok();
+                profiles
+                    .delete_profile_stage(&batch, secret.as_deref(), (lease, row.id), &mut output)
+                    .await?
+            } else {
+                profiles.preview_profile_plan(&batch, &mut output).await?
+            };
             Ok(serde_json::to_value(summary)?)
         }
         (name, _) => bail!("real handler {name} is not implemented for deletion"),

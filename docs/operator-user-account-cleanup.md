@@ -1,9 +1,8 @@
-# Offline account cleanup
+# Account cleanup
 
 `buzz-admin user-deletions account-batches` previews or deletes supported account
-records. Preview is the default. These are operator commands against the selected
-`DATABASE_URL`; stop relay instances and external writers before capturing scope
-and keep them stopped through deletion. The command does not stop them for you.
+records. Preview is the default. Never stop or restart a relay for user deletion, including rehearsals and production.
+Use an isolated test database for destructive rehearsals.
 
 ## Select communities and preview current agents
 
@@ -87,9 +86,7 @@ current discovery heads are retired instead of creating new ones.
 The command processes these transactions sequentially. Human and agent passes
 can revisit a shared channel; each committed list describes the current rows.
 No background worker, notification, or new network event is involved. Open apps
-fetch the corrected lists when member data is refreshed or reloaded. This does
-not invalidate live sessions or authorize online account deletion; the existing
-writer-stop requirement still applies outside controlled testing.
+fetch the corrected lists when member data is refreshed or reloaded. Live sessions can still write until account gating is implemented.
 Lists left stale by an older, already completed deletion need a separate repair:
 without the membership rows, this command cannot rediscover those channels.
 
@@ -111,11 +108,10 @@ same command: it fetches current direct agents and selects remaining rows. It
 does not append another audit entry for an already removed role. Every batch
 checks the ownership set again and locks the matching ownership rows through
 commit. A changed set stops the run; retry fetches it again. A final ownership
-check also prevents reporting completion with a changed set. These checks do
-not replace the requirement to stop writers. Keep `users.agent_owner_pubkey`
+check also prevents reporting completion with a changed set. Other writers can still create dependent rows. Keep `users.agent_owner_pubkey`
 records until all dependent handlers have finished; account cleanup retains them.
 Preview uses read-only transactions; a multi-scope preview uses one snapshot per
-scope. The offline writer-stop requirement makes those observations stable.
+scope. Concurrent changes can produce different observations across scopes.
 
 ## Deliberate limits
 

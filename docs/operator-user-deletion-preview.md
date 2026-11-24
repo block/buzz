@@ -1,5 +1,7 @@
 # Run and verify a read-only user deletion
 
+**Never stop or restart a relay for user deletion, including rehearsals and production.**
+
 Use this procedure to preview one user's deletion across their communities. It saves the request, approval, and stage history in PostgreSQL. User data and storage versions stay in place. For an owned community the preview records `would_submit` and its community ID. It creates zero child deletion requests.
 
 ## 1. Select the target and review the inventory

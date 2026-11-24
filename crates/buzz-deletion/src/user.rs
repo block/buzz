@@ -1,4 +1,4 @@
-//! User inventory, offline account cleanup and persisted deletion workflows.
+//! User inventory, account cleanup and persisted deletion workflows.
 
 use anyhow::{bail, Result};
 use buzz_db::user_deletion::ExecutionMode;
@@ -12,9 +12,9 @@ pub enum Command {
     ContentBatches(content_batches::Args),
     /// Run media cleanup directly, without a workflow request.
     MediaBatches(media::Args),
-    /// Preview or delete profiles in one community; deletion requires stopped writers.
+    /// Preview or delete profiles in one community.
     ProfileBatches(profile_batches::Args),
-    /// Print account-table batches for one community; --delete executes offline.
+    /// Print account-table batches for one community or apply them with --delete.
     AccountBatches(account_batches::Args),
     /// Capture frozen human/agent inputs across stored communities, read-only.
     AccountScope {
@@ -67,7 +67,7 @@ pub enum Command {
     Run {
         /// Approved request UUID.
         id: Uuid,
-        /// Execute implemented real handlers; stop relay and external writers first.
+        /// Execute implemented handlers. Never stop or restart a relay. Use isolated test data while account gating is unimplemented.
         #[arg(long)]
         delete: bool,
         /// Run the same workflow and record progress without applying source deletions.

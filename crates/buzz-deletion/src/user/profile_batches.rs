@@ -18,7 +18,7 @@ pub struct Args {
     /// Print proposed rows without writing anything (the default).
     #[arg(long, alias = "read-only", conflicts_with = "delete")]
     print_only: bool,
-    /// Apply batches. Stop relay and external writers; finish content/account/media cleanup first.
+    /// Apply batches after content, account and media cleanup. Never stop or restart a relay.
     #[arg(long, conflicts_with = "print_only")]
     delete: bool,
     /// Maximum row mutations per transaction, 1–100.

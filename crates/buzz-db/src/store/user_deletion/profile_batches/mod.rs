@@ -1,7 +1,7 @@
-//! Offline profile erasure. Preview and deletion share the exact immutable plan.
-//! Writers must remain stopped until the caller's full deletion verification ends.
+//! Profile erasure. Preview and deletion share the exact immutable plan.
+//! Concurrent writes to target data can invalidate the result after verification.
 use super::{normalize_user_deletion_pubkey, UserDeletionStore};
-use crate::{DbError, Result};
+use crate::{entity_deletion::EntityLease, DbError, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::{Connection, PgConnection};
@@ -63,7 +63,7 @@ struct Plan {
 }
 
 impl UserDeletionStore {
-    /// Preview or execute a standalone profile plan with stopped writers.
+    /// Preview or execute a standalone profile plan against isolated data.
     ///
     /// No workflow is enabled, lease acquired or deletion journal modified.
     /// `relay_secret` is required only to replace a shared archive snapshot;
@@ -75,7 +75,7 @@ impl UserDeletionStore {
         relay_secret: Option<&str>,
         writer: &mut impl Write,
     ) -> Result<ProfileBatchSummary> {
-        self.profile_batches(options, delete, relay_secret, false, writer)
+        self.profile_batches(options, delete, relay_secret, false, None, writer)
             .await
     }
 
@@ -87,7 +87,19 @@ impl UserDeletionStore {
         options: &ProfileBatchOptions,
         writer: &mut impl Write,
     ) -> Result<ProfileBatchSummary> {
-        self.profile_batches(options, false, None, true, writer)
+        self.profile_batches(options, false, None, true, None, writer)
+            .await
+    }
+
+    /// Execute an approved workflow stage, fencing every batch with its worker lease.
+    pub async fn delete_profile_stage(
+        &self,
+        options: &ProfileBatchOptions,
+        relay_secret: Option<&str>,
+        stage: (&EntityLease, Uuid),
+        writer: &mut impl Write,
+    ) -> Result<ProfileBatchSummary> {
+        self.profile_batches(options, true, relay_secret, false, Some(stage), writer)
             .await
     }
 
@@ -97,6 +109,7 @@ impl UserDeletionStore {
         delete: bool,
         relay_secret: Option<&str>,
         report_prerequisites: bool,
+        stage: Option<(&EntityLease, Uuid)>,
         writer: &mut impl Write,
     ) -> Result<ProfileBatchSummary> {
         if !(1..=100).contains(&options.batch_size) || !(1..=1_000_000).contains(&options.max_items)
@@ -191,6 +204,17 @@ impl UserDeletionStore {
                     sqlx::query(setting).execute(&mut *raw).await?;
                 }
                 lock(&mut raw, &plan.scope).await?;
+                if let Some((lease, id)) = stage {
+                    super::validate_cleanup_stage(
+                        &mut raw,
+                        lease,
+                        id,
+                        "purge_profile",
+                        Some(plan.scope.community),
+                        &plan.scope.human,
+                    )
+                    .await?;
+                }
                 let mut tx = crate::AdmittedTx::admit(
                     raw,
                     &crate::deletion::DeletionStore::new(self.pool.clone()),
@@ -200,6 +224,9 @@ impl UserDeletionStore {
                 ownership::recheck(tx.conn(), &plan.scope, &remaining_targets).await?;
                 for op in *batch {
                     rows::apply(&mut tx, &plan.scope, op, &replacements).await?;
+                }
+                if let Some((lease, _)) = stage {
+                    crate::store::entity_deletion::lock_owned(tx.conn(), lease).await?;
                 }
                 tx.commit().await?;
                 for op in *batch {

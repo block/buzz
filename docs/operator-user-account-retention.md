@@ -30,8 +30,8 @@ coordinator wiring belong to the verifier change. The existing account command
 must keep reporting `account_erasure_complete: false` while those prerequisites
 and the remaining account work are incomplete.
 
-For supported selectors and runnable commands, see [offline account cleanup](operator-user-account-cleanup.md).
+For supported selectors and runnable commands, see [account cleanup](operator-user-account-cleanup.md).
 
-All deletion commands run offline with relay and external writers stopped.
+Never stop or restart a relay for user deletion, including rehearsals and production.
 Preview is read-only. A per-community invocation must not silently mutate
 deployment-global privileges or registrations.

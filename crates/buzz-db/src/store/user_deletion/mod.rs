@@ -9,7 +9,7 @@ pub mod content_batches;
 mod discovery;
 mod inventory;
 mod media;
-/// Standalone, offline profile cleanup with read-only preview.
+/// Profile cleanup with read-only preview and bounded delete batches.
 pub mod profile_batches;
 pub use agent_ownership::UserDeletionTargets;
 mod requests;
@@ -57,4 +57,44 @@ impl UserDeletionStore {
         self.account_snapshot_signer = Some(signer);
         self
     }
+}
+
+/// Verify the worker still owns this running stage for the approved target.
+/// Hold the parent lock through the batch commit.
+async fn validate_cleanup_stage(
+    tx: &mut sqlx::PgConnection,
+    lease: &crate::entity_deletion::EntityLease,
+    stage_id: uuid::Uuid,
+    stage: &str,
+    community: Option<uuid::Uuid>,
+    target: &str,
+) -> crate::Result<()> {
+    use crate::store::entity_deletion::{lock_owned, validate_approved_inventory};
+    let request = lock_owned(tx, lease).await?;
+    validate_approved_inventory(tx, &request).await?;
+    let inputs =
+        UserDeletionInventory::read(&request)?.non_owner_inputs(&request.target, community)?;
+    if request.status != "running" || normalize_user_deletion_pubkey(&request.target)? != target {
+        return Err(crate::DbError::DeletionSafety(format!(
+            "{stage} target or status changed"
+        )));
+    }
+    let matches: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM entity_deletion_stage_history
+         WHERE id=$1 AND request_id=$2 AND stage=$5 AND is_current
+         AND status='running' AND target_community_id=$3 AND metadata_json->'inputs'=$4)",
+    )
+    .bind(stage_id)
+    .bind(lease.request_id)
+    .bind(community)
+    .bind(inputs)
+    .bind(stage)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !matches {
+        return Err(crate::DbError::DeletionSafety(format!(
+            "{stage} is not current or outside approved scope"
+        )));
+    }
+    Ok(())
 }
