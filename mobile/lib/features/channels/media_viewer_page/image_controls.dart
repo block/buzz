@@ -69,11 +69,16 @@ class _MediaViewerCircleButton extends StatelessWidget {
   final String tooltip;
   final VoidCallback? onPressed;
 
+  /// Video runs under the button, so it needs the dark backing the transport
+  /// uses; a faint white circle disappears over light video.
+  final bool overVideo;
+
   const _MediaViewerCircleButton({
     super.key,
     required this.icon,
     required this.tooltip,
     required this.onPressed,
+    this.overVideo = false,
   });
 
   @override
@@ -99,10 +104,18 @@ class _MediaViewerCircleButton extends StatelessWidget {
       child: onPressed == null
           ? const SizedBox.shrink()
           : DecoratedBox(
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.16),
-                shape: BoxShape.circle,
-              ),
+              decoration: overVideo
+                  ? BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.55),
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.10),
+                      ),
+                      shape: BoxShape.circle,
+                    )
+                  : BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.16),
+                      shape: BoxShape.circle,
+                    ),
               child: IconButton(
                 onPressed: onPressed,
                 tooltip: tooltip,
@@ -118,10 +131,12 @@ class _MediaViewerCloseButton extends StatelessWidget {
     super.key,
     required this.tooltip,
     required this.onPressed,
+    this.overVideo = false,
   });
 
   final String tooltip;
   final VoidCallback onPressed;
+  final bool overVideo;
 
   @override
   Widget build(BuildContext context) {
@@ -137,6 +152,7 @@ class _MediaViewerCloseButton extends StatelessWidget {
       icon: BuzzIcons.x,
       tooltip: tooltip,
       onPressed: onPressed,
+      overVideo: overVideo,
     );
   }
 }

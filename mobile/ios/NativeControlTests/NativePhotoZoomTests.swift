@@ -109,7 +109,11 @@ struct NativePhotoZoomTests {
     viewer.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
     viewer.layoutGallery(insets: UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0))
     precondition(buttons[0].frame.maxY < buttons[1].frame.minY, "Ordinary phones retain top Close and bottom actions")
-    precondition(pager.view.frame.minY == 59 + 56 && pager.view.frame.maxY < buttons[1].frame.minY, "Photos keep clear of the actions")
+    pager.view.layoutIfNeeded(); page.view.layoutIfNeeded()
+    let photo = descendants(page.view).compactMap { $0 as? UIScrollView }.first!.convert(page.view.bounds, to: viewer.view)
+    let band = descendants(page.view).compactMap { $0 as? UIScrollView }.first!.frame
+    precondition(pager.view.frame == viewer.view.bounds, "One pager frame for every page, so paging never resizes a page")
+    precondition(band.minY == 59 + 56 && band.maxY < buttons[1].frame.minY && photo.width > 0, "Photos keep clear of the actions inside their page")
     precondition(pager.viewControllers!.first === page, "Folding must retain the selected native page")
     print("PASS: native gallery rail sides, full viewport, targets and compact transition")
   }
@@ -198,6 +202,20 @@ struct NativePhotoZoomTests {
     viewer.setChrome(hidden: false)
     precondition(videoButtons.allSatisfy { $0.alpha == 1 && $0.isUserInteractionEnabled }, "Tapping again restores them")
     precondition(transport.alpha == 1 && transport.isUserInteractionEnabled && !transport.accessibilityElementsHidden, "The transport comes back with the actions")
+    viewer.setChrome(hidden: true)
+    viewer.revealForVoiceOver(running: false)
+    precondition(transport.alpha == 0, "Turning VoiceOver off leaves the chrome alone")
+    viewer.revealForVoiceOver(running: true)
+    precondition(videoButtons.allSatisfy { $0.alpha == 1 && !$0.accessibilityElementsHidden } && transport.alpha == 1,
+                 "Turning VoiceOver on after the fade reveals the actions and transport")
+    let menu = transport.options.menu!
+    precondition(menu.title == "Playback Speed" && menu.children.count == 6, "The options menu offers AVKit's playback speeds")
+    precondition(transport.options.accessibilityLabel == "Playback options" && transport.options.title(for: .normal) == "1×", "Speed shows like the Flutter viewer")
+    (first as! NativePhotoPage).setSpeed(1.5)
+    precondition(player.defaultRate == 1.5 && transport.options.title(for: .normal) == "1.5×", "Choosing a speed sets the player's rate")
+    (first as! NativePhotoPage).setSpeed(1)
+    precondition(NativeVideoTransport.speed(0.75) == "0.75×" && NativeVideoTransport.speed(2) == "2×", "Speed labels drop trailing zeros")
+    precondition(transport.airPlay.superview === transport && transport.airPlay.bounds.width >= 44, "AirPlay stays available")
     func settle() { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
     player.pause(); settle()
     precondition(transport.playPause.accessibilityLabel == "Play", "A paused video offers Play")
@@ -242,12 +260,21 @@ struct NativePhotoZoomTests {
     let active = current.children.compactMap { $0 as? AVPlayerViewController }.first!
     precondition(active.player != nil, "Returning to a video restores its player")
     precondition(spinner.isHidden, "Leaving a loading video stops its loader")
+    let phone = UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0)
+    viewer.layoutGallery(insets: phone)
+    let pagerWhileVideo = pager.view.frame
     let next = viewer.pageViewController(pager, viewControllerAfter: current)!
     viewer.pageViewController(pager, willTransitionTo: [next])
+    next.view.frame = pager.view.bounds; next.view.layoutIfNeeded()
+    let photoWhileSwiping = descendants(next.view).compactMap { $0 as? UIScrollView }.first!.frame
     precondition(feedback.clicks == 4, "Next swipe fires before the new photo is selected")
     pager.setViewControllers([next], direction: .forward, animated: false)
     viewer.pageViewController(pager, didFinishAnimating: true, previousViewControllers: [current], transitionCompleted: true)
     precondition(feedback.clicks == 4, "Completed swipe does not add a delayed haptic")
+    viewer.layoutGallery(insets: phone); pager.view.setNeedsLayout(); pager.view.layoutIfNeeded(); next.view.layoutIfNeeded()
+    precondition(pager.view.frame == pagerWhileVideo, "Settling on a photo keeps the pager frame it had on the video")
+    precondition(descendants(next.view).compactMap { $0 as? UIScrollView }.first!.frame == photoWhileSwiping && photoWhileSwiping.minY == 59 + 56,
+                 "A photo keeps its inset frame from mid-swipe to settled")
     viewer.pageViewController(pager, didFinishAnimating: true, previousViewControllers: [current], transitionCompleted: true)
     precondition(feedback.clicks == 4, "Repeated callbacks for the same page do not duplicate haptics")
     viewer.viewDidDisappear(false)

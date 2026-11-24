@@ -620,6 +620,33 @@ void main() {
     });
   }
 
+  testWidgets('actions over the video have a dark backing on Android', (
+    tester,
+  ) async {
+    // A faint white circle disappears over light video such as a screen recording.
+    await _pumpVideo(tester, onReply: () {});
+    for (final key in [
+      'message-media-video-viewer-reply-thread',
+      'message-media-video-viewer-share',
+      'message-media-video-viewer-close',
+    ]) {
+      final backing = tester.widget<DecoratedBox>(
+        find
+            .descendant(
+              of: find.byKey(ValueKey(key)),
+              matching: find.byType(DecoratedBox),
+            )
+            .first,
+      );
+      final color = (backing.decoration as BoxDecoration).color!;
+      // Worst case is a white frame behind the button: the white icon still
+      // needs WCAG's 3:1 for non-text UI against the blended backing.
+      final behind = Color.alphaBlend(color, Colors.white).computeLuminance();
+      expect(1.05 / (behind + 0.05), greaterThanOrEqualTo(3), reason: key);
+    }
+    await _disposeVideo(tester);
+  });
+
   testWidgets(
     'pinch zoom and pan preserve playback and controls, then reset to fit',
     (tester) async {

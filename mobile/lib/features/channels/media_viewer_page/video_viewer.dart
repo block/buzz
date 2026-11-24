@@ -449,6 +449,7 @@ class MediaVideoViewerPage extends HookConsumerWidget {
                                 ),
                                 icon: BuzzIcons.share,
                                 tooltip: 'Share video',
+                                overVideo: true,
                                 onPressed: canShare
                                     ? () => unawaited(shareVideo())
                                     : null,
@@ -459,6 +460,7 @@ class MediaVideoViewerPage extends HookConsumerWidget {
                                   'message-media-video-viewer-close',
                                 ),
                                 tooltip: 'Close video viewer',
+                                overVideo: true,
                                 onPressed: () =>
                                     Navigator.of(context).maybePop(),
                               ),

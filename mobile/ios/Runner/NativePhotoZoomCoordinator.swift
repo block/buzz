@@ -174,6 +174,7 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   // Video pages hide the overlaid actions and transport on tap, like other video apps.
   private lazy var chromeTap = UITapGestureRecognizer(target: self, action: #selector(toggleChrome))
   private var galleryInsets = UIEdgeInsets.zero
+  private var photoInsets = UIEdgeInsets.zero
   private var chromeHidden = false
   private var chromeTimer: Timer?
   var selectionFeedback = UISelectionFeedbackGenerator()
@@ -204,6 +205,8 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     chromeTap.delegate = self
     chromeTap.cancelsTouchesInView = false
     view.addGestureRecognizer(chromeTap)
+    NotificationCenter.default.addObserver(self, selector: #selector(voiceOverChanged),
+                                           name: UIAccessibility.voiceOverStatusDidChangeNotification, object: nil)
     pager.dataSource = self; pager.delegate = self
     addChild(pager); view.addSubview(pager.view); pager.didMove(toParent: self)
     pager.setViewControllers([page(index)], direction: .forward, animated: false)
@@ -275,10 +278,16 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     let safe = bounds.inset(by: insets)
     let bottom = safe.maxY - 56
     let indicatorBounds = inRail ? bounds : safe
+    // Every page shares one full-window pager frame, so swiping between a photo and a
+    // video never resizes a page after it settles. Photos keep main's band inside their page.
+    pager.view.frame = bounds
+    let photoInsets = inRail ? .zero : UIEdgeInsets(top: safe.minY + 56, left: safe.minX,
+                                                    bottom: max(0, bounds.maxY - (bottom - 16)), right: max(0, bounds.maxX - safe.maxX))
+    self.photoInsets = photoInsets
+    for page in pager.children.compactMap({ $0 as? NativePhotoPage }) { page.photoInsets = photoInsets }
     pageContainer.frame = CGRect(x: indicatorBounds.minX + 68, y: bottom,
                                  width: max(0, indicatorBounds.width - 136), height: 44)
     if inRail {
-      pager.view.frame = bounds
       let width = right ? insets.right : insets.left
       var centerX = right ? bounds.maxX - width / 2 : width / 2
       var top: CGFloat = min(bounds.width, bounds.height) >= 600 ? 110 : 170
@@ -316,12 +325,6 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
       close.frame = CGRect(x: centerX - 24, y: top + 6, width: 48, height: 48)
       reply.frame = CGRect(x: centerX - 24, y: railBottom - 108, width: 48, height: 48)
       more.frame = CGRect(x: centerX - 24, y: railBottom - 48, width: 48, height: 48)
-    } else if videoIndices.contains(index) {
-      // Video fills the screen; the actions float over it and hide on tap.
-      pager.view.frame = bounds
-    } else {
-      pager.view.frame = CGRect(x: safe.minX, y: safe.minY + 56,
-                                width: safe.width, height: max(0, bottom - 16 - safe.minY - 56))
     }
     share.frame = more.frame
     if !inRail {
@@ -366,6 +369,13 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     return true
   }
   @objc private func toggleChrome() { setChrome(hidden: !chromeHidden) }
+  // VoiceOver can't tap the bare video to reveal faded actions, so bring them back
+  // as soon as it starts. The fade timer and the reveal tap both skip VoiceOver.
+  @objc private func voiceOverChanged() { revealForVoiceOver(running: UIAccessibility.isVoiceOverRunning) }
+  func revealForVoiceOver(running: Bool) {
+    guard running, chromeHidden || chromeTimer != nil else { return }
+    setChrome(hidden: false)
+  }
   func setChrome(hidden: Bool) {
     chromeTimer?.invalidate(); chromeTimer = nil
     chromeHidden = hidden
@@ -476,12 +486,16 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   }
   private func page(_ value: Int) -> NativePhotoPage {
     let page = NativePhotoPage(index: value, label: labels[value], image: images[value] ?? previews[value], isVideo: videoIndices.contains(value))
-    page.chromeInsets = galleryInsets
+    page.chromeInsets = galleryInsets; page.photoInsets = photoInsets
     page.onRetry = { [weak self] in self?.videoPath = nil; self?.updateChrome(); self?.loadVideo() }
     page.onPlayback = { [weak self, weak page] playing in
       guard let self, let page, self.pager.viewControllers?.first === page else { return }
       // Bring the actions back on pause, at the end and while scrubbing.
       if playing { self.scheduleChromeHide() } else { self.setChrome(hidden: false) }
+    }
+    page.onActivity = { [weak self, weak page] in
+      guard let self, let page, self.pager.viewControllers?.first === page else { return }
+      self.setChrome(hidden: false)
     }
     if page.isVideo {
       if let (loaded, path) = videoPath, loaded == value { page.setVideo(path, autoplay: appeared) }
@@ -636,12 +650,15 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
 }
 
 @available(iOS 18.0, *)
-private final class NativePhotoPage: UIViewController, UIScrollViewDelegate {
+private final class NativePhotoPage: UIViewController, UIScrollViewDelegate, AVRoutePickerViewDelegate {
   let index: Int
   let isVideo: Bool
   var onRetry: (() -> Void)?
   var onPlayback: ((Bool) -> Void)?
+  // Opening a menu or the AirPlay picker restarts the fade, like any other use of the controls.
+  var onActivity: (() -> Void)?
   var chromeInsets = UIEdgeInsets.zero { didSet { if chromeInsets != oldValue { viewIfLoaded?.setNeedsLayout() } } }
+  var photoInsets = UIEdgeInsets.zero { didSet { if photoInsets != oldValue && !isVideo { viewIfLoaded?.setNeedsLayout() } } }
   private lazy var video = AVPlayerViewController()
   private let transport = NativeVideoTransport()
   private var timeObserver: Any?
@@ -699,6 +716,8 @@ private final class NativePhotoPage: UIViewController, UIScrollViewDelegate {
       transport.isHidden = true; view.addSubview(transport)
       transport.playPause.addTarget(self, action: #selector(togglePlayback), for: .touchUpInside)
       transport.mute.addTarget(self, action: #selector(toggleMute), for: .touchUpInside)
+      transport.options.addAction(UIAction { [weak self] _ in self?.onActivity?() }, for: .menuActionTriggered)
+      transport.airPlay.delegate = self
       transport.slider.addTarget(self, action: #selector(beginScrub), for: .touchDown)
       transport.slider.addTarget(self, action: #selector(scrub), for: .valueChanged)
       transport.slider.addTarget(self, action: #selector(endScrub), for: [.touchUpInside, .touchUpOutside, .touchCancel])
@@ -726,7 +745,7 @@ private final class NativePhotoPage: UIViewController, UIScrollViewDelegate {
         if item.status == .failed { self.videoFailed() }
         else if item.status == .readyToPlay {
           self.loading.setLoading(false); self.status.text = nil; self.video.view.isHidden = false; self.scroll.isHidden = true
-          self.transport.isHidden = false; self.updateTransport()
+          self.transport.isHidden = false; self.updateTransport(); self.rebuildOptions()
         }
       }
     }
@@ -753,6 +772,25 @@ private final class NativePhotoPage: UIViewController, UIScrollViewDelegate {
     transport.alpha = visible ? 1 : 0
     transport.isUserInteractionEnabled = visible
     transport.accessibilityElementsHidden = !visible
+  }
+  func routePickerViewWillBeginPresentingRoutes(_ routePickerView: AVRoutePickerView) { onActivity?() }
+  func routePickerViewDidEndPresentingRoutes(_ routePickerView: AVRoutePickerView) { onActivity?() }
+  private func rebuildOptions() {
+    guard let player = video.player else { return }
+    let rate = player.defaultRate
+    transport.setSpeed(rate)
+    let speeds = [Float(0.5), 0.75, 1, 1.25, 1.5, 2].map { value in
+      UIAction(title: NativeVideoTransport.speed(value), state: abs(rate - value) < 0.01 ? .on : .off) { [weak self] _ in
+        self?.setSpeed(value)
+      }
+    }
+    transport.options.menu = UIMenu(title: "Playback Speed", children: speeds)
+  }
+  func setSpeed(_ rate: Float) {
+    guard let player = video.player else { return }
+    player.defaultRate = rate
+    if player.timeControlStatus != .paused { player.rate = rate }
+    rebuildOptions(); onActivity?()
   }
   private func updateTransport() {
     guard let item = video.player?.currentItem, !transport.slider.isTracking else { return }
@@ -803,7 +841,8 @@ private final class NativePhotoPage: UIViewController, UIScrollViewDelegate {
   }
   @objc private func retryVideo() { showVideoLoading(); onRetry?() }
   override func viewDidLayoutSubviews() {
-    super.viewDidLayoutSubviews(); scroll.frame = view.bounds; status.frame = view.bounds.insetBy(dx: 24, dy: 100)
+    super.viewDidLayoutSubviews(); scroll.frame = isVideo ? view.bounds : view.bounds.inset(by: photoInsets)
+    status.frame = view.bounds.insetBy(dx: 24, dy: 100)
     if isVideo {
       video.view.frame = view.bounds
       loading.frame = CGRect(x: view.bounds.midX - 22, y: view.bounds.midY - 22, width: 44, height: 44)
@@ -824,6 +863,10 @@ private final class NativePhotoPage: UIViewController, UIScrollViewDelegate {
 private final class NativeVideoTransport: UIView {
   let playPause = UIButton(type: .system)
   let mute = UIButton(type: .system)
+  // Playback speed, as AVKit offered. The relay only accepts one video and one audio
+  // track, so there are never subtitles or alternate audio to choose.
+  let options = UIButton(type: .system)
+  let airPlay = AVRoutePickerView()
   let slider = UISlider()
   private let elapsed = UILabel()
   private let total = UILabel()
@@ -844,13 +887,31 @@ private final class NativeVideoTransport: UIView {
       addSubview(label)
     }
     total.textAlignment = .right
+    options.tintColor = .white
+    options.titleLabel?.font = UIFontMetrics(forTextStyle: .caption1).scaledFont(for: .systemFont(ofSize: 13, weight: .semibold))
+    options.titleLabel?.adjustsFontForContentSizeCategory = true
+    options.showsMenuAsPrimaryAction = true
+    options.accessibilityLabel = "Playback options"
+    addSubview(options)
+    airPlay.tintColor = .white
+    airPlay.prioritizesVideoDevices = true
+    addSubview(airPlay)
     slider.minimumTrackTintColor = .white
     slider.maximumTrackTintColor = UIColor(white: 1, alpha: 0.35)
     slider.accessibilityLabel = "Video position"
     addSubview(slider)
-    setPlaying(false); setMuted(false); update(time: 0, duration: 0)
+    setPlaying(false); setMuted(false); setSpeed(1); update(time: 0, duration: 0)
   }
   required init?(coder: NSCoder) { nil }
+
+  func setSpeed(_ rate: Float) {
+    options.setTitle(Self.speed(rate), for: .normal)
+    options.accessibilityValue = "\(Self.speed(rate)) speed"
+  }
+  static func speed(_ rate: Float) -> String {
+    let text = String(format: "%.2f", rate).replacingOccurrences(of: #"\.?0+$"#, with: "", options: .regularExpression)
+    return "\(text)×"
+  }
 
   func setPlaying(_ playing: Bool) {
     playPause.setImage(UIImage(systemName: playing ? "pause.fill" : "play.fill"), for: .normal)
@@ -880,9 +941,12 @@ private final class NativeVideoTransport: UIView {
     let height = bounds.height
     playPause.frame = CGRect(x: 0, y: 0, width: 44, height: height)
     mute.frame = CGRect(x: bounds.width - 44, y: 0, width: 44, height: height)
+    airPlay.frame = CGRect(x: mute.frame.minX - 44, y: 0, width: 44, height: height)
+    let optionsWidth = max(44, options.sizeThatFits(bounds.size).width + 8)
+    options.frame = CGRect(x: airPlay.frame.minX - optionsWidth, y: 0, width: optionsWidth, height: height)
     let label = max(elapsed.sizeThatFits(bounds.size).width, total.sizeThatFits(bounds.size).width)
     elapsed.frame = CGRect(x: playPause.frame.maxX, y: 0, width: label, height: height)
-    total.frame = CGRect(x: mute.frame.minX - label, y: 0, width: label, height: height)
+    total.frame = CGRect(x: options.frame.minX - label, y: 0, width: label, height: height)
     slider.frame = CGRect(x: elapsed.frame.maxX + 10, y: 0, width: max(0, total.frame.minX - elapsed.frame.maxX - 20), height: height)
   }
 }
