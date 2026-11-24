@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
@@ -12,12 +13,85 @@ import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
 import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
+import 'package:buzz/shared/outbox/text_outbox_store.dart';
 
 import '../community/community_storage_test.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(() => FlutterSecureStorage.setMockInitialValues({}));
+  test(
+    'startup retains queued sends for memberships this build hides',
+    () async {
+      final secure = FakeSecureStorage();
+      final storage = CommunityStorage(secure: secure);
+      final keys = nostr.Keys.generate();
+      final shown = Community.create(
+        name: 'Shown',
+        relayUrl: 'https://shown.example',
+        nsec: keys.nsec,
+      );
+      final hidden = Community.create(
+        name: 'Hidden',
+        relayUrl: 'https://hidden.example',
+        pubkey: keys.public,
+        nsec: 'unreadable',
+      );
+      final unknown = Community.create(
+        name: 'Unknown signer',
+        relayUrl: 'https://unknown.example',
+      );
+      await storage.saveAll([shown, hidden, unknown]);
+      final restricted = CommunityStorage(
+        secure: secure,
+        visible: (community) => community.id == shown.id,
+      );
+      final directory = await Directory.systemTemp.createTemp('outbox-auth');
+      addTearDown(() => directory.delete(recursive: true));
+      final outbox = TextOutboxStore(directory: () async => directory);
+      addTearDown(outbox.close);
+      final hiddenScope = (communityId: hidden.id, pubkey: keys.public);
+      final unknownScope = (communityId: unknown.id, pubkey: keys.public);
+      final orphan = (communityId: 'removed-community', pubkey: keys.public);
+      final wrongSigner = (communityId: hidden.id, pubkey: 'a' * 64);
+      for (final scope in [hiddenScope, unknownScope, orphan, wrongSigner]) {
+        await outbox.enqueue(scope, '${scope.communityId}:${scope.pubkey}', (
+          channelId: 'channel',
+          parentId: null,
+          rootId: null,
+          text: 'a saved message',
+          content: 'a saved message',
+          recipients: const [],
+          tags: const [],
+          implicitSoloAgent: null,
+          personal: false,
+        ));
+      }
+
+      final container = ProviderContainer(
+        overrides: [
+          communityStorageProvider.overrideWithValue(restricted),
+          textOutboxStoreProvider.overrideWithValue(outbox),
+        ],
+      );
+      addTearDown(container.dispose);
+      expect(
+        (await container.read(authProvider.future)).community?.id,
+        shown.id,
+      );
+      expect(
+        (await outbox.list(hiddenScope)).single.draft.text,
+        'a saved message',
+      );
+      expect(
+        (await outbox.list(unknownScope)).single.draft.text,
+        'a saved message',
+      );
+      expect(await outbox.list(orphan), isEmpty);
+      expect(await outbox.list(wrongSigner), isEmpty);
+    },
+  );
+
   test('waits for transition teardown before replacing credentials', () async {
     final storage = CommunityStorage(secure: FakeSecureStorage());
     final active = Community.create(

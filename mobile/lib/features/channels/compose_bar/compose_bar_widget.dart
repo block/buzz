@@ -527,15 +527,7 @@ class ComposeBar extends HookConsumerWidget {
       final draft = controller.text;
       final mentions = controller.mentions;
       final code = controller._styledCodeRanges(draft);
-      final submittedOrigin = ComposerSendOrigin.capture(sendSurfaceKey);
-      Future<void> sendWithOrigin(
-        String content,
-        List<String> mentionPubkeys, {
-        List<List<String>> mediaTags = const [],
-      }) => ComposerSendOrigin.run(
-        submittedOrigin,
-        () => onSend(content, mentionPubkeys, mediaTags: mediaTags),
-      );
+      final sendWithOrigin = _captureSendOrigin(sendSurfaceKey, onSend);
       final submittedDraftRevision = draftRevision.value;
       final cleanupStoredDraft = ref
           .read(composeDraftsProvider.notifier)
@@ -683,6 +675,7 @@ class ComposeBar extends HookConsumerWidget {
             outgoing: outgoing,
             onSend: sendWithOrigin,
             onQueueText: onQueueText,
+            shouldQueueText: () => _shouldQueueText(ref, draftKey, draft),
             claimOutboxSend: claimOutboxSend,
             messenger: messenger,
           );

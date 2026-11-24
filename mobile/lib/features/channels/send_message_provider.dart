@@ -119,10 +119,28 @@ class SendMessage {
       );
       final event = localMessage;
       if (event != null) _completeLocalMessage(channelId, event.id);
-    } catch (_) {
+    } catch (error) {
       final event = localMessage;
-      if (event != null) _removeLocalMessage(channelId, event.id);
-      rethrow;
+      var keepLocalMessage = false;
+      try {
+        final acknowledgementLost =
+            error is RelayAckLostError || error is RelayAckTimeoutError;
+        if (error is! RelayNotConnectedError &&
+            !(acknowledgementLost && event != null)) {
+          rethrow;
+        }
+        final fallback = ComposerSendOrigin.queueAfterConnectionLoss(
+          acknowledgementLost ? event : null,
+        );
+        if (fallback == null) rethrow;
+        await fallback;
+        keepLocalMessage = acknowledgementLost;
+        ComposerSendOrigin.finishQueuedSend();
+      } finally {
+        if (event != null && !keepLocalMessage) {
+          _removeLocalMessage(channelId, event.id);
+        }
+      }
     }
   }
 
@@ -331,11 +349,22 @@ extension QueuedTextSender on SendMessage {
   }
 
   /// Adds an already accepted event to the existing timeline immediately.
-  void showQueuedAccepted(String channelId, NostrEvent event) {
+  void showQueuedAccepted(
+    String channelId,
+    NostrEvent event, {
+    required bool alreadyOptimistic,
+  }) {
     _ensureDeliveryValid();
-    _markLocalMessageForAnimation(channelId, event.id);
-    _addLocalMessage(channelId, event);
+    if (!alreadyOptimistic) {
+      _addLocalMessage(channelId, event);
+    }
     _completeLocalMessage(channelId, event.id);
+  }
+
+  /// Drops an optimistic row when delivery now needs a user decision.
+  void showQueuedNotAccepted(String channelId, NostrEvent event) {
+    _ensureDeliveryValid();
+    _removeLocalMessage(channelId, event.id);
   }
 }
 

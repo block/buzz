@@ -24,9 +24,8 @@ Future<void> confirmSignOut(BuildContext context, WidgetRef ref) async {
     final communities = await ref.read(communityListProvider.future);
     final active = await ref.read(activeCommunityProvider.future);
     if (communities.isEmpty || !context.mounted) return;
-    final warn = await ref
-        .read(textOutboxStoreProvider)
-        .shouldWarnBeforeRemoval();
+    final outbox = ref.read(textOutboxStoreProvider);
+    final warn = await outbox.shouldWarnBeforeRemoval();
     if (!context.mounted) return;
     final confirmed = await showDestructiveConfirmation(
       context: context,
@@ -38,23 +37,32 @@ Future<void> confirmSignOut(BuildContext context, WidgetRef ref) async {
       confirmLabel: 'Sign out',
     );
     if (!confirmed || !context.mounted) return;
-    // Every key is saved before any community is removed, so a failure
-    // leaves each community with its only copy of its key.
     for (final community in communities) {
-      await keepCommunityKey(community);
+      outbox.beginRemoval(community.id);
     }
-    // The session ends before any community is removed, so the Sign in
-    // landing never shows it and nothing started there can be cancelled by
-    // it. Removed communities' push-lease revocations authenticate with the
-    // push-stop credential it leaves behind.
-    await flow?.endAccountSession();
-    // The active community goes last, so removing the others never switches
-    // to and connects another one.
-    for (final community in [
-      ...communities.where((c) => c.id != active?.id),
-      ...communities.where((c) => c.id == active?.id),
-    ]) {
-      await list.removeCommunity(community.id);
+    try {
+      // Every key is saved before any community is removed, so a failure
+      // leaves each community with its only copy of its key.
+      for (final community in communities) {
+        await keepCommunityKey(community);
+      }
+      // The session ends before any community is removed, so the Sign in
+      // landing never shows it and nothing started there can be cancelled by
+      // it. Removed communities' push-lease revocations authenticate with the
+      // push-stop credential it leaves behind.
+      await flow?.endAccountSession();
+      // The active community goes last, so removing the others never switches
+      // to and connects another one.
+      for (final community in [
+        ...communities.where((c) => c.id != active?.id),
+        ...communities.where((c) => c.id == active?.id),
+      ]) {
+        await list.removeCommunity(community.id);
+      }
+    } finally {
+      for (final community in communities) {
+        outbox.endRemoval(community.id);
+      }
     }
     // Reveal the Sign in landing under the page that signed out.
     navigator.popUntil((route) => route.isFirst);

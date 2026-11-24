@@ -1414,6 +1414,10 @@ void main() {
         await tester.pumpWidget(
           _buildComposeBar(
             uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            overrides: [relaySessionProvider.overrideWith(_ConnectedRelay.new)],
+            onQueueText: (_, _, _, _, _, {possiblySent}) async {
+              fail('A connected send should use the optimistic timeline.');
+            },
             onSend:
                 (
                   content,
@@ -1457,8 +1461,15 @@ void main() {
           '',
         );
 
-        delivery.complete();
+        delivery.completeError(
+          const RelayEventRejectedException('blocked: channel is archived'),
+        );
         await tester.pumpAndSettle();
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          draft,
+        );
+        expect(find.textContaining('Not sent'), findsOneWidget);
       },
     );
 
@@ -1466,6 +1477,7 @@ void main() {
       tester,
     ) async {
       var write = Completer<void>();
+      var relay = _ConnectedRelay(status: SessionStatus.disconnected);
       final ids = <String>[];
       final viewer = 'f' * 64;
       final agent = 'a' * 64;
@@ -1475,6 +1487,7 @@ void main() {
               .read(composeDraftsProvider.notifier)
               .draftFor(composeDraftKey('channel-1'));
       Widget composeBar() => _buildComposeBar(
+        overrides: [relaySessionProvider.overrideWith(() => relay)],
         currentPubkey: viewer,
         channels: [_makeCurrentChannel()],
         members: [
@@ -1490,7 +1503,7 @@ void main() {
         onSend: (_, _, {mediaTags = const []}) async {
           fail('Plain text should use the queue.');
         },
-        onQueueText: (id, text, content, recipients, tags) {
+        onQueueText: (id, text, content, recipients, tags, {possiblySent}) {
           expect(text, scope.isEmpty ? 'keep this draft' : '@Scout ');
           expect(content, text.trim());
           expect(recipients, scope.isEmpty ? isEmpty : [agent]);
@@ -1531,6 +1544,7 @@ void main() {
       messenger.removeCurrentSnackBar();
       await tester.pumpAndSettle();
       write = Completer<void>();
+      relay.setStatus(SessionStatus.connected);
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pump();
       await tester.pump();
@@ -1553,10 +1567,11 @@ void main() {
         ),
       ];
       await tester.pumpWidget(const SizedBox.shrink());
+      relay = _ConnectedRelay(status: SessionStatus.disconnected);
       await tester.pumpWidget(composeBar());
       await tester.pumpAndSettle();
       expect(savedDraft(), isNull);
-      await tester.tap(find.text('@Scout'));
+      await tester.tap(find.text('@Scout '));
       await tester.pumpAndSettle();
       expect(tester.widget<TextField>(field).controller!.text, '@Scout ');
       expect(savedDraft(), isNull);
@@ -8890,4 +8905,21 @@ class _CountingCustomEmojiList extends ListBase<CustomEmoji> {
     iterations += 1;
     return super.iterator;
   }
+}
+
+class _ConnectedRelay extends RelaySessionNotifier {
+  _ConnectedRelay({this.status = SessionStatus.connected});
+
+  final SessionStatus status;
+
+  @override
+  SessionState build() => SessionState(status: status);
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => const [];
+
+  void setStatus(SessionStatus status) => state = SessionState(status: status);
 }

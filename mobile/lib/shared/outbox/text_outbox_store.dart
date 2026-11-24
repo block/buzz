@@ -56,7 +56,7 @@ final class TextOutboxMessage {
         ),
         _ => null,
       },
-      mayHaveSent = row['may_have_sent'] == 1;
+      mayHaveSent = row['may_have_sent'] != 0;
 
   final String id;
   final TextOutboxDraft draft;
@@ -97,7 +97,7 @@ final class TextOutboxStore {
   final _changes = StreamController<int>.broadcast();
   int _revision = 0;
   Future<void> _tail = Future.value();
-  final _retiring = <String>{};
+  final _retiring = <String, int>{};
 
   /// Fires after a successful write so readers can refresh.
   Stream<int> get changes => _changes.stream;
@@ -106,31 +106,42 @@ final class TextOutboxStore {
   void close() => unawaited(_tail.whenComplete(_changes.close));
 
   /// Whether community removal currently prevents new sends.
-  bool isRetiring(String communityId) => _retiring.contains(communityId);
+  bool isRetiring(String communityId) => _retiring.containsKey(communityId);
 
   /// Fences delivery and enqueue while the saved community is removed.
-  void beginRemoval(String communityId) => _retiring.add(communityId);
+  void beginRemoval(String communityId) {
+    _retiring.update(communityId, (depth) => depth + 1, ifAbsent: () => 1);
+  }
 
   /// Releases the fence after the membership and database operations settle.
   void endRemoval(String communityId) {
+    final depth = _retiring[communityId] ?? 0;
+    if (depth > 1) {
+      _retiring[communityId] = depth - 1;
+      return;
+    }
     _retiring.remove(communityId);
     _changes.add(++_revision);
   }
 
-  /// Commits the complete unsigned send in one SQLite write.
+  /// Commits a send and any event from an ambiguous publish in one write.
   Future<void> enqueue(
     TextOutboxScope scope,
     String id,
-    TextOutboxDraft draft,
-  ) => _run(
+    TextOutboxDraft draft, {
+    NostrEvent? possiblySent,
+  }) => _run(
     (db) {
       if (db == null) throw StateError('Message outbox storage unavailable.');
+      if (possiblySent != null && possiblySent.pubkey != scope.pubkey) {
+        throw StateError('The queued message belongs to another signer.');
+      }
       db.execute(
         '''
       INSERT INTO outbox (
         id, community_id, pubkey, channel_id, parent_id, root_id, text,
-        content, recipients, tags, solo_agent, personal
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        content, recipients, tags, solo_agent, personal, signed_event, may_have_sent
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO NOTHING
       ''',
         [
@@ -146,6 +157,8 @@ final class TextOutboxStore {
           jsonEncode(draft.tags),
           draft.implicitSoloAgent,
           draft.personal ? 1 : 0,
+          possiblySent == null ? null : jsonEncode(possiblySent.toJson()),
+          possiblySent == null ? 0 : 2,
         ],
       );
     },
@@ -185,8 +198,39 @@ final class TextOutboxStore {
 
   /// Commits the uncertainty marker before the session writes to the socket.
   Future<void> markAttempted(TextOutboxScope scope, String id) => _run((db) {
-    _update(db, scope, id, 'may_have_sent = 1', const []);
+    _update(
+      db,
+      scope,
+      id,
+      'may_have_sent = MIN(may_have_sent + 1, 2)',
+      const [],
+    );
   }, scope: scope);
+
+  /// A definite refusal resolves only the current attempt. An older attempt
+  /// with no verdict keeps its possible delivery even if the retry is refused.
+  Future<void> recordRejection(
+    TextOutboxScope scope,
+    String id, {
+    required TextOutboxStatus status,
+    required bool definitive,
+  }) => _run(
+    (db) {
+      _update(
+        db,
+        scope,
+        id,
+        '''
+        status = ?, may_have_sent = CASE
+          WHEN ? = 1 AND may_have_sent = 1 THEN 0
+          ELSE may_have_sent END
+        ''',
+        [status.name, definitive ? 1 : 0],
+      );
+    },
+    write: true,
+    scope: scope,
+  );
 
   /// Persists a failed, pending, or delivery-unconfirmed status.
   Future<void> setStatus(
@@ -266,7 +310,10 @@ final class TextOutboxStore {
   }, write: true);
 
   /// Drops scopes absent from the persisted community list before replay.
-  Future<void> removeOrphans(Set<TextOutboxScope> retained) => _run((db) {
+  Future<void> removeOrphans(
+    Set<TextOutboxScope> retained, {
+    Set<String> unknownSigners = const {},
+  }) => _run((db) {
     if (db == null) return;
     _transaction(db, () {
       for (final row in db.select(
@@ -276,7 +323,10 @@ final class TextOutboxStore {
           communityId: row['community_id'] as String,
           pubkey: row['pubkey'] as String,
         );
-        if (retained.contains(scope)) continue;
+        if (retained.contains(scope) ||
+            unknownSigners.contains(scope.communityId)) {
+          continue;
+        }
         db.execute('DELETE FROM outbox WHERE community_id = ? AND pubkey = ?', [
           scope.communityId,
           scope.pubkey,
@@ -358,8 +408,17 @@ void _transaction(Database db, void Function() body) {
 }
 
 void _migrate(Database db) {
-  const version = 1;
+  const version = 2;
   if (db.userVersion == version) return;
+  if (db.userVersion == 1) {
+    _transaction(db, () {
+      // Version 1 did not count attempts. It may already include a lost ack
+      // followed by a refusal, so its nonzero marker remains unresolved.
+      db.execute('UPDATE outbox SET may_have_sent = 2 WHERE may_have_sent = 1');
+      db.userVersion = version;
+    });
+    return;
+  }
   if (db.userVersion != 0) {
     throw StateError('Unsupported message outbox format.');
   }

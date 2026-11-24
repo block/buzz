@@ -1,5 +1,24 @@
 part of '../compose_bar.dart';
 
+ComposeBarOnSend _captureSendOrigin(GlobalKey key, ComposeBarOnSend send) {
+  final origin = ComposerSendOrigin.capture(key);
+  return (content, mentionPubkeys, {mediaTags = const []}) =>
+      ComposerSendOrigin.run(
+        origin,
+        () => send(content, mentionPubkeys, mediaTags: mediaTags),
+      );
+}
+
+bool _shouldQueueText(WidgetRef ref, String draftKey, String text) {
+  if (ref.read(relaySessionProvider).status != SessionStatus.connected) {
+    return true;
+  }
+  // A restart can show an offline draft before the outbox releases its claim.
+  // Resubmitting it must reuse the saved ID even if the relay is now connected.
+  final draft = ref.read(composeDraftsProvider.notifier).draftFor(draftKey);
+  return draft?.outboxId != null && draft?.text == text;
+}
+
 Future<void> _sendTextOnlyDraft({
   required BuildContext context,
   required _MarkdownEditingController controller,
@@ -14,6 +33,7 @@ Future<void> _sendTextOnlyDraft({
   required _OutgoingMentions outgoing,
   required ComposeBarOnSend onSend,
   required ComposeBarOnQueueText? onQueueText,
+  required bool Function() shouldQueueText,
   required Future<String?> Function(String text) claimOutboxSend,
   required ScaffoldMessengerState? messenger,
 }) async {
@@ -57,7 +77,7 @@ Future<void> _sendTextOnlyDraft({
       return;
     }
     final tags = [...payload.mediaTags, ...outgoing.referenceTags];
-    if (onQueueText != null) {
+    if (onQueueText != null && shouldQueueText()) {
       final id = await claimOutboxSend(submittedText);
       if (!context.mounted || draftChanged()) {
         return;
@@ -78,9 +98,7 @@ Future<void> _sendTextOnlyDraft({
       return;
     }
     void clearSubmittedDraft() {
-      if (!context.mounted || draftRevision.value != submittedDraftRevision) {
-        return;
-      }
+      if (!context.mounted || draftChanged()) return;
       clearedDraftText = controller.value;
       clearedDraftMentions = controller.bindings;
       clearedDraftMentionsInvalid = controller.mentionsInvalid;
@@ -88,9 +106,29 @@ Future<void> _sendTextOnlyDraft({
       clearedDraftRevision = draftRevision.value;
     }
 
+    Future<void> queueAfterConnectionLoss(NostrEvent? possiblySent) =>
+        onQueueText!(
+          const Uuid().v4(),
+          submittedText,
+          payload.content,
+          outgoing.pubkeys,
+          tags,
+          possiblySent: possiblySent,
+        );
+
     await ComposerSendOrigin.uponLocalInsertion(
       clearSubmittedDraft,
-      () => onSend(payload.content, outgoing.pubkeys, mediaTags: tags),
+      () async {
+        try {
+          await onSend(payload.content, outgoing.pubkeys, mediaTags: tags);
+        } on RelayNotConnectedError {
+          // A destination can also lose connectivity during send preparation,
+          // before it reaches the signed publish and its own fallback.
+          if (onQueueText == null) rethrow;
+          await queueAfterConnectionLoss(null);
+        }
+      },
+      connectionFallback: onQueueText == null ? null : queueAfterConnectionLoss,
     );
     // A send destination without an optimistic timeline clears on success.
     if (clearedDraftRevision == null) {
@@ -277,7 +315,7 @@ Future<String?> Function(String) _useComposeDraftLifecycle({
     voiceNote: voiceNote,
     uploadError: uploadError,
   );
-  return claimOutboxSend.value;
+  return (text) => claimOutboxSend.value(text);
 }
 
 // Report aggregate work independently of rebuilds, including sub-frame failures.

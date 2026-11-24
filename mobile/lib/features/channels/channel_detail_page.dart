@@ -244,6 +244,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       personalChat ? meSendMessageProvider : sendMessageProvider,
     );
     final outboxSupported = ref.watch(textOutboxSupportedProvider);
+    final queueText = ref.read(queueConversationTextProvider);
     final outboxScope = outboxSupported
         ? ref.watch(textOutboxScopeProvider)
         : null;
@@ -1010,7 +1011,14 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                             ? ''
                             : resolvedChannel.name,
                         onQueueText: outboxSupported
-                            ? (id, text, content, recipients, tags) {
+                            ? (
+                                id,
+                                text,
+                                content,
+                                recipients,
+                                tags, {
+                                possiblySent,
+                              }) {
                                 if (!placementKnown) {
                                   ref.invalidate(meGroupsProvider);
                                   throw StateError(
@@ -1020,7 +1028,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                                 String? implicitAgent;
                                 if (personalChat) {
                                   if (!resolvedChannel.isPersonalChat(
-                                    ref.read(myPubkeyProvider),
+                                    outboxScope?.pubkey,
                                     mePlacement?.asData?.value.channels ??
                                         const [],
                                   )) {
@@ -1038,8 +1046,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                                     recipients = [implicitAgent];
                                   }
                                 }
-                                return queueConversationText(
-                                  ref,
+                                return queueText(
                                   scope: outboxScope,
                                   id: id,
                                   channelId: channel.id,
@@ -1050,6 +1057,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                                   tags: tags,
                                   personal: personalChat,
                                   implicitSoloAgent: implicitAgent,
+                                  possiblySent: possiblySent,
                                 );
                               }
                             : null,

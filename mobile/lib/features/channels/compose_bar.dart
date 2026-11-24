@@ -28,6 +28,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:uuid/uuid.dart';
 
 import '../../shared/agents/owned_agent_directory.dart';
 import '../../shared/identity_names/identity_name_policy.dart';
@@ -115,8 +116,9 @@ typedef ComposeBarOnQueueText =
       String text,
       String content,
       List<String> recipients,
-      List<List<String>> tags,
-    );
+      List<List<String>> tags, {
+      NostrEvent? possiblySent,
+    });
 
 typedef ComposeBarOnSend =
     Future<void> Function(

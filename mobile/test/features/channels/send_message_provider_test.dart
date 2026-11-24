@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -6,6 +7,8 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
+import 'package:buzz/features/channels/composer_send_origin.dart';
+import 'package:buzz/shared/outbox/text_outbox_store.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
@@ -72,6 +75,85 @@ void main() {
     expect(completedIds, isEmpty);
     expect(removedIds, [localMessages.single.id]);
   });
+
+  for (final outcome in [
+    'disconnected',
+    'lost ack',
+    'timeout',
+    'disk failure',
+  ]) {
+    test(
+      'connection fallback retains the correct text and event: $outcome',
+      () async {
+        final directory = await Directory.systemTemp.createTemp(
+          'send-fallback',
+        );
+        addTearDown(() => directory.delete(recursive: true));
+        final outbox = TextOutboxStore(directory: () async => directory);
+        addTearDown(outbox.close);
+        final session = _PendingPublishRelaySession();
+        final keys = nostr.Keys.generate();
+        final scope = (communityId: 'community', pubkey: keys.public);
+        final local = <NostrEvent>[];
+        final removed = <String>[];
+        final send = SendMessage(
+          signedEventRelay: SignedEventRelay(session: session, nsec: keys.nsec),
+          fetchMembers: (_) async => const [],
+          readUserCache: () => const {},
+          addLocalMessage: (_, event) => local.add(event),
+          completeLocalMessage: (_, _) =>
+              fail('Publish has no acknowledgement'),
+          removeLocalMessage: (_, id) => removed.add(id),
+        );
+        final result = ComposerSendOrigin.uponLocalInsertion(
+          () {},
+          () => send(channelId: _channelId, content: 'send this'),
+          connectionFallback: (event) async {
+            expect(removed, isEmpty);
+            if (outcome == 'disk failure') {
+              throw StateError('Outbox unavailable');
+            }
+            await outbox.enqueue(scope, 'local-row', (
+              channelId: _channelId,
+              parentId: null,
+              rootId: null,
+              text: 'send this',
+              content: 'send this',
+              recipients: const [],
+              tags: const [],
+              implicitSoloAgent: null,
+              personal: false,
+            ), possiblySent: event);
+          },
+        );
+        await session.published;
+        expect(local.single.toJson(), session.event.toJson());
+        session.reject(switch (outcome) {
+          'disconnected' => RelayNotConnectedError(),
+          'timeout' => RelayAckTimeoutError('no ack'),
+          _ => RelayAckLostError(),
+        });
+        if (outcome == 'disk failure') {
+          await expectLater(result, throwsStateError);
+          expect(removed, [session.event.id]);
+          expect(await outbox.list(scope), isEmpty);
+        } else {
+          await result;
+          final row = (await outbox.list(scope)).single;
+          expect(row.draft.text, 'send this');
+          if (outcome == 'disconnected') {
+            expect(row.signedEvent, isNull);
+            expect(row.mayHaveSent, isFalse);
+            expect(removed, [session.event.id]);
+          } else {
+            expect(row.signedEvent?.toJson(), session.event.toJson());
+            expect(row.mayHaveSent, isTrue);
+            expect(removed, isEmpty);
+          }
+        }
+      },
+    );
+  }
 
   test('final signed event addresses the current DM agent member', () async {
     final session = _PendingPublishRelaySession();
@@ -282,5 +364,6 @@ class _PendingPublishRelaySession extends RelaySessionNotifier {
 
   void accept() => _result.complete(event);
 
-  void reject() => _result.completeError(Exception('relay rejected event'));
+  void reject([Object? error]) =>
+      _result.completeError(error ?? Exception('relay rejected event'));
 }

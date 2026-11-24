@@ -17,6 +17,7 @@ import 'channel.dart';
 import 'channel_management_provider.dart';
 import 'channels_provider.dart';
 import 'message_mention_pubkeys.dart';
+import 'pending_local_messages_provider.dart';
 import 'send_message_provider.dart';
 
 /// Whether this client has the native backup-excluded outbox directory.
@@ -59,52 +60,57 @@ final textOutboxMessagesProvider = FutureProvider.autoDispose
 
 /// Enqueues the settled composer payload and checks that it still belongs to
 /// the active community. A local write failure propagates to the composer.
-Future<void> queueConversationText(
-  WidgetRef ref, {
-  required TextOutboxScope? scope,
-  required String id,
-  required String channelId,
-  required Channel? channel,
-  required String text,
-  required String content,
-  required List<String> recipients,
-  required List<List<String>> tags,
-  String? parentId,
-  String? rootId,
-  bool personal = false,
-  String? implicitSoloAgent,
-}) async {
-  if (scope == null || ref.read(textOutboxScopeProvider) != scope) {
-    throw ActiveCommunityChangedError('Queued send changed communities.');
-  }
-  final resolved = channel?.isDm == true
-      ? messageMentionPubkeys(
-          channel: channel!,
-          senderPubkey: scope.pubkey,
-          explicitMentions: recipients,
-          dmRecipientPubkeys: dmParticipantPubkeys(
-            channel,
-            ref.read(channelMembersProvider(channelId)).value,
-          ),
-        )
-      : recipients;
-  try {
-    await ref.read(textOutboxStoreProvider).enqueue(scope, id, (
-      channelId: channelId,
-      parentId: parentId,
-      rootId: rootId,
-      text: text,
-      content: content,
-      recipients: resolved,
-      tags: tags,
-      implicitSoloAgent: implicitSoloAgent,
-      personal: personal,
-    ));
-  } catch (error) {
-    debugPrint('Could not commit a queued send: ${error.runtimeType}');
-    throw StateError('Couldn’t save this message on your device. Try again.');
-  }
-}
+final queueConversationTextProvider = Provider(
+  (ref) =>
+      ({
+        required TextOutboxScope? scope,
+        required String id,
+        required String channelId,
+        required Channel? channel,
+        required String text,
+        required String content,
+        required List<String> recipients,
+        required List<List<String>> tags,
+        String? parentId,
+        String? rootId,
+        bool personal = false,
+        String? implicitSoloAgent,
+        NostrEvent? possiblySent,
+      }) async {
+        if (scope == null || ref.read(textOutboxScopeProvider) != scope) {
+          throw ActiveCommunityChangedError('Queued send changed communities.');
+        }
+        final resolved = channel?.isDm == true
+            ? messageMentionPubkeys(
+                channel: channel!,
+                senderPubkey: scope.pubkey,
+                explicitMentions: recipients,
+                dmRecipientPubkeys: dmParticipantPubkeys(
+                  channel,
+                  ref.read(channelMembersProvider(channelId)).value,
+                ),
+              )
+            : recipients;
+        try {
+          await ref.read(textOutboxStoreProvider).enqueue(scope, id, (
+            channelId: channelId,
+            parentId: parentId,
+            rootId: rootId,
+            text: text,
+            content: content,
+            recipients: resolved,
+            tags: tags,
+            implicitSoloAgent: implicitSoloAgent,
+            personal: personal,
+          ), possiblySent: possiblySent);
+        } catch (error) {
+          debugPrint('Could not commit a queued send: ${error.runtimeType}');
+          throw StateError(
+            'Couldn’t save this message on your device. Try again.',
+          );
+        }
+      },
+);
 
 /// Runs the outbox across conversations while the signed-in app is active.
 final textOutboxRunnerProvider = Provider<void>((ref) {
@@ -201,13 +207,27 @@ final textOutboxRunnerProvider = Provider<void>((ref) {
                 match.pubkey == event.pubkey,
           );
         },
+        showNotAccepted: (message, event) {
+          final draft = message.draft;
+          ref
+              .read(
+                draft.personal ? meSendMessageProvider : sendMessageProvider,
+              )
+              .showQueuedNotAccepted(draft.channelId, event);
+        },
         showAccepted: (message, event) {
           final draft = message.draft;
           ref
               .read(
                 draft.personal ? meSendMessageProvider : sendMessageProvider,
               )
-              .showQueuedAccepted(draft.channelId, event);
+              .showQueuedAccepted(
+                draft.channelId,
+                event,
+                alreadyOptimistic: ref
+                    .read(pendingLocalMessagesProvider(draft.channelId))
+                    .containsKey(event.id),
+              );
           if (draft.parentId == null &&
               defaultTargetPlatform == TargetPlatform.iOS) {
             final channel = ref

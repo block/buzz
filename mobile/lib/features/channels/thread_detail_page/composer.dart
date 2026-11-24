@@ -24,6 +24,7 @@ class _ThreadComposer extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final sender = ref.read(sendMessageProvider);
+    final queueText = ref.read(queueConversationTextProvider);
     final enabled = ref.watch(textOutboxSupportedProvider);
     final scope = enabled ? ref.watch(textOutboxScopeProvider) : null;
     return Column(
@@ -47,19 +48,20 @@ class _ThreadComposer extends ConsumerWidget {
               : prefillScopeMessages,
           onFocusRequested: onFocusRequested,
           onQueueText: enabled
-              ? (id, text, content, recipients, tags) => queueConversationText(
-                  ref,
-                  scope: scope,
-                  id: id,
-                  channelId: channelId,
-                  channel: channel,
-                  text: text,
-                  content: content,
-                  recipients: recipients,
-                  tags: tags,
-                  parentId: head.id,
-                  rootId: effectiveRootId,
-                )
+              ? (id, text, content, recipients, tags, {possiblySent}) =>
+                    queueText(
+                      scope: scope,
+                      id: id,
+                      channelId: channelId,
+                      channel: channel,
+                      text: text,
+                      content: content,
+                      recipients: recipients,
+                      tags: tags,
+                      parentId: head.id,
+                      rootId: effectiveRootId,
+                      possiblySent: possiblySent,
+                    )
               : null,
           onSend: (content, mentionPubkeys, {mediaTags = const []}) =>
               sender.call(

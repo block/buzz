@@ -16,6 +16,7 @@ final class TextOutboxDelivery {
     required this.publish,
     required this.lookup,
     required this.showAccepted,
+    this.showNotAccepted,
     DateTime Function()? now,
   }) : _now = now ?? DateTime.now;
 
@@ -30,6 +31,7 @@ final class TextOutboxDelivery {
   publish;
   final Future<bool> Function(NostrEvent) lookup;
   final void Function(TextOutboxMessage, NostrEvent) showAccepted;
+  final void Function(TextOutboxMessage, NostrEvent)? showNotAccepted;
   final DateTime Function() _now;
 
   /// Delivers pending messages in commit order. Returns true when a temporary
@@ -76,6 +78,7 @@ final class TextOutboxDelivery {
         await accept(event);
       } else {
         await store.setStatus(scope, message.id, TextOutboxStatus.unconfirmed);
+        if (isCurrent()) showNotAccepted?.call(message, event);
       }
     }
 
@@ -103,10 +106,8 @@ final class TextOutboxDelivery {
         beforeWire: () async {
           validateScope();
           if (_expired(signed)) throw const _OutboxSignatureExpired();
-          if (!attempted) {
-            await store.markAttempted(scope, message.id);
-            attempted = true;
-          }
+          await store.markAttempted(scope, message.id);
+          attempted = true;
           return isCurrent();
         },
         validateScope: validateScope,
@@ -120,18 +121,25 @@ final class TextOutboxDelivery {
       return !attempted && isCurrent();
     } on RelayEventRejectedException catch (error) {
       if (!isCurrent()) return false;
-      if (error.message.startsWith('rate-limited:') ||
-          error.message.startsWith('error:')) {
-        return true;
+      final prefix = error.message.split(':').first;
+      final transient = prefix == 'rate-limited' || prefix == 'error';
+      final definitive = const {
+        'invalid',
+        'restricted',
+        'blocked',
+        'auth-required',
+        'rate-limited',
+      }.contains(prefix);
+      await store.recordRejection(
+        scope,
+        message.id,
+        status: transient ? TextOutboxStatus.pending : TextOutboxStatus.failed,
+        definitive: definitive,
+      );
+      if (!transient && event != null && isCurrent()) {
+        showNotAccepted?.call(message, event);
       }
-      if (error.message.startsWith('invalid: event timestamp') &&
-          attempted &&
-          event != null) {
-        await reconcile(event);
-      } else {
-        await store.setStatus(scope, message.id, TextOutboxStatus.failed);
-      }
-      return false;
+      return transient;
     } on MentionTagException {
       if (!isCurrent()) return false;
       await store.setStatus(scope, message.id, TextOutboxStatus.failed);
