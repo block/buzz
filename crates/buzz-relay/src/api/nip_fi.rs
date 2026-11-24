@@ -4239,13 +4239,15 @@ mod route_integration_tests {
         }
     }
 
-    /// Answers loads from `inner` only after `delay`, as a slow store would.
-    struct SlowLoad {
+    /// Reads from `inner`, reports the read on `read`, then holds the answer
+    /// until `release`, so a test controls the time between read and merge.
+    struct GatedLoad {
         inner: buzz_auth::InMemoryCommandReplayGuard,
-        delay: std::time::Duration,
+        read: tokio::sync::Notify,
+        release: tokio::sync::Notify,
     }
 
-    impl buzz_auth::CommandReplayGuard for SlowLoad {
+    impl buzz_auth::CommandReplayGuard for GatedLoad {
         fn try_claim<'a>(
             &'a self,
             claim: buzz_auth::CommandClaim<'a>,
@@ -4267,7 +4269,8 @@ mod route_integration_tests {
         ) -> buzz_auth::LoadDenies<'a> {
             Box::pin(async move {
                 let denies = self.inner.load_denies(issuer, now).await;
-                tokio::time::sleep(self.delay).await;
+                self.read.notify_one();
+                self.release.notified().await;
                 denies
             })
         }
@@ -4279,9 +4282,10 @@ mod route_integration_tests {
     #[tokio::test]
     async fn restore_judges_expiry_at_the_merge() {
         use buzz_auth::CommandReplayGuard as _;
-        let source = Arc::new(SlowLoad {
+        let source = Arc::new(GatedLoad {
             inner: buzz_auth::InMemoryCommandReplayGuard::default(),
-            delay: std::time::Duration::from_millis(400),
+            read: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
         });
         let key = nostr::Keys::generate().public_key();
         let now = chrono::Utc::now();
@@ -4300,22 +4304,37 @@ mod route_integration_tests {
             .await
             .unwrap();
         assert_eq!(outcome, buzz_auth::ClaimOutcome::Claimed);
-        let source: Arc<dyn buzz_auth::CommandReplayGuard> = source;
-        let pod = store_pod(10, Arc::clone(&source)).await;
+        let dyn_source: Arc<dyn buzz_auth::CommandReplayGuard> = source.clone();
+        let pod = store_pod(10, Arc::clone(&dyn_source)).await;
         let deny_map = pod.nip_fi_deny_map.as_deref().unwrap();
+        let lapse = chrono::Utc::now() + chrono::Duration::milliseconds(200);
         deny_map.merge_cross_pod_deny(
             TEST_ISS,
             &key,
-            buzz_auth::DenyEntry::whole_key(now + chrono::Duration::milliseconds(200)),
-            || now,
+            buzz_auth::DenyEntry::whole_key(lapse),
+            chrono::Utc::now,
         );
         let generation = deny_map.begin_restore();
-        assert_eq!(restore_nip_fi_denies(&pod, &[source]).await, Ok(()));
+        let sources = [dyn_source];
+        let restore = restore_nip_fi_denies(&pod, &sources);
+        tokio::pin!(restore);
+        tokio::select! {
+            _ = &mut restore => panic!("restore finished before the gated read"),
+            () = source.read.notified() => {}
+        }
+        assert!(
+            chrono::Utc::now() < lapse,
+            "the whole key is live at the read"
+        );
+        let wait = (lapse - chrono::Utc::now()).to_std().unwrap_or_default();
+        tokio::time::sleep(wait + std::time::Duration::from_millis(50)).await;
+        source.release.notify_one();
+        assert_eq!(restore.await, Ok(()));
         assert!(deny_map.finish_restore(generation));
         let after = chrono::DateTime::from_timestamp(c, 0).unwrap() + chrono::Duration::seconds(1);
         assert!(
             !deny_map.denies(TEST_ISS, &key, after, chrono::Utc::now()),
-            "the lapsed whole key gave way to the cutoff"
+            "the whole key lapsed before the merge and gave way to the cutoff"
         );
     }
 
@@ -5681,8 +5700,8 @@ return 'claimed'
             }
         }
 
-        /// A pod that predates cutoffs writes over a cutoff, and a fresh
-        /// upgraded pod restores what it wrote as a whole-key deny.
+        /// A pod that predates cutoffs writes over a cutoff with an equal or
+        /// shorter `until`, and a fresh upgraded pod restores what it wrote as a whole-key deny.
         #[tokio::test]
         #[ignore = "requires Redis"]
         async fn redis_pre_cutoff_writer_then_fresh_restore_is_whole_key() {
@@ -5693,30 +5712,36 @@ return 'claimed'
             let namespace = test_namespace();
             let prefix = format!("{namespace}:deny");
             let store = redis_guard_in(&namespace);
-            let (cut, fresh) = (
-                nostr::Keys::generate().public_key(),
-                nostr::Keys::generate().public_key(),
-            );
+            let [equal, shorter, fresh] =
+                std::array::from_fn(|_| nostr::Keys::generate().public_key());
             let now = chrono::Utc::now();
             let until = now + chrono::Duration::seconds(120);
             let c = now.timestamp();
-            let outcome = store
-                .try_claim(buzz_auth::CommandClaim {
-                    issuer: TEST_ISS,
-                    jti: "cutoff",
-                    ttl_secs: 60,
-                    target: &cut,
-                    until,
-                    scope: buzz_auth::DenyScope::IssuedThrough(c),
-                    capacity: 10,
-                    now,
-                })
-                .await
-                .unwrap();
-            assert_eq!(outcome, buzz_auth::ClaimOutcome::Claimed);
-            for (jti, target) in [("old-a", &cut), ("old-b", &fresh)] {
+            for (jti, target) in [("cutoff-a", &equal), ("cutoff-b", &shorter)] {
+                let outcome = store
+                    .try_claim(buzz_auth::CommandClaim {
+                        issuer: TEST_ISS,
+                        jti,
+                        ttl_secs: 60,
+                        target,
+                        until,
+                        scope: buzz_auth::DenyScope::IssuedThrough(c),
+                        capacity: 10,
+                        now,
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(outcome, buzz_auth::ClaimOutcome::Claimed);
+            }
+            let short = until - chrono::Duration::seconds(60);
+            for (jti, target, old_until) in [
+                ("old-a", &equal, until),
+                ("old-b", &shorter, short),
+                ("old-c", &fresh, until),
+            ] {
                 let reply =
-                    pre_cutoff::accept(&mut conn, &prefix, TEST_ISS, jti, target, until, now).await;
+                    pre_cutoff::accept(&mut conn, &prefix, TEST_ISS, jti, target, old_until, now)
+                        .await;
                 assert_eq!(reply, "claimed");
             }
 
@@ -5727,10 +5752,10 @@ return 'claimed'
             assert!(deny_map.finish_restore(generation));
             let after =
                 chrono::DateTime::from_timestamp(c, 0).unwrap() + chrono::Duration::seconds(1);
-            for key in [cut, fresh] {
+            for key in [equal, shorter, fresh] {
                 assert!(
                     deny_map.denies(TEST_ISS, &key, after, chrono::Utc::now()),
-                    "the old writer's full revoke restores as the whole key"
+                    "the old writer's full revoke, equal or shorter, restores as the whole key"
                 );
             }
         }
@@ -5936,18 +5961,125 @@ return 'claimed'
                 store.try_claim(claim(jti, &a, until, t)).await.unwrap();
                 assert!(!held(&a).await, "{case} until clears the cutoff");
             }
-            // b expires before the next accept's now and is pruned.
-            store
-                .try_claim(claim("c3", &b, t + chrono::Duration::milliseconds(300), t))
+            // b's entry already expired when the next accept runs, so it is pruned.
+            let (index, exact) = buzz_pubsub::nip_fi_command_replay::deny_store_keys(
+                &format!("{namespace}:deny"),
+                &issuer,
+            );
+            let mut seed_conn = conn.clone();
+            let _: () = redis::pipe()
+                .atomic()
+                .cmd("ZADD")
+                .arg(&index)
+                .arg(1)
+                .arg(b.to_hex())
+                .ignore()
+                .cmd("HSET")
+                .arg(&exact)
+                .arg(b.to_hex())
+                .arg("0:1000000")
+                .ignore()
+                .cmd("HSET")
+                .arg(&cutoffs)
+                .arg(b.to_hex())
+                .arg(1)
+                .ignore()
+                .query_async(&mut seed_conn)
                 .await
                 .unwrap();
-            seed(&b).await;
-            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
             store
                 .try_claim(claim("c4", &a, t + s(120), t + s(10)))
                 .await
                 .unwrap();
             assert!(!held(&b).await, "pruning clears the cutoff");
+        }
+
+        /// A disconnect over a stored cutoff restore would reject is refused
+        /// with nothing written: the claim stays unused and the deny state is
+        /// unchanged.
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn redis_accept_refuses_an_unreadable_stored_cutoff() {
+            let url = std::env::var("BUZZ_TEST_REDIS_URL")
+                .or_else(|_| std::env::var("REDIS_URL"))
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+            let mut conn = buzz_pubsub::redis_connection(&url).expect("redis pool");
+            let namespace = test_namespace();
+            let prefix = format!("{namespace}:deny");
+            let store = redis_guard_in(&namespace);
+            let issuer = format!("https://{}.example", uuid::Uuid::new_v4());
+            let (index, exact) =
+                buzz_pubsub::nip_fi_command_replay::deny_store_keys(&prefix, &issuer);
+            let cutoffs = buzz_pubsub::nip_fi_command_replay::revoke_through_key(&prefix, &issuer);
+            let now = chrono::Utc::now();
+            for (case, bad) in [
+                ("fractional", "12.5"),
+                ("out of range", "9223372036854775807"),
+            ] {
+                let key = nostr::Keys::generate().public_key();
+                let _: () = redis::pipe()
+                    .atomic()
+                    .cmd("HSET")
+                    .arg(&cutoffs)
+                    .arg(key.to_hex())
+                    .arg(bad)
+                    .ignore()
+                    .query_async(&mut conn)
+                    .await
+                    .unwrap();
+                let snapshot = |conn: &mut buzz_pubsub::RedisConnection| {
+                    let mut conn = conn.clone();
+                    let (index, exact, cutoffs) = (index.clone(), exact.clone(), cutoffs.clone());
+                    async move {
+                        let state: (Vec<String>, Vec<(String, String)>, Vec<(String, String)>) =
+                            redis::pipe()
+                                .cmd("ZRANGE")
+                                .arg(&index)
+                                .arg(0)
+                                .arg(-1)
+                                .cmd("HGETALL")
+                                .arg(&exact)
+                                .cmd("HGETALL")
+                                .arg(&cutoffs)
+                                .query_async(&mut conn)
+                                .await
+                                .unwrap();
+                        state
+                    }
+                };
+                let before = snapshot(&mut conn).await;
+                let jti = format!("bad-cutoff-{key}");
+                let claim = buzz_auth::CommandClaim {
+                    issuer: &issuer,
+                    jti: &jti,
+                    ttl_secs: 60,
+                    target: &key,
+                    until: now + chrono::Duration::seconds(60),
+                    scope: buzz_auth::DenyScope::IssuedThrough(now.timestamp()),
+                    capacity: 10,
+                    now,
+                };
+                assert!(
+                    store.try_claim(claim).await.is_err(),
+                    "{case} cutoff is refused"
+                );
+                assert_eq!(
+                    snapshot(&mut conn).await,
+                    before,
+                    "{case} leaves the deny state"
+                );
+                let _: () = redis::cmd("HDEL")
+                    .arg(&cutoffs)
+                    .arg(key.to_hex())
+                    .query_async(&mut conn)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    store.try_claim(claim).await.unwrap(),
+                    buzz_auth::ClaimOutcome::Claimed,
+                    "{case} left the claim unused"
+                );
+            }
         }
 
         /// The Redis script checks replay and shared capacity before writing,

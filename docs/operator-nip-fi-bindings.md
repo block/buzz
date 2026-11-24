@@ -288,6 +288,8 @@ What this covers, and what it does not:
   - The cutoff is orphaned (its field is not in the deny hash): there is no
     deny underneath it, so after the `HDEL` that key is not revoked at all.
     Send the disconnect again if the revocation is still needed.
+  A new disconnect for a key whose stored cutoff is unreadable also fails
+  with `503` and records nothing until that `HDEL`; then send it again.
 - **Deny set over capacity on a pod:** if a revocation this pod receives does
   not fit its `deny_set_capacity`, the pod closes admission the same way and
   restores until its active entries fit.
