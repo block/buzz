@@ -597,6 +597,11 @@ void main() {
       await tester.tap(find.byTooltip('New'));
       await tester.pumpAndSettle();
       expect(find.text('New workspace'), findsOneWidget);
+      // The menu dims what it covers instead of blurring the whole screen.
+      final barrier = tester
+          .widgetList<ModalBarrier>(find.byType(ModalBarrier))
+          .last;
+      expect(barrier.color?.a, greaterThan(0));
       final menu = find
           .ancestor(
             of: find.text('New workspace'),

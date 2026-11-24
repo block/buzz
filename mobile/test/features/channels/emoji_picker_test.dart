@@ -550,6 +550,17 @@ void main() {
         'fire',
       );
       await tester.pumpAndSettle();
+      // Clear keeps its own plain style, not the sheet header's control disc.
+      final clearSurface = tester.widget<Material>(
+        find
+            .descendant(
+              of: find.byKey(const ValueKey('emoji-picker-search-clear')),
+              matching: find.byType(Material),
+            )
+            .first,
+      );
+      expect(clearSurface.color, Colors.transparent);
+      expect(clearSurface.shape, isNot(isA<CircleBorder>()));
       await tester.tap(find.byKey(const ValueKey('emoji-picker-search-clear')));
       await tester.pumpAndSettle();
 
