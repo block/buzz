@@ -8,7 +8,18 @@ Postgres.
 | --- | --- |
 | `BUZZ_OPENSEARCH_URL` | HTTP(S) cluster URL without credentials, query or fragment. Unset turns indexing off. |
 | `BUZZ_OPENSEARCH_USERNAME`, `BUZZ_OPENSEARCH_PASSWORD` | Optional basic auth. Set both or neither. |
+| `BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE` | Optional AWS SigV4 request signing, for Amazon OpenSearch Service: `es` for a managed domain, `aoss` for a Serverless collection. Unset turns signing off. Not combined with basic auth. |
+| `BUZZ_OPENSEARCH_AWS_REGION` | Region to sign for. Defaults to `AWS_REGION`, then `AWS_DEFAULT_REGION`. Signing needs one of them. |
 | `BUZZ_OPENSEARCH_PREVIEW` | Required with the URL until [block/buzz#9862](https://github.com/block/buzz/pull/9862), because deleted messages stay in the index. Use it only on relays without real data. |
+
+## AWS request signing
+
+With signing on, the relay takes credentials from the standard AWS chain:
+environment variables, the shared profile, a web identity token, then the
+container or instance role. It reloads them before they expire, so role
+credentials rotate without a restart. The identity needs HTTP access to the
+domain or, for Serverless, a data access policy on the collection and its
+`buzz-*` indexes plus `aoss:APIAccessAll`.
 
 ## Rollout order
 

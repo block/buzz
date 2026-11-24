@@ -109,7 +109,10 @@ jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_
 
 # HTTP client (webhook delivery)
 reqwest = { version = "0.13", features = ["json", "rustls", "stream"], default-features = false }
-opensearch = { version = "2.4", default-features = false, features = ["rustls-tls"] }
+opensearch = { version = "2.4", default-features = false, features = ["rustls-tls", "aws-auth"] }
+# AWS credential chain, for SigV4-signed OpenSearch requests
+aws-config = "1"
+aws-credential-types = "1"
 
 # Cryptography
 sha2      = "0.11"

@@ -12,6 +12,8 @@
 
 use std::time::Duration;
 
+use aws_config::Region;
+use aws_credential_types::provider::SharedCredentialsProvider;
 use buzz_core::CommunityId;
 use buzz_db::search_outbox::SearchDocument;
 use opensearch::auth::Credentials;
@@ -23,6 +25,7 @@ use opensearch::indices::{IndicesCreateParts, IndicesDeleteParts, IndicesExistsP
 use opensearch::{BulkOperation, BulkParts, OpenSearch, SearchParts};
 use serde_json::{json, Value};
 
+use crate::aws_credentials::{CachedCredentials, DefaultChain};
 use crate::query::{normalized_search_text, page_bounds, PageBounds};
 use crate::{
     ChannelScope, SearchError, SearchHit, SearchMode, SearchQuery, SearchResult, SearchSort,
@@ -50,6 +53,9 @@ pub struct OpenSearchConfig {
     pub url: String,
     /// HTTP basic credentials, if the cluster needs them.
     pub basic_auth: Option<(String, String)>,
+    /// Sign requests with AWS SigV4, if the cluster needs it. Not combined
+    /// with basic credentials.
+    pub aws_sigv4: Option<AwsSigV4>,
     /// Prefix of the alias and index names. The relay always uses
     /// [`DEFAULT_INDEX_PREFIX`]; tests set their own to share a cluster.
     pub index_prefix: String,
@@ -63,9 +69,22 @@ impl std::fmt::Debug for OpenSearchConfig {
                 "basic_auth",
                 &self.basic_auth.as_ref().map(|(user, _)| user),
             )
+            .field("aws_sigv4", &self.aws_sigv4)
             .field("index_prefix", &self.index_prefix)
             .finish()
     }
+}
+
+/// AWS SigV4 request signing, for Amazon OpenSearch Service. Credentials come
+/// from the AWS default chain (environment, shared profile, web identity
+/// token, container role, instance role) and are reloaded before they expire.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AwsSigV4 {
+    /// Signing service name: `es` for a managed domain, `aoss` for a
+    /// Serverless collection.
+    pub service: String,
+    /// AWS region of the cluster, for example `us-east-1`.
+    pub region: String,
 }
 
 /// The message index on one OpenSearch cluster.
@@ -94,6 +113,16 @@ impl SearchIndex {
             TransportBuilder::new(SingleNodeConnectionPool::new(url)).timeout(REQUEST_TIMEOUT);
         if let Some((user, password)) = &config.basic_auth {
             transport = transport.auth(Credentials::Basic(user.clone(), password.clone()));
+        }
+        if let Some(sigv4) = &config.aws_sigv4 {
+            let region = Region::new(sigv4.region.clone());
+            let credentials = CachedCredentials::new(DefaultChain::new(region.clone()));
+            transport = transport
+                .auth(Credentials::AwsSigV4(
+                    SharedCredentialsProvider::new(credentials),
+                    region,
+                ))
+                .service_name(&sigv4.service);
         }
         let transport = transport
             .build()
