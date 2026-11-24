@@ -898,15 +898,31 @@ async fn run_active_audio_connection(
     crate::nip_fi_test_hooks::before_deny_set_check(tenant.community()).await;
     if let Some(assertion) = &nip_fi_assertion {
         if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
-            if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now()) {
+            if let Some(refusal) =
+                crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now())
+            {
                 warn!(
                     channel_id = %channel_id,
                     pubkey = %pubkey_hex,
-                    "NIP-FI deny-set hit at audio post-registration check — denying"
+                    class = ?refusal.class,
+                    "NIP-FI deny-set check refused audio post-registration — denying"
                 );
-                control.deny_nip_fi_enforce(crate::nip_fi_shadow::DENY_SET.by(Some(pubkey)));
-                auth_line.finish(AuthResult::Denied(crate::access::AuthReason::DenySet));
-                deny_audio_authorization(&mut ws_send, &control, &mut terminal_ctrl_rx).await;
+                control.deny_nip_fi_enforce(refusal.by(Some(pubkey)));
+                auth_line.finish(AuthResult::Denied(match refusal.class {
+                    buzz_auth::DenialClass::AuthorizationDenied => {
+                        crate::access::AuthReason::DenySet
+                    }
+                    _ => crate::access::AuthReason::AuthorizationUnavailable,
+                }));
+                exit_authorization_refusal(
+                    &mut ws_send,
+                    &control,
+                    &mut terminal_ctrl_rx,
+                    true,
+                    refusal.class,
+                    serde_json::Value::Null,
+                )
+                .await;
                 return;
             }
         }
@@ -4896,6 +4912,40 @@ mod tests {
                 })),
             ]
         );
+    }
+
+    /// While the deny map restores, audio AUTH refuses as
+    /// `authorization unavailable` with a bare close, for a revoked key and
+    /// an unknown one, never `authorization denied`.
+    #[tokio::test]
+    async fn audio_restoring_deny_map_emits_authorization_unavailable() {
+        use tokio_tungstenite::tungstenite::Message;
+        let deadline = chrono::Utc::now() + chrono::Duration::hours(1);
+        let denied = nostr::Keys::generate();
+        for (state_key, signer) in [(Some(denied.public_key()), &denied), (None, &denied)] {
+            let state = audio_deny_state(state_key.as_ref()).await;
+            state
+                .nip_fi_deny_map
+                .as_deref()
+                .expect("deny map")
+                .begin_restore();
+            let assertion =
+                buzz_auth::VerifiedAssertion::for_test(Some(signer.public_key()), vec![deadline]);
+            let (wire, _) = run_audio_auth_wire(state, Some(assertion), signer, true).await;
+            assert_eq!(
+                wire.first(),
+                Some(&Message::Text(
+                    audio_denial(buzz_auth::DenialClass::AuthorizationUnavailable).into()
+                ))
+            );
+            assert!(
+                !wire.iter().any(|m| matches!(
+                    m,
+                    Message::Close(Some(f)) if f.code == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy
+                )),
+                "a bare close, never the 1008 of a revocation: {wire:?}"
+            );
+        }
     }
 
     /// Records every frame the denial writer emits for a registered audio

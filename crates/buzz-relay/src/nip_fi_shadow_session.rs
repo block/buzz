@@ -19,7 +19,7 @@ use nostr::PublicKey;
 use tokio_util::sync::CancellationToken;
 
 use crate::nip_fi_core::NipFiSession;
-use crate::nip_fi_shadow::{Stage, WouldDeny, DENY_SET};
+use crate::nip_fi_shadow::{Stage, WouldDeny};
 use crate::state::AppState;
 
 #[derive(Clone, Copy)]
@@ -167,8 +167,8 @@ impl ShadowSession {
         self.sessions
             .registered()
             .insert(self.id, Arc::downgrade(self));
-        if deny_listed(state, &self.assertion) {
-            self.decide(Err(DENY_SET.by(self.assertion.asserted_key())));
+        if let Some(refusal) = deny_refusal(state, &self.assertion) {
+            self.decide(Err(refusal));
         }
     }
 
@@ -318,19 +318,20 @@ pub(crate) fn upgrade_denied(
     community: &metrics::SharedString,
     assertion: &VerifiedAssertion,
 ) -> bool {
-    let denied = deny_listed(state, assertion);
-    if denied {
-        let verdict = Err(DENY_SET.by(assertion.asserted_key()));
-        crate::nip_fi_shadow::record_for("ws", community.clone(), verdict);
+    let refusal = deny_refusal(state, assertion);
+    if let Some(refusal) = refusal {
+        crate::nip_fi_shadow::record_for("ws", community.clone(), Err(refusal));
     }
-    denied
+    refusal.is_some()
 }
 
-fn deny_listed(state: &AppState, assertion: &VerifiedAssertion) -> bool {
+/// The deny-set step's would-deny: revoked for an active entry, unavailable
+/// while the deny map is still restoring.
+fn deny_refusal(state: &AppState, assertion: &VerifiedAssertion) -> Option<WouldDeny> {
     state
         .nip_fi_deny_map
         .as_deref()
-        .is_some_and(|map| crate::nip_fi_core::assertion_denied(map, assertion, chrono::Utc::now()))
+        .and_then(|map| crate::nip_fi_core::assertion_denied(map, assertion, chrono::Utc::now()))
 }
 
 #[cfg(test)]
@@ -519,6 +520,29 @@ pub(crate) mod tests {
             revoke(&state, &key);
         });
         assert_eq!(records, ["deny_set/denied"]);
+    }
+
+    /// While the deny map restores, the shadow upgrade records the deny set
+    /// as unavailable, never revoked, for a listed key and an unknown one.
+    #[test]
+    fn restoring_deny_map_records_unavailable_not_revoked() {
+        let key = Keys::generate().public_key();
+        let records = shadow_records(async move {
+            let state = shadow_state(Some(key)).await;
+            state.nip_fi_deny_map.as_deref().unwrap().begin_restore();
+            for target in [key, Keys::generate().public_key()] {
+                let assertion = VerifiedAssertion::for_test(
+                    Some(target),
+                    vec![Utc::now() + Duration::hours(1)],
+                );
+                assert!(upgrade_denied(
+                    &state,
+                    &crate::nip_fi_shadow::BOUND.into(),
+                    &assertion
+                ));
+            }
+        });
+        assert_eq!(records, ["deny_set/unavailable", "deny_set/unavailable"]);
     }
 
     /// Delivers a real cross-pod disconnect for `key` to a shadow pod.
