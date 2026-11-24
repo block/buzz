@@ -13,6 +13,7 @@ import '../../shared/me/me_sync.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/agent_navigation_icon.dart';
+import '../../shared/widgets/navigation_button_surface.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/preset_agent_avatar.dart';
 import '../../shared/widgets/buzz_callout.dart';
@@ -27,6 +28,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
   final VoidCallback onChooseAgent;
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final diameter = NavigationGlassGroup.diameterOf(context);
     final preference = ref.watch(defaultAgentProvider);
     final scope = ref.watch(meSyncProvider);
     final pubkey = preference.isLoading ? null : preference.value;
@@ -129,7 +131,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       child: withTranscription(
         SizedBox(
           child: SizedBox.square(
-            dimension: 56,
+            dimension: diameter,
             child: IconButton(
               tooltip: label,
               padding: EdgeInsets.zero,
@@ -147,7 +149,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
                     : usesInsetAgentArtwork(profile?.avatarUrl)
                     ? PresetAgentAvatar(
                         imageUrl: profile!.avatarUrl!,
-                        size: 47.88,
+                        size: diameter * 0.855,
                         fallback: Center(child: Text(profile.initial)),
                       )
                     : AvatarImage(

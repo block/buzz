@@ -60,10 +60,13 @@ class AppListRow extends StatelessWidget {
         // its first line.
         children: [
           if (icon != null) ...[
-            Icon(
-              icon,
-              size: 22,
-              color: titleColor ?? context.colors.onSurfaceVariant,
+            SizedBox(
+              width: AppListInset.iconWidthOf(context),
+              child: Icon(
+                icon,
+                size: 22,
+                color: titleColor ?? context.colors.onSurfaceVariant,
+              ),
             ),
             const SizedBox(width: Grid.xs),
           ],

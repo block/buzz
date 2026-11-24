@@ -2,14 +2,18 @@ import 'dart:async';
 
 import 'package:http/http.dart' as http;
 
-/// One deadline covers headers and the bounded body. Abort only this request,
-/// leaving the shared client usable for sign-out and subsequent attempts.
+import '../http/app_http_client.dart';
+
+/// One deadline, [timeout], covers headers and the bounded body. Abort only
+/// this request, leaving the shared client usable for sign-out and subsequent
+/// attempts.
 /// [onHeaders] sees the response as soon as its headers arrive, before the
 /// body is read, even if reading the body then fails.
 Future<http.Response> boundedHttpResponse(
   http.Client client,
   http.Request source, {
   int maxBytes = 65536,
+  Duration timeout = const Duration(seconds: 30),
   void Function(http.BaseResponse headers)? onHeaders,
 }) async {
   final abort = Completer<void>();
@@ -53,7 +57,10 @@ Future<http.Response> boundedHttpResponse(
   }
 
   try {
-    return await read().timeout(const Duration(seconds: 30));
+    return await read().timeout(timeout);
+  } on TimeoutException {
+    noteHttpDeadline(request);
+    rethrow;
   } finally {
     abort.complete();
     // Do not let transport cleanup hold the account's serial queue hostage.

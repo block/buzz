@@ -9,11 +9,13 @@ class _DiagnosticsSection extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final reporter = ref.watch(diagnosticReporterProvider);
     return AppListCard(
+      dividerIndent: Grid.xs,
       verticalPadding: Grid.twelve,
       children: [
         AppListRow(
           key: const Key('settings-send-test-report'),
           title: 'Send test report',
+          subtitle: 'Send a test error to the reporting destination',
           onTap: () {
             reporter.sendTestReport();
             ScaffoldMessenger.of(context).showFeedbackSnackBar(
@@ -25,6 +27,7 @@ class _DiagnosticsSection extends ConsumerWidget {
         AppListRow(
           key: const Key('settings-test-crash'),
           title: 'Test crash',
+          subtitle: 'Crash Buzz in native code to check crash reports',
           titleColor: context.colors.error,
           onTap: () async {
             final confirmed = await showDestructiveConfirmation(

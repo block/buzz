@@ -38,12 +38,8 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       nameMember();
 
-      session.debugHandleSocketMessageForTest([
-        'OK',
-        'event-1',
-        false,
-        'invalid: bad signature',
-      ]);
+      // The relay's refusal arrives over the socket after the member changed.
+      harness.refuse.complete();
       await expectLater(rejected, throwsA(isA<Exception>()));
       harness.decode.complete();
       await expectLater(query, throwsA(isA<FormatException>()));
@@ -68,6 +64,7 @@ class _Harness {
     required this.session,
     required this.reporter,
     required this.keys,
+    required this.refuse,
     required this.decode,
     required this.noticed,
     required this.sendFrames,
@@ -76,6 +73,7 @@ class _Harness {
   final RelaySessionNotifier session;
   final _RecordingDiagnostics reporter;
   final nostr.Keys keys;
+  final Completer<void> refuse;
   final Completer<void> decode;
   final Completer<void> noticed;
   final void Function() sendFrames;
@@ -87,6 +85,7 @@ Future<_Harness> _connectedSession() async {
   final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
   addTearDown(() => server.close(force: true));
   final clients = <WebSocket>[];
+  final refuse = Completer<void>();
   server.listen((request) async {
     final ws = await WebSocketTransformer.upgrade(request);
     clients.add(ws);
@@ -95,6 +94,14 @@ Future<_Harness> _connectedSession() async {
       if (message.first == 'AUTH') {
         final id = (message[1] as Map<String, dynamic>)['id'];
         ws.add(jsonEncode(['OK', id, true, '']));
+      } else if (message.first == 'EVENT') {
+        final id = (message[1] as Map<String, dynamic>)['id'];
+        unawaited(
+          refuse.future.then(
+            (_) =>
+                ws.add(jsonEncode(['OK', id, false, 'invalid: bad signature'])),
+          ),
+        );
       }
     });
     ws.add(jsonEncode(['AUTH', 'challenge']));
@@ -155,6 +162,7 @@ Future<_Harness> _connectedSession() async {
     session: session,
     reporter: reporter,
     keys: keys,
+    refuse: refuse,
     decode: decode,
     noticed: noticed,
     sendFrames: () => clients.last

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -7,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 import 'package:uuid/uuid.dart';
 
+import '../http/app_http_client.dart';
 import 'diagnostic_filter.dart';
 import 'diagnostic_reporter.dart';
 import 'sentry_diagnostic_reporter.dart';
@@ -33,13 +35,21 @@ Future<void> runWithDiagnostics({
     (options) => configureDiagnostics(options, destination),
     appRunner: () {
       // A scope tag also reaches the native SDKs, so native crashes and
-      // hangs carry it too.
+      // hangs carry it too. Counts carry scope attributes, not tags.
       if (installId != null) {
         Sentry.configureScope(
-          (scope) => scope.setTag(DiagnosticFilter.installIdTag, installId),
+          (scope) => scope
+            ..setTag(DiagnosticFilter.installIdTag, installId)
+            ..setAttributes({
+              DiagnosticFilter.installIdTag: SentryAttribute.string(installId),
+            }),
         );
       }
-      return app(SentryDiagnosticReporter());
+      final reporter = SentryDiagnosticReporter();
+      // The shared HTTP client is made outside Riverpod; it counts to the same
+      // reporter, so its counts follow the member like everything else.
+      appHttpDiagnostics = reporter;
+      return app(reporter);
     },
   );
 }
@@ -60,8 +70,16 @@ Future<String?> diagnosticInstallId({
     final dir = await (directory ?? _installIdDirectory)();
     final file = File('${dir.path}/$_installIdFile');
     if (await file.exists()) {
-      final saved = (await file.readAsString()).trim();
-      if (saved.isNotEmpty) return saved;
+      // A failed read goes to the catch below and keeps the file: replacing it
+      // after a passing error would split this device's reports.
+      final bytes = await file.readAsBytes();
+      try {
+        final saved = utf8.decode(bytes).trim();
+        if (saved.isNotEmpty) return saved;
+      } on FormatException {
+        // Not text: a damaged file is replaced below, not a reason to send
+        // reports without an install ID.
+      }
     }
     final created = const Uuid().v4();
     await dir.create(recursive: true);

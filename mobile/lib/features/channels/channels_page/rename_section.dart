@@ -11,7 +11,7 @@ Future<SectionRenameResult?> showSectionRenameEditor(
   if (defaultTargetPlatform == TargetPlatform.iOS) {
     const editor = MethodChannel('buzz/profile_text_editor');
     const picker = MethodChannel('buzz/section_emoji');
-    final theme = utilitySurfaceThemeData(Theme.of(context));
+    final theme = utilitySheetThemeData(Theme.of(context));
     final container = ProviderScope.containerOf(context, listen: false);
     Map<String, Object?> selection(String icon) {
       if (!icon.startsWith(':')) return {'icon': icon};

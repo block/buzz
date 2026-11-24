@@ -168,15 +168,49 @@ class IdentityNames {
     if (_candidates.contains(key)) return _members[key];
     return _outside.putIfAbsent(key, () {
       if (!isHexPubkey(key)) return null;
+      // A name no member's label can ever take never collides, so it needs
+      // no qualifier and leaves the members' labels as they are: skip
+      // resolving the whole context again for each such outsider.
+      final name = trimIdentityName(_factFor(key)!.name);
+      if (!_mayCollide(name)) return ResolvedIdentityName(name, null);
       return _resolve({..._candidates, key})[key];
     });
   }
+
+  /// Whether a context member's label could ever read [name]: it is a
+  /// member's name, or has the shape of a qualified label (an owner prefix,
+  /// an agent mark or a key suffix), which a member's label can grow into.
+  bool _mayCollide(String name) =>
+      _memberNames.contains(name) ||
+      name.contains('\u2019s ') ||
+      name.endsWith(' (agent)') ||
+      name.contains(' \u00b7 ');
+
+  late final Set<String> _memberNames = {
+    for (final key in _candidates)
+      if (_factFor(key) case final fact?) trimIdentityName(fact.name),
+  };
 
   /// The unambiguous display label for [pubkey], including any qualifier
   /// needed to distinguish identities with the same name and owner.
   /// A malformed key keeps its plain known name and is never disambiguated.
   String labelFor(String pubkey) =>
       resolve(pubkey)?.name ?? _plainName(pubkey.toLowerCase());
+
+  /// Whether [pubkey] has a real name here: a profile, directory or view
+  /// fallback name, not just the compact npub [labelFor] falls back to.
+  bool hasName(String pubkey) {
+    final key = pubkey.toLowerCase();
+    return _nonBlank(_sources.verifiedNames[key]) != null ||
+        _nonBlank(_sources.profiles[key]?.displayName) != null ||
+        _nonBlank(_sources.agentDisplayNames[key]) != null ||
+        _nonBlank(_fallbackNames[key]) != null;
+  }
+
+  /// Whether [pubkey] is an agent here: a bot role, agent directory entry
+  /// or owned profile.
+  bool isAgent(String pubkey) =>
+      _factFor(pubkey.toLowerCase())?.isAgent ?? false;
 
   String _plainName(String key) =>
       _nonBlank(_sources.verifiedNames[key])?.trim() ??

@@ -33,6 +33,11 @@ class RelayConfig {
   /// for network I/O; [baseUrl] and [wsUrl] are the addresses to connect to.
   String get storedOrigin => _baseUrl;
 
+  /// Whether [other] signs as the same account on the same relay, so work
+  /// started under one config can still be sent under the other.
+  bool isSameCommunity(RelayConfig other) =>
+      baseUrl == other.baseUrl && nsec == other.nsec;
+
   /// Relay origin as an HTTP(S) URL.
   ///
   /// Communities are persisted with whichever scheme their onboarding flow

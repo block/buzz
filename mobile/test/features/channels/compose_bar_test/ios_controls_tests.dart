@@ -397,7 +397,7 @@ void iosControlsTests() {
       await tester.pumpWidget(agentComposer());
       await tester.pumpAndSettle();
       // The mic is offered only for an empty field: remove the prefill.
-      await tester.tap(find.text('@Scout'));
+      await tester.tap(find.text('@Scout '));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), '');
       await tester.pumpAndSettle();
@@ -417,7 +417,9 @@ void iosControlsTests() {
       speech.result.complete('Keep the exact recipient.');
       await tester.pumpAndSettle();
       expect(agentDraft()?.text, '@Scout Keep the exact recipient.');
-      expect(agentDraft()?.mentionKeys, {'Scout': agent});
+      expect(agentDraft()?.mentions.map((m) => (m.start, m.end, m.pubkey)), [
+        (0, 6, agent),
+      ]);
       expect(agentDraft()?.transcriptionId, endsWith('.saved'));
       // The agent is renamed and another member takes its old name.
       renamed = true;
@@ -1046,6 +1048,11 @@ void iosControlsTests() {
     await tester.pumpAndSettle();
     expect(tester.widget<ConcentricSheetSurface>(surface).capsule, isFalse);
     expect(tester.getSize(composer).width, emptyComposerSize.width);
+    final fieldBounds = tester.getRect(find.byType(EditableText));
+    final bubbleBounds = tester.getRect(composer);
+    expect(fieldBounds.left - bubbleBounds.left, closeTo(14, 0.5));
+    expect(fieldBounds.top - bubbleBounds.top, closeTo(10, 0.5));
+    expect(bubbleBounds.bottom - fieldBounds.bottom, closeTo(10, 0.5));
     expect(find.byTooltip('Send'), findsOneWidget);
     expect(find.byTooltip('Emoji'), findsOneWidget);
     expect(find.byTooltip('Dictate'), findsNothing);

@@ -557,7 +557,11 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       conversationDisplayName: conversation?.displayName,
       conversationRecipientCount: conversation?.recipientCount,
       replyContext: channelID == nil
-        ? nil : BuzzNotificationReplyContext.make(for: event, inSolo: channel?.isSolo),
+        ? nil
+        : community.pubkey.flatMap {
+          BuzzNotificationReplyContext.make(
+            for: event, recipientPubkey: $0, inSolo: channel?.isSolo)
+        },
       notificationScope: BuzzNotificationCacheScope(community: community)
     )
   }

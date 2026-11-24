@@ -196,10 +196,14 @@ class RunnerTests: XCTestCase {
       XCTAssertEqual(glass.centerSurface.bounds.width, vertical ? 56 : 112)
       XCTAssertEqual(glass.centerSurface.center, CGPoint(x: glass.bounds.midX, y: glass.bounds.midY))
       glass.setMenuOpen(true, animator: nil)
-      let merged = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-        glass.leftSurface.alpha == 0 && glass.rightSurface.alpha == 0
-      }, object: nil)
-      await fulfillment(of: [merged], timeout: 2)
+      // The values below are set as soon as an animation starts. Also wait
+      // for the animation to finish, so the close that follows starts from a
+      // finished animator, as it does when someone closes the menu.
+      await waitUntil("the side surfaces have merged") {
+        glass.leftSurface.alpha == 0 && glass.rightSurface.alpha == 0 &&
+          (glass.leftSurface.layer.animationKeys() ?? []).isEmpty &&
+          (glass.rightSurface.layer.animationKeys() ?? []).isEmpty
+      }
       XCTAssertEqual(glass.leftSurface.transform.tx, vertical ? 0 : 100, accuracy: 0.01)
       XCTAssertEqual(glass.leftSurface.transform.ty, vertical ? 72 : 0, accuracy: 0.01)
       XCTAssertEqual(glass.rightSurface.transform.tx, vertical ? 0 : -100, accuracy: 0.01)
@@ -207,11 +211,12 @@ class RunnerTests: XCTestCase {
       glass.setMenuOpen(false, animator: nil)
       glass.setMenuOpen(true, animator: nil)
       glass.setMenuOpen(false, animator: nil)
-      let restored = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      await waitUntil("the side surfaces are restored") {
         glass.leftSurface.alpha == 1 && glass.rightSurface.alpha == 1 &&
-          glass.leftSurface.transform == .identity && glass.rightSurface.transform == .identity
-      }, object: nil)
-      await fulfillment(of: [restored], timeout: 2)
+          glass.leftSurface.transform == .identity && glass.rightSurface.transform == .identity &&
+          (glass.leftSurface.layer.animationKeys() ?? []).isEmpty &&
+          (glass.rightSurface.layer.animationKeys() ?? []).isEmpty
+      }
     }
   }
 
@@ -1328,7 +1333,21 @@ class RunnerTests: XCTestCase {
       messenger.scroll(to: boundary)
       await assertCompactTitleOpacity(1)
       XCTAssertEqual(navigation.navigationBar.frame.height, compact, accuracy: 0.5)
+      if leadingTitle {
+        let sheet = UIViewController()
+        sheet.modalPresentationStyle = .pageSheet
+        await withCheckedContinuation { continuation in
+          parent.present(sheet, animated: true) { continuation.resume() }
+        }
+        XCTAssertEqual(navigation.topViewController?.navigationItem.title, "")
+        await withCheckedContinuation { continuation in
+          parent.dismiss(animated: true) { continuation.resume() }
+        }
+        XCTAssertEqual(navigation.topViewController?.navigationItem.title, "")
+        XCTAssertEqual(centeredTitle.text, "Home")
+      }
       messenger.scroll(to: 0)
+      XCTAssertEqual(navigation.topViewController?.navigationItem.title, "Home")
       bar.view().frame.size.height += boundary * 0.7
       bar.view().setNeedsLayout()
       bar.view().layoutIfNeeded()
@@ -2541,6 +2560,28 @@ extension XCTestCase {
     UIApplication.shared.connectedScenes
       .compactMap { $0 as? UIWindowScene }
       .first { $0.activationState == .foregroundActive }
+  }
+
+  /// Returns once `condition` holds, and fails the test if it never does.
+  ///
+  /// `XCTNSPredicateExpectation` evaluates its predicate about once a second,
+  /// so a short wait gets one or two looks and a busy host main thread can
+  /// use them all up. This checks every few milliseconds, and checks once
+  /// more before giving up however late the main thread comes back.
+  @MainActor
+  func waitUntil(
+    _ description: String, timeout: TimeInterval = 10,
+    file: StaticString = #filePath, line: UInt = #line,
+    _ condition: @MainActor () -> Bool
+  ) async {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition() {
+      guard Date() < deadline else {
+        XCTFail("Timed out waiting until \(description)", file: file, line: line)
+        return
+      }
+      try? await Task.sleep(nanoseconds: 10_000_000)
+    }
   }
 
   /// Fulfilled once `window` is the key window and shows `root`'s view.

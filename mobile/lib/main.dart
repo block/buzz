@@ -7,13 +7,16 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app.dart';
+import 'diagnostic_screens.dart';
 import 'features/age_gate/age_signal_push_bootstrap.dart';
 import 'features/agents/agents_page.dart';
 import 'features/invites/invite_join_provider.dart';
 import 'shared/agents/agents_surface.dart';
 import 'shared/diagnostics/diagnostic_member_binding.dart';
+import 'shared/diagnostics/diagnostic_navigation_observer.dart';
 import 'shared/diagnostics/diagnostic_reporter.dart';
 import 'shared/diagnostics/diagnostic_startup.dart';
+import 'shared/push/android_push_wake.dart';
 import 'shared/push/push_bridge.dart';
 import 'shared/relay/media_disk_cache.dart';
 import 'shared/relay/relay_closed_policy.dart';
@@ -21,6 +24,11 @@ import 'shared/relay/relay_websocket.dart';
 import 'shared/theme/theme_provider.dart';
 
 void main() => runBuzzApp(const App());
+
+/// Started by the Android push handler in a background engine, without UI,
+/// to turn a push wake into notifications.
+@pragma('vm:entry-point')
+Future<void> androidPushWakeMain() => runAndroidPushWake();
 
 Future<void> runBuzzApp(Widget app) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -79,6 +87,7 @@ ProviderScope buildRootProviderScope({
       (context, link) async => unawaited(showAgents(context, draft: link)),
     ),
     diagnosticReporterProvider.overrideWithValue(reporter),
+    diagnosticScreenClassifierProvider.overrideWithValue(diagnosticScreenOf),
     savedPrefsProvider.overrideWithValue(prefs),
     if (mediaCacheRoot != null)
       mediaCacheRootProvider.overrideWith((ref) => mediaCacheRoot()),

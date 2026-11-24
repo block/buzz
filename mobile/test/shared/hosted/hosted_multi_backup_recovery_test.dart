@@ -252,10 +252,12 @@ void main() {
 
   test('missing bound backup never accepts a different selected key', () async {
     bound = keys[2].public;
-    expect(
-      (await (await service()).resolve(selectedPubkey: keys[0].public)).state,
-      HostedIdentityState.mismatch,
+    final result = await (await service()).resolve(
+      selectedPubkey: keys[0].public,
     );
+    expect(result.state, HostedIdentityState.needsSetup);
+    expect(result.pubkey, bound);
+    expect(result.canCreate, isFalse);
     expect(await store.read(), isNull);
   });
 

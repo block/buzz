@@ -5,10 +5,11 @@ use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::validate_hex64;
 
+use super::agents::fetch_archived_snapshot;
 use super::verified_profiles::{
     discover_authority, fetch_verified_profiles, verified_profiles_from_events, VerifiedProfile,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Longest query `POST /profiles/search` accepts, in characters.
 const PROFILE_SEARCH_MAX_CHARS: usize = 100;
@@ -23,20 +24,39 @@ const PROFILE_SEARCH_MAX_CHARS: usize = 100;
 ///
 /// Where the community advertises NIP-FI verified profiles, each person with a
 /// valid relay-signed kind:30382 also carries a `verified` object.
+///
+/// A person on the relay's NIP-IA archive list is marked `"archived": true`.
+/// A name search leaves them out unless `include_archived`; a pubkey lookup
+/// always returns them, since whoever has the key is not discovering anyone.
 pub async fn cmd_get_users(
     client: &BuzzClient,
     pubkeys: &[String],
     name: Option<&str>,
     owner: Option<&str>,
+    include_archived: bool,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
+    let output = get_users_output(client, pubkeys, name, owner, include_archived, format).await?;
+    println!("{output}");
+    Ok(())
+}
+
+/// What [`cmd_get_users`] prints.
+async fn get_users_output(
+    client: &BuzzClient,
+    pubkeys: &[String],
+    name: Option<&str>,
+    owner: Option<&str>,
+    include_archived: bool,
+    format: &crate::OutputFormat,
+) -> Result<String, CliError> {
     if let Some(query) = name {
         if !pubkeys.is_empty() {
             return Err(CliError::Usage(
                 "--name and --pubkey are mutually exclusive".into(),
             ));
         }
-        return search_by_name(client, query, owner, format).await;
+        return search_by_name(client, query, owner, include_archived, format).await;
     }
 
     if owner.is_some() {
@@ -50,19 +70,111 @@ pub async fn cmd_get_users(
         return Err(CliError::Usage("--pubkey: maximum 200 pubkeys".into()));
     }
 
-    let profiles = get_profiles(client, pubkeys).await?;
+    let Some((profiles, archived)) = alongside_archive(client, async {
+        get_profiles(client, pubkeys).await.map(Some)
+    })
+    .await?
+    else {
+        unreachable!("pubkey lookups always return profiles")
+    };
+    let profiles = with_archived(profiles, archived.as_ref(), true);
     let output = match format {
         crate::OutputFormat::Compact => {
-            let compact: Vec<serde_json::Value> =
-                profiles.iter().map(|p| compact_profile(p, &[])).collect();
+            let compact: Vec<serde_json::Value> = profiles
+                .iter()
+                .map(|p| compact_profile(p, &["archived"]))
+                .collect();
             serde_json::to_string(&compact).unwrap_or_default()
         }
         crate::OutputFormat::Json | crate::OutputFormat::Agent => {
             serde_json::to_string(&profiles).unwrap_or_default()
         }
     };
-    println!("{output}");
-    Ok(())
+    Ok(output)
+}
+
+/// Runs `profiles` while the archive list is read. A profile error returns at
+/// once, and `None` (nothing to show) returns without waiting for the list.
+/// Otherwise it waits for the list, and when the list can't be read it warns
+/// on stderr and gives `None`: archive filtering fails open, never failing
+/// the lookup.
+async fn alongside_archive(
+    client: &BuzzClient,
+    profiles: impl std::future::Future<Output = Result<Option<Vec<serde_json::Value>>, CliError>>,
+) -> Result<Option<(Vec<serde_json::Value>, Option<HashSet<String>>)>, CliError> {
+    let archive = archived_pubkeys(client);
+    tokio::pin!(archive, profiles);
+    let mut archived = None;
+    let profiles = loop {
+        tokio::select! {
+            profiles = &mut profiles => break profiles?,
+            read = &mut archive, if archived.is_none() => archived = Some(read),
+        }
+    };
+    let Some(profiles) = profiles else {
+        return Ok(None);
+    };
+    let archived = match archived {
+        Some(read) => read,
+        None => archive.await,
+    };
+    let archived = archived
+        .map_err(|warning| eprintln!("{}", serde_json::json!({ "warning": warning })))
+        .ok();
+    Ok(Some((profiles, archived)))
+}
+
+/// The relay's archived pubkeys, or the warning to show when the list can't
+/// be read or verified.
+async fn archived_pubkeys(client: &BuzzClient) -> Result<HashSet<String>, String> {
+    archived_pubkeys_within(client, ARCHIVE_READ_DEADLINE).await
+}
+
+/// How long a lookup waits for the archive list before giving up on filtering.
+const ARCHIVE_READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn archived_pubkeys_within(
+    client: &BuzzClient,
+    deadline: std::time::Duration,
+) -> Result<HashSet<String>, String> {
+    let read = tokio::time::timeout(deadline, fetch_archived_snapshot(client))
+        .await
+        .unwrap_or_else(|_| Err(CliError::Other(format!("timed out after {deadline:?}"))));
+    read.map(|archived| archived.into_iter().collect())
+        .map_err(|e| format!("archived-identities list unavailable, results not filtered: {e}"))
+}
+
+/// Marks each profile on the `archived` list `"archived": true`, dropping it
+/// unless `keep_archived`. With no list, profiles pass through unmarked. The
+/// profile parsers strip any self-authored `archived`, so the marker only
+/// ever reflects the relay's signed list.
+fn with_archived(
+    profiles: Vec<serde_json::Value>,
+    archived: Option<&HashSet<String>>,
+    keep_archived: bool,
+) -> Vec<serde_json::Value> {
+    profiles
+        .into_iter()
+        .filter_map(|mut profile| {
+            let Some(archived) = archived else {
+                return Some(profile);
+            };
+            let Some(pubkey) = profile.get("pubkey").and_then(|v| v.as_str()) else {
+                return Some(profile);
+            };
+            let pubkey = pubkey.to_ascii_lowercase();
+            if !archived.contains(&pubkey) {
+                return Some(profile);
+            }
+            if !keep_archived {
+                return None;
+            }
+            if let Some(obj) = profile.as_object_mut() {
+                obj.insert("archived".to_string(), serde_json::json!(true));
+            }
+            Some(profile)
+        })
+        .collect()
 }
 
 /// kind:0 profiles for `pubkeys` (our own when empty), each with its verified
@@ -108,6 +220,7 @@ async fn lookup_profiles(
             let mut profile: serde_json::Value = serde_json::from_str(content_str).ok()?;
             if let Some(obj) = profile.as_object_mut() {
                 obj.remove("verified");
+                obj.remove("archived");
                 obj.insert(
                     "pubkey".to_string(),
                     serde_json::json!(e.get("pubkey").and_then(|v| v.as_str()).unwrap_or("")),
@@ -319,6 +432,7 @@ fn profile_content(event: &serde_json::Value) -> serde_json::Map<String, serde_j
         .and_then(|content| content.as_object().cloned())
         .unwrap_or_default();
     profile.remove("verified");
+    profile.remove("archived");
     profile
 }
 
@@ -520,18 +634,21 @@ async fn search_by_name(
     client: &BuzzClient,
     query: &str,
     owner: Option<&str>,
+    include_archived: bool,
     format: &crate::OutputFormat,
-) -> Result<(), CliError> {
+) -> Result<String, CliError> {
     if query.trim().is_empty() {
         return Err(CliError::Usage("--name cannot be empty".into()));
     }
 
     let owner = resolve_owner(client, owner)?;
-    let profiles = if let Some(owner) = owner {
+    let profiles = async {
+        let Some(owner) = owner else {
+            return search_profiles(client, query).await.map(Some);
+        };
         let pubkeys = owned_agent_pubkeys_by_name(client, &owner, query).await?;
         if pubkeys.is_empty() {
-            println!("[]");
-            return Ok(());
+            return Ok(None);
         }
         let valid_pubkeys: Vec<&String> = pubkeys
             .iter()
@@ -549,15 +666,27 @@ async fn search_by_name(
             serde_json::from_str(&raw)
                 .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?
         };
-        owner_scoped_profiles(&events, &pubkeys, &owner, &effective_owner(client))
-    } else {
-        search_profiles(client, query).await?
+        Ok(Some(owner_scoped_profiles(
+            &events,
+            &pubkeys,
+            &owner,
+            &effective_owner(client),
+        )))
     };
+    let Some((profiles, archived)) = alongside_archive(client, profiles).await? else {
+        return Ok("[]".to_string());
+    };
+    let profiles = with_archived(profiles, archived.as_ref(), include_archived);
     let output = match format {
         crate::OutputFormat::Compact => {
             let compact: Vec<serde_json::Value> = profiles
                 .iter()
-                .map(|p| compact_profile(p, &["owner_pubkey", "owned_by_me", "verification"]))
+                .map(|p| {
+                    compact_profile(
+                        p,
+                        &["owner_pubkey", "owned_by_me", "verification", "archived"],
+                    )
+                })
                 .collect();
             serde_json::to_string(&compact).unwrap_or_default()
         }
@@ -565,8 +694,7 @@ async fn search_by_name(
             serde_json::to_string(&profiles).unwrap_or_default()
         }
     };
-    println!("{output}");
-    Ok(())
+    Ok(output)
 }
 
 pub async fn cmd_set_profile(
@@ -944,7 +1072,18 @@ pub async fn dispatch(
             pubkeys,
             name,
             owner,
-        } => cmd_get_users(client, &pubkeys, name.as_deref(), owner.as_deref(), format).await,
+            include_archived,
+        } => {
+            cmd_get_users(
+                client,
+                &pubkeys,
+                name.as_deref(),
+                owner.as_deref(),
+                include_archived,
+                format,
+            )
+            .await
+        }
         UsersCmd::SetProfile {
             name,
             avatar,
@@ -984,10 +1123,10 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_profile, find_profiles, get_profiles, lookup_profiles,
-        owned_agent_pubkeys_from_events, owner_scoped_profiles, owner_verification,
-        parse_expiration_tag, parse_expiry, presence_subject, publish_status, read_statuses,
-        search_profiles,
+        archived_pubkeys, archived_pubkeys_within, compact_profile, find_profiles, get_profiles,
+        get_users_output, lookup_profiles, owned_agent_pubkeys_from_events, owner_scoped_profiles,
+        owner_verification, parse_expiration_tag, parse_expiry, presence_subject, publish_status,
+        read_statuses, search_profiles, with_archived, ARCHIVE_READ_DEADLINE,
     };
     use crate::client::BuzzClient;
     use crate::error::CliError;
@@ -1006,8 +1145,14 @@ mod tests {
         events: Vec<Value>,
         queries: Vec<Value>,
         raw_query_response: Option<String>,
+        /// Never answer queries for this kind.
+        held_kind: Option<u64>,
         /// Answer queries for this kind with invalid JSON.
         broken_kind: Option<u64>,
+        /// Answer queries for this kind with HTTP 500.
+        failing_kind: Option<u64>,
+        /// Hold kind:0 queries until the archive-list query has arrived.
+        profiles_after_archive: bool,
         /// NIP-11 document served at `/`.
         info: Value,
         /// Body of `POST /profiles/search`; `None` answers 404 like an older relay.
@@ -1025,18 +1170,39 @@ mod tests {
                 "/query",
                 post(|State(relay): State<Shared>, body: Bytes| async move {
                     let filters: Vec<Value> = serde_json::from_slice(&body).unwrap();
+                    let held = relay.lock().unwrap().held_kind;
+                    if held.is_some() && filters[0]["kinds"][0].as_u64() == held {
+                        std::future::pending::<()>().await;
+                    }
+                    if filters[0]["kinds"][0] == 0 {
+                        while relay.lock().unwrap().profiles_after_archive
+                            && !relay
+                                .lock()
+                                .unwrap()
+                                .queries
+                                .iter()
+                                .any(|q| q["kinds"][0] == 13535)
+                        {
+                            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        }
+                    }
                     let [filter] = filters.as_slice() else {
                         panic!("one filter expected: {filters:?}")
                     };
                     let mut relay = relay.lock().unwrap();
                     relay.queries.push(filter.clone());
                     if let Some(raw) = relay.raw_query_response.clone() {
-                        return raw;
+                        return (StatusCode::OK, raw);
+                    }
+                    if relay.failing_kind.is_some()
+                        && filter["kinds"][0].as_u64() == relay.failing_kind
+                    {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, "boom".to_string());
                     }
                     if relay.broken_kind.is_some()
                         && filter["kinds"][0].as_u64() == relay.broken_kind
                     {
-                        return "not json".to_string();
+                        return (StatusCode::OK, "not json".to_string());
                     }
                     let kind = &filter["kinds"][0];
                     let matching: Vec<Value> = relay
@@ -1064,7 +1230,7 @@ mod tests {
                         })
                         .cloned()
                         .collect();
-                    serde_json::to_string(&matching).unwrap()
+                    (StatusCode::OK, serde_json::to_string(&matching).unwrap())
                 }),
             )
             .route(
@@ -1456,6 +1622,215 @@ mod tests {
             "issuer_label": "Example",
             "verified_at": 100,
         })
+    }
+
+    /// Seeds the relay's kind:13535 archive list, signed by `signer`.
+    fn seed_archive_list(relay: &Shared, signer: &Keys, archived: &[&Keys]) {
+        let hexes: Vec<String> = archived.iter().map(|k| k.public_key().to_hex()).collect();
+        let mut tags = vec![vec!["-"]];
+        tags.extend(hexes.iter().map(|h| vec!["p", h.as_str()]));
+        seed(relay, signer, 13535, "", tags, 100);
+    }
+
+    fn rows(keys: &[&Keys]) -> Vec<Value> {
+        keys.iter()
+            .map(|k| json!({"pubkey": k.public_key().to_hex(), "name": "Alice Example"}))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn archive_filter_reads_the_relay_signed_list() {
+        let (client, relay) = setup().await;
+        let relay_keys = Keys::generate();
+        let (old, new) = (Keys::generate(), Keys::generate());
+        relay.lock().unwrap().info = json!({"self": relay_keys.public_key().to_hex()});
+        seed_archive_list(&relay, &relay_keys, &[&old]);
+
+        let archived = archived_pubkeys(&client).await.expect("list readable");
+        let profiles = rows(&[&old, &new]);
+
+        // Name search: excluded by default.
+        let found = with_archived(profiles.clone(), Some(&archived), false);
+        assert_eq!(found, rows(&[&new]));
+
+        // --include-archived (and --pubkey): kept and marked.
+        let found = with_archived(profiles, Some(&archived), true);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0]["archived"], true);
+        assert!(found[1].get("archived").is_none());
+    }
+
+    /// `buzz users get` output, parsed, in both normal and compact format.
+    async fn users_get(
+        client: &BuzzClient,
+        pubkeys: &[String],
+        name: Option<&str>,
+        include: bool,
+    ) -> [Vec<Value>; 2] {
+        let mut out = Vec::new();
+        for format in [crate::OutputFormat::Json, crate::OutputFormat::Compact] {
+            let raw = get_users_output(client, pubkeys, name, None, include, &format)
+                .await
+                .unwrap();
+            out.push(serde_json::from_str(&raw).unwrap());
+        }
+        out.try_into().unwrap()
+    }
+
+    fn archived_flags(rows: &[Value]) -> Vec<Option<bool>> {
+        rows.iter()
+            .map(|p| p.get("archived").map(|v| v.as_bool().unwrap()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn users_get_marks_archived_only_from_the_signed_list() {
+        let (client, relay) = setup().await;
+        let relay_keys = Keys::generate();
+        let (listed, claims) = (Keys::generate(), Keys::generate());
+        relay.lock().unwrap().info = json!({"self": relay_keys.public_key().to_hex()});
+        // Both set their own `archived: true`; only `listed` is on the relay's list.
+        seed_profile(
+            &relay,
+            &listed,
+            r#"{"name":"Alice Example","archived":true}"#,
+        );
+        seed_profile(&relay, &claims, r#"{"name":"Alice Other","archived":true}"#);
+        seed_archive_list(&relay, &relay_keys, &[&listed]);
+        let pubkeys = vec![listed.public_key().to_hex(), claims.public_key().to_hex()];
+
+        for rows in users_get(&client, &[], Some("alice"), false).await {
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            assert_eq!(rows[0]["pubkey"], claims.public_key().to_hex());
+            assert_eq!(archived_flags(&rows), [None]);
+        }
+        for rows in users_get(&client, &[], Some("alice"), true).await {
+            assert_eq!(archived_flags(&rows), [Some(true), None], "{rows:?}");
+        }
+        for rows in users_get(&client, &pubkeys, None, false).await {
+            assert_eq!(archived_flags(&rows), [Some(true), None], "{rows:?}");
+        }
+        // A non-object kind:0 still comes back with a healthy list.
+        let odd = Keys::generate();
+        seed_profile(&relay, &odd, "null");
+        for rows in users_get(&client, &[odd.public_key().to_hex()], None, false).await {
+            assert_eq!(rows.len(), 1, "{rows:?}");
+        }
+
+        // Unreadable list: nothing filtered or marked.
+        relay.lock().unwrap().broken_kind = Some(13535);
+        for rows in users_get(&client, &[], Some("alice"), false).await {
+            assert_eq!(archived_flags(&rows), [None, None], "{rows:?}");
+        }
+        for rows in users_get(&client, &pubkeys, None, false).await {
+            assert_eq!(archived_flags(&rows), [None, None], "{rows:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn archive_filter_fails_open_when_the_list_read_hangs() {
+        let (client, relay) = setup().await;
+        let relay_keys = Keys::generate();
+        relay.lock().unwrap().info = json!({"self": relay_keys.public_key().to_hex()});
+        relay.lock().unwrap().held_kind = Some(13535);
+        let deadline = std::time::Duration::from_millis(100);
+        assert!(archived_pubkeys_within(&client, deadline).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn profile_errors_return_without_waiting_for_the_archive_read() {
+        // Rerun in a child process to read its stderr: no archive warning.
+        if std::env::var_os("BUZZ_USERS_STDERR_CHILD").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "commands::users::tests::profile_errors_return_without_waiting_for_the_archive_read",
+                    "--nocapture",
+                ])
+                .env("BUZZ_USERS_STDERR_CHILD", "1")
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success(), "{stdout}{stderr}");
+            assert!(stdout.contains("1 passed"), "{stdout}");
+            assert!(!stderr.contains("archived-identities"), "{stderr}");
+            return;
+        }
+        let (client, relay) = setup().await;
+        let relay_keys = Keys::generate();
+        relay.lock().unwrap().info = json!({"self": relay_keys.public_key().to_hex()});
+        relay.lock().unwrap().held_kind = Some(13535);
+        relay.lock().unwrap().failing_kind = Some(0);
+        let pubkey = Keys::generate().public_key().to_hex();
+        for (pubkeys, name) in [(vec![pubkey], None), (vec![], Some("alice"))] {
+            let started = std::time::Instant::now();
+            let result = get_users_output(
+                &client,
+                &pubkeys,
+                name,
+                None,
+                false,
+                &crate::OutputFormat::Json,
+            )
+            .await;
+            assert!(result.is_err(), "{name:?}: {result:?}");
+            assert!(started.elapsed() < ARCHIVE_READ_DEADLINE / 2, "{name:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn name_search_reads_the_archive_list_alongside_the_profiles() {
+        let (client, relay) = setup().await;
+        let relay_keys = Keys::generate();
+        let (old, new) = (Keys::generate(), Keys::generate());
+        relay.lock().unwrap().info = json!({"self": relay_keys.public_key().to_hex()});
+        seed_profile(&relay, &old, r#"{"name":"Alice Old"}"#);
+        seed_profile(&relay, &new, r#"{"name":"Alice New"}"#);
+        seed_archive_list(&relay, &relay_keys, &[&old]);
+        // The profile search answers only once the archive read has started.
+        relay.lock().unwrap().profiles_after_archive = true;
+        let raw = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            get_users_output(
+                &client,
+                &[],
+                Some("alice"),
+                None,
+                false,
+                &crate::OutputFormat::Json,
+            ),
+        )
+        .await
+        .expect("archive read starts before the profile search finishes")
+        .unwrap();
+        let rows: Vec<Value> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["pubkey"], new.public_key().to_hex());
+    }
+
+    #[tokio::test]
+    async fn archive_filter_fails_open_when_the_list_is_unreadable() {
+        // No relay `self`, and a list signed by someone other than the relay.
+        for forged in [false, true] {
+            let (client, relay) = setup().await;
+            let old = Keys::generate();
+            if forged {
+                let relay_keys = Keys::generate();
+                relay.lock().unwrap().info = json!({"self": relay_keys.public_key().to_hex()});
+                let impostor = Keys::generate();
+                seed_archive_list(&relay, &impostor, &[&old]);
+                // The query asks for the relay's author; make the impostor's event answer it.
+                relay.lock().unwrap().events[0]["pubkey"] = json!(relay_keys.public_key().to_hex());
+            }
+            let archived = archived_pubkeys(&client).await.ok();
+            assert!(archived.is_none(), "forged={forged}");
+            let profiles = rows(&[&old]);
+            assert_eq!(
+                with_archived(profiles.clone(), archived.as_ref(), false),
+                profiles
+            );
+        }
     }
 
     #[tokio::test]

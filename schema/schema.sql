@@ -6,9 +6,9 @@
 -- namespace, so nothing else may live under it.
 --
 -- Everything SchemaBot cannot apply lives in this directory's other
--- subdirectories: `types/`, `functions/`, `partitions/`, `triggers/`, and
--- `seeds/`. This file composes them into one fresh database, in load order:
--- types → functions → tables → partitions → triggers → seeds.
+-- subdirectories: `types/`, `partitions/`, and `seeds/`. This file composes
+-- them into one fresh database, in load order: types → tables → partitions →
+-- seeds. docs/database.md forbids triggers, functions, and foreign keys.
 --
 -- `./bin/pgschema apply --file schema/schema.sql` resolves the `\i` includes
 -- relative to this file (it refuses `..`). `pgschema` skips INSERTs and some
@@ -18,7 +18,7 @@
 -- `cd schema && psql -f schema.sql`.
 --
 -- Adding a table: add `tables/public/<table>.sql` and include it below after
--- the tables it references; put its partitions, triggers, and seed rows in the
+-- the tables it references; put its partitions and seed rows in the
 -- matching subdirectories and include those too. This file holds only `\i`
 -- lines and `CREATE EXTENSION`. Outside `tables/public/`, no file may create,
 -- alter or drop a table or index, except `CREATE TABLE ... PARTITION OF` in
@@ -60,8 +60,6 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i types/subscription_status.sql
 \i types/pause_reason.sql
 \i types/channel_add_policy.sql
-
--- functions
 
 -- tables
 \i tables/public/communities.sql
@@ -130,8 +128,6 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 -- partitions
 \i partitions/events.sql
 \i partitions/delivery_log.sql
-
--- triggers
 
 -- seeds
 \i seeds/communities.sql

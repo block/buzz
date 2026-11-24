@@ -20,14 +20,20 @@ public struct BuzzNotificationReplyContext: Codable, Equatable, Sendable {
   /// Whether channel metadata showed a Solo chat, which takes no thread
   /// replies; nil when it was unknown.
   public let inSolo: Bool?
+  /// The account the notification was for, which the reply must be sent as,
+  /// guarding against a community's credentials being replaced in place. nil
+  /// for a notification an earlier build posted.
+  public let recipientPubkey: String?
 
   public init(
-    senderPubkey: String, threadRootID: String? = nil, messageCreatedAt: Int, inSolo: Bool? = nil
+    senderPubkey: String, threadRootID: String? = nil, messageCreatedAt: Int, inSolo: Bool? = nil,
+    recipientPubkey: String? = nil
   ) {
     self.senderPubkey = senderPubkey
     self.threadRootID = threadRootID
     self.messageCreatedAt = messageCreatedAt
     self.inSolo = inSolo
+    self.recipientPubkey = recipientPubkey
   }
 
   /// Kinds the app can answer with an ordinary channel or DM message.
@@ -35,14 +41,15 @@ public struct BuzzNotificationReplyContext: Codable, Equatable, Sendable {
   static let replyableKinds: Set<Int> = [9, 40002]
 
   static func make(
-    for event: VerifiedNostrEvent, inSolo: Bool? = nil
+    for event: VerifiedNostrEvent, recipientPubkey: String, inSolo: Bool? = nil
   ) -> BuzzNotificationReplyContext? {
     guard replyableKinds.contains(event.kind) else { return nil }
     return BuzzNotificationReplyContext(
       senderPubkey: event.pubkey.lowercased(),
       threadRootID: nip10RootID(in: event.tags),
       messageCreatedAt: event.createdAt,
-      inSolo: inSolo
+      inSolo: inSolo,
+      recipientPubkey: recipientPubkey.lowercased()
     )
   }
 
@@ -72,6 +79,7 @@ public struct BuzzNotificationReplyContext: Codable, Equatable, Sendable {
     var value = ["sender_pubkey": senderPubkey, "created_at": String(messageCreatedAt)]
     value["thread_root_id"] = threadRootID
     value["in_solo"] = inSolo.map { $0 ? "true" : "false" }
+    value["recipient_pubkey"] = recipientPubkey
     return value
   }
 
@@ -80,12 +88,17 @@ public struct BuzzNotificationReplyContext: Codable, Equatable, Sendable {
     from userInfo: [AnyHashable: Any]
   ) -> BuzzNotificationReplyContext? {
     guard let raw = userInfo[userInfoKey] as? [String: Any],
-      Set(raw.keys).isSubset(of: ["sender_pubkey", "thread_root_id", "created_at", "in_solo"]),
+      Set(raw.keys).isSubset(of: [
+        "sender_pubkey", "thread_root_id", "created_at", "in_solo", "recipient_pubkey",
+      ]),
       let sender = raw["sender_pubkey"] as? String, !sender.isEmpty,
       let createdAt = (raw["created_at"] as? String).flatMap(Int.init), createdAt > 0
     else { return nil }
     if let rawRoot = raw["thread_root_id"] {
       guard let root = rawRoot as? String, !root.isEmpty else { return nil }
+    }
+    if let rawRecipient = raw["recipient_pubkey"] {
+      guard let recipient = rawRecipient as? String, !recipient.isEmpty else { return nil }
     }
     var inSolo: Bool?
     if let rawSolo = raw["in_solo"] {
@@ -97,7 +110,8 @@ public struct BuzzNotificationReplyContext: Codable, Equatable, Sendable {
     }
     return BuzzNotificationReplyContext(
       senderPubkey: sender, threadRootID: raw["thread_root_id"] as? String,
-      messageCreatedAt: createdAt, inSolo: inSolo)
+      messageCreatedAt: createdAt, inSolo: inSolo,
+      recipientPubkey: raw["recipient_pubkey"] as? String)
   }
 }
 
@@ -169,6 +183,7 @@ public struct BuzzNotificationReplyRequest: Equatable, Sendable {
     arguments["messageCreatedAt"] = String(context.messageCreatedAt)
     arguments["deadline"] = String(Int64(deadline.timeIntervalSince1970 * 1000))
     arguments["inSolo"] = context.inSolo == true ? "true" : nil
+    arguments["recipientPubkey"] = context.recipientPubkey
     return arguments
   }
 
@@ -187,7 +202,8 @@ public struct BuzzNotificationReplyRequest: Equatable, Sendable {
         threadRootID: arguments["threadRootId"]),
       context: BuzzNotificationReplyContext(
         senderPubkey: sender, threadRootID: arguments["replyRootId"],
-        messageCreatedAt: createdAt, inSolo: arguments["inSolo"] == "true" ? true : nil),
+        messageCreatedAt: createdAt, inSolo: arguments["inSolo"] == "true" ? true : nil,
+        recipientPubkey: arguments["recipientPubkey"]),
       threadIdentifier: "",
       deadline: arguments["deadline"].flatMap(Double.init).map {
         Date(timeIntervalSince1970: $0 / 1000)
@@ -246,6 +262,13 @@ public final class BuzzNotificationReplyBuffer: @unchecked Sendable {
       taken.append(entries[index].request)
     }
     return taken
+  }
+
+  /// Whether a request is still waiting for its outcome.
+  public func holds(id: String) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return entries.contains { $0.request.id == id }
   }
 
   /// Finishes a request, returning false when the id is unknown or already
@@ -338,7 +361,8 @@ public final class BuzzNotificationReplyJournal: @unchecked Sendable {
     recorded(id: id)?["publishing"] == "true"
   }
 
-  /// Forgets a reply once the app has reported it sent, or kept its draft.
+  /// Forgets a reply once the app has reported it sent, kept its draft, or
+  /// found its community gone (after its "Reply not sent" notice is posted).
   public func settle(id: String) {
     lock.lock()
     defer { lock.unlock() }

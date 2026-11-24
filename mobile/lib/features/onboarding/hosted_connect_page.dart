@@ -40,7 +40,7 @@ class HostedConnectPage extends HookConsumerWidget {
             onPopInvokedWithResult: (didPop, _) {
               if (!didPop) stepsNavigator.currentState?.maybePop();
             },
-            child: _HostedSteps(
+            child: HostedSetupSteps(
               navigatorKey: stepsNavigator,
               flow: flow,
               onAddCommunity: onAddCommunity,
@@ -73,8 +73,10 @@ class HostedConnectPage extends HookConsumerWidget {
   }
 }
 
-class _HostedSteps extends HookWidget {
-  const _HostedSteps({
+/// The hosted setup steps, pushed as one screen above [HostedConnectPage].
+class HostedSetupSteps extends HookWidget {
+  const HostedSetupSteps({
+    super.key,
     required this.navigatorKey,
     required this.flow,
     this.onAddCommunity,

@@ -936,6 +936,34 @@ const AUX_PAGE_LIMIT: i64 = buzz_db::DEFAULT_MAX_PAGE_LIMIT;
 /// loop forever against a pathological write pattern.
 const AUX_MAX_PAGES: usize = 64;
 
+/// How far before the oldest retained window row the aux hops still look.
+/// Ingest rejects any event more than 900 s from the relay clock
+/// (`MAX_TIMESTAMP_DRIFT_SECS` in `handlers/ingest.rs`), so an aux event can
+/// predate its target by at most ~30 min; a day covers that with room for
+/// data that reached the store another way. The bound lets the `#e` GIN
+/// probes prune older `events` partitions instead of scanning the
+/// community's whole history.
+const WINDOW_AUX_SINCE_MARGIN_SECS: i64 = 24 * 60 * 60;
+
+/// Lower `created_at` bound for both window aux hops: the oldest aux target
+/// (Unix seconds) minus [`WINDOW_AUX_SINCE_MARGIN_SECS`]. Every aux event, in
+/// either hop, really happened after the row it chains back to, so its
+/// timestamp is at most twice the ingest drift before that row's; the same
+/// bound covers both hops.
+/// `None` when there are no targets (no hops run).
+fn window_aux_since(
+    target_created_at: impl IntoIterator<Item = i64>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let oldest = target_created_at.into_iter().min()?;
+    let since = oldest.saturating_sub(WINDOW_AUX_SINCE_MARGIN_SECS).max(0);
+    chrono::DateTime::from_timestamp(since, 0)
+}
+
+/// Unix seconds of a stored event, for [`window_aux_since`].
+fn stored_event_secs(event: &buzz_core::StoredEvent) -> i64 {
+    i64::try_from(event.event.created_at.as_secs()).unwrap_or(i64::MAX)
+}
+
 fn build_aux_query(
     community: buzz_core::CommunityId,
     target_ids: Vec<String>,
@@ -1109,9 +1137,16 @@ async fn handle_channel_window_filter(
         let mut seen_aux: std::collections::HashSet<nostr::EventId> =
             std::collections::HashSet::new();
         let mut hop_ids = row_ids_hex.clone();
+        let aux_since = window_aux_since(
+            window
+                .rows
+                .iter()
+                .map(|row| stored_event_secs(&row.stored_event)),
+        );
         for hop_kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
-            let aux_query =
+            let mut aux_query =
                 build_aux_query(tenant.community(), std::mem::take(&mut hop_ids), hop_kinds);
+            aux_query.since = aux_since;
             let aux_events = query_all_pages(
                 aux_query,
                 AUX_PAGE_LIMIT,
@@ -5615,6 +5650,170 @@ pub(crate) mod postgres_tests {
             Some("conflict: canvas changed since it was loaded"),
             "409 body must carry the exact canonical error value. Got: {body_text}"
         );
+    }
+
+    /// The channel-window aux closure reads both hops from one day before the
+    /// oldest retained row, not before the newest row or the wall clock. The
+    /// window holds a row from now and one from 40 days ago; aux on the old
+    /// row inside that bound still comes back, on the two-row page and on the
+    /// cursor page holding only the old row, and aux dated more than a day
+    /// before the old row is not read. Mutations: drop `aux_query.since`, or
+    /// widen the margin by more than a minute → the out-of-bound events return
+    /// → RED; anchor on the newest row (`.max()`) or on `Utc::now()` → the
+    /// in-bound events vanish → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn channel_window_aux_hops_read_from_a_day_before_the_oldest_row() {
+        use buzz_core::kind::{KIND_DELETION, KIND_REACTION};
+        use buzz_db::channel::{ChannelType, ChannelVisibility};
+
+        let state = bridge_handler_test_state()
+            .await
+            .expect("local Postgres and Redis");
+        let host = format!("window-aux-bound-{}.local", uuid::Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community");
+        let author = Keys::generate();
+        let (channel, _) = state
+            .db
+            .create_channel_with_id(
+                community.id,
+                uuid::Uuid::new_v4(),
+                &format!("window-aux-bound-{}", uuid::Uuid::new_v4().simple()),
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                author.public_key().to_bytes().as_slice(),
+                None,
+            )
+            .await
+            .expect("create channel");
+        let ch = channel.id.to_string();
+
+        // Ingest's ±900 s clock check and the store's channel-event floor
+        // both refuse backdated events, so the backdated aux events are
+        // stored channel-less, as a NIP-09 deletion may be; the aux hops are
+        // community-wide `#e` lookups and still find them. The old row must
+        // be in the channel, so it is written as historical data would be.
+        let now = chrono::Utc::now().timestamp() as u64;
+        let day = 86_400;
+        let build = |kind: u32, at: u64, target: Option<&nostr::EventId>| {
+            let mut builder = EventBuilder::new(Kind::Custom(kind as u16), "+")
+                .tag(Tag::parse(["h", ch.as_str()]).expect("h"));
+            if let Some(target) = target {
+                builder = builder.tag(Tag::parse(["e", &target.to_hex()]).expect("e"));
+            }
+            builder
+                .custom_created_at(nostr::Timestamp::from(at))
+                .sign_with_keys(&author)
+                .expect("sign")
+        };
+        let store = |kind: u32, at: u64, target: &nostr::EventId| {
+            let event = build(kind, at, Some(target));
+            let state = state.clone();
+            async move {
+                state
+                    .db
+                    .insert_event(community.id, &event, None)
+                    .await
+                    .expect("insert");
+                event.id
+            }
+        };
+        let new_row = build(9, now, None);
+        state
+            .db
+            .insert_event(community.id, &new_row, Some(channel.id))
+            .await
+            .expect("insert new row");
+        let old_at = now - 40 * day;
+        let old_row = build(9, old_at, None);
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("pool");
+        sqlx::query(
+            "INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at,channel_id) \
+             VALUES ($1,$2,$3,to_timestamp($4),$5,$6,$7,$8,now(),$9)",
+        )
+        .bind(community.id.as_uuid())
+        .bind(old_row.id.to_bytes().to_vec())
+        .bind(old_row.pubkey.to_bytes().to_vec())
+        .bind(old_at as f64)
+        .bind(9_i32)
+        .bind(serde_json::to_value(&old_row.tags).expect("tags"))
+        .bind(&old_row.content)
+        .bind(old_row.sig.serialize().to_vec())
+        .bind(channel.id)
+        .execute(&pool)
+        .await
+        .expect("insert old row");
+        let reaction_in = store(KIND_REACTION, old_at - day + 60, &old_row.id).await;
+        let reaction_out = store(KIND_REACTION, old_at - day - 60, &old_row.id).await;
+        let delete_in = store(KIND_DELETION, old_at - day + 120, &reaction_in).await;
+        let delete_out = store(KIND_DELETION, old_at - day - 120, &reaction_in).await;
+
+        let query = |filter: Value| {
+            let state = state.clone();
+            let host = host.clone();
+            let pubkey = author.public_key().to_hex();
+            async move {
+                let body = serde_json::to_vec(&[filter]).expect("json");
+                let (status, bytes) = post_query(state, &host, &pubkey, &body).await;
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "{}",
+                    String::from_utf8_lossy(&bytes)
+                );
+                serde_json::from_slice::<Vec<Value>>(&bytes).expect("event array")
+            }
+        };
+        let assert_old_row_aux = |events: &[Value], page: &str| {
+            let has = |id: &nostr::EventId| {
+                events
+                    .iter()
+                    .any(|e| e["id"].as_str() == Some(id.to_hex().as_str()))
+            };
+            assert!(has(&old_row.id), "{page}: old row: {events:?}");
+            assert!(
+                has(&reaction_in),
+                "{page}: hop 1 inside the bound: {events:?}"
+            );
+            assert!(
+                has(&delete_in),
+                "{page}: hop 2 inside the bound: {events:?}"
+            );
+            assert!(
+                !has(&reaction_out),
+                "{page}: hop 1 past the bound: {events:?}"
+            );
+            assert!(
+                !has(&delete_out),
+                "{page}: hop 2 past the bound: {events:?}"
+            );
+        };
+
+        let filter = serde_json::json!({
+            "kinds": [9], "#h": [&ch], "top_level": true, "include_aux": true,
+        });
+        assert_old_row_aux(&query(filter.clone()).await, "two-row page");
+
+        let mut paged = filter;
+        paged["limit"] = serde_json::json!(1);
+        let first = query(paged.clone()).await;
+        let bounds: Value = first
+            .iter()
+            .find(|e| e["kind"] == 39006)
+            .and_then(|e| e["content"].as_str())
+            .map(|content| serde_json::from_str(content).expect("bounds content"))
+            .expect("window bounds");
+        assert_eq!(bounds["has_more"], true, "{first:?}");
+        paged["until"] = bounds["next_cursor"]["created_at"].clone();
+        paged["before_id"] = bounds["next_cursor"]["id"].clone();
+        assert_old_row_aux(&query(paged).await, "cursor page");
     }
 
     // ──────────────────────────────────────────────────────────────────────────

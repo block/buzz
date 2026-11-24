@@ -121,6 +121,7 @@ mod tests {
     fn report() -> Report {
         Report {
             relay_url: "wss://relay.example".into(),
+            pubkey: "00".repeat(32),
             relay_version: Some("1.2.3".into()),
             passed: false,
             seconds: 1.5,

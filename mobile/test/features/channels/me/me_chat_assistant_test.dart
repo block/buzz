@@ -539,27 +539,32 @@ void main() {
           ],
           child: MaterialApp(
             theme: AppTheme.light(),
-            home: _Harness((value) => sent = value),
+            home: Row(
+              children: [
+                Expanded(child: _Harness((_) {})),
+                Expanded(child: _Harness((value) => sent = value)),
+              ],
+            ),
           ),
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.byTooltip('Change agent: Alpha'), findsOneWidget);
-      expect(find.byType(AvatarImage), findsOneWidget);
+      expect(find.byTooltip('Change agent: Alpha'), findsNWidgets(2));
+      expect(find.byType(AvatarImage), findsNWidgets(2));
       // Without artwork, the fallback initial follows the owner's label.
       expect(
         find.descendant(of: find.byType(AvatarImage), matching: find.text('A')),
-        findsOneWidget,
+        findsNWidgets(2),
       );
       expect(find.text('Choose follow-up assistant'), findsNothing);
       final readsBeforeSend = directoryReads;
-      await tester.tap(find.text('Send'));
+      await tester.tap(find.text('Send').last);
       await tester.pumpAndSettle();
       expect(sent, ['a']);
       expect(directoryReads, readsBeforeSend);
       expect(ownershipReads, 1);
       final readsBeforeOpening = directoryReads;
-      await tester.tap(find.byTooltip('Change agent: Alpha'));
+      await tester.tap(find.byTooltip('Change agent: Alpha').first);
       await tester.pumpAndSettle();
       expect(directoryReads, readsBeforeOpening);
       expect(find.text('Agents · 2'), findsOneWidget);
@@ -572,17 +577,17 @@ void main() {
       );
       members = ['a', 'b'];
       ProviderScope.containerOf(
-        tester.element(find.byType(_Harness)),
+        tester.element(find.byType(_Harness).first),
       ).invalidate(channelMembersProvider('chat'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Beta'));
       await tester.pumpAndSettle();
-      expect(find.byTooltip('Change agent: Beta'), findsOneWidget);
+      expect(find.byTooltip('Change agent: Beta'), findsNWidgets(2));
       expect(
         prefs.getString('me-assistant:${sync.community}:${sync.pubkey}:chat'),
         'b',
       );
-      await tester.tap(find.text('Send'));
+      await tester.tap(find.text('Send').last);
       await tester.pumpAndSettle();
       expect(sent, ['b']);
       expect(ownershipReads, 2);

@@ -87,8 +87,13 @@ class _SystemMessageRow extends HookConsumerWidget {
         ? message.reactions
         : _aggregateSystemMessageReactions(sourceMessages);
 
+    // Read through the page's container, and report failures from the page's
+    // navigator: the actions sheet can toggle after a new message rebuilds
+    // this row away.
+    final container = ProviderScope.containerOf(context, listen: false);
+    final pageContext = Navigator.of(context).context;
     void toggleGroupedReaction(String emoji) {
-      final actions = ref.read(channelActionsProvider);
+      final actions = container.read(channelActionsProvider);
       final reactedMessages = sourceMessages.where(
         (source) => source.reactions.any(
           (reaction) =>
@@ -98,18 +103,31 @@ class _SystemMessageRow extends HookConsumerWidget {
         ),
       );
       if (reactedMessages.isEmpty) {
-        actions.addReaction(message.id, emoji, targetAuthor: message.pubkey);
+        reportReactionFailure(
+          pageContext,
+          actions.addReaction(message.id, emoji, targetAuthor: message.pubkey),
+          adding: true,
+        );
         return;
       }
-      for (final source in reactedMessages) {
-        final reaction = source.reactions.firstWhere(
-          (candidate) =>
-              candidate.emoji == emoji &&
-              candidate.reactedByCurrentUser &&
-              candidate.currentUserReactionId != null,
-        );
-        actions.removeReaction(reaction.currentUserReactionId!, emoji);
-      }
+      reportReactionFailure(
+        pageContext,
+        Future.wait([
+          for (final source in reactedMessages)
+            actions.removeReaction(
+              source.reactions
+                  .firstWhere(
+                    (candidate) =>
+                        candidate.emoji == emoji &&
+                        candidate.reactedByCurrentUser &&
+                        candidate.currentUserReactionId != null,
+                  )
+                  .currentUserReactionId!,
+              emoji,
+            ),
+        ]),
+        adding: false,
+      );
     }
 
     void openReactionPopover(MessageLongPressDetails details) {
@@ -277,12 +295,15 @@ class _SystemMessageRow extends HookConsumerWidget {
                               messageId: message.id,
                               channelId: channelId,
                               reactions: reactions,
-                              onToggle: (emoji) =>
-                                  toggleReaction(ref, message, emoji),
+                              onToggle: (emoji) => toggleReaction(
+                                context,
+                                container,
+                                message,
+                                emoji,
+                              ),
                               showAddButton: isMember && !isArchived,
-                              onAddReaction: () => showAddReactionPicker(
+                              onAddReaction: addReactionPickerFor(
                                 context: context,
-                                ref: ref,
                                 message: message,
                               ),
                             ),
@@ -309,7 +330,8 @@ class _SystemMessageRow extends HookConsumerWidget {
                     channelId: channelId,
                     reactions: reactions,
                     onToggle: groupedMessages == null
-                        ? (emoji) => toggleReaction(ref, message, emoji)
+                        ? (emoji) =>
+                              toggleReaction(context, container, message, emoji)
                         : toggleGroupedReaction,
                   ),
                 ),

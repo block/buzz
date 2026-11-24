@@ -17,3 +17,17 @@ List<List<String>> buildUpdateChannelTags({
     if (description != null) ['about', description.trim()],
   ];
 }
+
+/// Convert the existing stream without changing its visibility or join role.
+List<List<String>> buildSoloConversionTags(
+  String channelId,
+  List<String> labels,
+) {
+  final retained = labels.where((label) => label != 'buzz.solo');
+  return [
+    ['h', channelId],
+    ['unlisted', 'false'],
+    if (retained.isEmpty) ['t', ''],
+    for (final label in retained) ['t', label],
+  ];
+}

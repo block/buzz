@@ -48,7 +48,7 @@ landed. Three feature branches are active, each one a channel. You're in.
 Everything is here.
 
 A new contributor finds the project the same way. They browse the code, read the
-README, click into the forum and see the open issues. They read a design doc in the
+README, click into the forum, and see the open issues. They read a design doc in the
 canvas. They understand the project before they write a line of code. Then they hit
 "Connect on Buzz" and they're in the community. No separate onboarding flow. No
 "read our wiki at wiki.myproject.com and our forum at forum.myproject.com and our
@@ -200,6 +200,16 @@ is yours. If you move to a different relay, your identity comes with you. Your
 contribution history is portable. The work you did is yours. If `myproject.com`
 goes down, your npub still exists. Your history still exists. You stand up a new
 relay, point your domain at it, and you're back. The project continues.
+
+Your key is yours; the community governs its shared work. Three parties hold
+three different kinds of authority. You hold your key. A community's owners and
+admins set that community's rules. The hosting operator sets deployment
+constraints, like "repos here are never public." On your own relay you are the
+community and the operator at once. On managed hosting, the operator's authority
+stops at its stated constraints, and the community's rules stay the community's.
+In a community that governs its code, your identity and your public work still
+travel with you, but private records stay with the community that kept them.
+See [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md).
 
 ---
 

@@ -66,6 +66,7 @@ class BuilderlabAccountClient {
     Uri? accountOrigin,
     this.onSessionChanged,
     DiagnosticReporter diagnostics = const NoopDiagnosticReporter(),
+    this.readOnlySession = false,
     DateTime Function() now = DateTime.now,
   }) : _now = now,
        _diagnostics = diagnostics,
@@ -90,6 +91,13 @@ class BuilderlabAccountClient {
   /// cleared, so a signed-out session is never left shared; a failed share of
   /// an adopted session is retried at the next adopt.
   final Future<void> Function(String? credential)? onSessionChanged;
+
+  /// Uses the saved session without ever saving, replacing or deleting it,
+  /// for a caller that shares the record with the app that owns it (a
+  /// background push wake). A rejected credential is only dropped from memory,
+  /// since the owner may have saved a newer session while the check was
+  /// pending; signing in or out is refused.
+  final bool readOnlySession;
   static const _prefix = '/api/goose';
 
   /// Remote-agent registry routes, shared with desktop.
@@ -236,6 +244,9 @@ class BuilderlabAccountClient {
     required String verifier,
     bool Function()? isCurrent,
   }) {
+    if (readOnlySession) {
+      throw StateError('a read-only session client cannot sign in');
+    }
     // Taken at the call, so an exchange queued before a sign-out can never
     // sign back in after it.
     final epoch = _sessionEpoch;
@@ -388,8 +399,11 @@ class BuilderlabAccountClient {
 
   /// Public identity metadata only. Private-key recovery belongs to the identity
   /// storage owner, which must derive and verify the key before any persistence.
-  Future<Map<String, dynamic>> currentIdentity() =>
-      post('/v1/buzz/nostr-identities/current', {});
+  ///
+  /// [signer] is the key a community is asking for, when that may not be the
+  /// active member's: a bad reply is then reported only while reports name it.
+  Future<Map<String, dynamic>> currentIdentity({String? signer}) =>
+      post('/v1/buzz/nostr-identities/current', {}, signer: signer);
 
   /// Saves a successfully admitted destination to the same account, even if
   /// another session operation was queued before this request runs.
@@ -425,12 +439,14 @@ class BuilderlabAccountClient {
     String path,
     Map<String, dynamic> body, {
     String? expectedSubject,
-  }) => _post(path, body, expectedSubject: expectedSubject);
+    String? signer,
+  }) => _post(path, body, expectedSubject: expectedSubject, signer: signer);
 
   Future<Map<String, dynamic>> _post(
     String path,
     Map<String, dynamic> body, {
     String? signingKey,
+    String? signer,
     String? expectedSubject,
   }) {
     if (!RegExp(r'^/v1/buzz(/[a-z0-9_-]+)+$').hasMatch(path) &&
@@ -455,6 +471,7 @@ class BuilderlabAccountClient {
           credential: credential,
           body: body,
           signingKey: signingKey,
+          signer: signer,
         );
       } on AccountFailure catch (failure) {
         if (failure == AccountFailure.denied &&
@@ -503,6 +520,7 @@ class BuilderlabAccountClient {
         }
         final pubkey = AccountIdentityStore.publicKeyForNsec(nsec);
         // Never creates a binding: the key must already belong to the account.
+        // Gated on [pubkey]: the community may be removed, not the active one.
         final current = await _request(
           '/v1/buzz/nostr-identities/current',
           credential: signedOut.credential,
@@ -524,6 +542,9 @@ class BuilderlabAccountClient {
   /// Runs at once, without waiting for pending account requests; none of them
   /// can adopt or save a session after it.
   Future<void> clearLocalSession() {
+    if (readOnlySession) {
+      throw StateError('a read-only session client cannot sign out');
+    }
     if (_disposed) return Future.error(AccountFailure.unavailable);
     _sessionEpoch++;
     return _storageQueue.run(_clear);
@@ -531,7 +552,18 @@ class BuilderlabAccountClient {
 
   /// Ends a session a request found rejected, unless a sign-out already did.
   Future<void> _clearSince(int epoch) => _storageQueue.run(() async {
-    if (epoch == _sessionEpoch) await _clear();
+    if (epoch != _sessionEpoch) return;
+    if (readOnlySession) {
+      _credential = null;
+      _unshared = null;
+      _account = null;
+      if (!_disposed) {
+        _subject.value = null;
+        _sessionGeneration.value++;
+      }
+      return;
+    }
+    await _clear();
   });
   Future<void> _clear() async {
     // A session saved but not yet restored (an offline launch) still backs

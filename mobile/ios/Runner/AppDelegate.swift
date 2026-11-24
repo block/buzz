@@ -49,6 +49,7 @@ import os.log
   private var ageSignalRequestID: UUID?
   private var ageSignalResult: FlutterResult?
   private var concentricSheetSurfaceChannel: FlutterMethodChannel?
+  private var conversationMenu: ConversationMenu?
   private var nativePhotoZoomCoordinator: NativePhotoZoomCoordinator?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
   private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
@@ -85,6 +86,9 @@ import os.log
       registrar.register(IosMediaCarouselFactory(messenger: registrar.messenger()), withId: "buzz/ios_media_carousel")
     }
 
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "ConversationMenuRow") {
+      conversationMenu = ConversationMenu(messenger: registrar.messenger()) { registrar.viewController }
+    }
     let messenger = engineBridge.applicationRegistrar.messenger()
     let keyboardChannel = FlutterMethodChannel(
       name: "buzz/community_keyboard", binaryMessenger: messenger)
@@ -317,15 +321,6 @@ import os.log
       segmentedControlRegistrar.register(
         NativeSegmentedControlFactory(messenger: messenger),
         withId: "buzz/native_segmented_control"
-      )
-    }
-
-    if let skinToneRegistrar = engineBridge.pluginRegistry.registrar(
-      forPlugin: "BuzzNativeSkinToneControl"
-    ) {
-      skinToneRegistrar.register(
-        NativeSkinToneControlFactory(messenger: messenger),
-        withId: "buzz/native_skin_tone_control"
       )
     }
 
@@ -861,6 +856,19 @@ import os.log
             relayURL: relayURL
           )
           await MainActor.run { result(record.flutterArguments) }
+        } catch BuzzDevPushEnrollmentError.invalidGatewayResponse(let route) {
+          // Its own code, with no text from the reply, so Dart can report
+          // contract drift without parsing messages. The details are only the
+          // fixed route label, so local logs still tell the routes apart.
+          await MainActor.run {
+            result(
+              FlutterError(
+                code: "gateway_response_invalid",
+                message: "The push gateway sent a response the app cannot read.",
+                details: route
+              )
+            )
+          }
         } catch {
           await MainActor.run {
             result(
