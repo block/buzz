@@ -417,35 +417,6 @@ void main() {
     expect(details.ttlSeconds, 86400);
   });
 
-  test('only a Solo chat nobody has named reads its name as a title', () {
-    const stored = '![video](https://relay.example.org/media/4a4a4a4a4a4a';
-    for (final (labels, shown) in [
-      (['stream', 'buzz.solo'], 'Video'),
-      // Desktop marks a name someone chose, which is shown as chosen.
-      (['stream', 'buzz.solo', 'buzz.session.named'], stored),
-      (['stream'], stored),
-      (['forum', 'buzz.solo'], stored),
-    ]) {
-      final details = channelDetailsFromEvent(
-        NostrEvent(
-          id: 'meta-1',
-          pubkey: 'creator',
-          createdAt: 1700000000,
-          kind: 39000,
-          tags: [
-            ['d', _channelId],
-            ['name', stored],
-            for (final label in labels) ['t', label],
-            ['private'],
-          ],
-          content: '',
-          sig: 'sig',
-        ),
-      );
-      expect(details.name, shown, reason: '$labels');
-    }
-  });
-
   test('omits archivedAt when no archived tag is present', () {
     final details = channelDetailsFromEvent(
       NostrEvent(

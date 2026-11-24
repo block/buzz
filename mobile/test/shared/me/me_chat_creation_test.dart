@@ -9,79 +9,161 @@ import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
-  test('first-message title follows desktop plain-text rules', () {
-    for (final (message, title) in [
-      ('  Plan\n  my trip  ', 'Plan my trip'),
-      ('@Alice help me', '@Alice help me'),
+  // Desktop renames a chat only while its name is still the title desktop
+  // derives from the first message, so these are desktop's cases for
+  // `startingChatTitle`, from `src/features/solo/chat-title.test.ts` in
+  // block/buzz-app at 0785a47f26, written as mobile publishes a message:
+  // its content and `imeta` tags. Change the two together.
+  //
+  // Not ported: cases about desktop's composer state (recipient chips and
+  // staged GIFs), and `isStartingChatTitle`, which only desktop asks.
+  test('first-message title follows desktop rules', () {
+    final media = 'https://relay.example/media/${'a' * 64}';
+    final source = 'buzz://message?channel=design&id=${'c' * 64}';
+    List<String> imeta(String url, String type, [String? filename]) => [
+      'imeta',
+      'url $url',
+      'm $type',
+      if (filename != null) 'filename $filename',
+    ];
+    final video = imeta('$media.mp4', 'video/mp4');
+    final image = imeta('$media.png', 'image/png');
+    final photo = imeta('$media.jpg', 'image/jpeg');
+    final file = imeta('$media.txt', 'text/plain', 'notes.txt');
+    for (final (message, tags, title) in <(String, List<List<String>>, String)>[
+      // uses readable channel labels before truncating the title
       (
-        'buzz://message?channel=source Plan the next step',
-        'Plan the next step',
-      ),
-      ('buzz://message?channel=source', 'Chat'),
-      ('### Heading', 'Heading'),
-      ('🐝' * 90, '🐝' * 80),
-      ('> Ship it Friday\n>\n> ok?\n\nSummarize this', 'Summarize this'),
-      ('> Ship it Friday\n> ok?\n\n', 'Ship it Friday ok?'),
-    ]) {
-      expect(startingMeChatTitle(message), title);
-    }
-  });
-  test('a media or link first message keeps its stored name and reads as a '
-      'title', () {
-    // As the composer sends attachments: Markdown after the text, pointing at
-    // a content-addressed relay URL longer than a title.
-    final media = 'https://relay.example.org/media/${'4a' * 32}';
-    const page = 'https://www.example.com/releases/2026/11/notes';
-    for (final (message, stored, shown) in [
-      // The reported chat: only a video. Desktop renames a chat only while
-      // its name is still this literal, so it must stay what is stored.
-      (
-        '\n![video]($media.mp4)',
-        '![video]($media.mp4)'.substring(0, 80),
-        'Video',
-      ),
-      ('\n![image]($media.jpg)', null, 'Image'),
-      ('\n![audio]($media.m4a)', null, 'Audio'),
-      ('\n[voice-note-1732.mp4]($media.mp4)', null, 'Audio'),
-      ('\n[report.pdf]($media.pdf)', null, 'report.pdf'),
-      // Several attachments fit a title only at short addresses; at a
-      // relay's, the cut leaves the first.
-      ('\n![image]($media.jpg)\n![image]($media.png)', null, 'Image'),
-      ('\n![image](https://x.y/a)\n![image](https://x.y/b)', null, '2 images'),
-      (
-        '\n![video](https://x.y/a.mp4)\n![video](https://x.y/b.mp4)',
-        null,
-        '2 videos',
+        r'what is this about [\#design-and-research-work](buzz://channel/b17e217e-1234-4567-8901-123456789abc)',
+        [],
+        'what is this about #design-and-research-work',
       ),
       (
-        '\n![image](https://x.y/a)\n![video](https://x.y/b)\n![audio](https://x.y/c)',
-        null,
+        'Read [guide](https://example.com/${'x' * 120}) then discuss',
+        [],
+        'Read guide then discuss',
+      ),
+      // reads escaped and formatted labels across multiple links
+      (
+        r'Compare [**A** \[one\]](https://example.com/a) with [`B` &amp; C](https://example.com/b)',
+        [],
+        'Compare A [one] with B & C',
+      ),
+      (
+        'Read [the guide][ref]\n\n[ref]: https://example.com',
+        [],
+        'Read the guide [ref]: https://example.com',
+      ),
+      // preserves code, malformed links and unrelated Markdown source
+      for (final text in [
+        'Keep `[label](https://example.com)` literal',
+        'Keep [label](unfinished',
+        r'Keep **bold** and literal \# text',
+      ])
+        (text, [], text),
+      // truncates readable labels at 80 Unicode code points
+      ('[${'🐝' * 81}](https://example.com)', [], '🐝' * 80),
+      // titles a linked chat from the prompt after its leading source link
+      ('$source Investigate this failure', [], 'Investigate this failure'),
+      ('$source\n$source Compare both', [], 'Compare both'),
+      // never titles a link-only prompt with the link, but keeps later links
+      ('buzz://channel/design', [], 'Chat'),
+      ('Look at buzz://channel/design', [], 'Look at buzz://channel/design'),
+      // titles a message that is only media by what it sent
+      ('\n![video]($media.mp4)', [video], 'Video'),
+      ('\n![image]($media.png)', [image], 'Image'),
+      ('\n[notes.txt]($media.txt)', [file], 'Attachment'),
+      (
+        '\n![image]($media.png)\n![image]($media.jpg)',
+        [image, photo],
+        '2 images',
+      ),
+      (
+        '\n![image]($media.png)\n![video]($media.mp4)\n[notes.txt]($media.txt)',
+        [image, video, file],
         '3 attachments',
       ),
-      // Text keeps its words, without the media beside it.
-      ('Look at this\n![image]($media.jpg)', null, 'Look at this'),
-      ('![image](https://x.y/a) before and after', null, 'before and after'),
-      // The cut can land in a trailing attachment's address, at its opening
-      // bracket, or inside its label.
-      for (final length in [69, 70, 71, 74])
-        ('${'x' * length}\n![image]($media.jpg)', null, 'x' * length),
-      // Only web addresses: the site of one, or how many.
-      (page, page, 'Link to example.com'),
-      ('<$page>', null, 'Link to example.com'),
-      ('[$page]($page)', null, 'Link to example.com'),
-      ('$page/${'a' * 80}', null, 'Link to example.com'),
-      ('$page https://example.org/b', null, '2 links'),
-      // A link with its own label reads as the label, cut off or not.
-      ('[Release notes]($page)', null, 'Release notes'),
-      ('[Release notes]($media)', null, 'Release notes'),
-      ('Read [the guide]($page) first', null, 'Read the guide first'),
-      // An address among other words stays as written.
-      ('Summarize $page', 'Summarize $page', 'Summarize $page'),
-      ('Plan my trip', 'Plan my trip', 'Plan my trip'),
+      ('![wave](https://gif.example/1)', [], 'Image'),
+      ('![video]($media.mp4)', [], 'Video'),
+      ('![a]($media.png)\n![b]($media.jpg)', [], '2 images'),
+      ('[notes.txt](<$media.txt>)', [file], 'Attachment'),
+      // titles text sent with media by the text alone
+      ('See attached\n![video]($media.mp4)', [video], 'See attached'),
+      (
+        'What is this?\n\n![shot.png](<$media.png>)\n\n[notes.txt](<$media.txt>)',
+        [image, file],
+        'What is this?',
+      ),
+      // titles a message that is only web links by their site, never the
+      // address
+      ('https://www.example.com/a/b?c=d#e', [], 'Link to example.com'),
+      ('<https://example.com/a>', [], 'Link to example.com'),
+      (
+        '[https://example.com/a](https://example.com/a)',
+        [],
+        'Link to example.com',
+      ),
+      ('https://a.example/1\nhttps://b.example/2', [], '2 links'),
+      ('[Release notes](https://example.com/a)', [], 'Release notes'),
+      (
+        'Summarize https://example.com/a',
+        [],
+        'Summarize https://example.com/a',
+      ),
+      ('https://example.com/${'x' * 120}', [], 'Link to example.com'),
+
+      // Mobile's own cases. Plain text, and what its composer attaches.
+      ('  Plan\n  my trip  ', [], 'Plan my trip'),
+      ('@Alice help me', [], '@Alice help me'),
+      ('### Heading', [], 'Heading'),
+      ('🐝' * 90, [], '🐝' * 80),
+      (
+        '\n![image]($media.png)\n![image]($media.jpg)\n![image]($media.webp)',
+        [image, photo, imeta('$media.webp', 'image/webp')],
+        '3 images',
+      ),
+      (
+        '\n![video]($media.mp4)\n![video]($media.mov)',
+        [video, imeta('$media.mov', 'video/quicktime')],
+        '2 videos',
+      ),
+      // Desktop words audio, and a voice note either build records, as any
+      // other file.
+      (
+        '\n![audio]($media.m4a)',
+        [imeta('$media.m4a', 'audio/mp4')],
+        'Attachment',
+      ),
+      (
+        '\n[voice-note-1732.mp4]($media.mp4)',
+        [imeta('$media.mp4', 'video/mp4', 'voice-note-1732.mp4')],
+        'Attachment',
+      ),
+      // The same file attached twice is one attachment.
+      ('\n![image]($media.png)\n![image]($media.png)', [image, image], 'Image'),
+      // A link to a file that was not attached keeps its label.
+      ('[notes.txt]($media.txt)', [], 'notes.txt'),
+      ('Look\n![video]($media.mp4)\nhere', [video], 'Look here'),
+      (
+        '```\nlist[0](x) ![a](https://x.example/a.png)\n```',
+        [],
+        '``` list[0](x) ![a](https://x.example/a.png) ```',
+      ),
+      (
+        r'Not \[a link](https://example.com)',
+        [],
+        r'Not \[a link](https://example.com)',
+      ),
+      // Media counts only at an HTTPS address, as desktop reads it.
+      (
+        '\n![video](http://relay.example/a.mp4)',
+        [imeta('http://relay.example/a.mp4', 'video/mp4')],
+        'Chat',
+      ),
+      // Start Solo chat's quoted source is context: mobile's rule alone.
+      ('> Ship it Friday\n>\n> ok?\n\nSummarize this', [], 'Summarize this'),
+      ('> Ship it Friday\n> ok?\n\n', [], 'Ship it Friday ok?'),
     ]) {
-      final name = startingMeChatTitle(message);
-      if (stored != null) expect(name, stored, reason: message);
-      expect(readableMeChatTitle(name), shown, reason: message);
+      expect(startingMeChatTitle(message, tags: tags), title, reason: message);
     }
   });
   test(

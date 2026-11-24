@@ -1,20 +1,6 @@
 import 'package:flutter/foundation.dart';
 
-import '../../shared/me/me_chat_title.dart';
-import '../../shared/relay/nostr_models.dart';
-
 const Object _sentinel = Object();
-
-/// The name the app shows for the channel [data] describes. A Solo chat keeps
-/// its starting title until someone names it, which desktop records with the
-/// `buzz.session.named` label; until then it shows [readableMeChatTitle].
-/// Every other channel shows its name.
-String shownChannelName(ChannelData data) =>
-    data.channelType == 'stream' &&
-        data.labels.contains('buzz.solo') &&
-        !data.labels.contains('buzz.session.named')
-    ? readableMeChatTitle(data.name)
-    : data.name;
 
 /// Shown when a private-channel add is refused, so a missing Invite action
 /// reads as a rule rather than a bug.

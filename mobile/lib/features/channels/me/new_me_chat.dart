@@ -62,7 +62,7 @@ Future<void> _openMeChatDraft(
       builder: (context) => AlertDialog(
         title: const Text('Unfinished chat'),
         content: Text(
-          'Resume “${readableMeChatTitle(unfinished.name)}”, or discard its setup to start another chat. Any channel and messages already created are kept in Home or Solo.',
+          'Resume “${unfinished.name}”, or discard its setup to start another chat. Any channel and messages already created are kept in Home or Solo.',
         ),
         actions: [
           TextButton(
