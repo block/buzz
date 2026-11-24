@@ -160,7 +160,7 @@ When a send ends, the relay publishes one status. The exception is the author's 
 | `failed` | `attachment` | At release, an attachment is no longer available |
 | `failed` | `rejected` | Release is refused for good for any other reason |
 | `cancelled` | `banned` | The author or the author's owner is banned in the community |
-| `cancelled` | `disconnected` | A NIP-FI disconnect applies to the author or the author's owner ([Federated identity](#federated-identity)) |
+| `cancelled` | `disconnected` | A NIP-FI disconnect record fences the admission that carried the send ([Federated identity](#federated-identity)) |
 | `cancelled` | `channel_deleted` | The channel is deleted |
 | `cancelled` | `withdrawn` | The relay operator ends the send before a version change that could not keep it |
 
@@ -293,7 +293,7 @@ That delivers a late message, but a reader that records a channel as read up to 
 
 ## Federated identity
 
-In a community that requires NIP-FI, a send is a deferred action under [Deferred actions](NIP-FI.md#deferred-actions), because the relay releases it without a session. Each accepted generation is an acceptance of the deferred action, so the relay records the admission that carried it. That section defines which sends a disconnect command cancels: those of the target key and of every key it owns, accepted under the command's issuer, in every community. It also defines when check 13 refuses an instruction. A relay MUST NOT enable send later in such a community unless it implements that section.
+In a community that requires NIP-FI, a send is a deferred action under [Deferred actions](NIP-FI.md#deferred-actions), because the relay releases it without a session. Each accepted generation is an acceptance of the deferred action, so the relay records the admission that carried it. That section defines which sends a disconnect command cancels: those of the target key and of every key it owns, accepted under the command's issuer and within its scope, in every community. It also defines when check 13 refuses an instruction. A relay MUST NOT enable send later in such a community unless it implements that section.
 
 Nothing else in NIP-FI ends an accepted send. At release the relay does not contact the issuer, require a recent assertion or evaluate the community's issuer policy again. An issuer that only stops issuing assertions does not stop a pending send.
 
