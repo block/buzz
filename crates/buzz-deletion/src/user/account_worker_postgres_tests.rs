@@ -297,6 +297,29 @@ async fn real_account_cap_saves_failure_then_retry_saves_success() {
             .started_at,
         started
     );
+
+    let error = run(
+        &f.store,
+        f.request,
+        "profile-worker",
+        &f.options(100),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert_eq!(
+        error,
+        "real handler purge_profile is not implemented for deletion"
+    );
+    let stopped = f.inspect_released().await;
+    let stage = stopped.stage_history.iter().find(|s| s.is_current).unwrap();
+    assert_eq!(stage.stage, "purge_profile");
+    assert_eq!(stage.status, "failed");
+    assert_eq!(stage.last_error.as_deref(), Some(error.as_str()));
+    assert_eq!(stopped.request.status, "retry_wait");
+    assert_eq!(stopped.execution.last_error, stage.last_error);
+    assert!(stopped.execution.next_attempt_at.is_some());
 }
 
 #[tokio::test]

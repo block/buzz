@@ -531,22 +531,17 @@ async fn real_user_requires_gate_then_global_media_before_community_cleanup() {
         stage_delay: Duration::ZERO,
         no_agents_in: vec![],
     };
-    let error = super::super::handlers::dispatch(&store, &lease, &gate, &options)
-        .await
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("real handler gate_user is not implemented"));
-    assert_eq!(
-        store.inspect(request.id).await.unwrap().stage_history[0].status,
-        "pending"
-    );
-    // Seed a completed gate to exercise routing independently of its unfinished handler.
-    store.start_stage(&lease, gate.id).await.unwrap();
-    store
-        .save_stage_success(&lease, gate.id, serde_json::json!({"fixture": true}))
+    super::super::handlers::dispatch(&store, &lease, &gate, &options)
         .await
         .unwrap();
+    let saved = store.inspect(request.id).await.unwrap();
+    assert_eq!(saved.stage_history[0].status, "completed");
+    assert_eq!(
+        saved.stage_history[0].metadata_json["result"],
+        serde_json::json!({
+            "execution_mode": "delete", "implemented": false, "account_erasure_complete": false
+        })
+    );
     let NextStage::Stage(media) = store.get_next_stage(&lease, Some(gate.id)).await.unwrap() else {
         panic!("expected media");
     };

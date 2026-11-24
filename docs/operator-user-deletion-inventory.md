@@ -7,8 +7,8 @@ inventory preview → submit → inspect → approve → run → inspect complet
 ```
 
 The demo uses synthetic handlers. For real subjects, `run --read-only` records
-the existing handlers’ observations. A new destructive run stops at the
-unimplemented account gate. See [the executor guide](operator-user-deletion-executor.md)
+the existing handlers’ observations. Both modes record the account gate as unimplemented and continue.
+Stop all writers before starting a destructive run. See [the executor guide](operator-user-deletion-executor.md)
 for the optional row-identifier file and owned-community handoff.
 
 Run this example in an isolated development database. Production inventory preview may use

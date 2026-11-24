@@ -8,7 +8,7 @@ use url::Url;
 use uuid::Uuid;
 
 mod user_inventory_support;
-use user_inventory_support::{real_workflow_stops_at_gate, workflow_cli};
+use user_inventory_support::{step_real_workflow_past_gate, workflow_cli};
 
 fn admin_binary() -> std::ffi::OsString {
     // Nextest relocates binaries when extracting an archive. Cargo's build-time
@@ -313,7 +313,7 @@ async fn inventory_submission_completes_demo_but_refuses_unfinished_real_workflo
                 .all(|s| s["status"] == "completed" && s["is_current"] == false));
             done
         } else {
-            real_workflow_stops_at_gate(&url, id).await
+            step_real_workflow_past_gate(&url, id).await
         };
         let inspected = workflow_cli(&url, &["inspect", id], true).await;
         assert_eq!(inspected, done);
@@ -346,7 +346,7 @@ async fn inventory_submission_completes_demo_but_refuses_unfinished_real_workflo
         )
         .await;
     }
-    // Demo completion and refusal of the real workflow both preserve membership.
+    // The demo and the placeholder account gate preserve membership.
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM channel_members WHERE community_id = $1 AND pubkey = decode($2, 'hex')")
         .bind(community).bind(&key).fetch_one(&pool).await.unwrap();
     assert_eq!(count, 1);
@@ -392,11 +392,10 @@ async fn inventory_approval_and_resume_use_saved_account_identity_without_resolu
         true,
     )
     .await;
-    let stopped = real_workflow_stops_at_gate(&url, id).await;
-    assert_eq!(stopped["target"], account);
-    assert_eq!(stopped["inventory_manifest"], saved["inventory_manifest"]);
-    for stage in stopped["stage_history"].as_array().unwrap() {
+    let stepped = step_real_workflow_past_gate(&url, id).await;
+    assert_eq!(stepped["target"], account);
+    assert_eq!(stepped["inventory_manifest"], saved["inventory_manifest"]);
+    for stage in stepped["stage_history"].as_array().unwrap() {
         assert_eq!(stage["metadata_json"]["inputs"]["target"], account);
-        assert_eq!(stage["status"], "pending");
     }
 }

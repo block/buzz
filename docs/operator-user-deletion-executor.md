@@ -1,8 +1,9 @@
 # Run and recover a user-deletion workflow
 
 The workflow orders account gating, media cleanup, and per-community content
-cleanup. Destructive runs stop at the unimplemented account gate; they cannot
-complete through placeholder handlers. Demo requests simulate all stages and
+cleanup. Both modes record the account gate as unimplemented and continue.
+Stop writers before destructive runs. Delete mode stops if it reaches
+`purge_profile` or `global_cleanup`, whose workflow delete handlers are unimplemented. Demo requests simulate all stages and
 never delete media or content.
 
 Direct `media-batches` and `content-batches` commands remain available for
@@ -158,10 +159,9 @@ in `user/workflow.rs`; the database transition transaction contains no
 stage-name comparisons or two-community requirement.
 
 The handler gets the whole row. `metadata_json.inputs` holds the target and
-community input. The handler marks the row running and either saves success
-under `metadata_json.result` or records a failure and retry deadline. Returning
-success from the handler means its outcome was saved, including a retryable
-failure. Failure to save propagates out of the worker.
+community input. The dispatcher starts the stage before calling its handler. It saves a successful
+result under `metadata_json.result`. On a handler error it saves the stage as
+`failed` and the request as `retry_wait`, with the error and retry deadline.
 
 ### Durable state
 
@@ -274,9 +274,8 @@ INVENTORY_DIGEST=$(printf '%s\n' "$REQUEST_JSON" | jq -r '.inventory_digest')
 ./target/debug/buzz-admin user-deletions run "$REQUEST_ID" --delete
 ```
 
-Approval creates no stages. A real run requires `--delete`, then refuses the
-unimplemented `gate_user` handler and leaves it pending. Repeating the run does
-not fabricate progress. Use `--target demo:example` instead of `--pubkey` at
+Approval creates no stages. The first delete step saves `implemented: false`
+for `gate_user` and advances to `purge_media`. Use `--target demo:example` instead of `--pubkey` at
 submission to exercise the full synthetic workflow without deletion.
 
 The routing requires saved gate success before media, and saved media success
