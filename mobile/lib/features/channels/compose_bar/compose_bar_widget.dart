@@ -535,6 +535,9 @@ class ComposeBar extends HookConsumerWidget {
         () => onSend(content, mentionPubkeys, mediaTags: mediaTags),
       );
       final submittedDraftRevision = draftRevision.value;
+      final cleanupStoredDraft = ref
+          .read(composeDraftsProvider.notifier)
+          .cleanupAfterSend(draftKey);
       // Resolved before any await: see
       // `_reportSendCancelledByCommunitySwitch`.
       final messenger = ScaffoldMessenger.maybeOf(context);
@@ -654,6 +657,8 @@ class ComposeBar extends HookConsumerWidget {
         messenger: messenger,
       );
 
+      // Another submission may have finished the same asynchronous checks.
+      if (!context.mounted || isSending.value) return;
       isSending.value = true;
       try {
         if (queuedAttachments.isEmpty) {
@@ -663,6 +668,7 @@ class ComposeBar extends HookConsumerWidget {
             controller: controller,
             draftRevision: draftRevision,
             submittedDraftRevision: submittedDraftRevision,
+            cleanupStoredDraft: cleanupStoredDraft,
             focusNode: focusNode,
             clearComposer: clearComposer,
             addMentionedNonMembers: addMentionedNonMembers,
@@ -1082,6 +1088,7 @@ class ComposeBar extends HookConsumerWidget {
 
     return _ComposerDockFrame(
       expansionAnimation: composerExpansionController,
+      hasDraft: draftText.isNotEmpty,
       forceFullWidth: _voiceNoteFullWidth(voiceNote, attachments.value),
       child: _ComposerInputTray(
         tool: inputTool,

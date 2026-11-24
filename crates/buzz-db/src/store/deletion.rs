@@ -161,6 +161,7 @@ pub const PENDING_SCOPED_TABLES: &[&str] = &[
     "identity_retirement_actions",
     "identity_retirement_holds",
     "identity_retirement_workflows",
+    "search_backfill",
 ];
 
 /// Tenant tables an expand migration may add between a deletion's approval
@@ -177,6 +178,7 @@ pub const APPROVAL_FORWARD_TABLES: &[&str] = &[
     "identity_retirement_actions",
     "identity_retirement_holds",
     "identity_retirement_workflows",
+    "search_backfill",
     "search_outbox",
 ];
 
@@ -9713,8 +9715,6 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         (db, store, scratch)
     }
 
-    /// Approve, claim, fence, drain and remove bindings, leaving the request
-    /// ready for `purge_postgres`.
     /// Once a community is fenced for deletion, admission refuses its writes
     /// (and so its outbox rows) and claims skip it; the purge removes its
     /// outbox rows and keeps another community's.
@@ -9778,6 +9778,8 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         assert_eq!(queued(bystander).await, 1);
     }
 
+    /// Approve, claim, fence, drain and remove bindings, leaving the request
+    /// ready for `purge_postgres`.
     async fn fence_and_drain(
         store: &DeletionStore,
         request: &DeletionRequest,

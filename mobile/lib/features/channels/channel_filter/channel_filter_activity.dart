@@ -60,9 +60,17 @@ final channelFilterActivityProvider = FutureProvider.autoDispose
                 .firstOrNull
                 ?.lastMessageAt,
             channelsNotifier.activityRevisionFor(channelId),
+            channelsNotifier.filterEvidenceFor(channelId)?.event?.id,
           ),
         ),
       );
+      final evidence = channelsNotifier.filterEvidenceFor(channelId);
+      if (evidence != null) {
+        final event = evidence.event;
+        return event == null
+            ? null
+            : compute(verifiedFilterActivity, [event.toJson()]);
+      }
       ref.listen(appLifecycleProvider, (_, next) {
         if (next == AppLifecycleState.resumed) ref.invalidateSelf();
       });

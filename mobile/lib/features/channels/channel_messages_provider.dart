@@ -6,6 +6,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/channels/saved_message_store.dart';
 import '../../shared/relay/relay.dart';
 import 'channel_event_order.dart';
+import 'channel_open_timing.dart';
+import 'edit_authority.dart';
 import 'pending_local_messages_provider.dart';
 import 'saved_channel_page.dart';
 import 'channel_window.dart';
@@ -17,10 +19,6 @@ import 'timeline_message.dart';
 part 'channel_messages_provider/thread_summaries.dart';
 part 'channel_messages_provider/pagination.dart';
 part 'channel_messages_provider/notices.dart';
-
-// Channel history keeps partial reply evidence; full threads stay route-scoped.
-const _maxCachedRepliesPerRoot = 256;
-const _maxCachedReplies = 2048;
 
 /// How long a chat nobody shows keeps its live subscription. A brief cover,
 /// such as a profile pushed over the chat, returns without a catch-up fetch.
@@ -35,7 +33,8 @@ const _channelLiveEventKinds = [
 /// subscription first, then syncs history via the server-assembled channel
 /// window fast path, falling back to the legacy websocket history path when the
 /// relay does not return a valid NIP-CW bounds overlay.
-class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
+class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>>
+    with _SummaryEditAuthority {
   final String channelId;
   final bool flatTimeline;
   void Function()? _unsubscribe;
@@ -93,6 +92,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         ref.read(relaySessionProvider).status == SessionStatus.connected,
   );
   bool _hasListeners = true;
+  ChannelOpenTimer? _openTimer;
+  // The first load's untimed refusal, for a refusal that comes via a thread.
+  ChannelOpenTimer? _openRefusal;
   Timer? _liveDetachTimer;
   bool _liveDetached = false;
   late final _summaryRefreshes = ThreadSummaryRefreshQueue(
@@ -174,6 +176,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     _liveDetached = false;
     ref.onCancel(() {
       _hasListeners = false;
+      _openTimer = null;
+      _openRefusal = null;
       _deletionOwnerQueue.pause();
       _summaryRefreshes.pause();
       _liveDetachTimer?.cancel();
@@ -253,6 +257,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     final ticket = cacheScope == null
         ? null
         : cache.capture(cacheScope, (channelId: channelId, rootId: ''));
+    ChannelOpenTimer? openTimer;
+    final refusal = ChannelOpenTimer.refusal(ref, loaded: _hasLoadedHistory);
+    _openRefusal = refusal;
     try {
       final session = ref.read(relaySessionProvider.notifier);
 
@@ -297,6 +304,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
               StackTrace.current,
               cache,
               cacheScope,
+              openTimer ?? _openTimer?.running ?? refusal,
             );
           },
         );
@@ -312,6 +320,11 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         );
       }
 
+      openTimer = _hasLoadedHistory
+          ? null
+          : ChannelOpenTimer.resume(_openTimer, ref);
+      // Shared only while the chat is open: a return later is a new open.
+      if (_hasListeners) _openTimer = openTimer;
       final historyVersion = ++_threadQuerySerial;
       final (history, wireEvents) = await _fetchNewestHistory(
         session,
@@ -345,6 +358,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       // catching up.
       _initInFlight = false;
       state = AsyncData(merged);
+      // An open the member left before it finished still took this long.
+      openTimer?.finish();
+      _openTimer = null;
+      _openRefusal = null;
       if (ticket != null && _hasListeners) {
         unawaited(
           saveMessagePage(
@@ -361,9 +378,12 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     } catch (e, st) {
       if (!_isCurrentInit(initVersion)) return;
       if (isRelayChannelAccessDenied(e)) {
-        _denyAccess(e, st, cache, cacheScope);
+        _denyAccess(e, st, cache, cacheScope, openTimer ?? refusal);
         return;
       }
+      openTimer?.finish(error: e);
+      _openTimer = null;
+      _openRefusal = null;
       if (_accessDenial != null) return;
       _historyRefreshFailed = true;
       final fallbackMessages = state.value ?? _lastKnownMessages;
@@ -395,15 +415,20 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     stackTrace,
     ref.read(savedMessageStoreProvider),
     ref.read(savedMessageScopeProvider),
+    _openTimer?.running ?? _openRefusal,
   );
 
   void _denyAccess(
     Object error,
     StackTrace stackTrace,
     SavedMessageStore cache,
-    SavedMessageScope? scope,
-  ) {
+    SavedMessageScope? scope, [
+    ChannelOpenTimer? openTimer,
+  ]) {
     _detachLive();
+    _openTimer = null;
+    _openRefusal = null;
+    openTimer?.finish(error: error);
     _lastKnownMessages = null;
     _hasLoadedHistory = false;
     _windowStore = const ChannelWindowStore.empty();
@@ -478,29 +503,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       return (history, history.reversed.toList());
     }
   }
-
-  Future<ChannelWindowPage> _fetchWindowPage(
-    RelaySessionNotifier session,
-    ChannelPageCursor? cursor,
-  ) async {
-    final events = await session.queryRelay([_channelWindowFilter(cursor)]);
-    return parseChannelWindowResponse(events, channelId, cursor);
-  }
-
-  NostrFilter _channelWindowFilter(ChannelPageCursor? cursor) => NostrFilter(
-    kinds: EventKind.channelWindowPageKinds,
-    tags: {
-      '#h': [channelId],
-    },
-    limit: 50,
-    until: cursor?.createdAt,
-    extensions: {
-      'top_level': true,
-      'include_summaries': true,
-      'include_aux': true,
-      if (cursor != null) 'before_id': cursor.eventId,
-    },
-  );
 
   void _handleLiveEvent(
     NostrEvent event, {

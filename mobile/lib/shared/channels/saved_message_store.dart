@@ -46,6 +46,14 @@ final savedMessageScopeProvider = Provider<SavedMessageScope?>((ref) {
   return pubkey == null ? null : (communityId: active.id, pubkey: pubkey);
 });
 
+/// The relay signing key saved for the active identity, read once per scope.
+/// It lets a cold, offline launch recognize relay-signed messages.
+final savedRelayAuthorProvider = FutureProvider<String?>((ref) async {
+  final scope = ref.watch(savedMessageScopeProvider);
+  if (scope == null) return null;
+  return ref.read(savedMessageStoreProvider).relayAuthor(scope);
+});
+
 /// Captures the right to read or write a page before an asynchronous load.
 final class SavedMessageTicket {
   const SavedMessageTicket._(
@@ -172,6 +180,37 @@ final class SavedMessageStore {
       events: events,
       relayAuthor: relayAuthor,
     );
+  }
+
+  /// The relay signing key last saved with this identity's pages: the key
+  /// that verified them, replaced when a save finds the relay rotated it.
+  /// Null when none was saved, the cache awaits a purge, or [scope] is
+  /// removed meanwhile.
+  Future<String?> relayAuthor(SavedMessageScope scope) async {
+    final key = _scopeKey(scope);
+    final epoch = _scopeEpochs.putIfAbsent(key, () => 0);
+    final author = await _enqueue((directory) async {
+      final marker = (await _purgeMarker(directory))!;
+      final needsReset = await _withPurgeMarker(
+        () async => _needsReset ??= await _purgePending(marker),
+      );
+      if (needsReset || _scopeEpochs[key] != epoch) return null;
+      final result = await _runDisk(
+        _DiskRequest(
+          path: _path(directory, key),
+          action: _DiskAction.relayAuthor,
+          page: (channelId: '', rootId: ''),
+          databasePageLimit: databasePageLimit,
+        ),
+      );
+      if (result.reset) _reportReset();
+      return result.relayAuthor;
+    });
+    return _scopeEpochs[key] == epoch &&
+            author != null &&
+            _lowerHex64.hasMatch(author)
+        ? author
+        : null;
   }
 
   /// Retires all in-flight work and deletes every version for this identity.
@@ -490,6 +529,8 @@ final class SavedMessageStore {
 
 // POSIX ENOENT on iOS and Android. Other errors leave the cache unavailable.
 const _noSuchFile = 2;
+
+final _lowerHex64 = RegExp(r'^[0-9a-f]{64}$');
 
 String _scopeKey(SavedMessageScope scope) => sha256
     .convert(utf8.encode('${scope.communityId}\n${scope.pubkey.toLowerCase()}'))

@@ -351,6 +351,7 @@ void main() {
                   FrostedAppBar(
                     title: Text('Conversation'),
                     titleContentHeight: 104,
+                    bottomHeight: 8,
                     nativeTitleAvatars: [IosNavigationAction(label: 'Alice')],
                     alwaysFrosted: true,
                   ),
@@ -361,7 +362,7 @@ void main() {
         ),
       );
       final backdrop = tester.element(find.byType(BackdropFilter));
-      expect(tester.getSize(find.byType(BackdropFilter)).height, 56);
+      expect(tester.getSize(find.byType(BackdropFilter)).height, 128);
       expect(
         find.descendant(
           of: find.byType(BackdropFilter),
@@ -554,9 +555,7 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  testWidgets('uses the theme primary color for automatic navigation glyphs', (
-    tester,
-  ) async {
+  testWidgets('Android Back uses the round navigation surface', (tester) async {
     await tester.pumpWidget(
       MaterialApp(
         theme: AppTheme.light(),
@@ -583,7 +582,13 @@ void main() {
         (widget) => widget is IconButton && widget.tooltip == 'Back',
       ),
     );
-    expect(backButton.color, AppTheme.light().colorScheme.primary);
+    final colors = AppTheme.light().colorScheme;
+    expect(backButton.color, colors.onSurface);
+    expect(
+      backButton.style?.backgroundColor?.resolve({}),
+      colors.surfaceContainerHighest,
+    );
+    expect(backButton.style?.shape?.resolve({}), isA<CircleBorder>());
   });
 
   testWidgets('replaces native glass while a Flutter backdrop is active', (
