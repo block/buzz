@@ -16,7 +16,7 @@
 //!
 //! The caller resolves every input from the state in force at the decision:
 //! roles from the repo's bound channel only, the owner's current standing,
-//! live grants, the floor for the repo's protected labels, the repo's rules,
+//! the level of a live grant, the floor for the repo's protected labels, the repo's rules,
 //! approvals and check results, and code owners from the ref being changed.
 //! A fact the input has no field for cannot affect the verdict; that is how
 //! announcing a repo or owning its announcer is kept from granting anything.
@@ -42,9 +42,9 @@ fn rank_of(r: Role) -> (out: u8)
 #[derive(Clone, Copy, Debug)]
 pub struct Owner { pub key: u64, pub admitted: bool, pub role: Role }
 
-/// Whether a key carries an owner attestation, and whose.
+/// Whether a key has a recorded owner, and whose.
 #[derive(Clone, Copy, Debug)]
-pub enum Who { Person, UnownedAgent, Agent(Owner) }
+pub enum Who { Person, Agent(Owner) }
 
 /// What the relay knows about a key now.
 #[derive(Clone, Copy, Debug)]
@@ -55,8 +55,10 @@ pub struct KeyFacts {
     /// Role in the repo's bound channel.
     pub role: Role,
     pub who: Who,
-    /// For an agent: a live grant from its owner for this repo.
-    pub granted: bool,
+    /// For an agent: the role named by the level of a live grant from its
+    /// owner for this repo (read: guest, push: member, manage: admin), or
+    /// none.
+    pub grant: Role,
     /// The key is trusted to report some check.
     pub check_key: bool,
 }
@@ -133,13 +135,14 @@ pub struct Input {
 // The property, stated without the evaluator.
 // ---------------------------------------------------------------------------
 
-/// k may act at level n now. Authority comes only from the bound channel; an
-/// agent also needs a live grant and an owner who may act at level n.
+/// k may act at level n now: through its own role in the bound channel, or,
+/// for an agent, through a live grant at level n from an owner who may act
+/// at level n himself. An agent whose owner is not admitted may do nothing.
 pub open spec fn may_act(k: KeyFacts, n: Role) -> bool {
-    k.admitted && rank(k.role) >= rank(n) && match k.who {
-        Who::Person => true,
-        Who::UnownedAgent => false,
-        Who::Agent(o) => k.granted && o.admitted && rank(o.role) >= rank(n),
+    k.admitted && match k.who {
+        Who::Person => rank(k.role) >= rank(n),
+        Who::Agent(o) => o.admitted && (rank(k.role) >= rank(n)
+            || (rank(k.grant) >= rank(n) && rank(o.role) >= rank(n))),
     }
 }
 
@@ -246,18 +249,28 @@ pub open spec fn lands_ok(i: Input) -> bool {
 // The evaluator.
 // ---------------------------------------------------------------------------
 
-/// The role the relay credits k with: its channel role, and for an agent,
-/// capped by its owner's, only under a live grant.
+fn lesser(a: Role, b: Role) -> (out: Role)
+    ensures rank(out) == if rank(a) <= rank(b) { rank(a) } else { rank(b) },
+{
+    if rank_of(a) <= rank_of(b) { a } else { b }
+}
+
+fn greater(a: Role, b: Role) -> (out: Role)
+    ensures rank(out) == if rank(a) >= rank(b) { rank(a) } else { rank(b) },
+{
+    if rank_of(a) >= rank_of(b) { a } else { b }
+}
+
+/// The role the relay credits k with: the greater of its own channel role
+/// and, for an agent, its grant's level capped by its owner's role.
 fn credited(k: KeyFacts) -> (out: Role)
     ensures forall|n: Role| n != Role::None ==> (rank(out) >= rank(n) <==> may_act(k, n)),
 {
     if !k.admitted { return Role::None; }
     match k.who {
         Who::Person => k.role,
-        Who::UnownedAgent => Role::None,
         Who::Agent(o) => {
-            if !k.granted || !o.admitted { Role::None }
-            else if rank_of(o.role) < rank_of(k.role) { o.role } else { k.role }
+            if !o.admitted { Role::None } else { greater(k.role, lesser(k.grant, o.role)) }
         }
     }
 }

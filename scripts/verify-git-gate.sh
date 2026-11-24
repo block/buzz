@@ -16,7 +16,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Raise this when obligations are added; lowering it needs a reason.
-MIN_VERIFIED=46
+MIN_VERIFIED=48
 
 opted_in=$(cargo metadata --no-deps --format-version 1 --locked |
   jq -r '.packages[] | select(.name == "buzz-git-gate") | .metadata.verus.verify')

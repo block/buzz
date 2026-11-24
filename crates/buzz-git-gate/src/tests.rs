@@ -15,7 +15,7 @@ fn person(key: u64, role: Role) -> KeyFacts {
         admitted: true,
         role,
         who: Who::Person,
-        granted: false,
+        grant: Role::None,
         check_key: false,
     }
 }
@@ -30,7 +30,7 @@ fn agent(key: u64, role: Role, owner: u64, owner_role: Role) -> KeyFacts {
             admitted: true,
             role: owner_role,
         }),
-        granted: true,
+        grant: Role::None,
         check_key: false,
     }
 }
@@ -109,25 +109,59 @@ fn a_moved_ref_or_a_dirty_scan_denies() {
 }
 
 #[test]
-fn agent_is_capped_by_owner_and_needs_a_grant() {
-    // The lesser of the two roles, from either side.
-    assert!(!decide(&push(
+fn an_agent_acts_on_its_own_role_or_on_a_grant_capped_by_its_owner() {
+    // Its own channel role, uncapped by its owner's, with no grant at all.
+    assert!(decide(&push(agent(3, Role::Member, 2, Role::None), vec![])));
+    assert!(decide(&push(
         agent(3, Role::Admin, 2, Role::Guest),
-        vec![]
+        vec![rule(Req::AdminPush)]
     )));
     assert!(!decide(&push(
         agent(3, Role::Guest, 2, Role::Admin),
         vec![]
     )));
-    let mut g = agent(3, Role::Member, 2, Role::Member);
-    assert!(decide(&push(g, vec![])));
-    g.granted = false;
-    assert!(!decide(&push(g, vec![])));
-    let unowned = KeyFacts {
-        who: Who::UnownedAgent,
-        ..person(3, Role::Admin)
+    // Not in the channel: a grant, at its level and within its owner's role.
+    let granted = |grant, owner_role| KeyFacts {
+        grant,
+        ..agent(3, Role::None, 2, owner_role)
     };
-    assert!(!decide(&push(unowned, vec![])));
+    assert!(decide(&push(granted(Role::Member, Role::Member), vec![])));
+    assert!(!decide(&push(granted(Role::Guest, Role::Admin), vec![])));
+    assert!(!decide(&push(granted(Role::Admin, Role::Guest), vec![])));
+    assert!(!decide(&push(granted(Role::Admin, Role::None), vec![])));
+    assert!(!decide(&push(
+        granted(Role::Member, Role::Admin),
+        vec![rule(Req::AdminPush)]
+    )));
+    // A narrower grant takes nothing from its own role.
+    assert!(decide(&push(
+        KeyFacts {
+            grant: Role::Guest,
+            ..agent(3, Role::Member, 2, Role::Member)
+        },
+        vec![]
+    )));
+    // Neither: nothing.
+    assert!(!decide(&push(agent(3, Role::None, 2, Role::Admin), vec![])));
+    // An owner who is not admitted takes both routes away.
+    let banned_owner = KeyFacts {
+        who: Who::Agent(Owner {
+            key: 2,
+            admitted: false,
+            role: Role::Admin,
+        }),
+        grant: Role::Admin,
+        ..agent(3, Role::Admin, 2, Role::Admin)
+    };
+    assert!(!decide(&push(banned_owner, vec![])));
+    // And an agent not admitted itself.
+    assert!(!decide(&push(
+        KeyFacts {
+            admitted: false,
+            ..agent(3, Role::Admin, 2, Role::Admin)
+        },
+        vec![]
+    )));
 }
 
 #[test]
