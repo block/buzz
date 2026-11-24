@@ -3,13 +3,13 @@ import { LoaderCircle, Search } from "lucide-react";
 import { useReducedMotion } from "motion/react";
 import * as React from "react";
 
-import type { KlipyGif } from "@/features/gifs/api";
-import { fetchKlipyGifs } from "@/features/gifs/relay";
+import type { GiphyGif } from "@/features/gifs/api";
+import { fetchGiphyGifs } from "@/features/gifs/relay";
 import { Input } from "@/shared/ui/input";
 import { Skeleton } from "@/shared/ui/skeleton";
 
-type KlipyGifPickerProps = {
-  onSelect: (gif: KlipyGif) => void;
+type GiphyGifPickerProps = {
+  onSelect: (gif: GiphyGif) => void;
   relayUrl: string;
   searchPath: string;
 };
@@ -27,11 +27,11 @@ const LOADING_SKELETONS = [
   "tall-d",
 ] as const;
 
-export const KlipyGifPicker = React.memo(function KlipyGifPicker({
+export const GiphyGifPicker = React.memo(function GiphyGifPicker({
   onSelect,
   relayUrl,
   searchPath,
-}: KlipyGifPickerProps) {
+}: GiphyGifPickerProps) {
   const [search, setSearch] = React.useState("");
   const [debouncedSearch, setDebouncedSearch] = React.useState("");
   const prefersReducedMotion = useReducedMotion() ?? false;
@@ -46,8 +46,8 @@ export const KlipyGifPicker = React.memo(function KlipyGifPicker({
 
   const gifsQuery = useQuery({
     queryFn: ({ signal }) =>
-      fetchKlipyGifs(relayUrl, searchPath, debouncedSearch, signal),
-    queryKey: ["klipy-gifs", relayUrl, searchPath, debouncedSearch],
+      fetchGiphyGifs(relayUrl, searchPath, debouncedSearch, signal),
+    queryKey: ["giphy-gifs", relayUrl, searchPath, debouncedSearch],
     retry: false,
     staleTime: 5 * 60 * 1_000,
   });
@@ -61,11 +61,12 @@ export const KlipyGifPicker = React.memo(function KlipyGifPicker({
             className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
           />
           <Input
-            aria-label="Search KLIPY"
+            aria-label="Search GIPHY"
             autoFocus
             className="h-9 bg-background/75 pl-8 pr-8 hover:bg-background/85 focus-visible:bg-background focus-visible:ring-ring/40"
+            maxLength={50}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search KLIPY"
+            placeholder="Search GIPHY"
             type="search"
             value={search}
           />
@@ -107,7 +108,7 @@ export const KlipyGifPicker = React.memo(function KlipyGifPicker({
             No GIFs found.
           </div>
         ) : (
-          <div className="columns-2 gap-1.5" data-testid="klipy-gif-grid">
+          <div className="columns-2 gap-1.5" data-testid="giphy-gif-grid">
             {gifsQuery.data.map((gif) => {
               const staticPoster = prefersReducedMotion ? gif.poster : null;
               const showAnimated = !prefersReducedMotion;
@@ -141,7 +142,7 @@ export const KlipyGifPicker = React.memo(function KlipyGifPicker({
                   ) : (
                     <span
                       className="flex aspect-video w-full items-center justify-center bg-muted px-2 text-center text-xs text-muted-foreground"
-                      data-testid="klipy-gif-static-placeholder"
+                      data-testid="giphy-gif-static-placeholder"
                     >
                       {gif.title}
                     </span>
@@ -154,7 +155,7 @@ export const KlipyGifPicker = React.memo(function KlipyGifPicker({
       </div>
 
       <div className="border-t border-border/60 px-3 py-2 text-center text-2xs text-muted-foreground">
-        Powered by KLIPY
+        Powered by GIPHY
       </div>
     </div>
   );

@@ -268,7 +268,7 @@ const MediaAttachmentItem = React.forwardRef<
   const hash = shortHash(attachment.sha256);
   const isVideo = attachment.type.startsWith("video/");
   // One accessible name for every control/label in this item. Provider media
-  // (e.g. KLIPY GIFs) carries a `displayLabel` but no content hash; ordinary
+  // (e.g. GIPHY GIFs) carries a `displayLabel` but no content hash; ordinary
   // uploads keep their historical type-aware `Attachment <hash>` /
   // `Video attachment <hash>` name; only genuinely hashless non-provider media
   // falls back to a filename.

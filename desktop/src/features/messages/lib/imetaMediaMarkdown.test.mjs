@@ -611,7 +611,7 @@ test("imetaMediaFromTags: entry without size leaves size 0", () => {
 test("buildImetaTags: omits hashless external media entirely", () => {
   const tags = buildImetaTags([
     {
-      url: "https://static.klipy.com/a.gif",
+      url: "https://media1.giphy.com/media/a1b2c3/giphy.gif",
       type: "image/gif",
       sha256: "",
       size: 1,
@@ -624,14 +624,17 @@ test("buildImetaTags: omits hashless external media entirely", () => {
 test("buildOutgoingMessage: hashless external media is content-only", () => {
   const out = buildOutgoingMessage("", [
     {
-      url: "https://static.klipy.com/a.gif",
+      url: "https://media1.giphy.com/media/a1b2c3/giphy.gif",
       type: "image/gif",
       sha256: "",
       size: 1,
       uploaded: 0,
     },
   ]);
-  assert.equal(out.content, "\n![image](https://static.klipy.com/a.gif)");
+  assert.equal(
+    out.content,
+    "\n![image](https://media1.giphy.com/media/a1b2c3/giphy.gif)",
+  );
   assert.equal(out.mediaTags, undefined);
 });
 
