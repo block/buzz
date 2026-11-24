@@ -16,10 +16,13 @@
 //! original response and an out-of-date relay learns the current revision.
 use crate::http::{error, AppState};
 use crate::secrets::MAX_SECRET_BYTES;
-use crate::store::{ApplyOutcome, IntegrationView, Mutation, Operation, Provider, StoreError};
+use crate::store::{
+    ApplyOutcome, DeliveryCursor, DeliveryPage, DeliveryState, IntegrationView, Mutation,
+    Operation, Provider, StoreError,
+};
 use axum::{
     body::Bytes,
-    extract::{OriginalUri, Path, State},
+    extract::{rejection::QueryRejection, OriginalUri, Path, Query, State},
     http::{header::AUTHORIZATION, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{get, post, put},
@@ -39,6 +42,8 @@ use uuid::Uuid;
 pub const MAX_MANAGEMENT_BODY_BYTES: usize = 64 * 1024;
 const MAX_COMMUNITY_HOST_BYTES: usize = 253;
 const MAX_GRACE_SECONDS: u64 = 30 * 24 * 3600;
+const DEFAULT_DELIVERY_PAGE: usize = 50;
+const MAX_DELIVERY_PAGE: usize = 200;
 
 /// Management routes, mounted on the private router only.
 pub fn routes() -> Router<AppState> {
@@ -50,6 +55,7 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/integrations/{id}/secret", put(put_secret))
         .route("/v1/integrations/{id}/disable", post(disable))
         .route("/v1/integrations/{id}/enable", post(enable))
+        .route("/v1/integrations/{id}/deliveries", get(list_deliveries))
         .route("/v1/operations/{operation_id}", get(get_operation))
 }
 
@@ -351,6 +357,72 @@ async fn get_integration(
     Json(IntegrationView::new(&integration, &secrets, now)).into_response()
 }
 
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct DeliveriesQuery {
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    cursor: Option<String>,
+    state: Option<DeliveryState>,
+    limit: Option<usize>,
+}
+
+/// Delivery timeline for the admin UI, proxied by the relay. Payloads are
+/// never returned. The signed URL binds the path only, so query parameters
+/// are read from the request; they select a page, not a security boundary.
+/// `next` is a keyset cursor over `(received_at, delivery_id)`, so rows that
+/// share a timestamp across a page boundary are neither skipped nor repeated.
+async fn list_deliveries(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    method: Method,
+    uri: OriginalUri,
+    headers: HeaderMap,
+    query: Result<Query<DeliveriesQuery>, QueryRejection>,
+) -> Response {
+    if let Err(reject) = authenticate(&state, &headers, &method, &uri, None) {
+        return reject.into_response();
+    }
+    let Ok(Query(query)) = query else {
+        return invalid();
+    };
+    let limit = query.limit.unwrap_or(DEFAULT_DELIVERY_PAGE);
+    if limit == 0 || limit > MAX_DELIVERY_PAGE {
+        return invalid();
+    }
+    match state.store.integration(id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return error(StatusCode::NOT_FOUND, "not_found"),
+        Err(e) => return store_error(e),
+    }
+    let before = match query.cursor.as_deref().map(DeliveryCursor::parse) {
+        None => None,
+        Some(Some(cursor)) => Some(cursor),
+        Some(None) => return invalid(),
+    };
+    let page = DeliveryPage {
+        since: query.since,
+        before,
+        state: query.state,
+        limit,
+    };
+    match state.store.list_deliveries(id, page).await {
+        Ok(deliveries) => {
+            let next = (deliveries.len() == limit)
+                .then(|| deliveries.last())
+                .flatten()
+                .map(|last| {
+                    DeliveryCursor {
+                        received_at: last.received_at,
+                        delivery_id: last.delivery_id.clone(),
+                    }
+                    .encode()
+                });
+            Json(serde_json::json!({ "deliveries": deliveries, "next": next })).into_response()
+        }
+        Err(e) => store_error(e),
+    }
+}
+
 async fn get_operation(
     State(state): State<AppState>,
     Path(operation_id): Path<Uuid>,
@@ -403,6 +475,11 @@ mod tests {
             store: store.clone(),
             secrets: secrets.clone(),
             relay_pubkeys: Arc::new(vec![relay.public_key()]),
+            intake: crate::http::IntakeLimits {
+                max_body_bytes: 1024,
+                timestamp_tolerance_seconds: 300,
+            },
+            rate_limiter: Arc::new(crate::intake::RateLimiter::new(100)),
             now: chrono::Utc::now,
             accepting: Arc::new(AtomicBool::new(true)),
         };
@@ -600,6 +677,122 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["revision"], 3);
         assert_eq!(body["has_secret"], true);
+    }
+
+    #[tokio::test]
+    async fn deliveries_are_listed_without_payloads_and_paged() {
+        let fx = fixture();
+        let id = Uuid::new_v4();
+        let path = format!("/v1/integrations/{id}");
+        call(
+            &fx,
+            &fx.relay,
+            "PUT",
+            &path,
+            &path,
+            Some(put_body(Uuid::new_v4(), 1)),
+        )
+        .await;
+        for (n, secs) in [("d1", 0), ("d2", 10), ("d3", 10), ("d4", 20)] {
+            fx.store
+                .insert_delivery(crate::store::NewDelivery {
+                    integration_id: id,
+                    delivery_id: n.into(),
+                    event_type: "pull_request.opened".into(),
+                    provider_timestamp: None,
+                    headers: serde_json::json!({}),
+                    body: b"{\"secret\":\"payload\"}".to_vec(),
+                    received_at: chrono::DateTime::from_timestamp(1_700_000_000 + secs, 0).unwrap(),
+                })
+                .await
+                .unwrap();
+        }
+        let deliveries = format!("{path}/deliveries");
+        let (status, body) = call(
+            &fx,
+            &fx.relay,
+            "GET",
+            &format!("{deliveries}?limit=2"),
+            &deliveries,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let ids: Vec<_> = body["deliveries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["delivery_id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(ids, ["d4", "d3"]);
+        assert_eq!(body["deliveries"][0]["state"], "queued");
+        assert!(body["deliveries"][0].get("body").is_none());
+        assert!(!body.to_string().contains("payload"));
+        let next = body["next"].as_str().unwrap().to_owned();
+        let (status, body) = call(
+            &fx,
+            &fx.relay,
+            "GET",
+            &format!("{deliveries}?limit=2&cursor={next}"),
+            &deliveries,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let ids: Vec<_> = body["deliveries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["delivery_id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(ids, ["d2", "d1"]);
+        let next = body["next"].as_str().unwrap().to_owned();
+        let (status, body) = call(
+            &fx,
+            &fx.relay,
+            "GET",
+            &format!("{deliveries}?limit=2&cursor={next}"),
+            &deliveries,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["deliveries"].as_array().unwrap().len(), 0);
+        assert!(body["next"].is_null());
+        let (status, _) = call(
+            &fx,
+            &fx.relay,
+            "GET",
+            &format!("{deliveries}?cursor=garbage"),
+            &deliveries,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _) = call(
+            &fx,
+            &fx.relay,
+            "GET",
+            &format!("{deliveries}?limit=0"),
+            &deliveries,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = call(
+            &fx,
+            &fx.relay,
+            "GET",
+            &format!("{deliveries}?bogus=1"),
+            &deliveries,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let missing = format!("/v1/integrations/{}/deliveries", Uuid::new_v4());
+        let (status, _) = call(&fx, &fx.relay, "GET", &missing, &missing, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

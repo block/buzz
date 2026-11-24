@@ -126,6 +126,116 @@ pub enum ApplyOutcome {
     NotFound,
 }
 
+/// Lifecycle of a stored delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryState {
+    Queued,
+    Accepted,
+    Failed,
+}
+
+impl DeliveryState {
+    /// Stable storage and wire name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeliveryState::Queued => "queued",
+            DeliveryState::Accepted => "accepted",
+            DeliveryState::Failed => "failed",
+        }
+    }
+
+    /// Inverse of [`DeliveryState::as_str`].
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "queued" => Some(DeliveryState::Queued),
+            "accepted" => Some(DeliveryState::Accepted),
+            "failed" => Some(DeliveryState::Failed),
+            _ => None,
+        }
+    }
+}
+
+/// A verified delivery about to be stored. The provider is acknowledged only
+/// once this row is committed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDelivery {
+    pub integration_id: Uuid,
+    pub delivery_id: String,
+    pub event_type: String,
+    pub provider_timestamp: Option<DateTime<Utc>>,
+    pub headers: serde_json::Value,
+    pub body: Vec<u8>,
+    pub received_at: DateTime<Utc>,
+}
+
+/// Result of storing a delivery keyed by `(integration_id, delivery_id)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertOutcome {
+    Inserted,
+    Duplicate,
+}
+
+/// A stored delivery without its payload, for the admin timeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeliverySummary {
+    pub delivery_id: String,
+    pub event_type: String,
+    pub state: DeliveryState,
+    pub attempts: i32,
+    pub event_id: Option<String>,
+    pub received_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+}
+
+/// Keyset position in the newest-first delivery timeline. Encoded as
+/// `{received_at_micros}.{delivery_id}` so a client can hand it back opaquely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryCursor {
+    pub received_at: DateTime<Utc>,
+    pub delivery_id: String,
+}
+
+impl DeliveryCursor {
+    /// Inverse of [`DeliveryCursor::encode`]; `None` for anything malformed.
+    pub fn parse(value: &str) -> Option<Self> {
+        let (micros, delivery_id) = value.split_once('.')?;
+        if delivery_id.is_empty() || delivery_id.len() > MAX_DELIVERY_ID_CURSOR_BYTES {
+            return None;
+        }
+        Some(Self {
+            received_at: DateTime::from_timestamp_micros(micros.parse().ok()?)?,
+            delivery_id: delivery_id.to_owned(),
+        })
+    }
+
+    /// Opaque cursor string for the admin client.
+    pub fn encode(&self) -> String {
+        format!(
+            "{}.{}",
+            self.received_at.timestamp_micros(),
+            self.delivery_id
+        )
+    }
+
+    fn position(&self) -> (DateTime<Utc>, &str) {
+        (self.received_at, self.delivery_id.as_str())
+    }
+}
+
+const MAX_DELIVERY_ID_CURSOR_BYTES: usize = 256;
+
+/// Page selector for [`Store::list_deliveries`]: newest first, optionally
+/// bounded below by `since`, continued from `before`, filtered by `state`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DeliveryPage {
+    pub since: Option<DateTime<Utc>>,
+    pub before: Option<DeliveryCursor>,
+    pub state: Option<DeliveryState>,
+    pub limit: usize,
+}
+
 /// Failures of the durable store. Callers treat every variant as retryable
 /// except [`StoreError::Invalid`].
 #[derive(Debug, Error)]
@@ -207,6 +317,14 @@ pub trait Store: Send + Sync {
         operation: Operation,
         now: DateTime<Utc>,
     ) -> Result<ApplyOutcome, StoreError>;
+    /// Record a verified delivery exactly once per `(integration, delivery_id)`.
+    async fn insert_delivery(&self, delivery: NewDelivery) -> Result<InsertOutcome, StoreError>;
+    /// Delivery summaries for one integration, newest first, payloads omitted.
+    async fn list_deliveries(
+        &self,
+        integration_id: Uuid,
+        page: DeliveryPage,
+    ) -> Result<Vec<DeliverySummary>, StoreError>;
 }
 
 /// Pure in-process transition shared by the memory store and the Postgres
@@ -284,11 +402,39 @@ pub fn transition(
     Ok(next)
 }
 
+/// A delivery row as the memory store holds it; exposed for tests only.
+#[derive(Clone, Debug)]
+pub struct StoredDelivery {
+    pub delivery: NewDelivery,
+    pub state: DeliveryState,
+    pub event_id: Option<String>,
+    pub attempts: i32,
+    pub next_attempt_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+impl StoredDelivery {
+    fn summary(&self) -> DeliverySummary {
+        DeliverySummary {
+            delivery_id: self.delivery.delivery_id.clone(),
+            event_type: self.delivery.event_type.clone(),
+            state: self.state,
+            attempts: self.attempts,
+            event_id: self.event_id.clone(),
+            received_at: self.delivery.received_at,
+            completed_at: self.completed_at,
+            last_error: self.last_error.clone(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct MemoryState {
     integrations: HashMap<Uuid, Integration>,
     secrets: HashMap<Uuid, Vec<IntegrationSecret>>,
     operations: HashMap<Uuid, AppliedOperation>,
+    deliveries: HashMap<(Uuid, String), StoredDelivery>,
 }
 
 /// Reference store for tests. One lock gives every transition a single
@@ -373,6 +519,71 @@ impl Store for MemoryStore {
         s.secrets.insert(operation.integration_id, secrets);
         s.operations.insert(operation.operation_id, applied.clone());
         Ok(ApplyOutcome::Applied(applied))
+    }
+
+    async fn insert_delivery(&self, delivery: NewDelivery) -> Result<InsertOutcome, StoreError> {
+        let mut s = self.0.lock().map_err(|_| StoreError::Unavailable(None))?;
+        let key = (delivery.integration_id, delivery.delivery_id.clone());
+        if s.deliveries.contains_key(&key) {
+            return Ok(InsertOutcome::Duplicate);
+        }
+        let next_attempt_at = Some(delivery.received_at);
+        s.deliveries.insert(
+            key,
+            StoredDelivery {
+                delivery,
+                state: DeliveryState::Queued,
+                event_id: None,
+                attempts: 0,
+                next_attempt_at,
+                last_error: None,
+                completed_at: None,
+            },
+        );
+        Ok(InsertOutcome::Inserted)
+    }
+
+    async fn list_deliveries(
+        &self,
+        integration_id: Uuid,
+        page: DeliveryPage,
+    ) -> Result<Vec<DeliverySummary>, StoreError> {
+        let s = self.0.lock().map_err(|_| StoreError::Unavailable(None))?;
+        let mut rows: Vec<_> = s
+            .deliveries
+            .values()
+            .filter(|d| d.delivery.integration_id == integration_id)
+            .filter(|d| page.state.is_none_or(|state| d.state == state))
+            .filter(|d| {
+                page.since
+                    .is_none_or(|since| d.delivery.received_at > since)
+            })
+            .filter(|d| {
+                page.before.as_ref().is_none_or(|before| {
+                    (d.delivery.received_at, d.delivery.delivery_id.as_str()) < before.position()
+                })
+            })
+            .map(StoredDelivery::summary)
+            .collect();
+        rows.sort_by(|a, b| {
+            b.received_at
+                .cmp(&a.received_at)
+                .then_with(|| b.delivery_id.cmp(&a.delivery_id))
+        });
+        rows.truncate(page.limit);
+        Ok(rows)
+    }
+}
+
+impl MemoryStore {
+    /// Test seam: the stored delivery row, payload included.
+    pub fn delivery(&self, integration_id: Uuid, delivery_id: &str) -> Option<StoredDelivery> {
+        self.0
+            .lock()
+            .ok()?
+            .deliveries
+            .get(&(integration_id, delivery_id.to_owned()))
+            .cloned()
     }
 }
 
@@ -476,6 +687,83 @@ mod tests {
         };
         assert_eq!(revoked.response["rotating_until"], serde_json::Value::Null);
         assert_eq!(store.verifying_secrets(id, at(90)).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn deliveries_dedupe_per_integration_and_page_newest_first() {
+        let store = MemoryStore::default();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let new = |integration_id, delivery_id: &str, secs| NewDelivery {
+            integration_id,
+            delivery_id: delivery_id.into(),
+            event_type: "ping".into(),
+            provider_timestamp: None,
+            headers: serde_json::json!({}),
+            body: b"{}".to_vec(),
+            received_at: at(secs),
+        };
+        assert_eq!(
+            store.insert_delivery(new(a, "d1", 0)).await.unwrap(),
+            InsertOutcome::Inserted
+        );
+        assert_eq!(
+            store.insert_delivery(new(a, "d1", 5)).await.unwrap(),
+            InsertOutcome::Duplicate
+        );
+        assert_eq!(
+            store.insert_delivery(new(b, "d1", 5)).await.unwrap(),
+            InsertOutcome::Inserted
+        );
+        store.insert_delivery(new(a, "d2", 10)).await.unwrap();
+        store.insert_delivery(new(a, "d3", 20)).await.unwrap();
+
+        let page = DeliveryPage {
+            limit: 2,
+            ..Default::default()
+        };
+        let first = store.list_deliveries(a, page.clone()).await.unwrap();
+        let ids: Vec<_> = first.iter().map(|d| d.delivery_id.as_str()).collect();
+        assert_eq!(ids, ["d3", "d2"]);
+        assert!(first.iter().all(|d| d.state == DeliveryState::Queued));
+        let older = store
+            .list_deliveries(
+                a,
+                DeliveryPage {
+                    before: first.last().map(|d| DeliveryCursor {
+                        received_at: d.received_at,
+                        delivery_id: d.delivery_id.clone(),
+                    }),
+                    ..page.clone()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(older.len(), 1);
+        assert_eq!(older[0].delivery_id, "d1");
+        let recent = store
+            .list_deliveries(
+                a,
+                DeliveryPage {
+                    since: Some(at(10)),
+                    ..page.clone()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].delivery_id, "d3");
+        assert!(store
+            .list_deliveries(
+                a,
+                DeliveryPage {
+                    state: Some(DeliveryState::Failed),
+                    ..page
+                }
+            )
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

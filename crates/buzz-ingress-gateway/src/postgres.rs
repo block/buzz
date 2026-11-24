@@ -1,8 +1,9 @@
 //! Postgres-backed store: migrations, runtime-role grants, readiness, and
 //! retention for the gateway's own tables.
 use crate::store::{
-    transition, AppliedOperation, ApplyOutcome, Integration, IntegrationSecret, IntegrationView,
-    Mutation, Operation, Provider, Store, StoreError,
+    transition, AppliedOperation, ApplyOutcome, DeliveryPage, DeliveryState, DeliverySummary,
+    InsertOutcome, Integration, IntegrationSecret, IntegrationView, Mutation, NewDelivery,
+    Operation, Provider, Store, StoreError,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -324,6 +325,74 @@ impl Store for PostgresStore {
         .await?;
         tx.commit().await?;
         Ok(ApplyOutcome::Applied(applied))
+    }
+
+    async fn insert_delivery(&self, delivery: NewDelivery) -> Result<InsertOutcome, StoreError> {
+        let inserted = sqlx::query(
+            "INSERT INTO ingress_gateway_deliveries
+                 (integration_id, delivery_id, event_type, provider_timestamp, headers, body,
+                  state, next_attempt_at, received_at)
+             VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $7)
+             ON CONFLICT (integration_id, delivery_id) DO NOTHING",
+        )
+        .bind(delivery.integration_id)
+        .bind(&delivery.delivery_id)
+        .bind(&delivery.event_type)
+        .bind(delivery.provider_timestamp)
+        .bind(&delivery.headers)
+        .bind(&delivery.body)
+        .bind(delivery.received_at)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(if inserted == 1 {
+            InsertOutcome::Inserted
+        } else {
+            InsertOutcome::Duplicate
+        })
+    }
+
+    async fn list_deliveries(
+        &self,
+        integration_id: Uuid,
+        page: DeliveryPage,
+    ) -> Result<Vec<DeliverySummary>, StoreError> {
+        let limit = i64::try_from(page.limit).unwrap_or(i64::MAX);
+        sqlx::query(
+            "SELECT delivery_id, event_type, state, attempts, event_id, received_at,
+                    completed_at, last_error
+             FROM ingress_gateway_deliveries
+             WHERE integration_id = $1
+               AND ($2::timestamptz IS NULL OR received_at > $2)
+               AND ($3::timestamptz IS NULL OR (received_at, delivery_id) < ($3, $4::text))
+               AND ($5::text IS NULL OR state = $5)
+             ORDER BY received_at DESC, delivery_id DESC
+             LIMIT $6",
+        )
+        .bind(integration_id)
+        .bind(page.since)
+        .bind(page.before.as_ref().map(|c| c.received_at))
+        .bind(page.before.as_ref().map(|c| c.delivery_id.as_str()))
+        .bind(page.state.map(DeliveryState::as_str))
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|row| {
+            let state: String = row.try_get("state")?;
+            Ok(DeliverySummary {
+                delivery_id: row.try_get("delivery_id")?,
+                event_type: row.try_get("event_type")?,
+                state: DeliveryState::parse(&state)
+                    .ok_or(StoreError::Invalid("unknown delivery state stored"))?,
+                attempts: row.try_get("attempts")?,
+                event_id: row.try_get("event_id")?,
+                received_at: row.try_get("received_at")?,
+                completed_at: row.try_get("completed_at")?,
+                last_error: row.try_get("last_error")?,
+            })
+        })
+        .collect()
     }
 }
 
