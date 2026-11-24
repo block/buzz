@@ -651,10 +651,10 @@ void main() {
       expect(result.failedCommunityIds, [relay.communityId]);
 
       // Storage that stalls on one claim past the budget doesn't hold the
-      // wake. Messages not yet claimed stay unclaimed for the next wake, and
-      // those already claimed are returned, not lost. A claim that only wins
-      // after the wake answered is recorded as shown but never returned, so
-      // its community is reported incomplete and the caller falls back.
+      // wake. Messages not yet claimed stay unclaimed for the next wake. A
+      // claim that only wins after the wake answered is recorded as shown but
+      // never returned, so its community is reported incomplete and the
+      // caller falls back.
       relay.silent = false;
       final friend = relay.person('Friend');
       final sent = [
@@ -669,7 +669,9 @@ void main() {
         metadata: Duration(seconds: 30),
         total: Duration(milliseconds: 700),
       );
-      final heldId = sent[sent.length ~/ 2];
+      // The oldest is claimed first, so the resolver always reaches it
+      // before the deadline, however slow the runner.
+      final heldId = sent.first;
       final release = Completer<void>();
       final heldStore = HeldClaimShownMessageStore(
         fixture.openStore(),
@@ -679,6 +681,7 @@ void main() {
       final stopped = Stopwatch()..start();
       final partial = await fixture.wake(store: heldStore, timeouts: tight);
       expect(stopped.elapsed, lessThan(const Duration(seconds: 2)));
+      expect(heldStore.entered, isTrue);
       release.complete();
       expect(await heldStore.recorded, isTrue);
       final partialIds = partial.notifications.map((n) => n.eventId).toList();

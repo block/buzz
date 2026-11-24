@@ -321,6 +321,9 @@ class HeldClaimShownMessageStore implements ShownMessageStore {
   final String eventId;
   final Future<void> release;
 
+  /// Whether the resolver has started the held claim.
+  bool entered = false;
+
   /// Completes once the held claim has been recorded.
   Future<bool> get recorded => _recorded.future;
   final _recorded = Completer<bool>();
@@ -338,6 +341,7 @@ class HeldClaimShownMessageStore implements ShownMessageStore {
     if (eventId != this.eventId) {
       return _inner.claim(community, eventId, createdAt);
     }
+    entered = true;
     await release;
     final won = await _inner.claim(community, eventId, createdAt);
     _recorded.complete(won);
