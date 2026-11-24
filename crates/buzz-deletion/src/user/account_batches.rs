@@ -148,12 +148,20 @@ pub(super) fn store(
     if mode == ExecutionMode::ReadOnly {
         return Ok(store);
     }
+    Ok(match configured_signer()? {
+        Some(signer) => store.with_account_snapshot_signer(signer),
+        None => store,
+    })
+}
+
+pub(super) fn configured_signer() -> Result<Option<nostr::Keys>> {
     match std::env::var("BUZZ_RELAY_PRIVATE_KEY") {
-        Ok(value) => Ok(store.with_account_snapshot_signer(
-            nostr::Keys::parse(&value)
-                .map_err(|_| anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY"))?,
-        )),
-        Err(std::env::VarError::NotPresent) => Ok(store),
+        Ok(value) => {
+            Ok(Some(nostr::Keys::parse(&value).map_err(|_| {
+                anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY")
+            })?))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
         Err(_) => anyhow::bail!("invalid BUZZ_RELAY_PRIVATE_KEY"),
     }
 }

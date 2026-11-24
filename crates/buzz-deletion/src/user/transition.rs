@@ -61,7 +61,7 @@ fn decide_next(request: &EntityRequest, history: &[EntityStage]) -> Result<Stage
             if current.status == "submitted" && current.stage != "delete_owned_community" {
                 return Err(invalid("unexpected submitted stage"));
             }
-            let outcome = decision(&current, progress.legacy)?;
+            let outcome = decision(&current)?;
             let successor = progress.apply(&inventory, &current, outcome)?;
             if successor.is_none()
                 && progress.visited_communities.len() != inventory.communities.len()

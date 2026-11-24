@@ -1,4 +1,4 @@
-//! Shared assertions for the inventory CLI's demo and real workflow journeys.
+//! Shared assertions for the inventory CLI and persisted workflow.
 
 use serde_json::Value;
 use std::process::Output;
@@ -49,7 +49,7 @@ pub async fn step_real_workflow_past_gate(url: &str, id: &str) -> Value {
     workflow_refuses(
         url,
         &["run", id, "--next-step"],
-        "real workflow execution requires --delete",
+        "workflow execution requires --delete",
     )
     .await;
     // Refusing the missing flag must happen before claiming or initializing.

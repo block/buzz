@@ -23,7 +23,7 @@ impl Drop for Fixture {
 impl Fixture {
     pub fn options(&self) -> RunOptions {
         RunOptions {
-            db: Some(Db::from_pool(self.pool.clone())),
+            db: Db::from_pool(self.pool.clone()),
             media: Some(self.storage.clone()),
             row_ids: None,
             delete: true,
@@ -31,9 +31,6 @@ impl Fixture {
             batch_size: 100,
             max_items: 100_000,
             next_step: false,
-            fail_stage: None,
-            stage_delay: Duration::ZERO,
-            no_agents_in: Vec::new(),
         }
     }
     pub async fn uploader_count(&self) -> i64 {

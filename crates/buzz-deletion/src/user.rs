@@ -19,16 +19,13 @@ pub enum Command {
     /// Capture frozen human/agent inputs across stored communities, read-only.
     AccountScope {
         /// Human public key, hex or npub.
-        #[arg(long, value_parser = inventory::parse_subject)]
+        #[arg(long, value_parser = content_batches::parse_pubkey)]
         pubkey: String,
     },
     /// Print affected communities as JSON; does not save or execute a request.
     Inventory {
-        /// Trusted signer for relay-authored content.
+        /// Human public key, as hex or npub.
         #[arg(long, value_parser = content_batches::parse_pubkey)]
-        relay_pubkey: Option<String>,
-        /// Demo fixture (default), hex public key, or npub.
-        #[arg(long, default_value = "demo", value_parser = inventory::parse_subject)]
         pubkey: String,
     },
     /// Save a request. An identical resubmission returns the existing row.
@@ -36,15 +33,9 @@ pub enum Command {
         /// Keep read-only progress separate from deletion of this subject.
         #[arg(long, requires = "pubkey")]
         read_only: bool,
-        /// Trusted signer for relay-authored content.
+        /// Human public key, as hex or npub.
         #[arg(long, value_parser = content_batches::parse_pubkey)]
-        relay_pubkey: Option<String>,
-        /// Optional demo request label, for example demo:alice. Conflicts with --pubkey.
-        #[arg(long, conflicts_with = "pubkey")]
-        target: Option<String>,
-        /// Demo fixture (default), hex public key, or npub to discover and save.
-        #[arg(long, value_parser = inventory::parse_subject)]
-        pubkey: Option<String>,
+        pubkey: String,
         /// Submitting operator identity.
         #[arg(long)]
         requested_by: String,
@@ -56,7 +47,7 @@ pub enum Command {
     Approve {
         /// Request UUID returned by submit.
         id: Uuid,
-        /// Approving operator identity (self-asserted for this demo).
+        /// Approving operator identity (self-asserted).
         #[arg(long)]
         approved_by: String,
         /// Inventory digest from inspect; approval must match this exact inventory.
@@ -91,17 +82,8 @@ pub enum Command {
         /// Execute one handler, transition to the next stage, and release ownership.
         #[arg(long)]
         next_step: bool,
-        /// Inject a retryable failure when this dummy stage is reached.
-        #[arg(long, value_parser = workflow::parse_stage)]
-        fail_stage: Option<String>,
-        /// Delay each dummy action for inspection and shutdown testing (up to 60s).
-        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u64).range(0..=60_000))]
-        stage_delay_ms: u64,
-        /// Simulate no agents in this community; may be repeated. Saves a runtime branch result.
-        #[arg(long)]
-        demo_no_agents_in: Vec<Uuid>,
     },
-    /// List synthetic requests, newest first.
+    /// List saved requests, newest first.
     List {
         /// Maximum number of rows.
         #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
@@ -179,37 +161,18 @@ pub async fn run(command: Command) -> Result<i32> {
                     .await?,
             )?;
         }
-        Command::Inventory {
-            pubkey,
-            relay_pubkey,
-        } => {
-            crate::print_json(
-                &db.user_deletion_store()
-                    .generate_inventory_with_relay(&pubkey, relay_pubkey.as_deref())
-                    .await?,
-            )?;
+        Command::Inventory { pubkey } => {
+            crate::print_json(&db.user_deletion_store().generate_inventory(&pubkey).await?)?;
         }
         Command::Submit {
             read_only,
-            relay_pubkey,
-            target,
             pubkey,
             requested_by,
             reason,
         } => {
-            let target = target.unwrap_or_else(|| match pubkey.as_deref() {
-                None | Some("demo") => "demo:default".to_owned(),
-                Some(key) => key.to_owned(),
-            });
             crate::print_json(
                 &db.user_deletion_store()
-                    .submit_for_mode(
-                        &target,
-                        &requested_by,
-                        reason.as_deref(),
-                        read_only,
-                        relay_pubkey.as_deref(),
-                    )
+                    .submit_for_mode(&pubkey, &requested_by, reason.as_deref(), read_only)
                     .await?,
             )?;
         }
@@ -233,36 +196,30 @@ pub async fn run(command: Command) -> Result<i32> {
             max_items,
             executor_id,
             next_step,
-            fail_stage,
-            stage_delay_ms,
-            demo_no_agents_in,
         } => {
-            let request = store.get(id).await?;
-            let real = !request.target.starts_with("demo:");
-            if real {
-                anyhow::ensure!(
-                    delete || read_only,
-                    "real workflow execution requires --delete or --read-only"
-                );
-                anyhow::ensure!(
-                    fail_stage.is_none() && stage_delay_ms == 0 && demo_no_agents_in.is_empty(),
-                    "dummy controls cannot be used for real deletion"
-                );
-            }
             anyhow::ensure!(
-                real || (!read_only && write_row_ids.is_none()),
-                "row output and read-only execution require a real subject"
+                delete || read_only,
+                "workflow execution requires --delete or --read-only"
             );
-            let relay_pubkey = buzz_db::user_deletion::UserDeletionInventory::resolve_relay_pubkey(
-                request.inventory_manifest.as_ref(),
-                relay_pubkey.as_deref(),
-            )?;
+            let request = store.get(id).await?;
+            // Earlier submissions may already identify the signer of historical records.
+            let saved_signer = request
+                .inventory_manifest
+                .as_ref()
+                .and_then(|manifest| manifest.get("discovery_relay_pubkey"))
+                .and_then(|key| key.as_str());
+            let relay_pubkey = match relay_pubkey.or_else(|| saved_signer.map(str::to_owned)) {
+                Some(key) => Some(key),
+                None => {
+                    account_batches::configured_signer()?.map(|keys| keys.public_key().to_hex())
+                }
+            };
             let code = worker::run(
                 &store,
                 id,
                 &executor_id.unwrap_or_else(crate::default_executor_id),
                 &worker::RunOptions {
-                    db: real.then(|| buzz_db::Db::from_pool(db.pool().clone())),
+                    db: buzz_db::Db::from_pool(db.pool().clone()),
                     media: None,
                     row_ids: write_row_ids.as_deref().map(row_ids::create).transpose()?,
                     delete,
@@ -270,9 +227,6 @@ pub async fn run(command: Command) -> Result<i32> {
                     batch_size,
                     max_items,
                     next_step,
-                    fail_stage,
-                    stage_delay: std::time::Duration::from_millis(stage_delay_ms),
-                    no_agents_in: demo_no_agents_in,
                 },
                 &crate::shutdown_token(),
             )
@@ -289,7 +243,6 @@ pub async fn run(command: Command) -> Result<i32> {
 mod account_batches;
 mod content_batches;
 mod handlers;
-mod inventory;
 /// Direct upload-only media cleanup and its workflow handler.
 pub mod media;
 /// Standalone delegation of an owned community to community deletion.

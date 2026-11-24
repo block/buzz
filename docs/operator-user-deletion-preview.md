@@ -6,7 +6,7 @@ Use this procedure to preview one user's deletion across their communities. It s
 
 ## 1. Select the target and review the inventory
 
-Use Bash with `buzz-admin` and `jq` on your path. Load the operator environment for the intended database and media store, including `DATABASE_URL`, `BUZZ_S3_ENDPOINT`, `BUZZ_S3_BUCKET`, and the usual storage credentials. Set `USER_PUBKEY` to the user's public key, `RELAY_PUBKEY` to the trusted relay public key, and `REQUESTED_BY` and `APPROVED_BY` to the respective operator identities. Run the blocks in the same shell. The output includes sensitive identifiers.
+Use Bash with `buzz-admin` and `jq` on your path. Load the operator environment for the intended database and media store, including `DATABASE_URL`, `BUZZ_S3_ENDPOINT`, `BUZZ_S3_BUCKET`, and the usual storage credentials. Set `USER_PUBKEY` to the user's public key, and `REQUESTED_BY` and `APPROVED_BY` to the respective operator identities. Run the blocks in the same shell. The output includes sensitive identifiers.
 
 ```bash
 set -euo pipefail
@@ -15,9 +15,9 @@ OUT=$(mktemp -d "${TMPDIR:-/tmp}/user-deletion.XXXXXXXX")
 echo "Preview files: $OUT"
 user_deletion() { buzz-admin user-deletions "$@"; }
 
-user_deletion inventory --pubkey "$USER_PUBKEY" --relay-pubkey "$RELAY_PUBKEY" \
+user_deletion inventory --pubkey "$USER_PUBKEY" \
   > "$OUT/inventory.json"
-user_deletion submit --read-only --pubkey "$USER_PUBKEY" --relay-pubkey "$RELAY_PUBKEY" \
+user_deletion submit --read-only --pubkey "$USER_PUBKEY" \
   --requested-by "$REQUESTED_BY" > "$OUT/request.json"
 REQUEST_ID=$(jq -er '.id' "$OUT/request.json")
 user_deletion inspect "$REQUEST_ID" > "$OUT/before.json"

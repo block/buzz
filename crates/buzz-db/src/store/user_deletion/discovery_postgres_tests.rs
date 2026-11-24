@@ -38,14 +38,9 @@ async fn owner_is_frozen_in_ordinary_and_read_only_submissions() {
     sqlx::query("INSERT INTO users(community_id,pubkey,agent_owner_pubkey,deactivated_at) VALUES($1,decode($2,'hex'),decode($3,'hex'),now())")
         .bind(agent_only).bind(&agent).bind(PUBKEY).execute(&pool).await.unwrap();
     let preview = store.generate_inventory(PUBKEY).await.unwrap();
-    assert!(preview["communities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|c| c["community_id"] == agent_only.to_string()
-            && c["relationship"] == "past_participant"));
+    assert_eq!(saved.inventory_manifest.as_ref().unwrap(), &preview);
     let read_only = store
-        .submit_for_mode(PUBKEY, "operator", None, true, None)
+        .submit_for_mode(PUBKEY, "operator", None, true)
         .await
         .unwrap();
     assert_eq!(
@@ -110,15 +105,8 @@ async fn channel_memberships_discover_participants_deduplicate_and_preserve_owne
                 .bind(community).bind(channel).bind(&key).bind(removed)
                 .execute(&pool).await.unwrap();
         }
-        if !unrelated {
-            expected.push((
-                community,
-                if removed {
-                    Some("past_participant")
-                } else {
-                    relay_role
-                },
-            ));
+        if !unrelated && !removed {
+            expected.push((community, relay_role));
         }
     }
     expected.sort_by_key(|(community, _)| *community);
@@ -132,8 +120,6 @@ async fn channel_memberships_discover_participants_deduplicate_and_preserve_owne
             actual["relationship"],
             if role == Some("owner") {
                 "owner"
-            } else if role == Some("past_participant") {
-                "past_participant"
             } else {
                 "participant"
             }
@@ -225,7 +211,6 @@ async fn current_inventory_includes_all_lifecycle_states_and_excludes_removed_me
         inventory,
         json!({
             "communities": expected,
-            "scope": "affected_communities",
             "workflow_version": 2,
         })
     );

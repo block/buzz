@@ -25,10 +25,8 @@ impl UserDeletionInventory {
             .inventory_manifest
             .as_ref()
             .ok_or_else(|| invalid("missing inventory"))?;
-        // Preserve old manifests and their exact saved handler inputs on resume.
-        let legacy = value.get("version").is_some() || value.get("target").is_some();
-        if legacy && (value["version"] != 1 || value["target"] != request.target) {
-            return Err(invalid("unsupported inventory version or target"));
+        if value["workflow_version"] != 2 {
+            return Err(invalid("unsupported user deletion workflow version; inspect the saved request before proceeding"));
         }
         let rows = value["communities"]
             .as_array()
@@ -41,16 +39,12 @@ impl UserDeletionInventory {
         let mut seen = HashSet::new();
         let mut communities = Vec::new();
         for row in rows {
-            if row["relationship"] == "owner" && value["workflow_version"] != 2 {
-                return Err(invalid("owned-community execution is not supported yet"));
-            }
             let id = row["community_id"]
                 .as_str()
                 .and_then(|s| Uuid::parse_str(s).ok())
                 .ok_or_else(|| invalid("invalid inventory community id"))?;
             if !seen.insert(id)
-                || (legacy && row["action"] != "delete_subject_data")
-                || (!legacy && row.get("action").is_some())
+                || row.get("action").is_some()
                 || !matches!(
                     row["relationship"].as_str(),
                     Some("participant" | "former_participant" | "past_participant" | "owner")
@@ -61,35 +55,6 @@ impl UserDeletionInventory {
             communities.push((id, row.clone()));
         }
         Ok(Self { communities })
-    }
-
-    /// Resolve frozen attribution for a filtered inventory. Legacy inventories
-    /// without that scope retain their existing runtime relay configuration.
-    pub fn resolve_relay_pubkey(
-        manifest: Option<&Value>,
-        supplied: Option<&str>,
-    ) -> Result<Option<String>> {
-        let Some(manifest) = manifest.filter(|m| m["scope"] == "affected_communities") else {
-            return Ok(supplied.map(str::to_owned));
-        };
-        let supplied = supplied
-            .map(super::normalize_user_deletion_pubkey)
-            .transpose()?;
-        let saved = manifest
-            .get("discovery_relay_pubkey")
-            .map(|v| {
-                v.as_str()
-                    .ok_or_else(|| invalid("invalid discovery relay key"))
-            })
-            .transpose()?
-            .map(super::normalize_user_deletion_pubkey)
-            .transpose()?;
-        if supplied.is_some() && supplied != saved {
-            return Err(invalid(
-                "relay key differs from filtered inventory; use the saved attribution key",
-            ));
-        }
-        Ok(saved)
     }
 
     /// Build handler inputs for a request-wide or community-scoped stage.

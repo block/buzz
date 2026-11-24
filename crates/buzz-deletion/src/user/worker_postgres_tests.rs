@@ -8,108 +8,123 @@ mod media_retry_postgres_tests;
 #[path = "worker_postgres_tests/owned_review.rs"]
 mod owned_review_postgres_tests;
 
-async fn fixture() -> (EntityDeletionStore, Uuid, sqlx::PgPool) {
-    let url = std::env::var("BUZZ_TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap();
-    let pool = sqlx::PgPool::connect(&url).await.unwrap();
-    let db = Db::from_pool(pool.clone());
-    if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
-        db.migrate().await.unwrap();
-    }
-    let store = db.entity_deletion_store();
-    let request = db
-        .user_deletion_store()
-        .submit("demo:runner", "submitter", None)
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn deletion_visits_only_memberships_saved_at_submission() {
+    let fixture = media_fixture::fixture().await;
+    let users = Db::from_pool(fixture.pool.clone()).user_deletion_store();
+    let subject = nostr::Keys::generate().public_key().to_hex();
+    let current = Uuid::from_u128(11);
+    let former = Uuid::from_u128(12);
+    for community in [current, former] {
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, 'member')",
+        )
+        .bind(community)
+        .bind(&subject)
+        .execute(&fixture.pool)
         .await
         .unwrap();
-    store
-        .approve(
-            request.id,
-            "approver",
-            request.inventory_digest.as_deref().unwrap(),
+        sqlx::query("INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig)
+            VALUES ($1,decode(repeat('aa',32),'hex'),decode($2,'hex'),now(),9,'[]','hello',decode(repeat('00',64),'hex'))")
+            .bind(community).bind(&subject).execute(&fixture.pool).await.unwrap();
+    }
+    sqlx::query("DELETE FROM relay_members WHERE community_id=$1 AND pubkey=$2")
+        .bind(former)
+        .bind(&subject)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let preview = users.generate_inventory(&subject).await.unwrap();
+    let listed = preview["communities"].as_array().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["community_id"], current.to_string());
+
+    let read_only = users
+        .submit_for_mode(&subject, "reader", None, true)
+        .await
+        .unwrap();
+    let deletion = users.submit(&subject, "operator", None).await.unwrap();
+    for request in [&read_only, &deletion] {
+        assert_eq!(request.inventory_manifest.as_ref(), Some(&preview));
+        users
+            .approve(
+                request.id,
+                "reviewer",
+                request.inventory_digest.as_deref().unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    // Losing the remaining membership after approval must not change the saved list.
+    sqlx::query("DELETE FROM relay_members WHERE community_id=$1 AND pubkey=$2")
+        .bind(current)
+        .bind(&subject)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    for (id, delete) in [(read_only.id, false), (deletion.id, true)] {
+        let options = RunOptions {
+            delete,
+            ..fixture.options()
+        };
+        run(
+            &fixture.store,
+            id,
+            "worker",
+            &options,
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
-    (
-        store,
-        request.id,
-        sqlx::PgPool::connect(&url).await.unwrap(),
-    )
-}
-
-fn options() -> RunOptions {
-    RunOptions {
-        next_step: false,
-        db: None,
-        media: None,
-        row_ids: None,
-        delete: false,
-        relay_pubkey: None,
-        batch_size: 100,
-        max_items: 1_000_000,
-        fail_stage: None,
-        stage_delay: Duration::ZERO,
-        no_agents_in: Vec::new(),
-    }
-}
-
-async fn assert_completed(store: &EntityDeletionStore, id: Uuid) {
-    let inspection = store.inspect(id).await.unwrap();
-    assert_eq!(inspection.request.status, "completed");
-    assert!(inspection.execution.completed_at.is_some());
-    assert!(inspection.execution.lease_owner.is_none());
-    assert_eq!(inspection.approvals.len(), 1);
-    let actual: Vec<_> = inspection
-        .stage_history
-        .iter()
-        .map(|s| {
-            (
-                s.stage.as_str(),
-                s.target_community_id.map(|id| id.to_string()),
-            )
-        })
-        .collect();
-    let b = Some("00000000-0000-0000-0000-00000000000b".to_owned());
-    let c = Some("00000000-0000-0000-0000-00000000000c".to_owned());
-    assert_eq!(
-        actual,
-        vec![
-            ("gate_user", None),
-            ("purge_media", None),
-            ("purge_content", b.clone()),
-            ("purge_agents", b),
-            ("purge_content", c.clone()),
-            ("purge_agents", c)
-        ]
-    );
-    for stage in &inspection.stage_history {
-        assert_eq!(stage.status, "completed");
-        assert!(!stage.is_current);
-        assert!(stage.started_at.is_some());
-        assert!(stage.finished_at >= stage.started_at);
-        assert_eq!(stage.metadata_json["result"]["dummy"], true);
+        let result = fixture.store.inspect(id).await.unwrap();
+        assert_eq!(result.request.status, "completed");
+        assert!(result
+            .stage_history
+            .iter()
+            .any(|row| row.target_community_id == Some(current)));
+        assert!(result
+            .stage_history
+            .iter()
+            .all(|row| row.target_community_id != Some(former)));
+        let remaining: Vec<Uuid> = sqlx::query_scalar("SELECT community_id FROM events WHERE pubkey=decode($1,'hex') AND content='hello' ORDER BY community_id")
+            .bind(&subject).fetch_all(&fixture.pool).await.unwrap();
+        assert_eq!(
+            remaining,
+            if delete {
+                vec![former]
+            } else {
+                vec![current, former]
+            }
+        );
     }
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn dummy_executor_completes_two_communities_and_completed_rerun_is_read_only() {
-    let (store, id, _) = fixture().await;
+async fn executor_completes_two_communities_and_completed_rerun_is_read_only() {
+    let f = media_fixture::fixture().await;
+    let store = &f.store;
+    let id = f.id;
+    sqlx::query("DELETE FROM relay_members WHERE pubkey = $1")
+        .bind(store.get(id).await.unwrap().target)
+        .execute(&f.pool)
+        .await
+        .unwrap();
     assert_eq!(
         tokio::time::timeout(
             Duration::from_secs(15),
-            run(&store, id, "worker", &options(), &CancellationToken::new())
+            run(store, id, "worker", &f.options(), &CancellationToken::new())
         )
         .await
         .unwrap()
         .unwrap(),
         0
     );
-    assert_completed(&store, id).await;
+    assert_eq!(store.get(id).await.unwrap().status, "completed");
     let before = serde_json::to_value(store.inspect(id).await.unwrap()).unwrap();
     assert_eq!(
-        run(&store, id, "worker", &options(), &CancellationToken::new())
+        run(store, id, "worker", &f.options(), &CancellationToken::new())
             .await
             .unwrap(),
         0
@@ -123,14 +138,18 @@ async fn dummy_executor_completes_two_communities_and_completed_rerun_is_read_on
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn next_step_advances_one_handler_at_a_time_through_completion() {
-    let (store, id, _) = fixture().await;
-    let one = RunOptions {
-        next_step: true,
-        ..options()
-    };
-    run(&store, id, "worker-a", &one, &CancellationToken::new())
+    let f = media_fixture::fixture().await;
+    let store = &f.store;
+    let id = f.id;
+    sqlx::query("DELETE FROM relay_members WHERE pubkey = $1")
+        .bind(store.get(id).await.unwrap().target)
+        .execute(&f.pool)
         .await
         .unwrap();
+    let one = RunOptions {
+        next_step: true,
+        ..f.options()
+    };
     let paused = store.inspect(id).await.unwrap();
     assert_eq!(paused.request.status, "running");
     assert!(paused.execution.lease_owner.is_none());
@@ -138,8 +157,8 @@ async fn next_step_advances_one_handler_at_a_time_through_completion() {
     assert_eq!(paused.stage_history[1].stage, "purge_media");
     assert_eq!(paused.stage_history[1].status, "pending");
     let gate = serde_json::to_value(&paused.stage_history[0]).unwrap();
-    for completed_handlers in 2..=6 {
-        run(&store, id, "worker-b", &one, &CancellationToken::new())
+    for completed_handlers in 2..=9 {
+        run(store, id, "worker-b", &one, &CancellationToken::new())
             .await
             .unwrap();
         let after = store.inspect(id).await.unwrap();
@@ -152,318 +171,21 @@ async fn next_step_advances_one_handler_at_a_time_through_completion() {
                 .count(),
             completed_handlers
         );
-        if completed_handlers < 6 {
+        if completed_handlers < 9 {
             assert_eq!(after.stage_history.len(), completed_handlers + 1);
             let current = after.stage_history.iter().find(|s| s.is_current).unwrap();
             assert_eq!(current.status, "pending");
             assert!(current.started_at.is_none());
         } else {
-            assert_eq!(after.stage_history.len(), 6);
+            assert_eq!(after.stage_history.len(), 9);
             assert!(!after.stage_history.iter().any(|s| s.is_current));
         }
     }
-    assert_completed(&store, id).await;
+    assert_eq!(store.get(id).await.unwrap().status, "completed");
     assert_eq!(
         serde_json::to_value(&store.inspect(id).await.unwrap().stage_history[0]).unwrap(),
         gate
     );
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn dummy_executor_failure_retries_same_community_stage() {
-    let (store, id, pool) = fixture().await;
-    let fail = RunOptions {
-        fail_stage: Some("purge_content".to_owned()),
-        ..options()
-    };
-    assert_eq!(
-        run(&store, id, "worker-a", &fail, &CancellationToken::new())
-            .await
-            .unwrap(),
-        1
-    );
-    let failed = store.inspect(id).await.unwrap();
-    assert_eq!(failed.request.status, "retry_wait");
-    assert_eq!(failed.execution.retry_count, 1);
-    assert!(failed
-        .execution
-        .last_error
-        .as_deref()
-        .unwrap()
-        .contains("injected dummy failure"));
-    assert_eq!(failed.stage_history.len(), 3);
-    let stage_id = failed.stage_history[2].id;
-    let started = failed.stage_history[2].started_at;
-    assert_eq!(failed.stage_history[2].status, "failed");
-    assert!(run(
-        &store,
-        id,
-        "worker-b",
-        &options(),
-        &CancellationToken::new()
-    )
-    .await
-    .is_err());
-    sqlx::query("UPDATE entity_deletion_requests SET next_attempt_at = clock_timestamp() - interval '1 second' WHERE id = $1")
-        .bind(id).execute(&pool).await.unwrap();
-    run(
-        &store,
-        id,
-        "worker-b",
-        &options(),
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
-    assert_completed(&store, id).await;
-    let after = store.inspect(id).await.unwrap();
-    assert_eq!(after.stage_history[2].id, stage_id);
-    assert_eq!(after.stage_history[2].started_at, started);
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn dummy_executor_shutdown_keeps_running_stage_for_next_worker() {
-    let (store, id, _) = fixture().await;
-    let shutdown = CancellationToken::new();
-    let delayed = RunOptions {
-        stage_delay: Duration::from_secs(60),
-        ..options()
-    };
-    let work = run(&store, id, "worker-a", &delayed, &shutdown);
-    tokio::pin!(work);
-    // Poll the production executor until its durable running row is visible.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            tokio::select! {
-                result = &mut work => panic!("run finished before cancellation: {result:?}"),
-                _ = tokio::time::sleep(Duration::from_millis(10)) => {
-                    if store.inspect(id).await.unwrap().stage_history.first().is_some_and(|s| s.status == "running") { break; }
-                }
-            }
-        }
-    }).await.unwrap();
-    shutdown.cancel();
-    assert_eq!(work.await.unwrap(), 0);
-    let paused = store.inspect(id).await.unwrap();
-    assert_eq!(paused.stage_history[0].status, "running");
-    assert!(paused.execution.lease_owner.is_none());
-    let stage_id = paused.stage_history[0].id;
-    run(
-        &store,
-        id,
-        "worker-b",
-        &options(),
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
-    assert_completed(&store, id).await;
-    assert_eq!(
-        store.inspect(id).await.unwrap().stage_history[0].id,
-        stage_id
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn dummy_handler_is_heartbeated_and_lease_loss_prevents_completion() {
-    let (store, id, pool) = fixture().await;
-    let lease = store
-        .claim(id, "worker", Duration::from_secs(1))
-        .await
-        .unwrap()
-        .unwrap();
-    let stage = match UserDeletionTransition::new(&store)
-        .get_next_stage(&lease, None)
-        .await
-        .unwrap()
-    {
-        NextStage::Stage(row) => row,
-        other => panic!("{other:?}"),
-    };
-    let before = store.inspect(id).await.unwrap().execution;
-    let delayed = RunOptions {
-        stage_delay: Duration::from_millis(1100),
-        ..options()
-    };
-    assert!(matches!(
-        run_stage_with_heartbeat(
-            &store,
-            &lease,
-            &stage,
-            &delayed,
-            &CancellationToken::new(),
-            Duration::from_millis(10)
-        )
-        .await,
-        Ok(HandlerProgress::Advance)
-    ));
-    let after = store.inspect(id).await.unwrap();
-    assert!(
-        after.execution.heartbeat_at.unwrap()
-            > before.heartbeat_at.unwrap() + chrono::Duration::seconds(1)
-    );
-    assert!(after.execution.lease_expires_at > before.lease_expires_at);
-    assert_eq!(after.stage_history.len(), 1);
-    assert!(after.stage_history[0].is_current);
-    assert_eq!(after.stage_history[0].status, "completed");
-
-    let stage = match UserDeletionTransition::new(&store)
-        .get_next_stage(&lease, None)
-        .await
-        .unwrap()
-    {
-        NextStage::Stage(row) => row,
-        other => panic!("{other:?}"),
-    };
-    let delayed = RunOptions {
-        stage_delay: Duration::from_secs(60),
-        ..options()
-    };
-    let shutdown = CancellationToken::new();
-    let work = run_stage_with_heartbeat(
-        &store,
-        &lease,
-        &stage,
-        &delayed,
-        &shutdown,
-        Duration::from_millis(10),
-    );
-    tokio::pin!(work);
-    // Lose the lease while the handler is already running, not before start_stage.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            tokio::select! {
-                _ = &mut work => panic!("handler finished before takeover"),
-                _ = tokio::time::sleep(Duration::from_millis(10)) => {
-                    if store.inspect(id).await.unwrap().stage_history[1].status == "running" {
-                        break;
-                    }
-                }
-            }
-        }
-    })
-    .await
-    .unwrap();
-    let takeover = async {
-        sqlx::query("UPDATE entity_deletion_requests SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = $1")
-            .bind(id).execute(&pool).await.unwrap();
-        // Claim uses SKIP LOCKED; an in-flight heartbeat may still own the row.
-        // The enclosing timeout bounds this retry, while join keeps work polled.
-        loop {
-            if let Some(replacement) = store
-                .claim(id, "worker", DEFAULT_LEASE_DURATION)
-                .await
-                .unwrap()
-            {
-                break replacement;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    };
-    // Keep polling renewal while takeover waits for the parent lock; an
-    // in-flight heartbeat must be allowed to commit and release that lock.
-    let (outcome, replacement) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(&mut work, takeover)
-    })
-    .await
-    .unwrap();
-    assert_eq!(replacement.generation, lease.generation + 1);
-    assert!(outcome.is_err());
-    let after = store.inspect(id).await.unwrap();
-    assert_eq!(after.stage_history.len(), 2);
-    assert_eq!(after.stage_history[1].status, "running");
-    assert!(after.stage_history[1].finished_at.is_none());
-    assert_eq!(after.execution.lease_generation, replacement.generation);
-    assert_eq!(after.execution.lease_owner.as_deref(), Some("worker"));
-    assert!(store.release(&replacement).await.unwrap());
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn migration_schema_dummy_executor_completes_two_communities() {
-    let (store, id, _) = fixture().await;
-    run(&store, id, "worker", &options(), &CancellationToken::new())
-        .await
-        .unwrap();
-    assert_completed(&store, id).await;
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn restart_after_handler_resumes_saved_branch_without_rerunning_action() {
-    let (store, id, _) = fixture().await;
-    assert!(store.inspect(id).await.unwrap().stage_history.is_empty());
-    execute_without_transition(&store, id, &options()).await;
-    let after_gate = store.inspect(id).await.unwrap();
-    assert_eq!(after_gate.stage_history.len(), 1);
-    assert_eq!(after_gate.stage_history[0].status, "completed");
-    assert!(after_gate.stage_history[0].is_current);
-    let gate_finished = after_gate.stage_history[0].finished_at;
-
-    execute_without_transition(&store, id, &options()).await;
-    let media_finished = store.inspect(id).await.unwrap().stage_history[1].finished_at;
-
-    let branch = RunOptions {
-        no_agents_in: vec![Uuid::from_u128(11)],
-        ..options()
-    };
-    execute_without_transition(&store, id, &branch).await;
-    let after_db = store.inspect(id).await.unwrap();
-    assert_eq!(after_db.stage_history.len(), 3);
-    assert_eq!(
-        after_db.stage_history[2].metadata_json["result"]["has_agents"],
-        false
-    );
-    let db_finished = after_db.stage_history[2].finished_at;
-    // No skip flag on restart: routing must use the persisted result, not new options.
-    run(
-        &store,
-        id,
-        "worker-c",
-        &options(),
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
-    let completed = store.inspect(id).await.unwrap();
-    assert_eq!(completed.request.status, "completed");
-    assert_eq!(completed.stage_history[1].finished_at, media_finished);
-    assert_eq!(completed.stage_history.len(), 5);
-    assert_eq!(completed.stage_history[0].finished_at, gate_finished);
-    assert_eq!(completed.stage_history[2].finished_at, db_finished);
-    assert_eq!(
-        completed.stage_history[2].metadata_json["transition"]["kind"],
-        "community_complete"
-    );
-    assert!(!completed
-        .stage_history
-        .iter()
-        .any(|row| row.target_community_id == Some(Uuid::from_u128(11))
-            && row.stage == "purge_agents"));
-}
-
-// Simulate process exit after the real handler commits but before the worker
-// calls get_next_stage again. No operator-facing pause flag is needed.
-async fn execute_without_transition(store: &EntityDeletionStore, id: Uuid, options: &RunOptions) {
-    let lease = store
-        .claim(id, "interrupted-worker", DEFAULT_LEASE_DURATION)
-        .await
-        .unwrap()
-        .unwrap();
-    let NextStage::Stage(row) = UserDeletionTransition::new(store)
-        .get_next_stage(&lease, None)
-        .await
-        .unwrap()
-    else {
-        panic!("expected an executable stage");
-    };
-    handlers::dispatch(store, &lease, &row, options)
-        .await
-        .unwrap();
-    store.release(&lease).await.unwrap();
 }
 
 #[tokio::test]
@@ -474,7 +196,7 @@ async fn read_only_run_writes_selected_keys_and_preserves_source_rows() {
     let db = Db::from_pool(f.pool.clone());
     let preview = db
         .user_deletion_store()
-        .submit_for_mode(&ordinary.target, "reader", None, true, None)
+        .submit_for_mode(&ordinary.target, "reader", None, true)
         .await
         .unwrap();
     assert_ne!(preview.id, ordinary.id);

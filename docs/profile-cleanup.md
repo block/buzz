@@ -2,8 +2,7 @@
 
 `buzz-admin user-deletions profile-batches` previews or removes profile data in
 one explicit community. This is the identity step after content, account and
-media cleanup. It does not enable the user-deletion workflow or declare complete
-account erasure.
+media cleanup. The full workflow enforces this order. A direct call checks the prerequisites itself.
 
 ```sh
 # DATABASE_URL selects the operator database. Preview is the default.
@@ -59,11 +58,11 @@ support up to 10,000 retained identities. Exceeding any limit is an error, never
 a successful partial preview. SQL statements have a 30-second timeout and locks
 a three-second timeout; large accounts can require a separately reviewed plan.
 
-Before mutations, the command checks for remaining credentials, memberships,
-and unresolved archive references. A canvas or other non-profile event signed
-by a target can survive profile cleanup. Workflow definitions and their history
-can also survive when the owner’s profile is removed. The content stage handles
-those records according to its own retention rules.
+Before deleting profiles, the handler checks for remaining credentials, memberships,
+owned workflows, unresolved archive references and other authored content.
+Shared canvas events (40100) and repository announcements and state (30617/30618)
+may survive. An owned workflow with retained run history still blocks profile
+deletion until its ownership is resolved.
 Profile cleanup retains replay watermarks, deletion fences, requests, approvals,
 history, repositories and media objects. Media cleanup must preserve its source
 evidence before this command removes avatar/configuration references.

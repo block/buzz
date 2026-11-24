@@ -1,4 +1,4 @@
-//! Shared read-only discovery of communities with user cleanup candidates.
+//! Shared read-only discovery of current community memberships.
 
 use super::{UserDeletionStore, MAX_COMMUNITIES};
 use crate::{DbError, Result};
@@ -21,40 +21,6 @@ fn invalid_pubkey() -> DbError {
     DbError::DeletionSafety("expected a 64-character hex public key or an npub".into())
 }
 
-// Identity resolution belongs to intake, never approval or workflow recovery.
-pub(super) fn normalize_target(input: &str) -> Result<String> {
-    if let Some(slug) = input.strip_prefix("demo:") {
-        if slug.is_empty()
-            || slug.len() > 64
-            || !slug.as_bytes()[0].is_ascii_alphanumeric()
-            || !slug
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-        {
-            return Err(DbError::DeletionSafety("invalid demo target label".into()));
-        }
-        return Ok(input.to_owned());
-    }
-    normalize_user_deletion_pubkey(input)
-}
-
-fn demo_inventory() -> serde_json::Value {
-    serde_json::json!({
-        "communities": [
-            {
-                "community_id": "00000000-0000-0000-0000-00000000000b",
-                "label": "demo:community-b",
-                "relationship": "participant"
-            },
-            {
-                "community_id": "00000000-0000-0000-0000-00000000000c",
-                "label": "demo:community-c",
-                "relationship": "former_participant"
-            }
-        ]
-    })
-}
-
 #[derive(sqlx::FromRow)]
 struct Membership {
     community_id: Uuid,
@@ -63,100 +29,75 @@ struct Membership {
 }
 
 impl UserDeletionStore {
-    /// Generate only community identities and relationships for demo or real input.
-    /// `demo` selects the existing fixture; other inputs accept hex or npub.
+    /// List the subject's current community and channel memberships.
     pub async fn generate_inventory(&self, pubkey: &str) -> Result<Value> {
-        self.generate_inventory_with_relay(pubkey, None).await
-    }
-
-    /// Generate the same inventory used by both submission modes, including
-    /// historical content attributed by an optional trusted relay signer.
-    pub async fn generate_inventory_with_relay(
-        &self,
-        pubkey: &str,
-        relay_pubkey: Option<&str>,
-    ) -> Result<Value> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("SET TRANSACTION READ ONLY")
             .execute(&mut *tx)
             .await?;
-        let inventory = generate_inventory_on(&mut tx, pubkey, relay_pubkey).await?;
+        let inventory = generate_inventory_on(&mut tx, pubkey).await?;
         tx.commit().await?;
         Ok(inventory)
     }
 }
 
-// Select communities with cleanup candidates, including residue after leaving.
-// Agent ownership is community-local: an owned users row is itself a candidate,
-// so there is no need to expand those keys into other communities here.
-// Handlers still validate attribution and discover their exact current rows.
+// Submission uses its existing transaction, including when the pool has one connection.
 pub(super) async fn generate_inventory_on(
     conn: &mut sqlx::PgConnection,
-    subject: &str,
-    relay_pubkey: Option<&str>,
+    pubkey: &str,
 ) -> Result<Value> {
-    let subject = if subject == "demo" {
-        "demo:default"
-    } else {
-        subject
-    };
-    let subject = normalize_target(subject)?;
-    let relay_pubkey = normalize_relay(&subject, relay_pubkey)?;
-    if subject.starts_with("demo:") {
-        return Ok(demo_inventory());
-    }
-    sqlx::query("SET LOCAL statement_timeout='30s'")
+    let pubkey = normalize_user_deletion_pubkey(pubkey)?;
+    sqlx::query("SET LOCAL statement_timeout = '30s'")
         .execute(&mut *conn)
         .await?;
-    // Closed SQL fragments only; all operator input stays bound. Reusing the
-    // planner predicate keeps legacy actor/p and private-state ownership aligned.
-    let attributed = include_str!("content_batches/authored.sql")
-        .replace("$1", "c.id")
-        .replace("$2", "ARRAY[decode($1, 'hex')]");
-    let query =
-        include_str!("inventory_discovery.sql").replace("/* ATTRIBUTED_CONTENT */", &attributed);
-    let rows = sqlx::query_as::<_, Membership>(sqlx::AssertSqlSafe(query))
-        .bind(&subject)
-        .bind((MAX_COMMUNITIES + 1) as i64)
-        .bind(relay_pubkey.as_deref())
-        .fetch_all(conn)
-        .await?;
+    // Operator-global discovery: deliberately do not apply the product's
+    // active-community filters. One statement gives one membership snapshot.
+    let rows = sqlx::query_as::<_, Membership>(
+        "WITH current_channels AS ( \
+                 SELECT DISTINCT community_id FROM channel_members \
+                 WHERE pubkey = decode($1, 'hex') AND removed_at IS NULL \
+             ), matched_communities AS ( \
+                 SELECT community_id FROM relay_members WHERE pubkey = $1 \
+                 UNION SELECT community_id FROM current_channels \
+             ) \
+             SELECT c.id AS community_id, c.host, m.role \
+             FROM matched_communities matched \
+             JOIN communities c ON c.id = matched.community_id \
+             LEFT JOIN relay_members m ON m.community_id = c.id AND m.pubkey = $1 \
+             ORDER BY c.id LIMIT $2",
+    )
+    .bind(&pubkey)
+    .bind((MAX_COMMUNITIES + 1) as i64)
+    .fetch_all(&mut *conn)
+    .await?;
     if rows.len() > MAX_COMMUNITIES {
         return Err(DbError::DeletionSafety(format!(
             "inventory exceeds {MAX_COMMUNITIES} communities; no partial inventory returned"
         )));
     }
-    let rows = rows.into_iter().map(|row| {
-        let relationship = match row.role.as_deref() {
-            Some("owner") => "owner",
-            Some("admin" | "member") => "participant",
-            None => "past_participant",
-            _ => return Err(DbError::DeletionSafety("unsupported membership role".into())),
-        };
-        Ok(json!({"community_id":row.community_id,"label":row.host,"relationship":relationship}))
-    }).collect::<Result<Vec<_>>>()?;
-    let mut inventory =
-        json!({"communities":rows,"scope":"affected_communities","workflow_version":2});
-    if let Some(key) = relay_pubkey {
-        inventory["discovery_relay_pubkey"] = key.into();
-    }
-    Ok(inventory)
-}
-
-// Normalize attribution once for preview, submission and idempotency checks.
-pub(super) fn normalize_relay(subject: &str, relay: Option<&str>) -> Result<Option<String>> {
-    let relay = relay.map(normalize_user_deletion_pubkey).transpose()?;
-    if relay.is_some() && subject.starts_with("demo:") {
-        return Err(DbError::DeletionSafety(
-            "trusted relay is only valid for real public keys".into(),
-        ));
-    }
-    if relay.as_deref() == Some(subject) {
-        return Err(DbError::DeletionSafety(
-            "the human and trusted relay public keys must differ".into(),
-        ));
-    }
-    Ok(relay)
+    let communities = rows
+        .into_iter()
+        .map(|row| {
+            let relationship = match row.role.as_deref() {
+                Some("owner") => "owner",
+                Some("admin" | "member") | None => "participant",
+                _ => {
+                    return Err(DbError::DeletionSafety(
+                        "unsupported membership role".into(),
+                    ))
+                }
+            };
+            Ok(json!({
+                "community_id": row.community_id,
+                "label": row.host,
+                "relationship": relationship,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(json!({
+        "communities": communities,
+        "workflow_version": 2,
+    }))
 }
 
 #[cfg(test)]

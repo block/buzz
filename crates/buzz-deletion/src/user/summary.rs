@@ -123,7 +123,7 @@ pub(super) async fn final_review(
     options: &super::worker::RunOptions,
     current_result: &Value,
 ) -> anyhow::Result<FinalSummary> {
-    use anyhow::{ensure, Context};
+    use anyhow::ensure;
     let saved = store.inspect(lease.request_id).await?;
     let mut remaining = Vec::new();
     let mut skipped = Vec::new();
@@ -146,10 +146,7 @@ pub(super) async fn final_review(
             {
                 continue;
             }
-            let db = options
-                .db
-                .as_ref()
-                .context("missing community deletion database")?;
+            let db = &options.db;
             let (observation, complete) =
                 super::owned_community::refresh(&saved.request, stage, &db.deletion_store())
                     .await?;

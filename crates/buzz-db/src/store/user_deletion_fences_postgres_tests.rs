@@ -13,7 +13,7 @@ async fn request(pool: &PgPool) -> EntityLease {
     let request = db
         .user_deletion_store()
         .submit(
-            &format!("demo:{}", Uuid::new_v4().simple()),
+            &nostr::Keys::generate().public_key().to_hex(),
             "operator",
             None,
         )
@@ -299,7 +299,11 @@ async fn insert_requires_approved_inventory_and_current_unexpired_worker() {
     let store = db.entity_deletion_store();
     let submitted = db
         .user_deletion_store()
-        .submit("demo:unapproved", "operator", None)
+        .submit(
+            &nostr::Keys::generate().public_key().to_hex(),
+            "operator",
+            None,
+        )
         .await
         .unwrap();
     assert!(store

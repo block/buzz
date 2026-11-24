@@ -6,6 +6,8 @@ use std::time::Duration;
 
 // This fixture exposes the real stores and transition component. It contains
 // no routing rules; each helper delegates to the production API.
+const TARGET: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
 struct TestStore {
     store: EntityDeletionStore,
     pool: PgPool,
@@ -52,10 +54,19 @@ async fn fixture() -> (TestStore, Uuid) {
         store: Db::from_pool(pool.clone()).entity_deletion_store(),
         pool,
     };
-    let request = store
-        .submit("demo:executor", "submitter", None)
+    let community = Uuid::new_v4();
+    sqlx::query("INSERT INTO communities(id,host) VALUES ($1,'routing.example')")
+        .bind(community)
+        .execute(&store.pool)
         .await
         .unwrap();
+    sqlx::query("INSERT INTO relay_members(community_id,pubkey,role) VALUES ($1,$2,'member')")
+        .bind(community)
+        .bind(TARGET)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    let request = store.submit(TARGET, "submitter", None).await.unwrap();
     store
         .approve(
             request.id,
@@ -84,7 +95,11 @@ async fn snapshot(store: &TestStore, id: Uuid) -> serde_json::Value {
 async fn concurrent_claimers_have_one_owner_and_unapproved_requests_are_not_claimed() {
     let (store, id) = fixture().await;
     let unapproved = store
-        .submit("demo:unapproved", "submitter", None)
+        .submit(
+            &nostr::Keys::generate().public_key().to_hex(),
+            "submitter",
+            None,
+        )
         .await
         .unwrap();
     assert!(store
@@ -165,7 +180,7 @@ async fn expired_and_superseded_workers_cannot_change_any_execution_state() {
     assert!(!store.release(&old).await.unwrap());
     assert_eq!(snapshot(&store, id).await, before);
     store
-        .save_stage_success(&new, stage.id, serde_json::json!({"dummy": true}))
+        .save_stage_success(&new, stage.id, serde_json::json!({"implemented": false}))
         .await
         .unwrap();
     let next = next(&store, &new, Some(stage.id)).await;
@@ -236,7 +251,7 @@ async fn transition_recovers_on_both_sides_of_commit_and_repeated_previous_id_is
         .unwrap();
     let gate = start(&store, &first).await.unwrap();
     store
-        .save_stage_success(&first, gate.id, serde_json::json!({"dummy": true}))
+        .save_stage_success(&first, gate.id, serde_json::json!({"implemented": false}))
         .await
         .unwrap();
     let saved = store.inspect(id).await.unwrap();
@@ -254,7 +269,7 @@ async fn transition_recovers_on_both_sides_of_commit_and_repeated_previous_id_is
         db_stage.metadata_json["previous_stage_id"],
         gate.id.to_string()
     );
-    assert_eq!(db_stage.metadata_json["inputs"]["target"], "demo:executor");
+    assert_eq!(db_stage.metadata_json["inputs"]["target"], TARGET);
     let before = snapshot(&store, id).await;
     assert_eq!(next(&store, &second, Some(gate.id)).await.id, db_stage.id);
     assert_eq!(snapshot(&store, id).await, before);
@@ -285,7 +300,7 @@ async fn failed_transition_keeps_completed_current_row_and_retry_creates_only_on
     let lease = claim(&store, id, "worker").await;
     let gate = start(&store, &lease).await.unwrap();
     store
-        .save_stage_success(&lease, gate.id, serde_json::json!({"dummy":true}))
+        .save_stage_success(&lease, gate.id, serde_json::json!({"implemented":false}))
         .await
         .unwrap();
     sqlx::query("ALTER TABLE entity_deletion_stage_history ADD CONSTRAINT reject_successor CHECK (stage <> 'purge_media') NOT VALID")
@@ -351,11 +366,15 @@ async fn routing_rebuilds_variable_community_progress_and_obeys_saved_branch_res
     let (store, _) = fixture().await;
     for count in [0, 1, 3] {
         let mut request = store
-            .submit(&format!("demo:communities-{count}"), "submitter", None)
+            .submit(
+                &nostr::Keys::generate().public_key().to_hex(),
+                "submitter",
+                None,
+            )
             .await
             .unwrap();
         let mut inventory = request.inventory_manifest.take().unwrap();
-        let template = inventory["communities"][0].clone();
+        let template = serde_json::json!({"label":"routing.example","relationship":"participant"});
         inventory["communities"] = (0..count)
             .map(|i| {
                 let mut row = template.clone();
@@ -374,7 +393,7 @@ async fn routing_rebuilds_variable_community_progress_and_obeys_saved_branch_res
         let mut lease = claim(&store, request.id, "worker").await;
         let mut stages = Vec::new();
         let mut previous = None;
-        for _ in 0..10 {
+        for _ in 0..13 {
             let row = match store.get_next_stage(&lease, previous).await.unwrap() {
                 NextStage::Finished => break,
                 NextStage::Stage(row) => row,
@@ -382,12 +401,12 @@ async fn routing_rebuilds_variable_community_progress_and_obeys_saved_branch_res
             };
             stages.push((row.stage.clone(), row.target_community_id));
             store.start_stage(&lease, row.id).await.unwrap();
-            // Alternate paths: first community skips agents, the next executes them.
-            let has_agents = row
-                .target_community_id
-                .is_some_and(|id| id.as_u128() % 2 == 1);
             store
-                .save_stage_success(&lease, row.id, serde_json::json!({"has_agents":has_agents}))
+                .save_stage_success(
+                    &lease,
+                    row.id,
+                    serde_json::json!({"account_erasure_complete":false}),
+                )
                 .await
                 .unwrap();
             // Rebuild from PostgreSQL after every successful action, with no previous id.
@@ -396,10 +415,10 @@ async fn routing_rebuilds_variable_community_progress_and_obeys_saved_branch_res
             previous = None;
         }
         assert_eq!(store.get(request.id).await.unwrap().status, "completed");
-        assert_eq!(stages.len(), 2 + count as usize + (count / 2) as usize);
+        assert_eq!(stages.len(), 3 + count as usize * 3);
         assert_eq!(
-            stages.iter().filter(|(s, _)| s == "purge_agents").count(),
-            (count / 2) as usize
+            stages.iter().filter(|(s, _)| s == "purge_profile").count(),
+            count as usize
         );
         assert!(matches!(
             store.get_next_stage(&lease, None).await.unwrap(),
@@ -469,7 +488,7 @@ async fn corrupt_inventory_history_and_results_fail_without_inventing_progress()
         .unwrap();
     let before = snapshot(&store, id).await;
     assert!(store.get_next_stage(&lease, Some(db.id)).await.is_err());
-    assert_eq!(snapshot(&store, id).await, before); // missing has_agents cannot skip work
+    assert_eq!(snapshot(&store, id).await, before); // missing content result cannot advance
     sqlx::query("DELETE FROM entity_deletion_stage_history WHERE id = $1")
         .bind(db.id)
         .execute(&store.pool)
@@ -519,7 +538,7 @@ async fn real_user_requires_gate_then_global_media_before_community_cleanup() {
     assert_eq!(gate.stage, "gate_user");
     assert_eq!(gate.target_community_id, None);
     let options = super::super::worker::RunOptions {
-        db: None,
+        db: Db::from_pool(store.pool.clone()),
         media: None,
         row_ids: None,
         relay_pubkey: None,
@@ -527,9 +546,6 @@ async fn real_user_requires_gate_then_global_media_before_community_cleanup() {
         max_items: 1_000_000,
         delete: true,
         next_step: true,
-        fail_stage: None,
-        stage_delay: Duration::ZERO,
-        no_agents_in: vec![],
     };
     super::super::handlers::dispatch(&store, &lease, &gate, &options)
         .await

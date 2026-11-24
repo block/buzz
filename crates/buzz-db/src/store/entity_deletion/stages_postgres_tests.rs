@@ -9,7 +9,11 @@ async fn stage_storage_accepts_caller_policy_and_rolls_back_invalid_decisions() 
     let db = Db::from_pool(pool.clone());
     let request = db
         .user_deletion_store()
-        .submit("demo:generic-storage", "operator", None)
+        .submit(
+            &nostr::Keys::generate().public_key().to_hex(),
+            "operator",
+            None,
+        )
         .await
         .unwrap();
     let store = db.entity_deletion_store();

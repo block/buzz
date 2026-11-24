@@ -43,20 +43,13 @@ const RULES: &[Rule] = &[
     Rule {
         name: "purge_content",
         community_scope: true,
-        allowed: &[
-            Decision::Stage("purge_account"),
-            Decision::Stage("purge_agents"),
-            Decision::CommunityComplete,
-        ],
+        allowed: &[Decision::Stage("purge_account")],
         decide: after_purge_content,
     },
     Rule {
         name: "purge_account",
         community_scope: true,
-        allowed: &[
-            Decision::Stage("purge_agents"),
-            Decision::Stage("purge_profile"),
-        ],
+        allowed: &[Decision::Stage("purge_profile")],
         decide: |_| Ok(Decision::Stage("purge_profile")),
     },
     Rule {
@@ -77,12 +70,6 @@ const RULES: &[Rule] = &[
         allowed: &[Decision::RequestComplete],
         decide: |_| Ok(Decision::RequestComplete),
     },
-    Rule {
-        name: "purge_agents",
-        community_scope: true,
-        allowed: &[Decision::CommunityComplete],
-        decide: |_| Ok(Decision::CommunityComplete),
-    },
 ];
 
 fn after_purge_content(result: &Value) -> Result<Decision> {
@@ -90,12 +77,7 @@ fn after_purge_content(result: &Value) -> Result<Decision> {
     if result["account_erasure_complete"] == false {
         return Ok(Decision::Stage("purge_account"));
     }
-    // Demo execution retains its saved, simulated agent-routing result.
-    match result["has_agents"].as_bool() {
-        Some(true) => Ok(Decision::Stage("purge_agents")),
-        Some(false) => Ok(Decision::CommunityComplete),
-        None => Err(invalid("purge_content result must contain has_agents")),
-    }
+    Err(invalid("missing content cleanup result"))
 }
 
 pub(super) fn rule(name: &str) -> Result<&'static Rule> {
@@ -105,24 +87,13 @@ pub(super) fn rule(name: &str) -> Result<&'static Rule> {
         .ok_or_else(|| invalid("unknown workflow stage"))
 }
 
-// The CLI derives stage validation from this workflow, without a second list.
-pub(super) fn parse_stage(name: &str) -> std::result::Result<String, String> {
-    rule(name)
-        .map(|rule| rule.name.to_owned())
-        .map_err(|error| error.to_string())
-}
-
-pub(super) fn decision(stage: &EntityStage, legacy: bool) -> Result<Decision> {
+pub(super) fn decision(stage: &EntityStage) -> Result<Decision> {
     let rule = rule(&stage.stage)?;
     let result = stage
         .metadata_json
         .get("result")
         .ok_or_else(|| invalid("completed stage has no saved result"))?;
-    let next = if legacy && stage.stage == "purge_account" {
-        Decision::Stage("purge_agents")
-    } else {
-        (rule.decide)(result)?
-    };
+    let next = (rule.decide)(result)?;
     if !rule.allowed.contains(&next) {
         return Err(invalid("stage selected a disallowed transition"));
     }
@@ -139,7 +110,6 @@ pub(super) struct Progress {
     pub current: Option<EntityStage>,
     pub visited_communities: HashSet<Uuid>,
     pub terminal: bool,
-    pub legacy: bool,
 }
 
 impl Progress {
@@ -154,10 +124,6 @@ impl Progress {
             current: None,
             visited_communities: HashSet::new(),
             terminal: false,
-            legacy: request
-                .inventory_manifest
-                .as_ref()
-                .is_none_or(|m| m["workflow_version"] != 2),
         };
         let mut successors = HashMap::new();
         for row in history {
@@ -212,7 +178,7 @@ impl Progress {
             {
                 return Err(invalid("non-current stage is not completed"));
             }
-            let outcome = decision(row, progress.legacy)?;
+            let outcome = decision(row)?;
             if row.metadata_json["transition"] != serde_json::to_value(outcome)? {
                 return Err(invalid("saved transition disagrees with handler result"));
             }
@@ -263,11 +229,10 @@ impl Progress {
                         },
                         community: Some(*id),
                     })),
-                    None if !self.legacy => Ok(Some(Step {
+                    None => Ok(Some(Step {
                         name: "global_cleanup",
                         community: None,
                     })),
-                    None => self.apply(inventory, row, Decision::RequestComplete),
                 }
             }
             Decision::RequestComplete => {
@@ -285,30 +250,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn content_routes_real_cleanup_and_saved_demo_results() {
-        assert_eq!(COMMUNITY_INITIAL_STAGE, "purge_content");
+    fn content_cleanup_precedes_account_cleanup() {
         let content = rule(COMMUNITY_INITIAL_STAGE).unwrap();
-        assert!(content.community_scope);
-        for (result, expected) in [
-            (
-                serde_json::json!({"content": {}, "account_erasure_complete": false}),
-                Decision::Stage("purge_account"),
-            ),
-            (
-                serde_json::json!({"account_erasure_complete": false, "has_agents": false}),
-                Decision::Stage("purge_account"),
-            ),
-            (
-                serde_json::json!({"dummy": true, "has_agents": true}),
-                Decision::Stage("purge_agents"),
-            ),
-            (
-                serde_json::json!({"dummy": true, "has_agents": false}),
-                Decision::CommunityComplete,
-            ),
-        ] {
-            assert_eq!((content.decide)(&result).unwrap(), expected);
-        }
+        assert_eq!(
+            (content.decide)(&serde_json::json!({"account_erasure_complete":false})).unwrap(),
+            Decision::Stage("purge_account")
+        );
         assert!((content.decide)(&serde_json::json!({})).is_err());
     }
 
@@ -327,13 +274,5 @@ mod tests {
             (media.decide)(&serde_json::json!({})).unwrap(),
             Decision::EnterCommunities
         );
-    }
-
-    #[test]
-    fn stage_options_follow_the_workflow_definition() {
-        for rule in RULES {
-            assert_eq!(parse_stage(rule.name).unwrap(), rule.name);
-        }
-        assert!(parse_stage("unregistered_stage").is_err());
     }
 }

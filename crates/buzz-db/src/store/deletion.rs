@@ -4642,9 +4642,10 @@ pub(crate) mod postgres_tests {
         use crate::user_deletion_fences::{self as fences, FenceIdentity};
         let (db, store) = store().await;
         let (request, inventory) = inventoried_request(&db, &store).await;
+        let human_key = nostr::Keys::generate().public_key();
         let entity = db
             .user_deletion_store()
-            .submit("demo:fence-retention", "operator", None)
+            .submit(&human_key.to_hex(), "operator", None)
             .await
             .unwrap();
         let entities = db.entity_deletion_store();
@@ -4661,7 +4662,6 @@ pub(crate) mod postgres_tests {
             .await
             .unwrap()
             .unwrap();
-        let human_key = nostr::Keys::generate().public_key();
         let agent_key = nostr::Keys::generate().public_key();
         let human = FenceIdentity::user(human_key);
         let agent = FenceIdentity::agent(request.community_id, agent_key);
@@ -9938,7 +9938,11 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         // community is purged; it is not a tenant-owned serving table.
         let entity = db
             .user_deletion_store()
-            .submit("demo:history-retention", "operator", None)
+            .submit(
+                &nostr::Keys::generate().public_key().to_hex(),
+                "operator",
+                None,
+            )
             .await
             .unwrap();
         db.entity_deletion_store()

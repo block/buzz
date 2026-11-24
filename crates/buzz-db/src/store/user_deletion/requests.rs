@@ -1,5 +1,5 @@
 //! Submit a user request and its discovered inventory in one transaction.
-use super::{discovery::normalize_target, UserDeletionStore};
+use super::{normalize_user_deletion_pubkey, UserDeletionStore};
 use crate::entity_deletion::EntityRequest;
 use crate::store::entity_deletion::requests::{
     inventory_digest, validate_operator, REQUEST_COLUMNS,
@@ -18,7 +18,7 @@ impl UserDeletionStore {
         requested_by: &str,
         reason: Option<&str>,
     ) -> Result<EntityRequest> {
-        self.submit_for_mode(target, requested_by, reason, false, None)
+        self.submit_for_mode(target, requested_by, reason, false)
             .await
     }
 
@@ -30,13 +30,9 @@ impl UserDeletionStore {
         requested_by: &str,
         reason: Option<&str>,
         read_only: bool,
-        relay_pubkey: Option<&str>,
     ) -> Result<EntityRequest> {
-        let subject = normalize_target(subject)?;
-        let relay_pubkey = super::discovery::normalize_relay(&subject, relay_pubkey)?;
-        let relay_pubkey = relay_pubkey.as_deref();
+        let subject = normalize_user_deletion_pubkey(subject)?;
         let target = if read_only {
-            super::normalize_user_deletion_pubkey(&subject)?;
             format!("read-only:{subject}")
         } else {
             subject.clone()
@@ -69,8 +65,7 @@ impl UserDeletionStore {
             )));
         }
         if request.status == "submitted" {
-            let inventory =
-                super::discovery::generate_inventory_on(&mut tx, &subject, relay_pubkey).await?;
+            let inventory = super::discovery::generate_inventory_on(&mut tx, &subject).await?;
             let digest = inventory_digest(&inventory)?;
             request = sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "UPDATE entity_deletion_requests
@@ -87,17 +82,6 @@ impl UserDeletionStore {
             // Validate shape and supported scope before committing either the
             // inventory or request. Unsupported execution fails, never filters.
             super::UserDeletionInventory::read(&request)?;
-        }
-        if request
-            .inventory_manifest
-            .as_ref()
-            .and_then(|m| m.get("discovery_relay_pubkey"))
-            .and_then(serde_json::Value::as_str)
-            != relay_pubkey
-        {
-            return Err(DbError::DeletionSafety(
-                "discovery relay differs from saved inventory; inspect the saved request".into(),
-            ));
         }
         tx.commit().await?;
         Ok(request)

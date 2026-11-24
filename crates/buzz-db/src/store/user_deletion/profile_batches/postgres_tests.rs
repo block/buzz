@@ -286,12 +286,14 @@ async fn limits_dependencies_and_signer_fail_before_any_mutation() {
         .is_err());
     assert_eq!(before, export(&f.pool).await);
     opts = f.options(1);
-    sqlx::query("INSERT INTO relay_members (community_id,pubkey,role) VALUES ($1,$2,'member')")
-        .bind(f.community)
-        .bind(f.human.public_key().to_hex())
-        .execute(&f.pool)
-        .await
-        .unwrap();
+    f.event(
+        f.community,
+        &f.agent,
+        1,
+        vec![],
+        "content must be cleaned first",
+    )
+    .await;
     let before = export(&f.pool).await;
     let mut output = Vec::new();
     assert!(f
@@ -306,13 +308,54 @@ async fn limits_dependencies_and_signer_fail_before_any_mutation() {
         .is_err());
     assert!(String::from_utf8(output)
         .unwrap()
-        .contains("relay_members: content/account cleanup"));
+        .contains("content/account cleanup"));
     assert_eq!(before, export(&f.pool).await);
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn content_then_profile_cleanup_preserves_canvases_workflow_history_and_repositories() {
+async fn owned_workflow_with_retained_history_blocks_profile_removal() {
+    let f = Fixture::new().await;
+    f.profiles().await;
+    let workflow: Uuid = sqlx::query_scalar(
+        "INSERT INTO workflows(community_id,name,owner_pubkey,definition,definition_hash)
+         VALUES($1,'shared workflow',$2,'{}',$3) RETURNING id",
+    )
+    .bind(f.community)
+    .bind(f.agent.public_key().to_bytes().as_slice())
+    .bind(vec![0u8; 32])
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO workflow_runs(community_id,workflow_id,status) VALUES($1,$2,'completed')",
+    )
+    .bind(f.community)
+    .bind(workflow)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let before = export(&f.pool).await;
+    let mut output = Vec::new();
+    assert!(f
+        .store
+        .run_profile_batches(
+            &f.options(2),
+            true,
+            Some(&f.relay.secret_key().to_secret_hex()),
+            &mut output
+        )
+        .await
+        .is_err());
+    assert!(String::from_utf8(output)
+        .unwrap()
+        .contains("workflows: content/account cleanup"));
+    assert_eq!(before, export(&f.pool).await);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn content_then_profile_cleanup_retains_canvases_and_repositories() {
     use crate::user_deletion::{content_batches::ContentBatchOptions, ExecutionMode};
 
     let f = Fixture::new().await;
@@ -351,24 +394,6 @@ async fn content_then_profile_cleanup_preserves_canvases_workflow_history_and_re
     let canvas = f
         .event(f.community, &f.human, 40100, vec![], "shared canvas")
         .await;
-    let workflow: Uuid = sqlx::query_scalar(
-        "INSERT INTO workflows(community_id,name,owner_pubkey,definition,definition_hash)
-         VALUES($1,'shared workflow',$2,'{}',$3) RETURNING id",
-    )
-    .bind(f.community)
-    .bind(f.agent.public_key().to_bytes().as_slice())
-    .bind(vec![0u8; 32])
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO workflow_runs(community_id,workflow_id,status) VALUES($1,$2,'completed')",
-    )
-    .bind(f.community)
-    .bind(workflow)
-    .execute(&f.pool)
-    .await
-    .unwrap();
     for owner in [&f.human, &f.agent] {
         f.event(f.community, owner, 1, vec![], "remove content first")
             .await;
@@ -376,6 +401,16 @@ async fn content_then_profile_cleanup_preserves_canvases_workflow_history_and_re
     let before = export(&f.pool).await;
     let opts = f.options(2);
     let secret = f.relay.secret_key().to_secret_hex();
+    let mut blocked = Vec::new();
+    assert!(f
+        .store
+        .run_profile_batches(&opts, true, Some(&secret), &mut blocked)
+        .await
+        .is_err());
+    assert!(String::from_utf8(blocked)
+        .unwrap()
+        .contains("events: content/account cleanup"));
+    assert_eq!(before, export(&f.pool).await);
     f.store
         .run_message_batches(
             &ContentBatchOptions {
@@ -409,8 +444,6 @@ async fn content_then_profile_cleanup_preserves_canvases_workflow_history_and_re
         .unwrap();
     assert_eq!(proposed.items, deleted.items);
     let after = export(&f.pool).await;
-    assert_eq!(before["workflows"], after["workflows"]);
-    assert_eq!(before["workflow_runs"], after["workflow_runs"]);
     assert_eq!(before["git_repo_names"], after["git_repo_names"]);
     let canvas_id = json!(format!("\\x{}", canvas.id));
     for (table, rows) in &before {

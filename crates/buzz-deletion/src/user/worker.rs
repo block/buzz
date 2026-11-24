@@ -11,9 +11,9 @@ use super::handlers::HandlerProgress;
 use super::{handlers, transition::UserDeletionTransition};
 use crate::{DEFAULT_LEASE_DURATION, HEARTBEAT_INTERVAL};
 
-/// Real execution controls and demo-only failure/delay options.
+/// Execution controls for an approved user deletion.
 pub(super) struct RunOptions {
-    pub db: Option<buzz_db::Db>,
+    pub db: buzz_db::Db,
     pub media: Option<std::sync::Arc<buzz_media::MediaStorage>>,
     pub delete: bool,
     pub row_ids: Option<std::fs::File>,
@@ -21,9 +21,6 @@ pub(super) struct RunOptions {
     pub batch_size: u16,
     pub max_items: u32,
     pub next_step: bool,
-    pub fail_stage: Option<String>,
-    pub stage_delay: Duration,
-    pub no_agents_in: Vec<Uuid>,
 }
 
 pub(super) async fn run(
@@ -41,24 +38,19 @@ pub(super) async fn run(
             request.entity_type
         );
     }
-    if !request.target.starts_with("demo:") {
-        // Preserve opaque account identities in existing inventories. A mode-tagged
-        // manifest from an unsupported workflow must never authorize deletion.
-        anyhow::ensure!(
-            request
-                .inventory_manifest
-                .as_ref()
-                .is_none_or(|m| m.get("execution_mode").is_none()),
-            "unsupported saved execution mode"
-        );
-        anyhow::ensure!(options.delete != request.target.starts_with("read-only:"),
-            "real workflow execution requires --delete for a deletion request or --read-only for a read-only request");
-        anyhow::ensure!(options.db.is_some(), "real workflow requires a database");
-    }
-    if options.delete
-        && !request.target.starts_with("demo:")
-        && matches!(request.status.as_str(), "completed" | "running")
-    {
+    buzz_db::user_deletion::UserDeletionInventory::read(&request)?;
+    // Preserve opaque account identities in existing inventories. A mode-tagged
+    // manifest from an unsupported workflow must never authorize deletion.
+    anyhow::ensure!(
+        request
+            .inventory_manifest
+            .as_ref()
+            .is_none_or(|m| m.get("execution_mode").is_none()),
+        "unsupported saved execution mode"
+    );
+    anyhow::ensure!(options.delete != request.target.starts_with("read-only:"),
+        "real workflow execution requires --delete for a deletion request or --read-only for a read-only request");
+    if options.delete && matches!(request.status.as_str(), "completed" | "running") {
         store.resume_delegated_review(id).await?;
     }
     let Some(lease) = store.claim(id, owner, DEFAULT_LEASE_DURATION).await? else {

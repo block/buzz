@@ -118,7 +118,7 @@ impl Fixture {
 
     fn options(&self, max_items: u32) -> RunOptions {
         RunOptions {
-            db: Some(Db::from_pool(self.pool.clone())),
+            db: Db::from_pool(self.pool.clone()),
             media: None,
             row_ids: None,
             delete: true,
@@ -126,9 +126,6 @@ impl Fixture {
             batch_size: 2,
             max_items,
             next_step: true,
-            fail_stage: None,
-            stage_delay: Duration::ZERO,
-            no_agents_in: Vec::new(),
         }
     }
 
