@@ -35,12 +35,6 @@ final ageSignalPushSnapshotRetryWaitProvider =
       return Future<void>.delayed;
     });
 
-/// Releases only the current process's confirmed notification restriction.
-final ageAllowedNotificationRestorerProvider =
-    Provider<Future<void> Function()>(
-      (ref) => restoreAgeRestrictedBuzzNotifications,
-    );
-
 /// Delay between successful maintenance purges while restriction remains active.
 const ageRestrictedNotificationMaintenanceDelay = Duration(seconds: 30);
 
@@ -85,7 +79,13 @@ class AgeSignalPushBootstrap extends HookConsumerWidget {
         previousState.value = state;
         consecutiveFailures.value = 0;
       }
-      if (state == AgeSignalState.restricted) return null;
+      // On Android the age check itself releases the restriction once it
+      // finishes allowed (see AgeSignalNotifier). Restoring here would lift a
+      // restriction the process still holds from an earlier engine.
+      if (state == AgeSignalState.restricted ||
+          defaultTargetPlatform == TargetPlatform.android) {
+        return null;
+      }
       var cancelled = false;
       unawaited(() async {
         try {

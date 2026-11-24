@@ -35,6 +35,12 @@ final ageRestrictedNotificationPurgerProvider =
       (ref) => purgeAgeRestrictedBuzzNotifications,
     );
 
+/// Releases only the current process's confirmed notification restriction.
+final ageAllowedNotificationRestorerProvider =
+    Provider<Future<void> Function()>(
+      (ref) => restoreAgeRestrictedBuzzNotifications,
+    );
+
 /// Access decision, independent of whether a platform check has completed.
 enum AgeSignalState { allowed, restricted }
 
@@ -96,6 +102,8 @@ class AgeSignalNotifier extends Notifier<AgeSignalState> {
                 return false;
               },
             );
+      } else {
+        _releaseNativeRestriction();
       }
     } catch (error) {
       if (generation != _generation) return;
@@ -105,7 +113,23 @@ class AgeSignalNotifier extends Notifier<AgeSignalState> {
       debugPrint(
         'Age check unavailable (${error.runtimeType}); access allowed.',
       );
+      _releaseNativeRestriction();
     }
+  }
+
+  /// On Android a confirmed restriction lives in the process, which can
+  /// outlive this engine: reopening Buzz builds a new notifier that starts
+  /// allowed. So only a check that finishes here without restricting lifts
+  /// it, never the initial allowed state. iOS restores from the push
+  /// bootstrap instead.
+  void _releaseNativeRestriction() {
+    if (defaultTargetPlatform != TargetPlatform.android) return;
+    unawaited(
+      Future.sync(ref.read(ageAllowedNotificationRestorerProvider)).catchError(
+        (Object error, StackTrace stackTrace) =>
+            reportPushLeaseCleanupError(error, stackTrace),
+      ),
+    );
   }
 }
 
