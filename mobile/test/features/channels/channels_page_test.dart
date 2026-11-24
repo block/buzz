@@ -3915,7 +3915,8 @@ void main() {
         'description': '',
         'ttl': null,
       });
-      expect(find.text('Bad state: Try again'), findsOneWidget);
+      // A StateError shows its message, not Dart's `Bad state: ` wrapper.
+      expect(find.text('Try again'), findsOneWidget);
       expectSingleFieldLabels();
 
       final nameField = tester.widget<TextField>(

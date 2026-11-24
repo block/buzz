@@ -175,6 +175,9 @@ final class NativeCreateChannelViewController: UITableViewController, UITextView
     busy = false
     setError(error)
     updateControls()
+    // The footer is below the fold in landscape and at large text sizes.
+    tableView.layoutIfNeeded()
+    tableView.scrollRectToVisible(tableView.rectForFooter(inSection: 2), animated: false)
     UIAccessibility.post(notification: .announcement, argument: error)
   }
 
