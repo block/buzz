@@ -134,15 +134,20 @@ async fn persist_command_event(
         }
 
         let kind = event.kind.as_u16() as i32;
-        let (expected_revision, revision_error) = match parse_expected_workflow_revision(
-            kind,
-            extract_tag(event, "expected-revision").as_deref(),
-        ) {
-            Ok(expected_revision) => (expected_revision, None),
-            Err(error) => (None, Some(error)),
+        let revision_tag = extract_tag(event, "expected-revision");
+        let create_only = is_workflow_create_only(kind, revision_tag.as_deref());
+        let (expected_revision, revision_error) = if create_only {
+            (None, None)
+        } else {
+            match parse_expected_workflow_revision(kind, revision_tag.as_deref()) {
+                Ok(expected_revision) => (expected_revision, None),
+                Err(error) => (None, Some(error)),
+            }
         };
         let precondition = if revision_error.is_some() {
             ParameterizedReplacePrecondition::ExactReplayOnly
+        } else if create_only {
+            ParameterizedReplacePrecondition::CreateOnly
         } else if let Some(expected_revision) = expected_revision.as_deref() {
             ParameterizedReplacePrecondition::ExpectedRevision(expected_revision)
         } else {
@@ -178,6 +183,9 @@ async fn persist_command_event(
             ParameterizedReplaceStatus::RevisionMismatch => Err(IngestError::Rejected(
                 "conflict: workflow changed since it was loaded".into(),
             )),
+            ParameterizedReplaceStatus::AlreadyExists => Err(IngestError::Rejected(
+                "conflict: workflow already exists".into(),
+            )),
             ParameterizedReplaceStatus::ReplayOnlyMiss => match revision_error {
                 Some(error) => Err(error),
                 None => Err(IngestError::Internal(
@@ -195,6 +203,15 @@ async fn persist_command_event(
     } else {
         Ok(PersistResult::Duplicate)
     }
+}
+
+/// `["expected-revision", "none"]` on a workflow definition asks for a
+/// create-only write: it is accepted only if this owner's coordinate has never
+/// held a definition, so a delayed create can't replace or revive one.
+const WORKFLOW_CREATE_ONLY_REVISION: &str = "none";
+
+fn is_workflow_create_only(kind: i32, expected_revision: Option<&str>) -> bool {
+    kind == KIND_WORKFLOW_DEF as i32 && expected_revision == Some(WORKFLOW_CREATE_ONLY_REVISION)
 }
 
 fn parse_expected_workflow_revision(
@@ -1714,6 +1731,24 @@ mod postgres_tests {
         .expect("workflow event")
     }
 
+    async fn persist_and_commit(
+        db: &buzz_db::Db,
+        tenant: &TenantContext,
+        event: &Event,
+    ) -> Result<bool, String> {
+        match persist_command_event(db, tenant, event, None).await {
+            Ok(PersistResult::Inserted(tx)) => {
+                tx.commit().await.expect("commit");
+                Ok(true)
+            }
+            Ok(PersistResult::Duplicate) => Ok(false),
+            Err(IngestError::Rejected(message)) => Err(message),
+            Err(error) => panic!("unexpected persistence failure: {error:?}"),
+        }
+    }
+
+    const ALREADY_EXISTS: &str = "conflict: workflow already exists";
+
     fn rejection_message(result: Result<Option<Vec<u8>>, IngestError>) -> String {
         match result {
             Err(IngestError::Rejected(message)) => message,
@@ -1754,6 +1789,25 @@ mod postgres_tests {
                     Some(malformed),
                 )),
                 "invalid: bad expected workflow revision",
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_workflow_none_revision_asks_for_create_only() {
+        let revision = hex::encode([0x42; 32]);
+        for (kind, tag, create_only) in [
+            (KIND_WORKFLOW_DEF as i32, Some("none"), true),
+            (KIND_WORKFLOW_DEF as i32, None, false),
+            (KIND_WORKFLOW_DEF as i32, Some("NONE"), false),
+            (KIND_WORKFLOW_DEF as i32, Some(""), false),
+            (KIND_WORKFLOW_DEF as i32, Some(revision.as_str()), false),
+            (KIND_DM_OPEN as i32, Some("none"), false),
+        ] {
+            assert_eq!(
+                is_workflow_create_only(kind, tag),
+                create_only,
+                "{kind} {tag:?}"
             );
         }
     }
@@ -1931,5 +1985,127 @@ mod postgres_tests {
             IngestError::Rejected(ref message)
                 if message == "invalid: bad expected workflow revision"
         ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_create_only_never_replaces_or_revives_a_coordinate() {
+        let (db, tenant) = persistence_test_context().await;
+        let keys = Keys::generate();
+        let workflow_id = Uuid::new_v4();
+        let now = Timestamp::now().as_secs();
+        let create = workflow_event(&keys, workflow_id, now, Some("none"), "create");
+
+        assert_eq!(persist_and_commit(&db, &tenant, &create).await, Ok(true));
+        assert_eq!(
+            persist_and_commit(&db, &tenant, &create).await,
+            Ok(false),
+            "an exact replay of the live head stays idempotent"
+        );
+        let second = workflow_event(&keys, workflow_id, now + 1, Some("none"), "second");
+        assert_eq!(
+            persist_and_commit(&db, &tenant, &second).await,
+            Err(ALREADY_EXISTS.into())
+        );
+
+        // The owner pauses it. A delayed create-only, even one signed by a
+        // device whose clock runs ahead, must not replace the pause.
+        let create_revision = create.id.to_hex();
+        let pause = workflow_event(&keys, workflow_id, now + 2, Some(&create_revision), "pause");
+        assert_eq!(persist_and_commit(&db, &tenant, &pause).await, Ok(true));
+        let skewed = workflow_event(&keys, workflow_id, now + 600, Some("none"), "skewed");
+        assert_eq!(
+            persist_and_commit(&db, &tenant, &skewed).await,
+            Err(ALREADY_EXISTS.into())
+        );
+        let still_paused = workflow_event(
+            &keys,
+            workflow_id,
+            now + 3,
+            Some(&pause.id.to_hex()),
+            "still-paused",
+        );
+        assert_eq!(
+            persist_and_commit(&db, &tenant, &still_paused).await,
+            Ok(true),
+            "the pause stayed the live head"
+        );
+
+        // The owner deletes it after the creating client's last lookup.
+        // Neither a replay of the original create nor a newer create-only
+        // signed before the deletion may bring it back.
+        let deleted = db
+            .delete_workflow_by_coordinate(
+                tenant.community(),
+                &keys.public_key().to_bytes(),
+                &workflow_id.to_string(),
+                (now + 4) as i64,
+            )
+            .await
+            .expect("delete workflow");
+        assert!(deleted.changed);
+        assert_eq!(
+            persist_and_commit(&db, &tenant, &create).await,
+            Err(ALREADY_EXISTS.into()),
+            "a replay after deletion must not report success"
+        );
+        let delayed = workflow_event(&keys, workflow_id, now + 5, Some("none"), "delayed");
+        assert_eq!(
+            persist_and_commit(&db, &tenant, &delayed).await,
+            Err(ALREADY_EXISTS.into())
+        );
+        let probe = workflow_event(
+            &keys,
+            workflow_id,
+            now + 6,
+            Some(&still_paused.id.to_hex()),
+            "probe",
+        );
+        assert_eq!(
+            persist_and_commit(&db, &tenant, &probe).await,
+            Err("conflict: workflow revision does not exist".into()),
+            "the coordinate stays deleted"
+        );
+
+        // Unconditional writes keep their existing NIP-33 behavior.
+        let other_id = Uuid::new_v4();
+        let plain = workflow_event(&keys, other_id, now, None, "plain");
+        assert_eq!(persist_and_commit(&db, &tenant, &plain).await, Ok(true));
+        let plain_create_only = workflow_event(&keys, other_id, now + 1, Some("none"), "late");
+        assert_eq!(
+            persist_and_commit(&db, &tenant, &plain_create_only).await,
+            Err(ALREADY_EXISTS.into())
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn concurrent_workflow_create_only_writes_insert_exactly_once() {
+        let (db, tenant) = persistence_test_context().await;
+        let keys = Keys::generate();
+        let workflow_id = Uuid::new_v4();
+        let now = Timestamp::now().as_secs();
+        let tasks: Vec<_> = (0..4)
+            .map(|index| {
+                let (db, tenant) = (db.clone(), tenant.clone());
+                let event = workflow_event(
+                    &keys,
+                    workflow_id,
+                    now + index,
+                    Some("none"),
+                    &format!("racer-{index}"),
+                );
+                tokio::spawn(async move { persist_and_commit(&db, &tenant, &event).await })
+            })
+            .collect();
+        let mut inserted = 0;
+        for task in tasks {
+            match task.await.expect("join") {
+                Ok(true) => inserted += 1,
+                Err(message) => assert_eq!(message, ALREADY_EXISTS),
+                Ok(false) => panic!("distinct create-only events are never duplicates"),
+            }
+        }
+        assert_eq!(inserted, 1);
     }
 }
