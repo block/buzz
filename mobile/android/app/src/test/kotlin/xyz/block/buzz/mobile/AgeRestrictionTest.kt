@@ -40,8 +40,13 @@ class AgeRestrictionTest {
 
         AgeRestriction.unlessRestricted {
             posting.countDown()
-            // The restricting thread is now waiting for this post to finish.
-            Thread.sleep(50)
+            // Post only once the restricting thread waits for this one, or has
+            // finished because nothing made it wait.
+            val deadline = System.nanoTime() + 5_000_000_000L
+            while (restricting.state != Thread.State.BLOCKED && restricting.isAlive) {
+                check(System.nanoTime() < deadline) { "restrict neither waited nor finished" }
+                Thread.yield()
+            }
             events += "post"
         }
         restricting.join()

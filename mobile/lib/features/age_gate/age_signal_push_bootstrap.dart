@@ -41,12 +41,6 @@ final ageAllowedNotificationRestorerProvider =
       (ref) => restoreAgeRestrictedBuzzNotifications,
     );
 
-/// Native notification purge performed once restriction is confirmed.
-final ageRestrictedNotificationPurgerProvider =
-    Provider<Future<void> Function()>(
-      (ref) => purgeAgeRestrictedBuzzNotifications,
-    );
-
 /// Delay between successful maintenance purges while restriction remains active.
 const ageRestrictedNotificationMaintenanceDelay = Duration(seconds: 30);
 
@@ -156,7 +150,12 @@ class _AgeRestrictedPushCleanup extends HookConsumerWidget {
         VoidCallback? cancelMaintenancePurge;
         unawaited(() async {
           try {
-            await purgeNotifications();
+            final confirmed = ref
+                .read(ageSignalProvider.notifier)
+                .takeConfirmedPurge();
+            if (confirmed == null || !await confirmed) {
+              await purgeNotifications();
+            }
             consecutivePurgeFailures.value = 0;
             if (!cancelled && remainingMaintenancePurges.value > 0) {
               remainingMaintenancePurges.value -= 1;

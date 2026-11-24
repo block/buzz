@@ -72,10 +72,10 @@ internal object PushWake {
         // nothing is recorded as shown, and a later grant sees new messages.
         val foreground = ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
         // A confirmed age restriction skips the wake the same way, and also
-        // keeps a run already going from posting (see WakeNotifier).
-        val restricted = AgeRestriction.isRestricted
-        if (foreground || restricted || !NotificationManagerCompat.from(context).areNotificationsEnabled()) {
-            Log.i(TAG, "wake ignored foreground=$foreground restricted=$restricted")
+        // keeps a run already going from posting (see WakeNotifier). The log
+        // leaves it out: the system log must not reveal the age decision.
+        if (foreground || AgeRestriction.isRestricted || !NotificationManagerCompat.from(context).areNotificationsEnabled()) {
+            Log.i(TAG, "wake ignored foreground=$foreground")
             handled.countDown()
             return
         }
