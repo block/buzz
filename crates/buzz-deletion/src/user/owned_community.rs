@@ -92,12 +92,10 @@ pub(super) async fn run_stage(
     Ok(metadata)
 }
 
-async fn resolve_child(
+pub(super) fn approved_community(
     request: &EntityRequest,
     row: &EntityStage,
-    community_store: &DeletionStore,
-    media: &MediaStorage,
-) -> Result<(DeletionRequest, bool)> {
+) -> Result<CommunityId> {
     let community_id = row
         .target_community_id
         .context("missing owned community ID")?;
@@ -120,7 +118,20 @@ async fn resolve_child(
     {
         bail!("stage inputs do not match the approved owned-community inventory");
     }
-    let community = CommunityId::from_uuid(community_id);
+    Ok(CommunityId::from_uuid(community_id))
+}
+
+async fn resolve_child(
+    request: &EntityRequest,
+    row: &EntityStage,
+    community_store: &DeletionStore,
+    media: &MediaStorage,
+) -> Result<(DeletionRequest, bool)> {
+    let community = approved_community(request, row)?;
+    anyhow::ensure!(
+        !request.target.starts_with("read-only:"),
+        "read-only requests cannot submit community deletions"
+    );
     let saved_child = row.metadata_json["waiting"]["child_request_id"].as_str();
     let child = match community_store.find_for_community(community).await? {
         Some(child) => child,

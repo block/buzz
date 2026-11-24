@@ -203,8 +203,9 @@ cap. Errors and oversized results fail rather than return partial inventories.
 A failed discovery during submission rolls back the request too.
 Preview uses a read-only transaction and needs no workflow tables or migrations.
 
-Preview and submission use the same selector. Each owned community goes to
-its own independently approved community-deletion request.
+Preview and submission use the same selector. Read-only execution records the ID of each owned
+community it would submit. Delete mode submits or reuses the community-deletion
+request for independent approval.
 
 ## Schema and compatibility
 

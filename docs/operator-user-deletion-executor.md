@@ -9,7 +9,8 @@ Direct `media-batches` and `content-batches` commands remain available for
 operator-controlled cleanup. Neither command installs or enforces the account
 gate. Protection against concurrent writes by the target or their agents remains
 unimplemented; neither command proves full account erasure. Use a disposable
-database and versioned storage bucket when testing. For owned communities both modes submit or reuse a child request. The child requires separate approval.
+database and versioned storage bucket when testing. For an owned community, read-only mode records the community ID and the proposed
+`would_submit` action. Delete mode submits or reuses a child request for separate approval.
 
 For a saved read-only run, submit with `--read-only`, approve its digest, then run:
 

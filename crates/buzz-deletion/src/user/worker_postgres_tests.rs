@@ -467,7 +467,7 @@ async fn execute_without_transition(store: &EntityDeletionStore, id: Uuid, optio
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn read_only_run_writes_selected_keys_and_preserves_source_rows() {
-    let f = media_fixture::fixture().await;
+    let f = media_fixture::fixture_with_roles(&["member", "member", "owner"]).await;
     let ordinary = f.store.get(f.id).await.unwrap();
     let db = Db::from_pool(f.pool.clone());
     let preview = db
@@ -521,6 +521,32 @@ async fn read_only_run_writes_selected_keys_and_preserves_source_rows() {
         .filter(|s| s.stage == "purge_account")
         .collect();
     assert_eq!(accounts.len(), 2);
+    let owner = Uuid::from_u128(13);
+    let stage = done
+        .stage_history
+        .iter()
+        .find(|s| s.stage == "delete_owned_community")
+        .unwrap();
+    assert_eq!(
+        stage.metadata_json["result"],
+        serde_json::json!({"community_id":owner, "action":"would_submit"})
+    );
+    let proposals: Vec<_> = rows
+        .iter()
+        .filter(|r| r["stage"] == "delete_owned_community")
+        .collect();
+    assert_eq!(proposals.len(), 1);
+    assert_eq!(proposals[0]["community"], owner.to_string());
+    assert_eq!(proposals[0]["action"], "would_submit");
+    assert!(proposals[0].get("child_request_id").is_none());
+    let children: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM community_deletion_requests WHERE community_id = $1",
+    )
+    .bind(owner)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(children, 0);
     assert!(accounts
         .iter()
         .all(|s| s.metadata_json["result"]["items"].as_u64().unwrap() > 0));

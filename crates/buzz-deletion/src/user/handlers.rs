@@ -212,6 +212,14 @@ async fn handle_remaining_stage(
         match row.stage.as_str() {
             "delete_owned_community" => {
                 let request = store.get(lease.request_id).await?;
+                if !options.delete {
+                    let community = super::owned_community::approved_community(&request, &row)?;
+                    let proposal = serde_json::json!({"community_id": community.as_uuid(), "action": "would_submit"});
+                    if let Some(ids) = options.ids(&row) {
+                        ids.record(proposal.clone())?;
+                    }
+                    return Ok(proposal);
+                }
                 let configured;
                 let storage = match options.media.as_deref() {
                     Some(storage) => storage,

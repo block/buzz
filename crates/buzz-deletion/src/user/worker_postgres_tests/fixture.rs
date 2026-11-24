@@ -46,6 +46,10 @@ impl Fixture {
 }
 
 pub(super) async fn fixture() -> Fixture {
+    fixture_with_roles(&["member", "member"]).await
+}
+
+pub(super) async fn fixture_with_roles(roles: &[&str]) -> Fixture {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
         .unwrap();
@@ -55,7 +59,7 @@ pub(super) async fn fixture() -> Fixture {
         db.migrate().await.unwrap();
     }
     let target = nostr::Keys::generate().public_key().to_hex();
-    for id in [11, 12] {
+    for (id, role) in (11..).zip(roles.iter().copied()) {
         let community = Uuid::from_u128(id);
         sqlx::query("INSERT INTO communities(id, host) VALUES ($1, $2)")
             .bind(community)
@@ -63,14 +67,13 @@ pub(super) async fn fixture() -> Fixture {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query(
-            "INSERT INTO relay_members(community_id, pubkey, role) VALUES ($1, $2, 'member')",
-        )
-        .bind(community)
-        .bind(&target)
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO relay_members(community_id, pubkey, role) VALUES ($1, $2, $3)")
+            .bind(community)
+            .bind(&target)
+            .bind(role)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
     sqlx::query("INSERT INTO media_uploaders(community_id, sha256, pubkey) VALUES ($1, $2, decode($3, 'hex'))")
         .bind(Uuid::from_u128(11)).bind("a".repeat(64)).bind(&target)
