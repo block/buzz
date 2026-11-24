@@ -47,6 +47,7 @@ async fn cluster_global_inventory_cli_uses_select_only_source_tables_without_wor
     .await
     .unwrap();
     for schema in [
+        include_str!("../../../schema/tables/public/users.sql"),
         include_str!("../../../schema/tables/public/channels.sql"),
         include_str!("../../../schema/tables/public/channel_members.sql"),
     ] {
