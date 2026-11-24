@@ -31,3 +31,24 @@ Future<void> publishShareBestie({
     debugPrint('[ShareBestie] could not publish: $error');
   }
 }
+
+/// Hands the share extension [pubkey]'s conversations, a JSON list the app
+/// has already named and sorted, so its picker opens without relay queries.
+Future<void> publishShareConversations({
+  required String pubkey,
+  required String conversations,
+}) async {
+  if (!Platform.isIOS) return;
+  try {
+    final path = await _appGroupChannel.invokeMethod<String>('cachesDirectory');
+    if (path == null) return;
+    final file = File('$path/share-conversations.json');
+    await file.parent.create(recursive: true);
+    await file.writeAsString(
+      '{"pubkey":${jsonEncode(pubkey)},"conversations":$conversations}',
+      flush: true,
+    );
+  } on Object catch (error) {
+    debugPrint('[ShareConversations] could not publish: $error');
+  }
+}

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/services.dart';
 
 import '../shared/relay/nostr_models.dart';
+import 'share_conversations.dart';
 
 /// The native side of the iOS share extension: what was shared, the signed-in
 /// community, and relay requests signed in the extension's own process.
@@ -58,22 +59,29 @@ class SharePayload {
     required this.missed,
     this.imagePath,
     this.imageMime,
+    this.filePath,
+    this.filename,
     this.problem,
     this.suggested,
     this.community,
     this.signedOut,
     this.bestie,
+    this.conversations,
   });
 
   factory SharePayload.fromMap(Map<String, Object?> map) {
     final image = map['image'] as Map<Object?, Object?>?;
+    final file = map['file'] as Map<Object?, Object?>?;
     final community = map['community'] as Map<Object?, Object?>?;
     final bestie = map['bestie'] as Map<Object?, Object?>?;
+    final conversations = map['conversations'] as List<Object?>?;
     return SharePayload(
       text: [for (final item in map['text'] as List? ?? const []) '$item'],
       missed: map['missed'] as int? ?? 0,
       imagePath: image?['path'] as String?,
       imageMime: image?['mime'] as String?,
+      filePath: file?['path'] as String?,
+      filename: file?['filename'] as String?,
       problem: map['problem'] as String?,
       suggested: _suggestedChannel(map['suggested'] as String?, community),
       community: community == null
@@ -89,6 +97,24 @@ class SharePayload {
               pubkey: bestie['pubkey'] as String? ?? '',
               name: bestie['name'] as String? ?? '',
             ),
+      conversations: conversations == null
+          ? null
+          : [
+              for (final item
+                  in conversations.whereType<Map<Object?, Object?>>())
+                if (item['id'] case final String id)
+                  ShareConversation(
+                    id: id,
+                    name: item['name'] as String? ?? '',
+                    isDm: item['dm'] == true,
+                    isSolo: item['solo'] == true,
+                    recipients: [
+                      for (final p in item['recipients'] as List? ?? const [])
+                        '$p',
+                    ],
+                    lastActivity: item['at'] as int? ?? 0,
+                  ),
+            ],
     );
   }
 
@@ -96,6 +122,10 @@ class SharePayload {
   final int missed;
   final String? imagePath;
   final String? imageMime;
+
+  /// A shared file other than a photo, sent as is.
+  final String? filePath;
+  final String? filename;
   final String? problem;
 
   /// The channel of the iOS share suggestion picked, when it belongs to this
@@ -104,6 +134,10 @@ class SharePayload {
   final ({String name, String pubkey})? community;
   final String? signedOut;
   final ({String pubkey, String name})? bestie;
+
+  /// The app's saved conversations, newest activity first; null when it
+  /// hasn't saved any for this account.
+  final List<ShareConversation>? conversations;
 
   /// The note's starting text: each link or text item on its own line.
   String get note => text.join('\n');

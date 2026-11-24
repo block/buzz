@@ -18,7 +18,7 @@ class _SendFailed extends _SendState {
   final String message;
 }
 
-/// Uploads the photo once, then publishes the message. [upload] keeps the
+/// Uploads the photo or file once, then publishes the message. [upload] keeps the
 /// uploaded descriptor so a retry only republishes.
 Future<void> sendShare({
   required SharePayload payload,
@@ -33,13 +33,17 @@ Future<void> sendShare({
     ['h', target.id],
     for (final pubkey in target.recipients) ['p', pubkey],
   ];
-  if (payload.imagePath != null) {
+  if (payload.imagePath != null || payload.filePath != null) {
     if (upload.value == null) {
       onUploading();
       upload.value = await _bridge.upload();
     }
     final blob = upload.value!;
     final url = blob['url'] as String;
+    // Named as the composer names a Files attachment.
+    final filename = payload.filePath == null
+        ? null
+        : safeAttachmentFilename(payload.filename ?? 'file');
     tags.add([
       'imeta',
       'url $url',
@@ -48,8 +52,12 @@ Future<void> sendShare({
       'size ${blob['size']}',
       if (blob['dim'] case final String dim) 'dim $dim',
       if (blob['blurhash'] case final String blurhash) 'blurhash $blurhash',
+      if (filename != null) 'filename $filename',
     ]);
-    content = content.isEmpty ? '![image]($url)' : '$content\n![image]($url)';
+    final link = filename == null
+        ? '![image]($url)'
+        : '[${filename.replaceAllMapped(RegExp(r'[\\\[\]]'), (m) => '\\${m[0]}')}]($url)';
+    content = content.isEmpty ? link : '$content\n$link';
   }
   if (content.isEmpty) throw StateError('Add a note to send.');
   await _bridge.publish(content: content, tags: tags, createdAt: createdAt);

@@ -9,14 +9,14 @@ import UniformTypeIdentifiers
 /// go through ShareImageEncoder, a band at a time, to stay within the share
 /// extension's memory limit.
 enum ShareImage {
-  static func prepare(_ provider: NSItemProvider) async throws -> SharedContent.Image {
+  static func prepare(_ provider: NSItemProvider) async throws -> SharedContent.Attachment {
     let offered = provider.registeredTypeIdentifiers.compactMap(UTType.init)
     let type =
       offered.first { $0.conforms(to: .jpeg) }
       ?? offered.first { $0.conforms(to: .heic) }
       ?? offered.first { $0.conforms(to: .image) }
       ?? .image
-    let source = try await loadFile(provider, type: type)
+    let (source, _) = try await loadFile(provider, type: type)
     var temporary = [source]
     defer { temporary.forEach { try? FileManager.default.removeItem(at: $0) } }
     let handle = try FileHandle(forReadingFrom: source)
@@ -52,7 +52,7 @@ enum ShareImage {
       try? FileManager.default.removeItem(at: output)
       throw ShareError.message("This photo is too large to send (over 50 MB).")
     }
-    return SharedContent.Image(url: output, mime: png ? "image/png" : "image/jpeg", size: size)
+    return SharedContent.Attachment(url: output, mime: png ? "image/png" : "image/jpeg", size: size, filename: nil)
   }
 
   private static func transcodeToJpeg(_ source: URL) throws -> URL {
@@ -83,19 +83,19 @@ enum ShareImage {
   }
 
   /// Copies the file the provider hands out, which it deletes when the
-  /// callback returns.
-  private static func loadFile(_ provider: NSItemProvider, type: UTType) async throws -> URL {
+  /// callback returns. Also returns the file's name.
+  static func loadFile(_ provider: NSItemProvider, type: UTType) async throws -> (URL, String) {
     try await withCheckedThrowingContinuation { continuation in
       provider.loadFileRepresentation(forTypeIdentifier: type.identifier) { url, error in
         guard let url else {
-          return continuation.resume(throwing: error ?? ShareError.message("Couldn't read the photo."))
+          return continuation.resume(throwing: error ?? ShareError.message("Couldn't read the shared file."))
         }
         let copy = FileManager.default.temporaryDirectory
           .appendingPathComponent("source-\(UUID().uuidString)")
           .appendingPathExtension(url.pathExtension)
         do {
           try FileManager.default.copyItem(at: url, to: copy)
-          continuation.resume(returning: copy)
+          continuation.resume(returning: (copy, url.lastPathComponent))
         } catch {
           continuation.resume(throwing: error)
         }

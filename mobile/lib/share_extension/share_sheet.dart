@@ -8,6 +8,7 @@ import 'package:uuid/uuid.dart';
 import '../features/channels/channel_management_provider.dart'
     show buildCreateChannelTags;
 import '../shared/me/me_chat_title.dart';
+import '../shared/relay/media_upload.dart' show safeAttachmentFilename;
 
 import '../shared/theme/buzz_icons.dart';
 import '../shared/theme/grid.dart';
@@ -98,7 +99,9 @@ class _ShareForm extends HookWidget {
           target: destination!,
           createdAt: createdAt.value!,
           upload: upload,
-          onUploading: () => send.value = const _Sending('Uploading photo…'),
+          onUploading: () => send.value = _Sending(
+            payload.filePath == null ? 'Uploading photo…' : 'Uploading file…',
+          ),
         );
         await _bridge.close();
       } on Object catch (error) {
@@ -144,6 +147,25 @@ class _ShareForm extends HookWidget {
                       ),
                     ),
                   ),
+                if (payload.filename case final filename?)
+                  Padding(
+                    padding: const EdgeInsets.only(right: Grid.twelve),
+                    child: SizedBox(
+                      width: 72,
+                      child: Column(
+                        children: [
+                          const Icon(BuzzIcons.file, size: 40),
+                          Text(
+                            filename,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.center,
+                            style: Theme.of(context).textTheme.labelSmall,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                 Expanded(
                   child: TextField(
                     controller: note,
@@ -151,7 +173,8 @@ class _ShareForm extends HookWidget {
                     minLines: 2,
                     maxLines: 5,
                     decoration: InputDecoration(
-                      hintText: payload.imagePath == null
+                      hintText:
+                          payload.imagePath == null && payload.filePath == null
                           ? 'Add a note'
                           : 'Add a caption',
                       border: const OutlineInputBorder(),

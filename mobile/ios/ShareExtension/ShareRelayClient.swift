@@ -116,15 +116,16 @@ final class ShareRelayClient {
     return event.id
   }
 
-  /// Uploads the image, streaming it from disk; returns the blob descriptor.
-  func upload(_ image: SharedContent.Image) async throws -> [String: Any] {
+  /// Uploads the photo or file, streaming it from disk; returns the blob
+  /// descriptor.
+  func upload(_ image: SharedContent.Attachment) async throws -> [String: Any] {
     let sha256 = try Self.sha256(of: image.url)
     var (data, response) = try await put("/upload", file: image.url, mime: image.mime, sha256: sha256)
     if let status = (response as? HTTPURLResponse)?.statusCode, status == 404 || status == 405 {
       (data, response) = try await put("/media/upload", file: image.url, mime: image.mime, sha256: sha256)
     }
     if let status = (response as? HTTPURLResponse)?.statusCode, status == 413 {
-      throw ShareError.message("This photo is too large to send.")
+      throw ShareError.message(image.filename == nil ? "This photo is too large to send." : "This file is too large to send.")
     }
     try Self.check(response, data)
     guard let descriptor = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {

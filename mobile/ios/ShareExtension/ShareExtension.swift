@@ -55,8 +55,10 @@ final class ShareViewController: UIViewController {
     case "load":
       let shared = await content.value
       var result: [String: Any] = ["text": shared.text, "missed": shared.missed]
-      if let image = shared.image {
-        result["image"] = ["path": image.url.path, "mime": image.mime, "size": image.size]
+      if let attachment = shared.attachment {
+        var map: [String: Any] = ["path": attachment.url.path, "mime": attachment.mime, "size": attachment.size]
+        if let filename = attachment.filename { map["filename"] = filename }
+        result[attachment.filename == nil ? "image" : "file"] = map
       }
       if let problem = shared.problem { result["problem"] = problem }
       let target = (extensionContext?.intent as? INSendMessageIntent)?.conversationIdentifier
@@ -69,6 +71,7 @@ final class ShareViewController: UIViewController {
           "relay": relay.baseURL.absoluteString,
         ]
         result["bestie"] = Self.bestie(pubkey: relay.pubkey)
+        if let conversations = Self.conversations(pubkey: relay.pubkey) { result["conversations"] = conversations }
       } catch {
         result["signedOut"] = ShareError.describe(error)
       }
@@ -79,8 +82,10 @@ final class ShareViewController: UIViewController {
       return try await relay.query(filters)
     case "upload":
       guard let relay else { throw ShareError.notSignedIn }
-      guard let image = await content.value.image else { throw ShareError.message("No image to send.") }
-      return try await relay.upload(image)
+      guard let attachment = await content.value.attachment else {
+        throw ShareError.message("Nothing to upload.")
+      }
+      return try await relay.upload(attachment)
     case "publish":
       guard let relay else { throw ShareError.notSignedIn }
       return try await relay.publish(
@@ -96,6 +101,16 @@ final class ShareViewController: UIViewController {
     default:
       return FlutterMethodNotImplemented
     }
+  }
+
+  /// The conversations the app last saved for this identity, newest first.
+  private static func conversations(pubkey: String) -> [Any]? {
+    guard let url = ShareRelayClient.appGroupURL?.appendingPathComponent("Library/Caches/share-conversations.json"),
+      let data = try? Data(contentsOf: url),
+      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      json["pubkey"] as? String == pubkey
+    else { return nil }
+    return json["conversations"] as? [Any]
   }
 
   /// The Bestie the app last published for this identity, if any.
@@ -122,21 +137,25 @@ enum ShareError: Error {
   }
 }
 
-/// What the person shared: text and links, and at most one photo.
+/// What the person shared: text and links, and at most one photo or file.
 struct SharedContent {
-  struct Image {
+  struct Attachment {
     let url: URL
     let mime: String
     let size: Int
+    /// The file's name; nil for a photo.
+    let filename: String?
   }
 
   var text: [String] = []
-  var image: Image?
+  var attachment: Attachment?
   var missed = 0
   var problem: String?
 
   /// The relay's default image limit.
   static let maximumImageBytes = 50 * 1024 * 1024
+  /// The app's limit for file attachments.
+  static let maximumFileBytes = 100 * 1024 * 1024
 
   static func load(from context: NSExtensionContext?) async -> SharedContent {
     var shared = SharedContent()
@@ -144,11 +163,11 @@ struct SharedContent {
     for provider in providers {
       NSLog("[BuzzShare] offered types: %@", provider.registeredTypeIdentifiers.joined(separator: ", "))
       if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
-        guard shared.image == nil else {
+        guard shared.attachment == nil else {
           shared.missed += 1
           continue
         }
-        do { shared.image = try await ShareImage.prepare(provider) }
+        do { shared.attachment = try await ShareImage.prepare(provider) }
         catch {
           shared.missed += 1
           shared.problem = ShareError.describe(error)
@@ -163,12 +182,48 @@ struct SharedContent {
       var loaded = false
       for type in [UTType.url, .plainText] where provider.hasItemConformingToTypeIdentifier(type.identifier) {
         let item = try? await provider.loadItem(forTypeIdentifier: type.identifier)
-        if let url = item as? URL { shared.text.append(url.absoluteString); loaded = true }
+        // A shared document (a PDF, or a text file from Files) arrives as a
+        // file URL; send the file itself, not its local path.
+        if let url = item as? URL, !url.isFileURL { shared.text.append(url.absoluteString); loaded = true }
         else if let string = item as? String { shared.text.append(string); loaded = true }
         break
       }
-      if !loaded { shared.missed += 1 }
+      if loaded { continue }
+      let offered = provider.registeredTypeIdentifiers.compactMap(UTType.init)
+      guard let type = offered.first(where: { $0.conforms(to: .data) && $0 != .fileURL }) ?? offered.first(where: { $0.conforms(to: .item) }) else {
+        shared.missed += 1
+        continue
+      }
+      guard shared.attachment == nil else {
+        shared.missed += 1
+        continue
+      }
+      do { shared.attachment = try await loadDocument(provider, type: type) }
+      catch {
+        shared.missed += 1
+        shared.problem = ShareError.describe(error)
+      }
     }
     return shared
+  }
+
+  /// A file sent as is, like the composer's Files attachment: the bytes
+  /// unchanged, typed application/octet-stream, with the file's name.
+  private static func loadDocument(_ provider: NSItemProvider, type: UTType) async throws -> Attachment {
+    let (url, name) = try await ShareImage.loadFile(provider, type: type)
+    let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+    guard size > 0 else {
+      try? FileManager.default.removeItem(at: url)
+      throw ShareError.message("This file is empty.")
+    }
+    guard size <= maximumFileBytes else {
+      try? FileManager.default.removeItem(at: url)
+      throw ShareError.message("This file is too large to send (over 100 MB).")
+    }
+    var filename = provider.suggestedName ?? name
+    if let ext = type.preferredFilenameExtension, (filename as NSString).pathExtension.isEmpty {
+      filename += ".\(ext)"
+    }
+    return Attachment(url: url, mime: "application/octet-stream", size: size, filename: filename)
   }
 }

@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 import 'package:duo_kit/duo_kit.dart';
 
 import '../../shared/widgets/adaptive_conversation_pane.dart';
+import 'share_conversations_publisher.dart';
 import '../../shared/widgets/buzz_navigation_metrics.dart';
 import '../../shared/widgets/duo_workspace_scaffold.dart';
 import '../../shared/widgets/duo_toolbar.dart';
@@ -421,6 +422,8 @@ class HomePage extends HookConsumerWidget {
             : null,
         body: Stack(
           children: [
+            if (defaultTargetPlatform == TargetPlatform.iOS)
+              const ShareConversationsPublisher(),
             if (defaultTargetPlatform == TargetPlatform.iOS)
               ConversationPaneScope(
                 controller: conversations,
