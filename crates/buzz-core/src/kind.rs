@@ -638,6 +638,14 @@ pub const KIND_ARTIFACT: u32 = 45010;
 pub const KIND_ARTIFACT_REMOVAL: u32 = 45011;
 /// A vote on a forum post.
 pub const KIND_FORUM_VOTE: u32 = 45002;
+
+/// NIP-WH webhook delivery: one provider webhook, signed by the ingress
+/// gateway and accepted only over HTTP `POST /events`. Ephemeral range: it
+/// never reaches `events` and never fans out.
+pub const KIND_WEBHOOK_DELIVERY: u32 = 20701;
+/// NIP-WH webhook record: what a matching subscription publishes to its
+/// channel. Relay-signed.
+pub const KIND_WEBHOOK_RECORD: u32 = 40701;
 /// A comment reply on a forum post.
 pub const KIND_FORUM_COMMENT: u32 = 45003;
 
@@ -832,6 +840,8 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_FORUM_POST,
     KIND_ARTIFACT,
     KIND_ARTIFACT_REMOVAL,
+    KIND_WEBHOOK_DELIVERY,
+    KIND_WEBHOOK_RECORD,
     KIND_FORUM_VOTE,
     KIND_FORUM_COMMENT,
     KIND_WORKFLOW_TRIGGER,
@@ -950,6 +960,7 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
         kind,
         KIND_VERIFIED_PROFILE
             | KIND_ARTIFACT_REMOVAL
+            | KIND_WEBHOOK_RECORD
             | KIND_NIP43_MEMBERSHIP_LIST
             | KIND_IA_ARCHIVED_LIST
             | KIND_CHANNEL_SUMMARY
@@ -1050,6 +1061,14 @@ mod tests {
     fn nip43_membership_snapshot_is_relay_only() {
         assert!(is_relay_only_kind(KIND_NIP43_MEMBERSHIP_LIST));
         assert!(!is_relay_only_kind(KIND_NIP43_LEAVE_REQUEST));
+    }
+
+    #[test]
+    fn webhook_deliveries_are_ephemeral_and_records_relay_only() {
+        assert!(is_ephemeral(KIND_WEBHOOK_DELIVERY));
+        assert!(!is_relay_only_kind(KIND_WEBHOOK_DELIVERY));
+        assert!(is_relay_only_kind(KIND_WEBHOOK_RECORD));
+        assert!(!is_ephemeral(KIND_WEBHOOK_RECORD));
     }
 
     #[test]

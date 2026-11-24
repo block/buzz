@@ -10,9 +10,19 @@ This NIP defines how channel admins choose which webhook deliveries reach their 
 
 A subscription is a [NIP-AR](NIP-AR.md) artifact of type `buzz.webhook-subscription`. NIP-AR gives it its identity, revisions, conflicts, moves, deletes and reads. This NIP adds the type's tags and content, and one write rule: only channel owners and admins write subscriptions.
 
-This document covers configuring subscriptions. Deliveries and the records published for them are added to it when a relay accepts them.
+An ingress gateway receives each provider webhook, verifies it, and posts it to the community's relay as a delivery. For each subscription whose filter matches, the relay publishes a record to the subscription's channel.
 
-## Event format
+## Kinds
+
+| Kind | Name | Signer | Stored | Read by |
+|------|------|--------|--------|---------|
+| `45010` | Subscription ([NIP-AR](NIP-AR.md) artifact) | Channel admin | As NIP-AR | Channel readers |
+| `20701` | Delivery | Ingress gateway | Privately, until processed | Nobody |
+| `40701` | Record | Relay | As a channel event | Channel readers |
+
+## Subscriptions
+
+### Event format
 
 A subscription revision is a NIP-AR `kind:45010` event (standard signing fields omitted):
 
@@ -44,7 +54,7 @@ type SubscriptionContent = {
 
 Unknown fields are an error. Every revision carries the whole filter and transform, as every NIP-AR revision carries a complete snapshot.
 
-### Expressions
+#### Expressions
 
 Both expressions read two variables:
 
@@ -60,7 +70,7 @@ event.type == "pull_request" && has(payload.action) && payload.action == "opened
 
 The CEL standard library is available, except the `timestamp` and `duration` functions. Each expression is at most 4096 bytes and 64 levels deep, and names no variable but these two. CEL is dynamically typed here: the relay refuses a result that is a literal of the wrong type when the revision arrives, and treats any other wrong result as an evaluation error.
 
-## Relay behavior
+### Relay behavior
 
 A relay that supports this NIP lists `buzz.webhook-subscription` in its NIP-11 `artifacts.admin_types` (see NIP-AR Access). It then applies, in addition to every NIP-AR rule:
 
@@ -78,11 +88,11 @@ The relay does not check that the integration exists or is active. A subscriptio
 | Signer is not an owner or admin | `false`, `restricted: only channel admins can write buzz.webhook-subscription artifacts` | 400 |
 | Other NIP-AR outcomes (conflict, unknown `prev`, channel gates) | as NIP-AR | as NIP-AR |
 
-### Evaluating
+#### Evaluating
 
 A subscription is evaluated only while the signer of its current revision is an owner or admin of its home channel. A revision signed before the relay enforced this NIP, or by an admin who has since left or lost the role, matches no delivery until a current admin saves a new revision. This protects channels from subscriptions written before the rule existed, without migrating them.
 
-## Reading
+### Reading
 
 Subscriptions are read through NIP-AR. To list a channel's subscriptions and follow changes:
 
@@ -92,10 +102,80 @@ Subscriptions are read through NIP-AR. To list a channel's subscriptions and fol
 
 Anyone who can read the channel can read its subscriptions. Put no secrets in an expression or the title.
 
+## Deliveries
+
+A delivery carries one provider webhook from the ingress gateway to the relay of the integration's community:
+
+```jsonc
+{
+  "kind": 20701,
+  "pubkey": "<ingress gateway pubkey>",
+  "created_at": 1700000000, // When the gateway received the webhook
+  "tags": [
+    ["e", "<integration UUID>"],
+    ["t", "provider:<provider>"],
+    ["delivery", "<provider delivery ID>"]
+  ],
+  "content": "<JSON DeliveryContent>"
+}
+```
+
+```typescript
+type DeliveryContent = {
+  version: 1
+  type: string        // Provider event type, e.g. pull_request
+  delivery_id: string // Same as the delivery tag
+  payload: unknown    // The provider's JSON body
+}
+```
+
+The gateway signs a delivery once and sends the same event on every retry, so its ID stays the same. It sends it with HTTP `POST /events` and a [NIP-98](98.md) header signed by the same key.
+
+A relay MUST accept a delivery only over HTTP, and only from a gateway key its operator configured. The relay keeps no integration records: it trusts that gateway to post each delivery only to the relay host of its integration's community. A delivery reaches only subscriptions of that community that name its integration. It MUST refuse one over WebSocket, where the ephemeral path would broadcast it, and MUST NOT serve a delivery to any client. Other ephemeral-range events are unaffected.
+
+## Records
+
+When a subscription matches a delivery, the relay publishes one record to the subscription's channel:
+
+```jsonc
+{
+  "kind": 40701,
+  "pubkey": "<relay pubkey>",
+  "tags": [
+    ["h", "<channel id>"],
+    ["integration", "<integration UUID>"],
+    ["t", "provider:<provider>"],
+    ["t", "subscription:<subscription d>"]
+  ],
+  "content": "<JSON RecordContent>"
+}
+```
+
+```typescript
+type RecordContent = {
+  version: 1
+  type: string                    // Provider event type
+  delivery_event_id: string       // The delivery's event ID
+  subscription_id: string         // The subscription's d
+  subscription_revision: string   // The revision evaluated
+  payload?: Record<string, unknown> // The transform's result; absent without a transform
+}
+```
+
+A relay publishes at most one record per delivery and subscription, even when it retries. A relay MUST reject a record from a client. Clients MUST ignore a record the relay's `self` key ([NIP-11](11.md)) did not sign.
+
+Records are read like other channel events:
+
+```json
+{ "kinds": [40701], "#h": ["<channel id>"] }
+```
+
+Add `"#t": ["subscription:<d>"]` for one subscription.
+
 ## Limits summary
 
 | Item | Limit |
 |------|-------|
-| `integration` tags on a revision | exactly 1, except on delete |
+| `integration` tags on a subscription revision | exactly 1, except on delete |
 | Expression size | 4096 bytes |
 | Expression depth | 64 levels |
