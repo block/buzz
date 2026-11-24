@@ -12,11 +12,8 @@ unimplemented; neither command proves full account erasure. Use a disposable
 database and versioned storage bucket when testing. For an owned community, read-only mode records the community ID and the proposed
 `would_submit` action. Delete mode submits or reuses a child request for separate approval.
 
-For a saved read-only run, submit with `--read-only`, approve its digest, then run:
-
-```sh
-buzz-admin user-deletions run "$REQUEST_ID" --read-only --write-row-ids rows.ndjson
-```
+Follow [Run and verify a read-only user deletion](operator-user-deletion-preview.md)
+for the inventory, approval, full-run, and verification commands.
 
 Both modes accept `--write-row-ids PATH`. Each invocation creates a new file.
 It records proposals from the stages that actually run, including compound row
