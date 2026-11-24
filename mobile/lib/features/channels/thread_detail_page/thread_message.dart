@@ -174,7 +174,14 @@ class _ThreadMessage extends HookConsumerWidget {
         return true;
       },
       child: Padding(
-        padding: EdgeInsets.only(top: showAuthor && !startsDay ? Grid.xs : 0),
+        padding: EdgeInsets.only(
+          top:
+              showAuthor &&
+                  !startsDay &&
+                  (action == null || showActionTimestamp)
+              ? Grid.xs
+              : 0,
+        ),
         child: DecoratedBox(
           key: ValueKey('thread-message-${message.id}'),
           decoration: BoxDecoration(
@@ -267,7 +274,13 @@ class _ThreadMessage extends HookConsumerWidget {
                             Expanded(
                               child: Padding(
                                 padding: EdgeInsets.only(
-                                  top: showAuthor && !startsDay ? Grid.half : 0,
+                                  top:
+                                      showAuthor &&
+                                          !startsDay &&
+                                          (action == null ||
+                                              showActionTimestamp)
+                                      ? Grid.half
+                                      : 0,
                                 ),
                                 child: Column(
                                   crossAxisAlignment: ownMessage

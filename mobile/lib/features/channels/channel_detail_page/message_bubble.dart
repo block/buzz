@@ -149,7 +149,14 @@ class _MessageBubble extends HookConsumerWidget {
         return true;
       },
       child: Padding(
-        padding: EdgeInsets.only(top: showAuthor && !startsDay ? Grid.xs : 0),
+        padding: EdgeInsets.only(
+          top:
+              showAuthor &&
+                  !startsDay &&
+                  (action == null || showActionTimestamp)
+              ? Grid.xs
+              : 0,
+        ),
         child: Material(
           color: Colors.transparent,
           borderRadius: BorderRadius.circular(Radii.md),
@@ -276,7 +283,12 @@ class _MessageBubble extends HookConsumerWidget {
                           Expanded(
                             child: Padding(
                               padding: EdgeInsets.only(
-                                top: showAuthor && !startsDay ? Grid.half : 0,
+                                top:
+                                    showAuthor &&
+                                        !startsDay &&
+                                        (action == null || showActionTimestamp)
+                                    ? Grid.half
+                                    : 0,
                               ),
                               child: Column(
                                 crossAxisAlignment: ownMessage
