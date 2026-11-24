@@ -530,10 +530,11 @@ stop it, and the deny set does not survive a restart.  So a relay with deferred
 actions also records each disconnect in durable storage that all of its
 processes share.  The deny set itself is unchanged.
 
-A relay that executes deferred actions MUST apply this section.  So MUST every
+A relay that executes deferred actions MUST apply this section.  Every other
 relay version and process that runs against storage holding a pending deferred
-action with a recorded issuer: one that ignored a command would leave the
-action for a later version to execute.
+action with a recorded issuer MUST apply it too.  If one of them ignored a
+disconnect command, the action would still be there for a later version to
+execute.
 
 With each deferred action it accepts, the relay MUST record the admission that
 carried it: the admitting issuer and the owner recorded for the admission, if
@@ -543,7 +544,8 @@ any.  The action **matches** `(iss, target_pubkey)` when its recorded issuer is
 For each disconnect command the relay makes one atomic change to that storage,
 the **durable change**.  It applies only if `(iss, jti)` is not already a
 completed command, so a signed command changes durable state at most once,
-however often and to whichever process it is delivered.
+however often it is delivered and whichever process receives it.  The change
+does three things:
 
 1. Record `(iss, jti)` as a **completed command** until the command's effective
    expiry (`effective_expiry` in `VerifyCommandJwt`).
@@ -574,9 +576,9 @@ An issuer that gets no answer retries the same signed command.  If the relay
 stopped before step 2 committed, the retry is a first delivery.  If it stopped
 after, the durable work stands, and the process that receives the retry ends in
 step 4: it holds the deny entry, closes the matching connections and propagates
-both as for any accepted command.  That retry moves no `recorded_at` and
-cancels nothing.  Only a new signed command reaches a deferred action accepted
-since then from an admission the record does not fence.
+both as for any accepted command.  That retry does not move `recorded_at` and
+cancels nothing.  A deferred action accepted since the first delivery, from an
+admission the record does not fence, is cancelled only by a new signed command.
 
 The relay MUST bound the disconnect records and the completed commands it keeps
 per issuer, independently of the deny set bound and of other issuers.  It MUST
@@ -584,15 +586,16 @@ remove a completed command only after its effective expiry, and a disconnect
 record only once no fenced admission can still be open.  With a maximum
 connection lifetime `L`, that is after `max(recorded_at, until) + L`.
 
-An admission is **fenced** by a disconnect record when the record's issuer made
-it, its proven key or its recorded owner is the record's target pubkey, and it
-happened at or before `recorded_at` or before `until`.  While it retains the
-record, the relay MUST refuse a deferred action from a fenced admission with
-`authorization_denied`.  Every relay process MUST decide that against the
-durable record, in the same atomic change that stores the action, and MUST
-serialize that change against the durable change of every disconnect command
-the action matches.  An acceptance therefore either commits first, and the
-command cancels it, or commits second, and finds the record.
+An admission is **fenced** by a disconnect record when all of these hold: the
+record's issuer made the admission; the admission's proven key or recorded
+owner is the record's target pubkey; and the admission happened at or before
+`recorded_at`, or before `until`.  While it retains the record, the relay MUST
+refuse a deferred action from a fenced admission with `authorization_denied`.
+Every relay process MUST make that decision against the durable record, in the
+same atomic change that stores the action, and MUST serialize that change
+against the durable change of every disconnect command the action matches.  An
+acceptance therefore either commits first, and the command cancels it, or
+commits second, and finds the record.
 
 A cancelled deferred action stays cancelled: a later assertion for the same key
 does not restore it.  [FI-TRACE-DEFERRED-ACTIONS]
