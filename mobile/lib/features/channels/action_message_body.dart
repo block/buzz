@@ -28,14 +28,45 @@ class ActionMessageBody extends StatelessWidget {
   final Widget child;
   final bool active;
 
+  /// Leading width shared by narration and its reply/reaction controls.
+  static double contentInset(BuildContext context) =>
+      _timeGutterWidth(context) + Grid.xl;
+
   @override
   Widget build(BuildContext context) {
     if (!active) return child;
+    final scaler = MediaQuery.textScalerOf(context);
+    double topInset(TextStyle style) =>
+        ((Grid.xl - scaler.scale(style.fontSize!) * style.height!) / 2).clamp(
+          0.0,
+          Grid.xl,
+        );
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: Grid.half),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          SizedBox(
+            width: _timeGutterWidth(context),
+            child: Padding(
+              padding: EdgeInsetsDirectional.only(
+                end: Grid.half,
+                top: topInset(messageTimestampTextStyle),
+              ),
+              child: Align(
+                alignment: AlignmentDirectional.centerEnd,
+                child: MessageLongPressTarget(
+                  child: Text(
+                    timestamp,
+                    maxLines: 1,
+                    style: messageTimestampTextStyle.copyWith(
+                      color: context.tertiaryTextColor,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
           MessageLongPressTarget(
             child: Semantics(
               container: true,
@@ -60,23 +91,18 @@ class ActionMessageBody extends StatelessWidget {
             ),
           ),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Keep the gesture target on the narration's painted width.
-                DefaultTextStyle.merge(
-                  textWidthBasis: TextWidthBasis.longestLine,
-                  child: MessageReplyDragTarget(child: child),
-                ),
-                MessageLongPressTarget(
-                  child: Text(
-                    timestamp,
-                    style: messageTimestampTextStyle.copyWith(
-                      color: context.tertiaryTextColor,
-                    ),
+            child: Padding(
+              padding: EdgeInsets.only(top: topInset(messageBodyTextStyle)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Keep the gesture target on the narration's painted width.
+                  DefaultTextStyle.merge(
+                    textWidthBasis: TextWidthBasis.longestLine,
+                    child: MessageReplyDragTarget(child: child),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ],
@@ -90,5 +116,12 @@ String actionMessageMarkdown(String displayName, String action) {
   final name = displayName
       .replaceAll(RegExp(r'[\r\n]+'), ' ')
       .replaceAllMapped(RegExp(r'[!-/:-@\[-`{-~]'), (m) => '\\${m[0]}');
-  return '**$name** $action';
+  return '$name $action';
 }
+
+double _timeGutterWidth(BuildContext context) =>
+    Grid.xxl *
+    MediaQuery.textScalerOf(
+      context,
+    ).scale(messageTimestampTextStyle.fontSize!) /
+    messageTimestampTextStyle.fontSize!;

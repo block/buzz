@@ -2,7 +2,7 @@
 
 Typing `/me passes out` sends a normal chat message whose signed content is
 exactly `/me passes out`. Supporting clients display a compact action row with
-the sender's avatar and an italicized sentence, such as **Alex** *passes out*.
+the sender's avatar and an italicized sentence, such as *Alex passes out*.
 The sender's name comes from the event author's identity in the current
 community, never from a name embedded in the message.
 
@@ -26,7 +26,9 @@ Actions are authored messages, visually distinct from both speech bubbles and
 relay-generated system notices. Show the author's avatar and name on every
 action, including consecutive actions, the viewer's own messages, and DMs.
 Use a small avatar and normal-size italic action text with readable contrast;
-keep timestamps and edit markers available. Profile labels render literally.
+put clock time in a fixed leading gutter, followed by the avatar and narration.
+Wrapped text, reactions, and reply controls align under the narration. Keep edit
+markers available. Profile labels render literally.
 Keep links, mentions, emoji, and attachments usable inside the action body.
 
 Do not group an action with neighboring speech bubbles. Keep the usual message

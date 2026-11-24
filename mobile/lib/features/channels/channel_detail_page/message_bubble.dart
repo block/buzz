@@ -196,7 +196,9 @@ class _MessageBubble extends HookConsumerWidget {
                             : Alignment.centerLeft,
                         child: Padding(
                           padding: EdgeInsets.only(
-                            left: ownMessage || !showSenderIdentity
+                            left: action != null
+                                ? ActionMessageBody.contentInset(context)
+                                : ownMessage || !showSenderIdentity
                                 ? 0
                                 : messageAvatarSize + messageAvatarContentGap,
                           ),
@@ -210,7 +212,9 @@ class _MessageBubble extends HookConsumerWidget {
                                 Padding(
                                   padding: EdgeInsets.only(
                                     right: ownMessage ? Grid.xxs : 0,
-                                    left: ownMessage ? 0 : Grid.xxs,
+                                    left: ownMessage || action != null
+                                        ? 0
+                                        : Grid.xxs,
                                   ),
                                   child: MessageLongPressTarget(
                                     child: ReactionRow(

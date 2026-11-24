@@ -93,6 +93,14 @@ void bubbleLayoutTests() {
             tester.getTopLeft(reactions).dy,
             greaterThanOrEqualTo(tester.getBottomLeft(timestamp).dy),
           );
+          final content = find.descendant(
+            of: row,
+            matching: find.byType(MessageContent),
+          );
+          expect(
+            tester.getTopLeft(reactions).dx,
+            greaterThanOrEqualTo(tester.getTopLeft(content).dx),
+          );
         }
 
         expectReactionBelowTimestamp('message-row-$threadIdRoot');

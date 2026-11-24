@@ -212,7 +212,9 @@ class _ThreadMessage extends HookConsumerWidget {
                           child: Padding(
                             padding: EdgeInsets.only(
                               right: ownMessage ? Grid.xxs : 0,
-                              left: ownMessage || !showSenderIdentity
+                              left: action != null
+                                  ? ActionMessageBody.contentInset(context)
+                                  : ownMessage || !showSenderIdentity
                                   ? 0
                                   : messageAvatarSize +
                                         messageAvatarContentGap +
