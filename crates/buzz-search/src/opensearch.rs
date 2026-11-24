@@ -561,7 +561,9 @@ impl SearchIndex {
             .await
             .map_err(transport_error)?;
         let body = checked(response).await?;
-        // A partly failed search is an error, not fewer hits.
+        // A partly failed search is an error, not fewer hits. Serverless
+        // reports `_shards` as all zeros, so there only `timed_out` can
+        // catch it.
         if body["timed_out"] == true {
             return Err(SearchError::Engine(crate::error::SEARCH_TIMED_OUT.into()));
         }

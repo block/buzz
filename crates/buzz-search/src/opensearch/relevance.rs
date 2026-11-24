@@ -19,10 +19,11 @@
 //!   documents that cannot reach the top, so cost does not grow with every
 //!   match of a common word. The trade-off: recency cannot lift a weak match
 //!   from outside the window.
-//! - **Serverless.** Built-in analysis only (no ICU plugin) and no scripts.
-//!   `word_delimiter_graph`, `edge_ngram`, `length`, `truncate`, the
-//!   `light_english` stemmer and `rescore` with a `function_score` decay
-//!   have not been checked on a Serverless collection.
+//! - **Serverless.** Built-in analysis only (no ICU plugin), and no scripts
+//!   are used. `word_delimiter_graph`, `edge_ngram`, `length`, `truncate`,
+//!   the `light_english` stemmer and `rescore` with a `function_score`
+//!   decay were checked on a NextGen Serverless collection, where an inline
+//!   Painless `script_score` also ran.
 
 use serde_json::{json, Value};
 
