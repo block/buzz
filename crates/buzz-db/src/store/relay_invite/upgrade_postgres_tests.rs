@@ -146,7 +146,7 @@ async fn insert_relay_admin_action(pool: &PgPool, fixture: RelayAdminActionFixtu
     id
 }
 
-async fn set_deletion_state(pool: &PgPool, community: Uuid, state: &str) {
+pub(super) async fn set_deletion_state(pool: &PgPool, community: Uuid, state: &str) {
     let mut tx = pool.begin().await.unwrap();
     sqlx::query(
         "SELECT set_config('buzz.deletion_executor_community', $1, true), \
@@ -386,7 +386,9 @@ async fn assert_join_role_preserved(pool: &PgPool, community: Uuid) {
     );
 }
 
-async fn start_invite_repair_script(application_name: Option<&str>) -> tokio::process::Child {
+pub(super) async fn start_invite_repair_script(
+    application_name: Option<&str>,
+) -> tokio::process::Child {
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../scripts/maintenance/backfill_invite_revocations.sql");
     let mut command = tokio::process::Command::new("psql");
@@ -405,7 +407,7 @@ async fn start_invite_repair_script(application_name: Option<&str>) -> tokio::pr
     command.spawn().expect("start invite repair script")
 }
 
-pub(super) async fn run_invite_repair_script(_pool: &PgPool) -> String {
+pub(super) async fn run_invite_repair_script() -> String {
     let child = start_invite_repair_script(None).await;
     let output = child.wait_with_output().await.unwrap();
     assert!(
@@ -615,10 +617,10 @@ async fn migration_schema_backfill_repairs_retained_restrictions_and_ignores_aud
         "pre-migration rows remain legacy-admitted"
     );
 
-    run_invite_repair_script(&pool).await;
+    run_invite_repair_script().await;
     let repaired = invite_revocation_state(&pool).await;
     assert_repaired_and_fenced(&pool, &cases).await;
-    run_invite_repair_script(&pool).await;
+    run_invite_repair_script().await;
     assert_eq!(invite_revocation_state(&pool).await, repaired);
     assert_repaired_and_fenced(&pool, &cases).await;
     assert_join_role_preserved(&pool, cases[0].community).await;
@@ -641,7 +643,7 @@ async fn migration_schema_backfill_repairs_retained_restrictions_and_ignores_aud
     .await
     .unwrap();
     assert!(old_code_insert_default);
-    run_invite_repair_script(&pool).await;
+    run_invite_repair_script().await;
     let old_code_insert_repaired: bool = sqlx::query_scalar(
         "SELECT legacy_admission FROM relay_invites \
          WHERE community_id=$1 AND token_hash=$2",
@@ -660,7 +662,7 @@ async fn migration_schema_legacy_claim_lazily_revokes_history_after_a_fenced_com
 {
     let (pool, cases) = legacy_fixture().await;
     crate::migration::run_migrations(&pool).await.unwrap();
-    run_invite_repair_script(&pool).await;
+    run_invite_repair_script().await;
 
     let community = cases[1].community;
     let token_hash = [2u8; 32];
@@ -723,7 +725,7 @@ async fn migration_schema_legacy_claim_lazily_revokes_history_after_a_fenced_com
         legacy_admission,
         "fenced communities retain the legacy marker until repaired"
     );
-    run_invite_repair_script(&pool).await;
+    run_invite_repair_script().await;
     let legacy_admission: bool =
         sqlx::query_scalar("SELECT legacy_admission FROM relay_invites WHERE community_id = $1")
             .bind(community)
@@ -784,10 +786,10 @@ async fn migration_schema_desired_pgschema_reconcile_matches_populated_upgrade()
         "pgschema preserves the legacy default for populated rows"
     );
 
-    run_invite_repair_script(&pool).await;
+    run_invite_repair_script().await;
     let repaired = invite_revocation_state(&pool).await;
     assert_repaired_and_fenced(&pool, &cases).await;
-    run_invite_repair_script(&pool).await;
+    run_invite_repair_script().await;
     assert_eq!(invite_revocation_state(&pool).await, repaired);
     assert_repaired_and_fenced(&pool, &cases).await;
     assert_join_role_preserved(&pool, cases[0].community).await;
@@ -799,7 +801,7 @@ async fn migration_schema_repaired_marker_survives_reconnect_and_timeout_expires
 ) {
     let (pool, cases) = legacy_fixture().await;
     crate::migration::run_migrations(&pool).await.unwrap();
-    run_invite_repair_script(&pool).await;
+    run_invite_repair_script().await;
 
     let community = CommunityId::from_uuid(cases[8].community);
     let token_hash = [9u8; 32];
@@ -924,7 +926,7 @@ async fn invite_repair_revokes_new_protocol_invites_for_active_bans() {
     .await
     .unwrap();
 
-    run_invite_repair_script(&pool).await;
+    run_invite_repair_script().await;
     let (revoked, legacy): (bool, bool) = sqlx::query_as(
         "SELECT revoked_at IS NOT NULL, legacy_admission \
          FROM relay_invites WHERE community_id=$1 AND id=$2",
@@ -1095,11 +1097,14 @@ async fn invite_repair_waits_for_deletion_transition_before_clearing_legacy_mark
     insert_restriction(&pool, *community.as_uuid(), &[1; 32], false, None, None).await;
 
     let mut deletion = pool.begin().await.unwrap();
-    sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
-        .bind(community.as_uuid())
-        .execute(&mut *deletion)
-        .await
-        .unwrap();
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(\
+         hashtextextended('buzz-community-deletion:' || $1::uuid::text, 0))",
+    )
+    .bind(community.as_uuid())
+    .execute(&mut *deletion)
+    .await
+    .unwrap();
     sqlx::query(
         "SELECT set_config('buzz.deletion_executor_community',$1,true), \
                 set_config('buzz.deletion_fence_generation','7',true)",
@@ -1176,7 +1181,7 @@ async fn invite_repair_waits_for_deletion_transition_before_clearing_legacy_mark
     assert!(!revoked && legacy, "quiescing communities remain fenced");
 
     set_deletion_state(&pool, *community.as_uuid(), "active").await;
-    run_invite_repair_script(&pool).await;
+    run_invite_repair_script().await;
     let (revoked, legacy): (bool, bool) = sqlx::query_as(
         "SELECT revoked_at IS NOT NULL, legacy_admission FROM relay_invites \
          WHERE community_id=$1 AND token_hash=$2",

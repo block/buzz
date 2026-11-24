@@ -1338,6 +1338,10 @@ mod revocation_postgres_tests;
 mod upgrade_postgres_tests;
 
 #[cfg(test)]
+#[path = "relay_invite/repair_batch_postgres_tests.rs"]
+mod repair_batch_postgres_tests;
+
+#[cfg(test)]
 mod owner_admission_postgres_tests;
 
 #[cfg(test)]

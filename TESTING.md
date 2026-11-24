@@ -193,13 +193,18 @@ all serving pods and retain it on compatible rollbacks; rolling back to a versio
 without this setting's enforcement restores legacy acceptance until natural expiry.
 This change does not choose or deploy a cutoff.
 
-The historical maintenance companion must be separately reviewed and approved
+The historical invitation repair script must be reviewed and approved
 **before deploying this core change**. Both steps belong to the same controlled
 rollout: leaving unrepaired rows serving indefinitely would extend historical
 restriction rejection until their repair. Migration 0075 is schema-only: it adds
 `revoked_at` and `legacy_admission` without rewriting existing invite rows.
 Reconcile any previously applied invitation migration version with the schema
-and migration history before applying it.
+and migration history before applying it. Migration 0075 is the repair's
+minimum schema prerequisite, not a complete current-relay upgrade. Before
+deploying the current relay, apply through the latest migration, following
+all applicable index-prebuild procedures in [docs/database.md](docs/database.md),
+including [artifact sync](docs/artifact-sync-deployment.md) and
+[profile search](docs/profile-search.md#deployment).
 
 There is no invitation-maintenance feature switch. Operators must prevent
 invitation mint/claim, ban lifts, and **new timeout/mute restrictions** throughout
@@ -222,13 +227,14 @@ invitation admission paused, using the same traffic/writer controls if needed.
 It also requires `BUZZ_AUTO_MIGRATE` off: with auto-migration on (the Helm
 default), the old binary fails at startup with SQLx `VersionMissing(75)`. See
 [docs/database.md](docs/database.md) Rule 5.
-The separately approved companion provides the operator command:
+Run the approved historical invitation repair script with the operator command:
 
 ```bash
 psql -X -v ON_ERROR_STOP=1 -f scripts/maintenance/backfill_invite_revocations.sql
 ```
 
-Run it as a top-level script, outside any caller transaction. The final query
+Run it as a top-level script, outside any caller transaction. The operator role
+needs database `TEMP` privilege for the session-local restriction-policy view. The final query
 must report `0` unrepaired invites in active communities. Run it twice; the
 second run must keep zero and leave revocation timestamps and markers unchanged.
 The default two-minute statement timeout covers the entire repair invocation,
@@ -236,8 +242,8 @@ not each batch. A timeout preserves committed batches, rolls back the current
 batch and skips the final query; it is not a successful zero check. Keep the
 same writer controls in place and rerun. A `lock_timeout` stop likewise keeps
 committed batches; resolve lock contention and rerun under the same controls.
-If scanning already repaired rows
-exhausts that budget, pass a larger finite budget, for example
+Each run walks forward within each community; a restart begins a new walk.
+If the invocation exhausts its budget, pass a larger finite budget, for example
 `psql -X -v ON_ERROR_STOP=1 -v invite_repair_timeout=10min -f scripts/maintenance/backfill_invite_revocations.sql`.
 Review fenced communities separately and keep their admission closed until they
 can be repaired under the same controls.
@@ -247,8 +253,7 @@ pre-change schema including channel join roles, for upgrade testing. Do not reus
 an older database that applied an invitation migration under an earlier number
 or a different 0075 checksum; reconcile it separately without resetting a user's
 database. Seed legacy links for a restricted issuer and an unrelated issuer;
-lift the first restriction before
-upgrade. Apply schema-only 0075 and confirm it rewrites no invite rows. Before
+lift the first restriction before upgrade. Apply schema-only 0075 and confirm it rewrites no invite rows. Before
 repair, signed claims reject historical legacy candidates lazily. Run the actual
 repair script twice, checking selective revocation, cleared markers, zero
 remaining active-community legacy rows and idempotence. The populated automated

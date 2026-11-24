@@ -1,10 +1,11 @@
--- This companion must be separately approved before core deployment and run
--- in that same controlled rollout, after schema migration 0075 and draining
--- every old writer. Prevent invite mint/claim, ban lifts, and NEW timeouts/mutes
--- throughout drain/repair. Without controls covering all writer paths, remove
--- public traffic and stop all relay/admin/background/direct writers; run only
--- this operator connection. Reopen only on new code after zero remaining and
--- an idempotent rerun. Review fenced communities before reopening them.
+-- Historical invitation repair: review and approve this script before core
+-- deployment, and run it in that controlled rollout after schema migration
+-- 0075 and draining every old writer. Prevent invite mint/claim, ban lifts,
+-- and NEW timeouts/mutes throughout drain/repair. Without controls covering
+-- all writer paths, remove public traffic and stop all relay/admin/background/
+-- direct writers; run only this operator connection. Reopen only on new code
+-- after zero remaining and an idempotent rerun. Review fenced communities
+-- before reopening them. The operator role needs TEMP privilege on the database.
 --
 -- Each community batch commits independently, takes the same lock order as the
 -- application writers, and skips a community unless it is active and has no
@@ -16,10 +17,10 @@
 -- COMMIT does not restart it. On timeout, committed batches remain repaired,
 -- the current batch rolls back, and ON_ERROR_STOP skips the final zero check.
 -- A lock_timeout stop likewise keeps committed batches; keep admission closed
--- and rerun after resolving lock contention.
--- Keep admission closed and rerun. If scanning the repaired prefix consumes
--- the budget, choose a larger finite invocation budget with psql's
--- -v invite_repair_timeout=10min (the default is 2min).
+-- and rerun after resolving lock contention. Each run walks invites forward
+-- within each community; a restart begins a new walk. If needed, choose a
+-- larger finite invocation budget with -v invite_repair_timeout=10min
+-- (the default is 2min).
 \set ON_ERROR_STOP on
 \if :{?invite_repair_timeout}
 \else
@@ -28,10 +29,46 @@
 SET lock_timeout = '5s';
 SET statement_timeout = :'invite_repair_timeout';
 
+-- Share the issuer/current-owner policy between both batches and validation.
+-- This is a session-local, non-materialized view, not a schema change; each
+-- statement sees current restrictions while holding the admission lock.
+CREATE TEMP VIEW invite_repair_restrictions AS
+SELECT invite.community_id, invite.id,
+       ((invite.legacy_admission AND (
+           issuer.pubkey IS NULL OR restriction_state.has_retained_restriction
+       )) OR restriction_state.has_active_ban) AS should_revoke,
+       restriction_state.has_active_ban
+FROM relay_invites AS invite
+CROSS JOIN LATERAL (
+    SELECT CASE
+        WHEN octet_length(invite.created_by) = 64
+             AND invite.created_by !~ '[^0-9a-f]'
+        THEN decode(invite.created_by, 'hex')
+    END AS pubkey
+) AS issuer
+CROSS JOIN LATERAL (
+    SELECT COALESCE(bool_or(true), false) AS has_retained_restriction,
+           COALESCE(bool_or(
+               restriction.banned
+               AND (restriction.ban_expires_at IS NULL
+                    OR restriction.ban_expires_at > clock_timestamp())
+           ), false) AS has_active_ban
+    FROM community_bans AS restriction
+    WHERE restriction.community_id = invite.community_id
+      AND restriction.pubkey IN (
+          issuer.pubkey,
+          (SELECT user_row.agent_owner_pubkey
+           FROM users AS user_row
+           WHERE user_row.community_id = invite.community_id
+             AND user_row.pubkey = issuer.pubkey)
+      )
+) AS restriction_state;
+
 DO $$
 DECLARE
     last_community UUID;
     target_community UUID;
+    last_invite UUID;
     community_active BOOLEAN;
     affected BIGINT;
 BEGIN
@@ -50,10 +87,13 @@ BEGIN
         END IF;
         EXIT WHEN NOT FOUND;
         last_community := target_community;
+        -- Reset once per community. NULL means first batch; nil UUIDs are valid
+        -- invite IDs and must not be used as a sentinel.
+        last_invite := NULL;
 
         LOOP
             PERFORM pg_advisory_xact_lock_shared(
-                community_deletion_lock_key(target_community)
+                hashtextextended('buzz-community-deletion:' || target_community::text, 0)
             );
             PERFORM pg_advisory_xact_lock(
                 hashtextextended('invite-admission:' || target_community::text, 0)
@@ -68,77 +108,77 @@ BEGIN
                 EXIT;
             END IF;
 
-            WITH candidates AS (
-                SELECT invite.id,
-                       (
-                           (invite.legacy_admission AND (
-                               issuer.pubkey IS NULL
-                               OR restriction_state.has_retained_restriction
-                           ))
-                           OR restriction_state.has_active_ban
-                       ) AS should_revoke
-                FROM relay_invites AS invite
-                CROSS JOIN LATERAL (
-                    SELECT CASE
-                        WHEN octet_length(invite.created_by) = 64
-                             AND invite.created_by !~ '[^0-9a-f]'
-                        THEN decode(invite.created_by, 'hex')
-                    END AS pubkey
-                ) AS issuer
-                CROSS JOIN LATERAL (
-                    SELECT
-                        EXISTS (
-                            SELECT 1
-                            FROM community_bans AS restriction
-                            WHERE restriction.community_id = invite.community_id
-                              AND (
-                                  restriction.pubkey = issuer.pubkey
-                                  OR restriction.pubkey = (
-                                      SELECT user_row.agent_owner_pubkey
-                                      FROM users AS user_row
-                                      WHERE user_row.community_id = invite.community_id
-                                        AND user_row.pubkey = issuer.pubkey
-                                  )
-                              )
-                        ) AS has_retained_restriction,
-                        EXISTS (
-                            SELECT 1
-                            FROM community_bans AS restriction
-                            WHERE restriction.community_id = invite.community_id
-                              AND (
-                                  restriction.pubkey = issuer.pubkey
-                                  OR restriction.pubkey = (
-                                      SELECT user_row.agent_owner_pubkey
-                                      FROM users AS user_row
-                                      WHERE user_row.community_id = invite.community_id
-                                        AND user_row.pubkey = issuer.pubkey
-                                  )
-                              )
-                              AND restriction.banned
-                              AND (restriction.ban_expires_at IS NULL
-                                   OR restriction.ban_expires_at > clock_timestamp())
-                        ) AS has_active_ban
-                ) AS restriction_state
-                WHERE invite.community_id = target_community
-                  AND (
-                    invite.legacy_admission
-                    OR (invite.revoked_at IS NULL AND restriction_state.has_active_ban)
-                  )
-                ORDER BY invite.id
-                LIMIT 500
-                FOR UPDATE OF invite
-            )
-            UPDATE relay_invites AS invite
-            SET revoked_at = CASE
-                    WHEN candidates.should_revoke AND invite.revoked_at IS NULL
-                    THEN clock_timestamp()
-                    ELSE invite.revoked_at
-                END,
-                legacy_admission = false
-            FROM candidates
-            WHERE invite.community_id = target_community
-              AND invite.id = candidates.id;
-            GET DIAGNOSTICS affected = ROW_COUNT;
+            -- Split first/successor statements so generic plans can seek by PK.
+            IF last_invite IS NULL THEN
+                WITH candidates AS (
+                    SELECT invite.id, restriction_state.should_revoke
+                    FROM relay_invites AS invite
+                    JOIN invite_repair_restrictions AS restriction_state
+                      ON restriction_state.community_id = invite.community_id
+                     AND restriction_state.id = invite.id
+                    WHERE invite.community_id = target_community
+                      AND (
+                        invite.legacy_admission
+                        OR (invite.revoked_at IS NULL AND restriction_state.has_active_ban)
+                      )
+                    ORDER BY invite.id
+                    LIMIT 500
+                    FOR UPDATE OF invite
+                ), updated AS (
+                    UPDATE relay_invites AS invite
+                    SET revoked_at = CASE
+                            WHEN candidates.should_revoke AND invite.revoked_at IS NULL
+                            THEN clock_timestamp()
+                            ELSE invite.revoked_at
+                        END,
+                        legacy_admission = false
+                    FROM candidates
+                    WHERE invite.community_id = target_community
+                      AND invite.id = candidates.id
+                      -- Force a bounded PK lookup, not a full-table hash join.
+                      AND invite.id = ANY (ARRAY(SELECT id FROM candidates))
+                    RETURNING invite.id
+                )
+                SELECT count(*), (array_agg(id ORDER BY id DESC))[1]
+                INTO affected, last_invite
+                FROM updated;
+            ELSE
+                WITH candidates AS (
+                    SELECT invite.id, restriction_state.should_revoke
+                    FROM relay_invites AS invite
+                    JOIN invite_repair_restrictions AS restriction_state
+                      ON restriction_state.community_id = invite.community_id
+                     AND restriction_state.id = invite.id
+                    WHERE invite.community_id = target_community
+                      AND invite.id > last_invite
+                      -- PostgreSQL does not propagate the range across this
+                      -- self-join: bound the view's invite input explicitly too.
+                      AND restriction_state.id > last_invite
+                      AND (
+                        invite.legacy_admission
+                        OR (invite.revoked_at IS NULL AND restriction_state.has_active_ban)
+                      )
+                    ORDER BY invite.id
+                    LIMIT 500
+                    FOR UPDATE OF invite
+                ), updated AS (
+                    UPDATE relay_invites AS invite
+                    SET revoked_at = CASE
+                            WHEN candidates.should_revoke AND invite.revoked_at IS NULL
+                            THEN clock_timestamp()
+                            ELSE invite.revoked_at
+                        END,
+                        legacy_admission = false
+                    FROM candidates
+                    WHERE invite.community_id = target_community
+                      AND invite.id = candidates.id
+                      AND invite.id = ANY (ARRAY(SELECT id FROM candidates))
+                    RETURNING invite.id
+                )
+                SELECT count(*), (array_agg(id ORDER BY id DESC))[1]
+                INTO affected, last_invite
+                FROM updated;
+            END IF;
 
             COMMIT;
             EXIT WHEN affected = 0;
@@ -153,37 +193,14 @@ $$;
 SELECT count(*) AS unrepaired_invites, count(*) = 0 AS repair_complete
 FROM relay_invites AS invite
 JOIN communities AS community ON community.id = invite.community_id
-CROSS JOIN LATERAL (
-    SELECT CASE
-        WHEN octet_length(invite.created_by) = 64
-             AND invite.created_by !~ '[^0-9a-f]'
-        THEN decode(invite.created_by, 'hex')
-    END AS pubkey
-) AS issuer
+JOIN invite_repair_restrictions AS restriction_state
+  ON restriction_state.community_id = invite.community_id
+ AND restriction_state.id = invite.id
 WHERE community.deletion_state = 'active'
   AND community.deleted_at IS NULL
   AND (
     invite.legacy_admission
-    OR (
-      invite.revoked_at IS NULL
-      AND EXISTS (
-        SELECT 1
-        FROM community_bans AS restriction
-        WHERE restriction.community_id = invite.community_id
-          AND (
-            restriction.pubkey = issuer.pubkey
-            OR restriction.pubkey = (
-                SELECT user_row.agent_owner_pubkey
-                FROM users AS user_row
-                WHERE user_row.community_id = invite.community_id
-                  AND user_row.pubkey = issuer.pubkey
-            )
-          )
-          AND restriction.banned
-          AND (restriction.ban_expires_at IS NULL
-               OR restriction.ban_expires_at > clock_timestamp())
-      )
-    )
+    OR (invite.revoked_at IS NULL AND restriction_state.has_active_ban)
   )\gset
 \echo unrepaired_invites
 \echo :unrepaired_invites
@@ -193,3 +210,4 @@ DO $$ BEGIN
     RAISE EXCEPTION 'invite repair incomplete; keep admission closed and rerun';
 END $$;
 \endif
+DROP VIEW invite_repair_restrictions;
