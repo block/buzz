@@ -1,5 +1,5 @@
--- Index for GET /buzz/v1/me/activity on a column 0105 added to an existing
--- table. Separate from 0105 so a deployment that applies migrations out of
+-- Index for GET /buzz/v1/me/activity on a column 0107 added to an existing
+-- table. Separate from 0107 so a deployment that applies migrations out of
 -- band can prebuild it between the two:
 --
 --   CREATE INDEX CONCURRENTLY idx_event_mentions_pubkey_received

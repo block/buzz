@@ -12,7 +12,7 @@ CREATE TABLE event_mentions (
     channel_id          UUID,
     event_kind          INT,
     -- Relay arrival of the event (events.received_at). NULL on rows written
-    -- before 0105: those are not listed by /buzz/v1/me/activity.
+    -- before 0107: those are not listed by /buzz/v1/me/activity.
     received_at         TIMESTAMPTZ,
     -- Thread root when the event is a reply; NULL for a top-level message.
     root_id             BYTEA,

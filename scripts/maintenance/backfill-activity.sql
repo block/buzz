@@ -1,5 +1,5 @@
 -- Backfill what GET /buzz/v1/me/activity reads from rows written before the
--- relay that keeps them (migration 0105). See docs/buzz-v1-activity.md.
+-- relay that keeps them (migration 0107). See docs/buzz-v1-activity.md.
 --
 -- For messages created within the last 30 days it fills:
 --   * event_mentions.received_at and root_id, so the mention is in the feed;
