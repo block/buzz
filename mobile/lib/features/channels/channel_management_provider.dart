@@ -10,6 +10,7 @@ import '../../shared/channels/saved_message_store.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/crypto/nip_oa.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/me/me_groups.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
@@ -79,16 +80,20 @@ final _agentPolicyRefusal = RegExp(
       : (ownerOnly: match.group(1) == 'owner_only', agent: match.group(2)!);
 }
 
-/// What to show for an agent's add-policy refusal of a DM, naming the agent
-/// when its [name] is known, as desktop's `agentPolicyMessage` words it.
+/// What to show for an agent's add-policy refusal of a DM. [agent] is the
+/// agent's contextual identity label and [owner] its verified owner's, each
+/// null while unknown, so the person knows exactly whose owner to ask.
 String dmAgentRefusedMessage({
   required bool adding,
   required bool ownerOnly,
-  String? name,
+  String? agent,
+  String? owner,
 }) {
-  final refused = ownerOnly
-      ? 'Only ${name != null ? '$name’s' : 'this agent’s'} owner can add it to a DM.'
-      : '${name ?? 'This agent'} can’t be added to a DM.';
+  final refused = !ownerOnly
+      ? '${agent ?? 'This agent'} can’t be added to a DM.'
+      : owner != null
+      ? 'Only $owner can add ${agent ?? 'this agent'} to a DM.'
+      : 'Only the owner of ${agent ?? 'this agent'} can add it to a DM.';
   return '${adding ? 'Couldn’t add them. ' : ''}$refused';
 }
 

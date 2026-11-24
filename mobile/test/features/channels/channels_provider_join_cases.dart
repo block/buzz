@@ -485,6 +485,7 @@ void _confirmedJoinCases() {
         ]);
       final container = _buildContainer(session: session);
       addTearDown(container.dispose);
+      container.read(_testPubkeyProvider.notifier).set('9' * 64);
       container
           .read(userCacheProvider.notifier)
           .put(UserProfile(pubkey: scout, displayName: 'Scout'));
@@ -497,7 +498,7 @@ void _confirmedJoinCases() {
               session: session,
               nsec: keys.nsec,
             ),
-            currentPubkey: 'me',
+            currentPubkey: '9' * 64,
           ),
         ),
       );
@@ -518,12 +519,12 @@ void _confirmedJoinCases() {
 
       await expectLater(
         open(),
-        shows('Only Scout’s owner can add it to a DM.'),
+        shows('Only the owner of Scout can add it to a DM.'),
       );
       // Without a name to show, it says whose owner in general.
       await expectLater(
         open(),
-        shows('Only this agent’s owner can add it to a DM.'),
+        shows('Only the owner of this agent can add it to a DM.'),
       );
       // Any other refusal is shown as before.
       await expectLater(
@@ -553,6 +554,348 @@ void _confirmedJoinCases() {
           ),
         ),
       );
+    });
+
+    test('a refused agent is named by its disambiguated label', () async {
+      final keys = nostr.Keys.generate();
+      final scout = 'd' * 64;
+      final otherScout = 'c' * 64;
+      final alice = 'a' * 64;
+      final aliceAgent = 'b' * 64;
+      final morgan = '1' * 64;
+      final session = _WriterReplicaRelaySession(memberships: const []);
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      container.read(_testPubkeyProvider.notifier).set('9' * 64);
+      container.read(userCacheProvider.notifier)
+        ..put(UserProfile(pubkey: morgan, displayName: 'Morgan'))
+        ..put(UserProfile(pubkey: alice, displayName: 'Alice'))
+        ..put(
+          UserProfile(pubkey: scout, displayName: 'Scout', ownerPubkey: morgan),
+        )
+        ..put(
+          UserProfile(
+            pubkey: otherScout,
+            displayName: 'Scout',
+            ownerPubkey: alice,
+          ),
+        )
+        ..put(UserProfile(pubkey: aliceAgent, displayName: 'Alice'));
+      final actions = container.read(
+        Provider<ChannelActions>(
+          (ref) => ChannelActions(
+            ref: ref,
+            session: session,
+            signedEventRelay: SignedEventRelay(
+              session: session,
+              nsec: keys.nsec,
+            ),
+            currentPubkey: '9' * 64,
+          ),
+        ),
+      );
+      Future<void> open(String agent, List<String> others, bool ownerOnly) {
+        session.dmOpenRefusals.add(
+          'forbidden: policy:${ownerOnly ? 'owner_only' : 'nobody'} — no '
+          '(agent $agent)',
+        );
+        return actions.openDm(pubkeys: [agent, ...others]);
+      }
+
+      Matcher shows(String message) => throwsA(
+        isA<DmAgentRefused>().having(
+          (error) => error.toString(),
+          'message',
+          message,
+        ),
+      );
+
+      // Two agents named Scout differ by their owners, and the owner is
+      // named too.
+      await expectLater(
+        open(scout, [otherScout], true),
+        shows('Only Morgan can add Morgan’s Scout to a DM.'),
+      );
+      await expectLater(
+        open(otherScout, [scout], false),
+        shows('Alice’s Scout can’t be added to a DM.'),
+      );
+      // An agent sharing a person's name is marked as the agent.
+      await expectLater(
+        open(aliceAgent, [alice], true),
+        shows('Only the owner of Alice (agent) can add it to a DM.'),
+      );
+      // A unique name stays plain, and an owner with no profile or no
+      // verified owner is not named.
+      await expectLater(
+        open(scout, [], true),
+        shows('Only Morgan can add Scout to a DM.'),
+      );
+      container
+          .read(userCacheProvider.notifier)
+          .put(UserProfile(pubkey: scout, displayName: 'Scout'));
+      await expectLater(
+        open(scout, [], true),
+        shows('Only the owner of Scout can add it to a DM.'),
+      );
+
+      // A refusal waits only for the names its sentence uses. Naming a
+      // cached, uniquely named agent reads no profile, though its owner,
+      // the DM's other people and this account are uncached; a refusal that
+      // names who may add the agent still reads its owner.
+      final stranger = '7' * 64;
+      final unloadedOwner = '8' * 64;
+      container
+          .read(userCacheProvider.notifier)
+          .put(
+            UserProfile(
+              pubkey: scout,
+              displayName: 'Scout',
+              ownerPubkey: unloadedOwner,
+            ),
+          );
+      List<List<String>?> profileReads() => [
+        for (final filter in session.historyFilters)
+          if (filter.kinds.contains(0)) filter.authors,
+      ];
+      session.historyFilters.clear();
+      await expectLater(
+        open(scout, [stranger], false),
+        shows('Scout can’t be added to a DM.'),
+      );
+      expect(profileReads(), isEmpty);
+      await expectLater(
+        open(scout, [stranger], true),
+        shows('Only the owner of Scout can add it to a DM.'),
+      );
+      expect(profileReads(), [
+        [unloadedOwner],
+      ]);
+    });
+
+    group('a refused agent added to a DM', () {
+      const dmId = 'dm-ahead';
+      final me = '9' * 64, scout = 'd' * 64, otherScout = 'c' * 64;
+      final morgan = '1' * 64, alice = 'a' * 64;
+      late _WriterReplicaRelaySession session;
+      late ProviderContainer container;
+      late ChannelActions actions;
+      setUp(() {
+        session = _WriterReplicaRelaySession(memberships: const []);
+        container = _buildContainer(session: session);
+        container.read(_testPubkeyProvider.notifier).set(me);
+        actions = container.read(
+          Provider<ChannelActions>(
+            (ref) => ChannelActions(
+              ref: ref,
+              session: session,
+              signedEventRelay: SignedEventRelay(
+                session: session,
+                nsec: nostr.Keys.generate().nsec,
+              ),
+              currentPubkey: me,
+            ),
+          ),
+        );
+        // Opened from New Message before the channel list has it.
+        container
+            .read(channelsProvider.notifier)
+            .rememberOpened(
+              Channel(
+                id: dmId,
+                name: 'DM',
+                channelType: 'dm',
+                visibility: 'private',
+                description: '',
+                createdBy: me,
+                createdAt: DateTime(2025),
+                memberCount: 2,
+                participantPubkeys: [me, otherScout],
+                isMember: true,
+              ),
+            );
+      });
+      tearDown(() => container.dispose());
+
+      Future<void> add() {
+        session.dmAddRefusals.add(
+          'forbidden: policy:owner_only — no (agent $scout)',
+        );
+        return actions.addToDm(
+          channelId: dmId,
+          pubkeys: [scout],
+          history: DmHistory.include,
+        );
+      }
+
+      test('compares against a DM opened ahead of the list', () async {
+        container.read(userCacheProvider.notifier)
+          ..put(UserProfile(pubkey: morgan, displayName: 'Morgan'))
+          ..put(UserProfile(pubkey: alice, displayName: 'Alice'))
+          ..put(
+            UserProfile(
+              pubkey: scout,
+              displayName: 'Scout',
+              ownerPubkey: morgan,
+            ),
+          )
+          ..put(
+            UserProfile(
+              pubkey: otherScout,
+              displayName: 'Scout',
+              ownerPubkey: alice,
+            ),
+          );
+        await expectLater(
+          add(),
+          throwsA(
+            isA<DmAgentRefused>().having(
+              (error) => error.toString(),
+              'message',
+              'Couldn’t add them. Only Morgan can add Morgan’s Scout to a DM.',
+            ),
+          ),
+        );
+      });
+
+      test('loads every agent owner in one read', () async {
+        container.read(userCacheProvider.notifier)
+          ..put(UserProfile(pubkey: me, displayName: 'Me'))
+          ..put(
+            UserProfile(
+              pubkey: scout,
+              displayName: 'Scout',
+              ownerPubkey: morgan,
+            ),
+          )
+          ..put(
+            UserProfile(
+              pubkey: otherScout,
+              displayName: 'Scout',
+              ownerPubkey: alice,
+            ),
+          );
+        await expectLater(add(), throwsA(isA<DmAgentRefused>()));
+        expect(session.profileReads, [
+          unorderedEquals([morgan, alice]),
+        ]);
+      });
+
+      test('tells two owners named Morgan apart', () async {
+        container.read(userCacheProvider.notifier)
+          ..put(UserProfile(pubkey: morgan, displayName: 'Morgan'))
+          ..put(UserProfile(pubkey: alice, displayName: 'Morgan'))
+          ..put(
+            UserProfile(
+              pubkey: scout,
+              displayName: 'Scout',
+              ownerPubkey: morgan,
+            ),
+          )
+          ..put(
+            UserProfile(
+              pubkey: otherScout,
+              displayName: 'Scout',
+              ownerPubkey: alice,
+            ),
+          );
+        await expectLater(
+          add(),
+          throwsA(
+            isA<DmAgentRefused>().having(
+              (error) => error.toString(),
+              'message',
+              'Couldn’t add them. Only Morgan · sl3h can add Morgan’s Scout · '
+                  'dmpv to a DM.',
+            ),
+          ),
+        );
+      });
+
+      for (final ownerOnly in [false, true]) {
+        test('waits for an owner already in the DM before naming '
+            '(${ownerOnly ? 'owner_only' : 'nobody'})', () async {
+          // Bob adds Morgan's Scout to a DM with Morgan, not yet loaded, and
+          // Alice's Scout.
+          const withMorgan = 'dm-morgan';
+          container
+              .read(channelsProvider.notifier)
+              .rememberOpened(
+                Channel(
+                  id: withMorgan,
+                  name: 'DM',
+                  channelType: 'dm',
+                  visibility: 'private',
+                  description: '',
+                  createdBy: me,
+                  createdAt: DateTime(2025),
+                  memberCount: 3,
+                  participantPubkeys: [me, morgan, otherScout],
+                  isMember: true,
+                ),
+              );
+          final cache = container.read(userCacheProvider.notifier)
+            ..put(UserProfile(pubkey: alice, displayName: 'Alice'))
+            ..put(
+              UserProfile(
+                pubkey: scout,
+                displayName: 'Scout',
+                ownerPubkey: morgan,
+              ),
+            )
+            ..put(
+              UserProfile(
+                pubkey: otherScout,
+                displayName: 'Scout',
+                ownerPubkey: alice,
+              ),
+            );
+          session.onProfileRead = (authors) {
+            if (authors.contains(morgan)) {
+              cache.put(UserProfile(pubkey: morgan, displayName: 'Morgan'));
+            }
+          };
+          await expectLater(
+            () {
+              session.dmAddRefusals.add(
+                'forbidden: policy:${ownerOnly ? 'owner_only' : 'nobody'} — '
+                'no (agent $scout)',
+              );
+              return actions.addToDm(
+                channelId: withMorgan,
+                pubkeys: [scout],
+                history: DmHistory.include,
+              );
+            }(),
+            throwsA(
+              isA<DmAgentRefused>().having(
+                (error) => error.toString(),
+                'message',
+                ownerOnly
+                    ? 'Couldn’t add them. Only Morgan can add Morgan’s Scout '
+                          'to a DM.'
+                    : 'Couldn’t add them. Morgan’s Scout can’t be added to a DM.',
+              ),
+            ),
+          );
+        });
+      }
+
+      test('names with what it has once profiles run late', () async {
+        session.profileReadsHang = true;
+        final clock = Stopwatch()..start();
+        await expectLater(
+          add(),
+          throwsA(
+            isA<DmAgentRefused>().having(
+              (error) => error.toString(),
+              'message',
+              startsWith('Couldn’t add them. Only the owner of '),
+            ),
+          ),
+        );
+        expect(clock.elapsed, lessThan(const Duration(seconds: 4)));
+      });
     });
 
     test('a list rebuild during the join still shows the membership', () async {
@@ -599,6 +942,28 @@ class _WriterReplicaRelaySession extends _FakeRelaySession {
 
   /// The relay's refusals of the next DM opens, in order, as their OK messages.
   final dmOpenRefusals = <String>[];
+
+  /// The authors of each profile read, in order.
+  final profileReads = <List<String>>[];
+
+  /// Whether profile reads never answer.
+  bool profileReadsHang = false;
+
+  /// Called with each profile read's authors, before it answers.
+  void Function(List<String> authors)? onProfileRead;
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) {
+    if (filter.kinds case [0]) {
+      profileReads.add([...?filter.authors]);
+      onProfileRead?.call([...?filter.authors]);
+      if (profileReadsHang) return Completer<List<NostrEvent>>().future;
+    }
+    return super.fetchHistory(filter, timeout: timeout);
+  }
 
   @override
   Future<NostrEvent> publish(
