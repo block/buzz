@@ -177,7 +177,7 @@ impl Repo<'_> {
 
 /// Eight cases exercise actual Git requests and verify whether each push landed.
 #[tokio::test]
-#[ignore = "requires an isolated live relay with Postgres, Redis and S3"]
+#[ignore = "requires an isolated live relay + MinIO + git"]
 async fn git_membership_or_grant() {
     use Expected::{Banned, Hidden, HookRejected, Success};
 
