@@ -8,6 +8,29 @@ void main() {
     expect(Radii.card, Radii.container);
   });
 
+  test(
+    'dark sheets use raised groups even when opened from a utility page',
+    () {
+      final base = AppTheme.dark();
+      for (final parent in [
+        base,
+        utilitySurfaceThemeData(base),
+        utilitySheetThemeData(base),
+      ]) {
+        final sheet = utilitySheetThemeData(parent);
+        expect(
+          sheet.bottomSheetTheme.modalBackgroundColor,
+          base.colorScheme.surfaceContainer,
+        );
+        expect(
+          sheet.colorScheme.surfaceContainerHighest,
+          base.colorScheme.surfaceContainerHigh,
+        );
+        expect(sheet.cardTheme.color, base.colorScheme.surfaceContainerHigh);
+      }
+    },
+  );
+
   test('exchanges utility canvas and container surface roles once', () {
     const pageSurface = Color(0xFFEEEEEE);
     const containerSurface = Color(0xFFFFFFFF);

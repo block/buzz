@@ -4,14 +4,16 @@ import 'package:http/http.dart' as http;
 
 import '../http/app_http_client.dart';
 
-/// One deadline covers headers and the bounded body. Abort only this request,
-/// leaving the shared client usable for sign-out and subsequent attempts.
+/// One deadline, [timeout], covers headers and the bounded body. Abort only
+/// this request, leaving the shared client usable for sign-out and subsequent
+/// attempts.
 /// [onHeaders] sees the response as soon as its headers arrive, before the
 /// body is read, even if reading the body then fails.
 Future<http.Response> boundedHttpResponse(
   http.Client client,
   http.Request source, {
   int maxBytes = 65536,
+  Duration timeout = const Duration(seconds: 30),
   void Function(http.BaseResponse headers)? onHeaders,
 }) async {
   final abort = Completer<void>();
@@ -55,7 +57,7 @@ Future<http.Response> boundedHttpResponse(
   }
 
   try {
-    return await read().timeout(const Duration(seconds: 30));
+    return await read().timeout(timeout);
   } on TimeoutException {
     noteHttpDeadline(request);
     rethrow;

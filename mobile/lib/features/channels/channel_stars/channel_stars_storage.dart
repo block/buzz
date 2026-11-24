@@ -7,8 +7,20 @@ import '../../../shared/theme/community_theme_preference.dart';
 
 /// Channel ids belong to one community, so the cache is keyed by relay as
 /// well as identity. One identity can be paired with several communities.
-String channelStarsKey(String pubkey, String relayUrl) =>
-    'buzz.channel-stars.v1:$pubkey:${Uri.encodeComponent(normalizeCommunityRelayUrl(relayUrl))}';
+enum ChannelFlagKind {
+  stars('channel-stars'),
+  pins('channel-pins');
+
+  const ChannelFlagKind(this.coordinate);
+  final String coordinate;
+}
+
+String channelStarsKey(
+  String pubkey,
+  String relayUrl, [
+  ChannelFlagKind kind = ChannelFlagKind.stars,
+]) =>
+    'buzz.${kind.coordinate}.v1:$pubkey:${Uri.encodeComponent(normalizeCommunityRelayUrl(relayUrl))}';
 
 /// The earlier key, shared by every community of the identity.
 String legacyChannelStarsKey(String pubkey) => 'buzz.channel-stars.v1:$pubkey';
@@ -75,11 +87,17 @@ class ChannelStarsStorage {
 
   ChannelStarsStorage(this._prefs);
 
-  ChannelStarStore read(String pubkey, String relayUrl) {
+  ChannelStarStore read(
+    String pubkey,
+    String relayUrl, [
+    ChannelFlagKind kind = ChannelFlagKind.stars,
+  ]) {
     // The shared entry may hold another community's channels, and the relay
     // copy is authoritative, so drop it rather than let one community claim it.
-    _prefs.remove(legacyChannelStarsKey(pubkey));
-    final raw = _prefs.getString(channelStarsKey(pubkey, relayUrl));
+    if (kind == ChannelFlagKind.stars) {
+      _prefs.remove(legacyChannelStarsKey(pubkey));
+    }
+    final raw = _prefs.getString(channelStarsKey(pubkey, relayUrl, kind));
     if (raw == null || raw.isEmpty) {
       return const ChannelStarStore();
     }

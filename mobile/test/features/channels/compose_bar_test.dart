@@ -1030,10 +1030,27 @@ void main() {
       await tester.tap(find.text('Message'));
       await tester.pump();
       await tester.pump();
+      const draft = 'First line  with spacing\n\nLast line';
+      await tester.enterText(find.byType(TextField), draft);
       focusNode.unfocus();
       await tester.pump();
       await tester.pumpAndSettle();
       expect(find.byType(TextField), findsNothing);
+
+      final width = tester.widget<FractionallySizedBox>(
+        find.byKey(const ValueKey('composer-width-transition')),
+      );
+      expect(width.widthFactor, 1);
+      final surface = tester.widget<Container>(
+        find.byKey(const ValueKey('composer-surface')),
+      );
+      expect(
+        surface.padding,
+        const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      );
+      final preview = tester.widget<Text>(find.text(draft));
+      expect(preview.maxLines, isNull);
+      expect(tester.getSize(find.text(draft)).height, greaterThan(40));
 
       restoreFocus!();
       await tester.pump();
@@ -1387,42 +1404,61 @@ void main() {
       expect(sentContent, 'First line\nSecond line');
     });
 
-    testWidgets('clears text before the optimistic send completes', (
-      tester,
-    ) async {
-      final delivery = Completer<void>();
-      await tester.pumpWidget(
-        _buildComposeBar(
-          uploadService: _testUploadService(nostr.Keys.generate().nsec),
-          onSend:
-              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
-                  delivery.future,
-        ),
-      );
+    testWidgets(
+      'holds the draft until local insertion and clears before delivery',
+      (tester) async {
+        final insertion = Completer<void>();
+        final delivery = Completer<void>();
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {
+                  await insertion.future;
+                  ComposerSendOrigin.didInsertLocalMessage();
+                  await delivery.future;
+                },
+          ),
+        );
 
-      await _expandComposer(tester);
-      await tester.enterText(find.byType(TextField), 'hello');
-      await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-      for (var i = 0; i < 20; i++) {
-        await tester.pump(const Duration(milliseconds: 20));
-        if (tester
-            .widget<TextField>(find.byType(TextField))
-            .controller!
-            .text
-            .isEmpty) {
-          break;
+        await _expandComposer(tester);
+        const draft = 'First line\nSecond line\nThird line';
+        await tester.enterText(find.byType(TextField), draft);
+        await tester.pumpAndSettle();
+        final surface = find.byKey(const ValueKey('composer-surface'));
+        final submittedHeight = tester.getSize(surface).height;
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        await tester.pump(const Duration(milliseconds: 30));
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          draft,
+        );
+        expect(tester.getSize(surface).height, submittedHeight);
+        insertion.complete();
+        for (var i = 0; i < 20; i++) {
+          await tester.pump(const Duration(milliseconds: 20));
+          if (tester
+              .widget<TextField>(find.byType(TextField))
+              .controller!
+              .text
+              .isEmpty) {
+            break;
+          }
         }
-      }
 
-      expect(
-        tester.widget<TextField>(find.byType(TextField)).controller!.text,
-        '',
-      );
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          '',
+        );
 
-      delivery.complete();
-      await tester.pumpAndSettle();
-    });
+        delivery.complete();
+        await tester.pumpAndSettle();
+      },
+    );
 
     testWidgets('a failed send restores an untouched cleared draft', (
       tester,
@@ -1432,8 +1468,14 @@ void main() {
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
           onSend:
-              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
-                  delivery.future,
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                ComposerSendOrigin.didInsertLocalMessage();
+                await delivery.future;
+              },
         ),
       );
 
@@ -1479,7 +1521,10 @@ void main() {
                   content,
                   mentionPubkeys, {
                   mediaTags = const <List<String>>[],
-                }) => delivery.future,
+                }) async {
+                  ComposerSendOrigin.didInsertLocalMessage();
+                  await delivery.future;
+                },
           ),
         );
 

@@ -5,6 +5,8 @@ import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'package:buzz/shared/http/app_http_client.dart';
 
+import 'relay_query_response.dart' show RelayResponseTooLarge;
+
 /// The default transport. On iOS and Android, the app-wide native session
 /// inflates gzip natively, off the Dart isolate. `dart:io` would inflate on
 /// the calling isolate, so leave its responses compressed for the response
@@ -113,13 +115,15 @@ class RelayHttpQueryClient {
       }
       iterator = StreamIterator(response.stream);
       if ((response.contentLength ?? 0) > maxBytes) {
-        throw const FormatException('Relay response exceeds byte limit');
+        throw const RelayResponseTooLarge('Relay response exceeds byte limit');
       }
       final bytes = <int>[];
       while (await iterator!.moveNext()) {
         final chunk = iterator!.current;
         if (bytes.length + chunk.length > maxBytes) {
-          throw const FormatException('Relay response exceeds byte limit');
+          throw const RelayResponseTooLarge(
+            'Relay response exceeds byte limit',
+          );
         }
         bytes.addAll(chunk);
       }

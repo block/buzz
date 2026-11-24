@@ -25,6 +25,7 @@ class ChannelStarsCrypto {
 /// Syncs the account's channel stars.
 class ChannelStarsManager extends SidebarFlagSync<ChannelStarEntry> {
   ChannelStarsManager({
+    ChannelFlagKind kind = ChannelFlagKind.stars,
     required super.pubkey,
     required super.relayUrl,
     required super.prefs,
@@ -35,11 +36,11 @@ class ChannelStarsManager extends SidebarFlagSync<ChannelStarEntry> {
     required super.onChanged,
     @visibleForTesting super.startupRetryBaseDelay = const Duration(seconds: 2),
   }) : super(
-         coordinate: 'channel-stars',
-         cacheKey: channelStarsKey(pubkey, relayUrl),
+         coordinate: kind.coordinate,
+         cacheKey: channelStarsKey(pubkey, relayUrl, kind),
          cachedFlags: ChannelStarsStorage(
            prefs,
-         ).read(pubkey, relayUrl).channels,
+         ).read(pubkey, relayUrl, kind).channels,
          decode: (json, strict) =>
              ChannelStarStore.fromJson(json, strict: strict).channels,
          encode: (flags) => ChannelStarStore(channels: flags).toJson(),

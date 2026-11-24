@@ -83,25 +83,37 @@ void mentionChipTests() {
     await tester.pump();
   }
 
-  testWidgets('a collapsed draft with a chip reads as one line', (
-    tester,
-  ) async {
-    final controller = await mount(
-      tester,
-      onSend: (_, _, {mediaTags = const []}) async {},
-    );
-    final field = find.byType(TextField);
-    await tester.enterText(field, 'Hey\n\n@bo');
-    await tester.pumpAndSettle();
-    await tester.tap(row('Bob'));
-    await tester.pumpAndSettle();
-    await tester.enterText(field, '${controller.text}there');
-    await tester.pumpAndSettle();
-    FocusManager.instance.primaryFocus?.unfocus();
-    await tester.pumpAndSettle();
-    expect(field, findsNothing);
-    expect(find.text('Hey @Bob there'), findsOneWidget);
-  });
+  testWidgets(
+    'adjacent picked mentions keep their chips when the keyboard closes',
+    (tester) async {
+      final controller = await mount(
+        tester,
+        onSend: (_, _, {mediaTags = const []}) async {},
+      );
+      final field = find.byType(TextField);
+      await tester.enterText(field, '@bo');
+      await tester.pumpAndSettle();
+      await tester.tap(row('Bob'));
+      await tester.pumpAndSettle();
+      await tester.enterText(field, '${controller.text}@help');
+      await tester.pumpAndSettle();
+      await tester.tap(row('Helper Bot'));
+      await tester.pumpAndSettle();
+      void checkChips() {
+        expect(personChip, findsOneWidget);
+        expect(agentChip, findsOneWidget);
+        final person = tester.getRect(personChip);
+        final agent = tester.getRect(agentChip);
+        expect(person.overlaps(agent), isFalse);
+      }
+
+      checkChips();
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tester.pumpAndSettle();
+      expect(field, findsNothing);
+      checkChips();
+    },
+  );
 
   testWidgets('chips keep the field at the plain line height', (tester) async {
     final controller = await mount(

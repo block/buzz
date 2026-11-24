@@ -8,6 +8,8 @@ class DmHeaderCluster extends StatelessWidget {
     required this.builder,
   });
 
+  static const diameter = 64.0;
+
   final int count;
   final Widget Function(int index, double size) builder;
 
@@ -15,7 +17,7 @@ class DmHeaderCluster extends StatelessWidget {
   Widget build(BuildContext context) {
     if (count == 0) return const SizedBox.shrink();
     if (count == 1) {
-      return SizedBox.square(dimension: 64, child: builder(0, 64));
+      return SizedBox.square(dimension: diameter, child: builder(0, diameter));
     }
     // Centers and diameters are fractions of the 60pt inner circle.
     final positions = switch (count) {
@@ -45,7 +47,7 @@ class DmHeaderCluster extends StatelessWidget {
         child: ColoredBox(
           color: theme.scaffoldBackgroundColor,
           child: SizedBox.square(
-            dimension: 64,
+            dimension: diameter,
             child: Stack(
               children: [
                 for (var i = 0; i < positions.length; i++)

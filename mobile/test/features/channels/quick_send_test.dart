@@ -59,6 +59,7 @@ class _Relay extends RelaySessionNotifier {
   void connect() => state = const SessionState(status: SessionStatus.connected);
 
   /// Background pauses started; the real session closes the socket after one.
+  @override
   var pauses = 0;
 
   @override
