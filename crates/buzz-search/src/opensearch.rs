@@ -115,6 +115,11 @@ impl SearchIndex {
             transport = transport.auth(Credentials::Basic(user.clone(), password.clone()));
         }
         if let Some(sigv4) = &config.aws_sigv4 {
+            if config.basic_auth.is_some() {
+                return Err(SearchError::Engine(
+                    "basic auth and AWS SigV4 cannot be combined".into(),
+                ));
+            }
             let region = Region::new(sigv4.region.clone());
             let credentials = CachedCredentials::new(DefaultChain::new(region.clone()));
             transport = transport

@@ -23,12 +23,18 @@ const REFRESH_BEFORE_EXPIRY: Duration = Duration::from_secs(5 * 60);
 /// the environment's files is picked up.
 const WITHOUT_EXPIRY_TTL: Duration = Duration::from_secs(15 * 60);
 
-/// After a failed reload, keep using credentials that are still valid for
-/// this long before trying again.
-const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(30);
+/// The shortest time between two loads, after a success or a failure. A
+/// source that is down, or that hands out credentials already near their
+/// expiry, is asked this often and not once per request.
+const MIN_LOAD_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Bound on one load, so a stalled credential source cannot hold requests.
+/// Bound on a load when there are no valid credentials to fall back on, so
+/// a stalled credential source cannot hold requests.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bound on a reload while the current credentials are still valid: the
+/// request goes on with those instead of waiting.
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The AWS default credential chain: environment, shared profile, web
 /// identity token, container role, then instance role. Built on first use.
@@ -72,18 +78,28 @@ impl ProvideCredentials for DefaultChain {
 }
 
 /// Credentials from `source`, loaded once and reused until shortly before
-/// they expire. Concurrent requests share one load.
+/// they expire. Concurrent requests share one load, whether it succeeds or
+/// fails.
 pub(crate) struct CachedCredentials<P> {
     source: P,
-    /// The credentials and when to reload them.
-    cached: Mutex<Option<(Credentials, SystemTime)>>,
+    state: Mutex<State>,
+}
+
+struct State {
+    /// The last credentials loaded.
+    credentials: Option<Credentials>,
+    /// No load before this time.
+    next_load: SystemTime,
 }
 
 impl<P> CachedCredentials<P> {
     pub(crate) fn new(source: P) -> Self {
         Self {
             source,
-            cached: Mutex::new(None),
+            state: Mutex::new(State {
+                credentials: None,
+                next_load: SystemTime::UNIX_EPOCH,
+            }),
         }
     }
 }
@@ -96,42 +112,47 @@ impl<P> std::fmt::Debug for CachedCredentials<P> {
 
 impl<P: ProvideCredentials> CachedCredentials<P> {
     async fn credentials(&self) -> provider::Result {
-        let mut cached = self.cached.lock().await;
+        let mut state = self.state.lock().await;
         let now = SystemTime::now();
-        if let Some((credentials, reload_at)) = cached.as_ref() {
-            if now < *reload_at {
-                return Ok(credentials.clone());
-            }
+        let valid = state
+            .credentials
+            .clone()
+            .filter(|credentials| credentials.expiry().is_none_or(|expiry| now < expiry));
+        if now < state.next_load {
+            return valid.ok_or_else(|| {
+                CredentialsError::not_loaded("loading AWS credentials failed moments ago")
+            });
         }
-        let error =
-            match tokio::time::timeout(LOAD_TIMEOUT, self.source.provide_credentials()).await {
-                Ok(Ok(credentials)) => {
-                    let reload_at = match credentials.expiry() {
-                        Some(expiry) => expiry
-                            .checked_sub(REFRESH_BEFORE_EXPIRY)
-                            .unwrap_or(SystemTime::UNIX_EPOCH),
-                        None => now + WITHOUT_EXPIRY_TTL,
-                    };
-                    *cached = Some((credentials.clone(), reload_at));
-                    return Ok(credentials);
-                }
-                Ok(Err(error)) => error,
-                Err(_) => CredentialsError::provider_timed_out(LOAD_TIMEOUT),
-            };
+        let timeout = if valid.is_some() {
+            REFRESH_TIMEOUT
+        } else {
+            LOAD_TIMEOUT
+        };
+        let earliest = now + MIN_LOAD_INTERVAL;
+        let error = match tokio::time::timeout(timeout, self.source.provide_credentials()).await {
+            Ok(Ok(credentials)) => {
+                state.next_load = match credentials.expiry() {
+                    Some(expiry) => expiry
+                        .checked_sub(REFRESH_BEFORE_EXPIRY)
+                        .map_or(earliest, |refresh| refresh.max(earliest))
+                        .min(expiry),
+                    None => now + WITHOUT_EXPIRY_TTL,
+                };
+                state.credentials = Some(credentials.clone());
+                return Ok(credentials);
+            }
+            Ok(Err(error)) => error,
+            Err(_) => CredentialsError::provider_timed_out(timeout),
+        };
         tracing::warn!(
             error = %with_sources(&error),
             "loading AWS credentials for OpenSearch failed"
         );
         // A failed reload is no reason to stop while the old set still works.
-        if let Some((credentials, reload_at)) = cached.as_mut() {
-            let expiry = credentials.expiry();
-            if expiry.is_none_or(|expiry| now < expiry) {
-                let retry_at = now + RETRY_AFTER_FAILURE;
-                *reload_at = expiry.map_or(retry_at, |expiry| retry_at.min(expiry));
-                return Ok(credentials.clone());
-            }
-        }
-        Err(error)
+        // Without one, requests fail at once until the next load is due.
+        let expiry = valid.as_ref().and_then(Credentials::expiry);
+        state.next_load = expiry.map_or(earliest, |expiry| earliest.min(expiry));
+        valid.ok_or(error)
     }
 }
 
@@ -163,43 +184,72 @@ mod tests {
 
     use super::*;
 
-    /// Hands out credentials valid for `lifetime`, counting the loads.
+    /// Succeeds `successes` times with hour-long credentials, then fails,
+    /// counting the loads.
     #[derive(Debug)]
-    struct Counting {
-        lifetime: Duration,
+    struct Source {
+        successes: usize,
         loads: AtomicUsize,
     }
 
-    impl ProvideCredentials for Counting {
+    impl ProvideCredentials for Source {
         fn provide_credentials<'a>(&'a self) -> future::ProvideCredentials<'a>
         where
             Self: 'a,
         {
-            self.loads.fetch_add(1, Ordering::SeqCst);
-            future::ProvideCredentials::ready(Ok(Credentials::new(
-                "access",
-                "secret",
-                None,
-                Some(SystemTime::now() + self.lifetime),
-                "test",
-            )))
+            let load = self.loads.fetch_add(1, Ordering::SeqCst);
+            future::ProvideCredentials::ready(if load < self.successes {
+                Ok(Credentials::new(
+                    format!("access-{load}"),
+                    "secret",
+                    None,
+                    Some(SystemTime::now() + Duration::from_secs(3600)),
+                    "test",
+                ))
+            } else {
+                Err(CredentialsError::not_loaded("source is down"))
+            })
         }
     }
 
-    async fn loads_for_two_requests(lifetime: Duration) -> usize {
-        let cached = CachedCredentials::new(Counting {
-            lifetime,
+    fn cache(successes: usize) -> CachedCredentials<Source> {
+        CachedCredentials::new(Source {
+            successes,
             loads: AtomicUsize::new(0),
-        });
-        for _ in 0..2 {
-            cached.provide_credentials().await.expect("credentials");
-        }
-        cached.source.loads.load(Ordering::SeqCst)
+        })
+    }
+
+    async fn access_key(cached: &CachedCredentials<Source>) -> Option<String> {
+        let credentials = cached.provide_credentials().await.ok()?;
+        Some(credentials.access_key_id().to_string())
+    }
+
+    /// Make the next request reload, as when the credentials near expiry.
+    async fn reload_is_due(cached: &CachedCredentials<Source>) {
+        cached.state.lock().await.next_load = SystemTime::UNIX_EPOCH;
     }
 
     #[tokio::test]
-    async fn credentials_are_reused_until_they_near_expiry() {
-        assert_eq!(loads_for_two_requests(Duration::from_secs(3600)).await, 1);
-        assert_eq!(loads_for_two_requests(Duration::from_secs(60)).await, 2);
+    async fn credentials_are_loaded_once_and_survive_a_failed_reload() {
+        let cached = cache(2);
+        assert_eq!(access_key(&cached).await.as_deref(), Some("access-0"));
+        assert_eq!(access_key(&cached).await.as_deref(), Some("access-0"));
+        reload_is_due(&cached).await;
+        assert_eq!(access_key(&cached).await.as_deref(), Some("access-1"));
+
+        // The source goes down: the valid set stays in use, and the source
+        // is not asked again on the next request.
+        reload_is_due(&cached).await;
+        assert_eq!(access_key(&cached).await.as_deref(), Some("access-1"));
+        assert_eq!(access_key(&cached).await.as_deref(), Some("access-1"));
+        assert_eq!(cached.source.loads.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_failed_first_load_is_not_repeated_per_request() {
+        let cached = cache(0);
+        assert_eq!(access_key(&cached).await, None);
+        assert_eq!(access_key(&cached).await, None);
+        assert_eq!(cached.source.loads.load(Ordering::SeqCst), 1);
     }
 }
