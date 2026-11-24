@@ -13,17 +13,24 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use buzz_core::CommunityId;
+use buzz_core::{media::EDIT_GOVERNED_KINDS, CommunityId};
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::{AdmittedTx, Result};
 
-/// Event kinds the search index holds; no other kind is ever queued. Stream
-/// messages (9), their v2 and forum forms (40002, 40008), and workflow
-/// messages (45001, 45003).
-pub const SEARCHABLE_KINDS: [i32; 5] = [9, 40002, 40008, 45001, 45003];
+/// Event kinds the search index holds; no other kind is ever queued. They
+/// are the message kinds an edit can replace, so the list has one owner.
+pub const SEARCHABLE_KINDS: [i32; EDIT_GOVERNED_KINDS.len()] = {
+    let mut kinds = [0; EDIT_GOVERNED_KINDS.len()];
+    let mut i = 0;
+    while i < kinds.len() {
+        kinds[i] = EDIT_GOVERNED_KINDS[i] as i32;
+        i += 1;
+    }
+    kinds
+};
 
 /// Communities a claim may pass over because their deletion fenced them
 /// between candidate selection and admission, or another worker holds all
