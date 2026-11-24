@@ -383,6 +383,55 @@ mod tests {
         );
     }
 
+    /// A bad cutoff does not hide the others: a good one still scopes its
+    /// key, a malformed one leaves its deny the whole key, an orphan adds
+    /// nothing, and the first bad record is kept.
+    #[test]
+    fn cutoff_join_keeps_readable_records_past_bad_ones() {
+        let [good, malformed, orphan] =
+            std::array::from_fn(|i| PublicKey::from_hex(&format!("{:064x}", i + 1)).unwrap());
+        let until = DateTime::from_timestamp(100, 0).unwrap();
+        let entries: Vec<_> = [good, malformed]
+            .iter()
+            .map(|k| (k.to_hex(), "100:0".to_owned()))
+            .collect();
+        let cutoffs = vec![
+            (good.to_hex(), "10".to_owned()),
+            (malformed.to_hex(), "12.5".to_owned()),
+            (orphan.to_hex(), "10".to_owned()),
+        ];
+        let mut bad = None;
+        let joined = join_cutoffs(
+            vec![(good, until), (malformed, until)],
+            &entries,
+            cutoffs,
+            &mut bad,
+        );
+        assert_eq!(
+            joined,
+            vec![
+                (
+                    good,
+                    DenyEntry {
+                        until,
+                        scope: DenyScope::IssuedThrough(10)
+                    }
+                ),
+                (
+                    malformed,
+                    DenyEntry {
+                        until,
+                        scope: DenyScope::WholeKey
+                    }
+                ),
+            ]
+        );
+        assert_eq!(
+            bad,
+            Some(format!("revoke_through 12.5 for {}", malformed.to_hex()))
+        );
+    }
+
     /// A full issuer at the default capacity joins every cutoff to its key.
     #[test]
     fn cutoff_join_handles_a_full_issuer() {
