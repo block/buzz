@@ -86,9 +86,16 @@ pub enum LoadDeniesError {
     /// The store could not be read.
     #[error(transparent)]
     Store(#[from] AuthError),
-    /// A stored deny record could not be decoded.
-    #[error("unreadable deny record: {0}")]
-    Unreadable(String),
+    /// A stored deny record could not be decoded.  `readable` holds every
+    /// active record that did decode, so the caller can still apply them;
+    /// the load is still a failure.
+    #[error("unreadable deny record: {record}")]
+    Unreadable {
+        /// The first record that could not be decoded.
+        record: String,
+        /// The active records that decoded.
+        readable: Vec<(PublicKey, DateTime<Utc>)>,
+    },
 }
 
 /// Redis key for a command replay claim:

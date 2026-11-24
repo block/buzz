@@ -189,22 +189,27 @@ impl CommandReplayGuard for RedisCommandReplayGuard {
                 .await
                 .map_err(internal)?;
             // An unreadable record fails the load: skipping it would reopen
-            // admission without that revocation.
+            // admission without that revocation.  Every other record is
+            // still decoded, so the caller can apply them meanwhile.
             let mut denies = Vec::with_capacity(entries.len());
+            let mut bad = None;
             for (key, until) in entries {
-                let (Ok(key), Ok(until)) = (String::from_utf8(key), String::from_utf8(until))
-                else {
-                    return Err(unreadable("deny record that is not UTF-8".into()));
-                };
-                let key =
-                    PublicKey::from_hex(&key).map_err(|_| unreadable(format!("deny key {key}")))?;
-                let until = parse_until(&until)
-                    .ok_or_else(|| unreadable(format!("deny until {until} for {key}")))?;
-                if until > now {
-                    denies.push((key, until));
+                match decode(key, until) {
+                    Ok((key, until)) if until > now => denies.push((key, until)),
+                    Ok(_) => {}
+                    Err(record) => {
+                        tracing::warn!(record, "nip-fi command store: unreadable deny record");
+                        bad.get_or_insert(record);
+                    }
                 }
             }
-            Ok(denies)
+            match bad {
+                None => Ok(denies),
+                Some(record) => Err(LoadDeniesError::Unreadable {
+                    record,
+                    readable: denies,
+                }),
+            }
         })
     }
 }
@@ -214,9 +219,14 @@ fn parse_until(value: &str) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp(secs.parse().ok()?, nanos.parse().ok()?)
 }
 
-fn unreadable(record: String) -> LoadDeniesError {
-    tracing::warn!(record, "nip-fi command store: unreadable deny record");
-    LoadDeniesError::Unreadable(record)
+/// One `HGETALL` field and value as a deny, or the record that won't decode.
+fn decode(key: Vec<u8>, until: Vec<u8>) -> Result<(PublicKey, DateTime<Utc>), String> {
+    let (Ok(key), Ok(until)) = (String::from_utf8(key), String::from_utf8(until)) else {
+        return Err("deny record that is not UTF-8".into());
+    };
+    let key = PublicKey::from_hex(&key).map_err(|_| format!("deny key {key}"))?;
+    let until = parse_until(&until).ok_or_else(|| format!("deny until {until} for {key}"))?;
+    Ok((key, until))
 }
 
 #[cfg(test)]

@@ -317,12 +317,14 @@ async fn merge_stored_denies(
             let now = chrono::Utc::now();
             let entries = match source.load_denies(&issuer, now).await {
                 Ok(entries) => entries,
-                Err(e) => {
-                    result = result.and(Err(match e {
-                        buzz_auth::LoadDeniesError::Store(_) => "store",
-                        buzz_auth::LoadDeniesError::Unreadable(_) => "unreadable",
-                    }));
+                Err(buzz_auth::LoadDeniesError::Store(_)) => {
+                    result = result.and(Err("store"));
                     continue;
+                }
+                // Apply the records that decoded; the restore still fails.
+                Err(buzz_auth::LoadDeniesError::Unreadable { readable, .. }) => {
+                    result = result.and(Err("unreadable"));
+                    readable
                 }
             };
             for (key, until) in entries {
@@ -4537,9 +4539,10 @@ mod route_integration_tests {
             }
             if self.load_unreadable {
                 return Box::pin(async {
-                    Err(buzz_auth::LoadDeniesError::Unreadable(
-                        "simulated bad record".into(),
-                    ))
+                    Err(buzz_auth::LoadDeniesError::Unreadable {
+                        record: "simulated bad record".into(),
+                        readable: Vec::new(),
+                    })
                 });
             }
             self.inner.load_denies(issuer, now)
@@ -4890,8 +4893,9 @@ mod route_integration_tests {
                     &format!("{namespace}:deny"),
                     &issuer,
                 );
-                let mut fields = vec![bytes(live.clone()), bytes(expired.clone())];
-                fields.extend(extra);
+                // The bad record first, so the readable ones come after it.
+                let mut fields: Vec<_> = extra.into_iter().collect();
+                fields.extend([bytes(live.clone()), bytes(expired.clone())]);
                 // One transaction, so the fixture always expires.
                 let _: () = redis::pipe()
                     .atomic()
@@ -4906,21 +4910,97 @@ mod route_integration_tests {
                     .query_async(&mut conn)
                     .await
                     .unwrap();
-                let loaded = store.load_denies(&issuer, now).await;
-                if ok {
-                    let keys: Vec<_> = loaded
-                        .unwrap()
-                        .into_iter()
-                        .map(|(k, _)| k.to_hex())
-                        .collect();
-                    assert_eq!(keys, vec![live.0.clone()], "{case}: expired entry filtered");
-                } else {
-                    assert!(
-                        matches!(loaded, Err(buzz_auth::LoadDeniesError::Unreadable(_))),
-                        "{case}: an unreadable record must fail the load as unreadable"
-                    );
-                }
+                let loaded = match store.load_denies(&issuer, now).await {
+                    Ok(loaded) => {
+                        assert!(ok, "{case}: an unreadable record must fail the load");
+                        loaded
+                    }
+                    Err(buzz_auth::LoadDeniesError::Unreadable { readable, .. }) => {
+                        assert!(!ok, "{case}: a readable hash must load");
+                        readable
+                    }
+                    Err(e) => panic!("{case}: an unreadable record is not a store error: {e}"),
+                };
+                let keys: Vec<_> = loaded.into_iter().map(|(k, _)| k.to_hex()).collect();
+                assert_eq!(
+                    keys,
+                    vec![live.0.clone()],
+                    "{case}: every readable active record still loads"
+                );
             }
+        }
+
+        /// One bad record does not hide the issuer's good ones: restore
+        /// applies the good record and closes its sessions, leaves unrelated
+        /// sessions open, and still fails as `unreadable`, so admission stays
+        /// closed until the bad record is removed and a retry restores.
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn redis_restore_applies_readable_records_past_a_bad_one() {
+            let url = std::env::var("BUZZ_TEST_REDIS_URL")
+                .or_else(|_| std::env::var("REDIS_URL"))
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+            let mut conn = buzz_pubsub::redis_connection(&url).expect("redis pool");
+            let namespace = test_namespace();
+            let store = redis_guard_in(&namespace);
+            let (revoked, bystander) = (
+                nostr::Keys::generate().public_key(),
+                nostr::Keys::generate().public_key(),
+            );
+            let now = chrono::Utc::now();
+            let outcome = store
+                .try_claim(buzz_auth::CommandClaim {
+                    issuer: TEST_ISS,
+                    jti: "good",
+                    ttl_secs: 60,
+                    target: &revoked,
+                    until: now + chrono::Duration::seconds(120),
+                    capacity: 10,
+                    now,
+                })
+                .await
+                .unwrap();
+            assert_eq!(outcome, buzz_auth::ClaimOutcome::Claimed);
+            let (_, hash) = buzz_pubsub::nip_fi_command_replay::deny_store_keys(
+                &format!("{namespace}:deny"),
+                TEST_ISS,
+            );
+            let _: () = redis::cmd("HSET")
+                .arg(&hash)
+                .arg("not-a-key")
+                .arg("1:0")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+
+            let pod = store_pod(10, Arc::clone(&store)).await;
+            let deny_map = pod.nip_fi_deny_map.as_deref().unwrap();
+            let revoked_session = IssuerSessions::register(&pod, TEST_ISS, &revoked);
+            let bystander_session = IssuerSessions::register(&pod, TEST_ISS, &bystander);
+            let generation = deny_map.begin_restore();
+            assert_eq!(
+                restore_nip_fi_denies(&pod, &[Arc::clone(&store)]).await,
+                Err("unreadable")
+            );
+            revoked_session.assert_closed("good record past a bad one");
+            bystander_session.assert_open("unrelated key");
+            assert_eq!(
+                deny_map.deny_status(TEST_ISS, &bystander, chrono::Utc::now()),
+                buzz_auth::DenyStatus::Unavailable,
+                "admission stays closed while a record is unreadable"
+            );
+
+            // The runbook's repair; the same generation's retry then reopens.
+            let _: () = redis::cmd("HDEL")
+                .arg(&hash)
+                .arg("not-a-key")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(restore_nip_fi_denies(&pod, &[store]).await, Ok(()));
+            assert!(deny_map.finish_restore(generation));
+            assert!(!is_denied(&pod, &bystander), "reopened after the repair");
+            assert!(is_denied(&pod, &revoked), "the good record still denies");
         }
 
         /// A full revoke clears any cutoff stored for its target, whether the

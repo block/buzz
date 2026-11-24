@@ -269,7 +269,8 @@ What this covers, and what it does not:
   it has restored. Watch `buzz_nip_fi_deny_restore_failures_total{reason}`.
 - **Unreadable deny record:** `reason="unreadable"` means Redis answered but
   a stored deny record could not be decoded: its field is not a hex pubkey,
-  or its value is not exactly `secs:nanos`. The pod stays closed until the
+  or its value is not exactly `secs:nanos`. The pod still applies the
+  issuer's other records and closes their sessions, but stays closed until the
   record is removed. The warning log names the record. Find it in the
   issuer's deny hash, `buzz:nip-fi:deny-until:<sha256(issuer) hex>`
   (`buzz:nip-fi:shadow-deny-until:…` in shadow mode), with `HGETALL`, then
