@@ -71,7 +71,7 @@ async fn invite_repair_resumes_committed_batches_and_resets_cursor_for_each_comm
                 CASE i%7 WHEN 0 THEN repeat('01',32) WHEN 1 THEN repeat('02',32) \
                   WHEN 2 THEN 'not-a-pubkey' WHEN 3 THEN repeat('04',32) \
                   WHEN 4 THEN repeat('06',32) WHEN 5 THEN repeat('AB',32) \
-                  ELSE repeat('02',32) END, now()+interval '1 day', \
+                  ELSE repeat('01',32) END, now()+interval '1 day', \
                 CASE WHEN i%7=6 THEN '2020-01-01 UTC'::timestamptz END \
          FROM generate_series(0,1203) AS i",
     )
