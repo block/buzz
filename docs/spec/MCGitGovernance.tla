@@ -135,7 +135,7 @@ MCPosts ==
     ELSE {}
 
 MCRoleChanges ==
-    CASE S = "authority" -> {<<ch1, b, "none">>, <<ch1, g, "member">>}
+    CASE S = "authority" -> {<<ch1, b, "none">>, <<ch1, g, "member">>, <<ch1, g, "admin">>}
       [] S = "review"    -> {<<ch1, d, "none">>}
       [] S = "reads"     -> {<<ch1, b, "none">>}
       [] S = "governance" -> {<<ch1, b, "member">>}

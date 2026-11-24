@@ -205,6 +205,8 @@ Owned(k) == k \in Agents /\ owner[k] # None
 
 \* The role a live grant from k's owner credits k with in repo r: the
 \* highest level among k's grants for r, capped by the owner's role there.
+\* The relay sees one tag per request, so "highest" only matters here,
+\* where an agent may hold several; check.sh does not guard the choice.
 ViaGrant(k, r) ==
     LET ch == ChanOf(r)
         levels == {IF "grant-level-ignored" \in Faults THEN "admin" ELSE x[3] :
@@ -869,6 +871,26 @@ NeverLandsByMemberAgentWithoutGrant ==
 NeverLandsByGrantOnlyAgent ==
     [][\A p \in pending : Accepted(p) /\ p.by \in Agents =>
           chanRole[ChanOf(p.repo)][p.by] # "none"]_vars
+\* A grant never narrows: an agent is accepted on its own role while every
+\* grant it holds for the repo is below what the push needs, its owner
+\* still in the channel so the grant still credits something.
+NeverLandsOverLowerGrant ==
+    [][\A p \in pending : Accepted(p) /\ p.by \in Agents /\ owner[p.by] # None
+          /\ chanRole[ChanOf(p.repo)][owner[p.by]] # "none"
+          /\ (\E x \in grants : x[1] = p.by /\ x[2] = p.repo) =>
+          \E x \in grants : /\ x[1] = p.by /\ x[2] = p.repo
+                           /\ \A c \in p.cmds : Rank[x[3]] >= Rank[Baseline(c)]]_vars
+\* A member agent keeps its own role when its owner leaves the channel.
+NeverLandsWithOwnerOutside ==
+    [][\A p \in pending : Accepted(p) /\ p.by \in Agents /\ owner[p.by] # None =>
+          chanRole[ChanOf(p.repo)][owner[p.by]] # "none"]_vars
+\* An agent with no recorded owner acts on its own role.
+NeverLandsByUnownedAgent ==
+    [][\A p \in pending : Accepted(p) /\ p.by \in Agents => owner[p.by] # None]_vars
+\* A grant reaches the repo of a channel the agent is not in, reads included.
+NeverReadsByGrantOnlyAgent ==
+    [][act'.kind = "read" /\ act'.by \in Agents =>
+          chanRole[ChanOf(act'.repo)][act'.by] # "none"]_vars
 NeverRebinds == ~\E x \in govlog : x.doc[1] = "bind"
 \* A push accepted and then abandoned.
 NeverAborts == [][act'.kind # "abort"]_vars

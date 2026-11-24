@@ -350,6 +350,10 @@ gcheck lands-owned         NeverLandsOwned    owners
 gcheck lands-by-agent      NeverLandsByAgent  review
 gcheck lands-member-agent-no-grant NeverLandsByMemberAgentWithoutGrant authority
 gcheck lands-grant-only-agent NeverLandsByGrantOnlyAgent fence
+gcheck lands-over-lower-grant NeverLandsOverLowerGrant authority
+gcheck lands-owner-outside NeverLandsWithOwnerOutside authority
+gcheck lands-by-unowned-agent NeverLandsByUnownedAgent authority
+gcheck reads-by-grant-only-agent NeverReadsByGrantOnlyAgent fence
 gcheck rebinds             NeverRebinds       governance
 gcheck stale-base-counts   NeverCountsOldBase staleok
 gcheck aborts              NeverAborts               fence
