@@ -194,9 +194,12 @@ Init ==
 (* The relay's evaluator.                                                  *)
 (***************************************************************************)
 
-\* The person an act is credited to: an agent counts as its owner.
+\* The person an act is credited to: an agent with a recorded owner counts
+\* as its owner; any other key, an agent with none included, as itself.
 Principal(k) ==
-    IF k \in Agents /\ "agent-is-own-principal" \notin Faults THEN owner[k] ELSE k
+    IF k \in Agents /\ "agent-is-own-principal" \notin Faults
+       /\ (owner[k] # None \/ "unowned-agent-unattributed" \in Faults)
+    THEN owner[k] ELSE k
 
 Owned(k) == k \in Agents /\ owner[k] # None
 
@@ -628,6 +631,7 @@ TypeOK ==
     /\ grants \subseteq Agents \X Repos \X (ChanRoles \ {"none"})
     /\ refs \in [Repos -> [Refs -> CommitOrNone]]
     /\ \A r \in Repos : visible[r] \subseteq Commits /\ ChanOf(r) \in Channels
+    /\ \A x \in receipts : x.for \in Keys
 
 \* k may act at level n in repo r now.  Authority comes only from the
 \* channel r is bound to, by one of two routes: k's own role there, or,
@@ -643,7 +647,7 @@ MayAct(k, r, n) ==
           /\ \E x \in grants : x[1] = k /\ x[2] = r /\ Rank[x[3]] >= Rank[n]
           /\ Rank[chanRole[ch][owner[k]]] >= Rank[n]
 
-Person(k) == IF k \in Agents THEN owner[k] ELSE k
+Person(k) == IF k \in Agents /\ owner[k] # None THEN owner[k] ELSE k
 
 \* Every rule in force for ref f of repo r: the floor's rules for every
 \* repo and for r's protected labels, and r's own rules.  None replaces

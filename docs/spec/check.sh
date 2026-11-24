@@ -291,6 +291,7 @@ gcheck grant-any-repo            LandsUnderCurrentAuthority    authority  grant-
 gcheck grant-level-ignored       LandsUnderCurrentAuthority    authority  grant-level-ignored
 gcheck owner-ban-ignored         LandsUnderCurrentAuthority    authority  owner-ban-ignored
 gcheck authority-at-receive      LandsUnderCurrentAuthority    authority  authority-at-receive
+gcheck unowned-agent-unattributed ReceiptsMatchDecisions authority unowned-agent-unattributed
 gcheck owner-replaceable         OwnerPinned                   authority  owner-replaceable
 gcheck no-receipt-on-refusal     ReceiptsMatchDecisions        authority  no-receipt-on-refusal
 gcheck agent-is-own-principal    LandsUnderCurrentAuthority    review     agent-is-own-principal
