@@ -700,6 +700,8 @@ void main() {
       final unnamed = await fixture.wake(timeouts: tight);
       expect(lookup.elapsed, lessThan(const Duration(seconds: 2)));
       expect(unnamed.notifications.map((n) => n.eventId), [late.id]);
+      // Cut short outside any claim, everything it claimed is returned.
+      expect(unnamed.unreported, isFalse);
 
       // Storage that never answers for one community holds back neither the
       // others nor what it claimed before it stalled, and the community is
@@ -730,6 +732,9 @@ void main() {
         fine.id,
         claimedFirst.id,
       });
+      // The claim still running may yet win, recording a message the wake
+      // never returned, so the wake says so.
+      expect(cutShort.unreported, isTrue);
 
       // Once the budget is spent, nothing more is sent to a relay.
       final gate = Completer<void>();
@@ -901,8 +906,36 @@ void main() {
       for (final result in await Future.wait([eighth, ninth])) {
         expect(result.notifications, isEmpty);
         expect(result.incomplete, isTrue);
+        expect(result.unreported, isFalse);
       }
       expect(failingPasses, 2);
+
+      // A message lost by one pass stays lost, so a clean rerun still
+      // reports it.
+      var lostPasses = 0;
+      final losing = PushWakeRunner((budget) async {
+        final result = await fixture.wake(
+          timeouts: PushWakeTimeouts(total: budget),
+        );
+        return ++lostPasses > 1
+            ? result
+            : PushWakeResult(
+                notifications: result.notifications,
+                unreported: true,
+              );
+      });
+      final lostHeld = relay.hold = Completer<void>();
+      final lostBefore = relay.queries.length;
+      final tenth = losing.wake();
+      await untilQueries(relay, lostBefore + 1);
+      final eleventh = losing.wake();
+      lostHeld.complete();
+      relay.hold = null;
+      for (final result in await Future.wait([tenth, eleventh])) {
+        expect(result.incomplete, isFalse);
+        expect(result.unreported, isTrue);
+      }
+      expect(lostPasses, 2);
     });
   });
 }

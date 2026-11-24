@@ -185,7 +185,8 @@ internal class WakeNotifier(private val context: Context) {
         }
     }
 
-    fun postGeneric() {
+    /** [silent] posts it without alerting, beside notifications that did. */
+    fun postGeneric(silent: Boolean = false) {
         val tap = PendingIntent.getActivity(
             context,
             GENERIC_ID,
@@ -203,6 +204,7 @@ internal class WakeNotifier(private val context: Context) {
                 .setCategory(NotificationCompat.CATEGORY_MESSAGE)
                 .setAutoCancel(true)
                 .setContentIntent(tap)
+                .setSilent(silent)
                 .build(),
         )
     }
