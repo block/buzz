@@ -381,7 +381,27 @@ pub async fn run_nip_fi_disconnect_consumer(
                 reason,
                 "nip-fi: deny restore failed; admission stays closed"
             );
-            tokio::time::sleep(retry).await;
+            // Keep closing revoked sessions while admission stays closed.
+            // The deadline is fixed, so traffic cannot postpone the retry.
+            let wait = tokio::time::sleep(retry);
+            tokio::pin!(wait);
+            loop {
+                tokio::select! {
+                    () = &mut wait => break,
+                    msg = rx.recv() => match msg {
+                        Ok(msg) => {
+                            if !retained(apply_nip_fi_disconnect(&state, &msg, chrono::Utc::now())) {
+                                continue 'generation;
+                            }
+                        }
+                        Err(RecvError::Lagged(n)) => {
+                            count_disconnect_event(mode, "buzz_nip_fi_disconnect_lag_total", "cross_pod", "lag", n);
+                            continue 'generation;
+                        }
+                        Err(RecvError::Closed) => return,
+                    },
+                }
+            }
             if subscription.borrow().epoch != epoch {
                 continue 'generation;
             }
@@ -4015,6 +4035,56 @@ mod route_integration_tests {
         });
     }
 
+    /// While restores keep failing, delivered disconnects still close their
+    /// sessions, admission stays closed, and steady traffic does not postpone
+    /// the next restore attempt.
+    #[tokio::test]
+    async fn failing_restore_still_closes_revoked_sessions() {
+        let store = Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
+        let failing = Arc::new(FailingReplayGuard {
+            load_fails: true,
+            ..Default::default()
+        });
+        let pod = store_pod(10, Arc::clone(&failing) as _).await;
+        pod.nip_fi_deny_map.as_deref().unwrap().begin_restore();
+        let (tx, rx) = tokio::sync::broadcast::channel(16);
+        let (sub_tx, sub_rx) =
+            tokio::sync::watch::channel(buzz_pubsub::NipFiSubscription::default());
+        let consumer = tokio::spawn(run_nip_fi_disconnect_consumer(
+            Arc::clone(&pod),
+            rx,
+            sub_rx,
+            vec![Arc::clone(&failing) as _],
+        ));
+        let (a, b, bystander, other) = (
+            nostr::Keys::generate().public_key(),
+            nostr::Keys::generate().public_key(),
+            nostr::Keys::generate().public_key(),
+            nostr::Keys::generate().public_key(),
+        );
+        let sessions = [&a, &b, &bystander].map(|k| IssuerSessions::register(&pod, TEST_ISS, k));
+        go_live(&sub_tx);
+        // Steady traffic, a message every 100ms for 2.5s, spanning two retry
+        // deadlines.
+        let messages = [store_deny(&store, &a).await, store_deny(&store, &b).await];
+        let start = tokio::time::Instant::now();
+        let mut i = 0;
+        while start.elapsed() < std::time::Duration::from_millis(2500) {
+            tx.send(messages[i % 2].clone()).unwrap();
+            i += 1;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        sessions[0].assert_closed("revoked during a failing restore");
+        sessions[1].assert_closed("revoked during a failing restore");
+        sessions[2].assert_open("not revoked");
+        assert!(is_denied(&pod, &other), "admission stays closed");
+        assert!(
+            failing.loads.load(std::sync::atomic::Ordering::SeqCst) >= 3,
+            "traffic must not postpone the retry"
+        );
+        consumer.abort();
+    }
+
     /// A deny that arrives during the restore and does not fit keeps the pod
     /// closed: it restores again and finds the union over capacity.
     #[tokio::test]
@@ -4339,6 +4409,7 @@ mod route_integration_tests {
         inner: Arc<buzz_auth::InMemoryCommandReplayGuard>,
         applies: bool,
         load_fails: bool,
+        loads: std::sync::atomic::AtomicUsize,
     }
 
     impl buzz_auth::CommandReplayGuard for FailingReplayGuard {
@@ -4368,6 +4439,7 @@ mod route_integration_tests {
             issuer: &'a str,
             now: chrono::DateTime<chrono::Utc>,
         ) -> buzz_auth::LoadDenies<'a> {
+            self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.load_fails {
                 return Box::pin(async {
                     Err(buzz_auth::AuthError::Internal(
@@ -4668,6 +4740,72 @@ mod route_integration_tests {
             let mut expected = vec![(*b, t + s(120)), (*c, t + s(90))];
             expected.sort_by_key(|(k, _)| k.to_hex());
             assert_eq!(loaded, expected, "the longer deny for b survives the prune");
+        }
+
+        /// A deny record restore cannot read fails the load, so the restore
+        /// fails and admission stays closed rather than dropping it.
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn redis_store_load_fails_on_unreadable_record() {
+            let url = std::env::var("BUZZ_TEST_REDIS_URL")
+                .or_else(|_| std::env::var("REDIS_URL"))
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+            let mut conn = buzz_pubsub::redis_connection(&url).expect("redis pool");
+            let key = || nostr::Keys::generate().public_key().to_hex();
+            let exact = |t: chrono::DateTime<chrono::Utc>| {
+                format!("{}:{}", t.timestamp(), t.timestamp_subsec_nanos())
+            };
+            let now = chrono::Utc::now();
+            let live = (key(), exact(now + chrono::Duration::seconds(120)));
+            let expired = (key(), exact(now - chrono::Duration::seconds(1)));
+            let cases = [
+                ("valid and expired", None, true),
+                (
+                    "invalid key",
+                    Some(("not-a-key".to_owned(), live.1.clone())),
+                    false,
+                ),
+                ("invalid until", Some((key(), "garbage".to_owned())), false),
+                (
+                    "until with extra field",
+                    Some((key(), format!("{}:x", live.1))),
+                    false,
+                ),
+            ];
+            for (case, extra, ok) in cases {
+                let namespace = test_namespace();
+                let store = redis_guard_in(&namespace);
+                let issuer = format!("https://{}.example", uuid::Uuid::new_v4());
+                let (_, hash) = buzz_pubsub::nip_fi_command_replay::deny_store_keys(
+                    &format!("{namespace}:deny"),
+                    &issuer,
+                );
+                let mut fields = vec![live.clone(), expired.clone()];
+                fields.extend(extra);
+                for (field, value) in fields {
+                    let _: () = redis::cmd("HSET")
+                        .arg(&hash)
+                        .arg(field)
+                        .arg(value)
+                        .query_async(&mut conn)
+                        .await
+                        .unwrap();
+                }
+                let loaded = store.load_denies(&issuer, now).await;
+                if ok {
+                    let keys: Vec<_> = loaded
+                        .unwrap()
+                        .into_iter()
+                        .map(|(k, _)| k.to_hex())
+                        .collect();
+                    assert_eq!(keys, vec![live.0.clone()], "{case}: expired entry filtered");
+                } else {
+                    assert!(
+                        loaded.is_err(),
+                        "{case}: an unreadable record must fail the load"
+                    );
+                }
+            }
         }
 
         /// The Redis script checks replay and shared capacity before writing,

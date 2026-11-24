@@ -173,13 +173,18 @@ impl CommandReplayGuard for RedisCommandReplayGuard {
                 .query_async(&mut conn)
                 .await
                 .map_err(internal)?;
-            Ok(entries
-                .into_iter()
-                .filter_map(|(key, until)| {
-                    Some((PublicKey::from_hex(&key).ok()?, parse_until(&until)?))
-                })
-                .filter(|(_, until)| *until > now)
-                .collect())
+            // An unreadable record fails the load: skipping it would reopen
+            // admission without that revocation.
+            let mut denies = Vec::with_capacity(entries.len());
+            for (key, until) in entries {
+                let key = PublicKey::from_hex(&key).map_err(internal)?;
+                let until = parse_until(&until)
+                    .ok_or_else(|| internal(format!("unreadable deny until: {until}")))?;
+                if until > now {
+                    denies.push((key, until));
+                }
+            }
+            Ok(denies)
         })
     }
 }
