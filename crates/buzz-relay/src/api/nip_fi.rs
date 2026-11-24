@@ -346,7 +346,8 @@ async fn merge_stored_denies(
                     until_unix_nanos: entry.until.timestamp_subsec_nanos(),
                     revoke_through: entry.scope.revoke_through(),
                 };
-                match merge_nip_fi_disconnect(state, &message, || now) {
+                // Judge expiry at the merge, not at the read before it.
+                match merge_nip_fi_disconnect(state, &message, chrono::Utc::now) {
                     NipFiDisconnectApplyResult::Applied(CrossPodMergeResult::Merged) => {
                         changed.push(message)
                     }
@@ -4238,6 +4239,86 @@ mod route_integration_tests {
         }
     }
 
+    /// Answers loads from `inner` only after `delay`, as a slow store would.
+    struct SlowLoad {
+        inner: buzz_auth::InMemoryCommandReplayGuard,
+        delay: std::time::Duration,
+    }
+
+    impl buzz_auth::CommandReplayGuard for SlowLoad {
+        fn try_claim<'a>(
+            &'a self,
+            claim: buzz_auth::CommandClaim<'a>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<buzz_auth::ClaimOutcome, buzz_auth::AuthError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            self.inner.try_claim(claim)
+        }
+
+        fn load_denies<'a>(
+            &'a self,
+            issuer: &'a str,
+            now: chrono::DateTime<chrono::Utc>,
+        ) -> buzz_auth::LoadDenies<'a> {
+            Box::pin(async move {
+                let denies = self.inner.load_denies(issuer, now).await;
+                tokio::time::sleep(self.delay).await;
+                denies
+            })
+        }
+    }
+
+    /// Restore judges expiry when it merges, not when it started reading: a
+    /// whole key that lapses during a slow load no longer overrides the
+    /// stored cutoff.
+    #[tokio::test]
+    async fn restore_judges_expiry_at_the_merge() {
+        use buzz_auth::CommandReplayGuard as _;
+        let source = Arc::new(SlowLoad {
+            inner: buzz_auth::InMemoryCommandReplayGuard::default(),
+            delay: std::time::Duration::from_millis(400),
+        });
+        let key = nostr::Keys::generate().public_key();
+        let now = chrono::Utc::now();
+        let c = now.timestamp();
+        let outcome = source
+            .try_claim(buzz_auth::CommandClaim {
+                issuer: TEST_ISS,
+                jti: "cutoff",
+                ttl_secs: 60,
+                target: &key,
+                until: now + chrono::Duration::seconds(120),
+                scope: buzz_auth::DenyScope::IssuedThrough(c),
+                capacity: 10,
+                now,
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome, buzz_auth::ClaimOutcome::Claimed);
+        let source: Arc<dyn buzz_auth::CommandReplayGuard> = source;
+        let pod = store_pod(10, Arc::clone(&source)).await;
+        let deny_map = pod.nip_fi_deny_map.as_deref().unwrap();
+        deny_map.merge_cross_pod_deny(
+            TEST_ISS,
+            &key,
+            buzz_auth::DenyEntry::whole_key(now + chrono::Duration::milliseconds(200)),
+            || now,
+        );
+        let generation = deny_map.begin_restore();
+        assert_eq!(restore_nip_fi_denies(&pod, &[source]).await, Ok(()));
+        assert!(deny_map.finish_restore(generation));
+        let after = chrono::DateTime::from_timestamp(c, 0).unwrap() + chrono::Duration::seconds(1);
+        assert!(
+            !deny_map.denies(TEST_ISS, &key, after, chrono::Utc::now()),
+            "the lapsed whole key gave way to the cutoff"
+        );
+    }
+
     /// Records a deny for `target` in `store` as another pod's accept would.
     async fn store_deny(
         store: &buzz_auth::InMemoryCommandReplayGuard,
@@ -5136,10 +5217,10 @@ mod route_integration_tests {
                 .map(|_| nostr::Keys::generate().public_key())
                 .collect();
             let (a, b, c) = (&keys[0], &keys[1], &keys[2]);
-            // A base an hour ahead: only the synthetic `now` expires entries,
-            // never Redis key TTLs on the wall clock.
-            let t = chrono::Utc::now() + chrono::Duration::hours(1);
+            // Redis judges expiry on its own clock, so entries expire for real.
+            let t = chrono::Utc::now();
             let s = chrono::Duration::seconds;
+            let ms = chrono::Duration::milliseconds;
             let at = |jti: &'static str, target, until, capacity, now| buzz_auth::CommandClaim {
                 issuer: &issuer,
                 jti,
@@ -5151,9 +5232,13 @@ mod route_integration_tests {
                 now,
             };
             assert_eq!(
-                store.try_claim(at("p1", a, t + s(1), 1, t)).await.unwrap(),
+                store
+                    .try_claim(at("p1", a, t + ms(300), 1, t))
+                    .await
+                    .unwrap(),
                 Claimed
             );
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
             assert_eq!(
                 store
                     .try_claim(at("p2", b, t + s(120), 1, t + s(2)))
@@ -5164,20 +5249,21 @@ mod route_integration_tests {
             );
             assert_eq!(
                 store
-                    .try_claim(at("p3", b, t + s(30), 2, t + s(2)))
+                    .try_claim(at("p3", b, t + s(1), 2, t + s(2)))
                     .await
                     .unwrap(),
                 Claimed
             );
             // A later accept prunes entries whose score is below its now.
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
             assert_eq!(
                 store
-                    .try_claim(at("p4", c, t + s(90), 2, t + s(60)))
+                    .try_claim(at("p4", c, t + s(90), 2, t + s(2)))
                     .await
                     .unwrap(),
                 Claimed
             );
-            let mut loaded = store.load_denies(&issuer, t + s(60)).await.unwrap();
+            let mut loaded = store.load_denies(&issuer, t + s(2)).await.unwrap();
             loaded.sort_by_key(|(k, _)| k.to_hex());
             let w = buzz_auth::DenyEntry::whole_key;
             let mut expected = vec![(*b, w(t + s(120))), (*c, w(t + s(90)))];
@@ -5349,6 +5435,130 @@ mod route_integration_tests {
             assert!(is_denied(&pod, &revoked), "the good record still denies");
         }
 
+        /// The deny-store writer and reader before cutoffs, from #9860's
+        /// `02627cce` (the script verbatim, the reader with its logging
+        /// dropped and errors as text): the code a rolled-back or
+        /// not-yet-upgraded pod runs.
+        mod pre_cutoff {
+            use chrono::{DateTime, Utc};
+            use nostr::PublicKey;
+
+            pub const ACCEPT_SCRIPT: &str = r"
+if redis.call('EXISTS', KEYS[1]) == 1 then return 'replay' end
+local active = ARGV[8] == '1'
+if active then
+  local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', '(' .. ARGV[7])
+  for _, member in ipairs(expired) do
+    redis.call('HDEL', KEYS[3], member)
+    redis.call('HDEL', KEYS[4], member)
+  end
+  redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', '(' .. ARGV[7])
+  if not redis.call('ZSCORE', KEYS[2], ARGV[2])
+     and redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[6]) then
+    return 'full'
+  end
+end
+redis.call('SET', KEYS[1], '1', 'EX', ARGV[1])
+if active then
+  redis.call('ZADD', KEYS[2], 'GT', ARGV[3], ARGV[2])
+  local cur = redis.call('HGET', KEYS[3], ARGV[2])
+  local keep = false
+  if cur then
+    local s, n = string.match(cur, '^(%-?%d+):(%d+)$')
+    s, n = tonumber(s), tonumber(n)
+    local ns, nn = tonumber(ARGV[4]), tonumber(ARGV[5])
+    keep = s > ns or (s == ns and n >= nn)
+  end
+  if not keep then redis.call('HSET', KEYS[3], ARGV[2], ARGV[4] .. ':' .. ARGV[5]) end
+  redis.call('HDEL', KEYS[4], ARGV[2])
+  local top = redis.call('ZRANGE', KEYS[2], -1, -1, 'WITHSCORES')
+  redis.call('PEXPIREAT', KEYS[2], top[2])
+  redis.call('PEXPIREAT', KEYS[3], top[2])
+  redis.call('PEXPIREAT', KEYS[4], top[2])
+end
+return 'claimed'
+";
+
+            /// Writes a whole-key deny as the old writer's `try_claim` did.
+            pub async fn accept(
+                conn: &mut buzz_pubsub::RedisConnection,
+                prefix: &str,
+                issuer: &str,
+                jti: &str,
+                target: &PublicKey,
+                until: DateTime<Utc>,
+                now: DateTime<Utc>,
+            ) -> String {
+                let (index, exact) =
+                    buzz_pubsub::nip_fi_command_replay::deny_store_keys(prefix, issuer);
+                let ceil_ms = until.timestamp_millis()
+                    + i64::from(until.timestamp_subsec_nanos() % 1_000_000 != 0);
+                redis::Script::new(ACCEPT_SCRIPT)
+                    .key(format!("{prefix}:claim:{issuer}:{jti}"))
+                    .key(index)
+                    .key(exact)
+                    .key(buzz_pubsub::nip_fi_command_replay::revoke_through_key(
+                        prefix, issuer,
+                    ))
+                    .arg(60)
+                    .arg(target.to_hex())
+                    .arg(ceil_ms)
+                    .arg(until.timestamp())
+                    .arg(until.timestamp_subsec_nanos())
+                    .arg(10)
+                    .arg(now.timestamp_millis())
+                    .arg(u8::from(until > now))
+                    .invoke_async(conn)
+                    .await
+                    .unwrap()
+            }
+
+            /// The old `load_denies` body: the exact-`until` hash only, applying
+            /// every record past a bad one but still failing.
+            pub async fn load_denies(
+                conn: &mut buzz_pubsub::RedisConnection,
+                exact: String,
+                now: DateTime<Utc>,
+            ) -> Result<Vec<(PublicKey, DateTime<Utc>)>, String> {
+                let entries: Vec<(Vec<u8>, Vec<u8>)> = redis::cmd("HGETALL")
+                    .arg(exact)
+                    .query_async(conn)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let mut denies = Vec::with_capacity(entries.len());
+                let mut bad = None;
+                for (key, until) in entries {
+                    match decode(key, until) {
+                        Ok((key, until)) if until > now => denies.push((key, until)),
+                        Ok(_) => {}
+                        Err(record) => {
+                            bad.get_or_insert(record);
+                        }
+                    }
+                }
+                match bad {
+                    None => Ok(denies),
+                    Some(record) => Err(record),
+                }
+            }
+
+            fn decode(key: Vec<u8>, until: Vec<u8>) -> Result<(PublicKey, DateTime<Utc>), String> {
+                let (Ok(key), Ok(until)) = (String::from_utf8(key), String::from_utf8(until))
+                else {
+                    return Err("deny record that is not UTF-8".into());
+                };
+                let key = PublicKey::from_hex(&key).map_err(|_| format!("deny key {key}"))?;
+                let until =
+                    parse_until(&until).ok_or_else(|| format!("deny until {until} for {key}"))?;
+                Ok((key, until))
+            }
+
+            fn parse_until(value: &str) -> Option<DateTime<Utc>> {
+                let (secs, nanos) = value.split_once(':')?;
+                DateTime::from_timestamp(secs.parse().ok()?, nanos.parse().ok()?)
+            }
+        }
+
         /// A cutoff a command stores in Redis survives a restart as a cutoff:
         /// a restored pod refuses an assertion issued at C and admits one
         /// issued after it, while the exact-`until` hash alone (the whole of
@@ -5399,14 +5609,9 @@ mod route_integration_tests {
                 &format!("{namespace}:deny"),
                 TEST_ISS,
             );
-            let entries: Vec<(String, String)> = redis::cmd("HGETALL")
-                .arg(exact)
-                .query_async(&mut conn)
+            let old = pre_cutoff::load_denies(&mut conn, exact, now)
                 .await
-                .unwrap();
-            let mut bad = None;
-            let old = buzz_pubsub::nip_fi_command_replay::decode_untils(&entries, now, &mut bad);
-            assert_eq!(bad, None, "the old reader decodes new data");
+                .expect("the old reader decodes new data");
             assert_eq!(old, vec![(key, until)], "read as a whole-key deny");
         }
 
@@ -5418,47 +5623,37 @@ mod route_integration_tests {
         #[ignore = "requires Redis"]
         async fn redis_scope_merge_matches_the_deny_map() {
             use buzz_auth::{DenyEntry, DenyScope};
-            let t = chrono::Utc::now() + chrono::Duration::hours(1);
             let s = chrono::Duration::seconds;
             let cut = DenyScope::IssuedThrough;
             let whole = DenyScope::WholeKey;
-            // (first, second, second's now)
+            // (first, second, milliseconds between the writes)
             let cases = [
+                ((s(60), cut(10)), (s(60), whole), 0, "whole over cutoff"),
+                ((s(60), whole), (s(60), cut(10)), 0, "cutoff over whole"),
                 (
-                    (t + s(60), cut(10)),
-                    (t + s(60), whole),
-                    t,
-                    "whole over cutoff",
-                ),
-                (
-                    (t + s(60), whole),
-                    (t + s(60), cut(10)),
-                    t,
-                    "cutoff over whole",
-                ),
-                (
-                    (t + s(60), cut(10)),
-                    (t + s(30), cut(20)),
-                    t,
+                    (s(60), cut(10)),
+                    (s(30), cut(20)),
+                    0,
                     "shorter later cutoff",
                 ),
                 (
-                    (t + s(60), cut(20)),
-                    (t + s(90), cut(10)),
-                    t,
+                    (s(60), cut(20)),
+                    (s(90), cut(10)),
+                    0,
                     "longer earlier cutoff",
                 ),
                 (
-                    (t + s(1), whole),
-                    (t + s(60), cut(10)),
-                    t + s(2),
+                    (chrono::Duration::milliseconds(300), whole),
+                    (s(60), cut(10)),
+                    400,
                     "expired whole key",
                 ),
             ];
-            for ((u1, s1), (u2, s2), now2, case) in cases {
+            for ((d1, s1), (d2, s2), wait, case) in cases {
                 let store = redis_guard();
                 let key = nostr::Keys::generate().public_key();
-                let claim = |jti, until, scope, now| buzz_auth::CommandClaim {
+                let t = chrono::Utc::now();
+                let claim = |jti, until, scope| buzz_auth::CommandClaim {
                     issuer: TEST_ISS,
                     jti,
                     ttl_secs: 60,
@@ -5466,22 +5661,139 @@ mod route_integration_tests {
                     until,
                     scope,
                     capacity: 10,
-                    now,
+                    now: t,
                 };
-                store.try_claim(claim("a", u1, s1, t)).await.unwrap();
-                store.try_claim(claim("b", u2, s2, now2)).await.unwrap();
                 let first = DenyEntry {
-                    until: u1,
+                    until: t + d1,
                     scope: s1,
                 };
                 let second = DenyEntry {
-                    until: u2,
+                    until: t + d2,
                     scope: s2,
                 };
-                let expected = DenyEntry::merge(Some(first), second, now2);
-                let loaded = store.load_denies(TEST_ISS, now2).await.unwrap();
+                store.try_claim(claim("a", first.until, s1)).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                store.try_claim(claim("b", second.until, s2)).await.unwrap();
+                let now = chrono::Utc::now();
+                let expected = DenyEntry::merge(Some(first), second, now);
+                let loaded = store.load_denies(TEST_ISS, now).await.unwrap();
                 assert_eq!(loaded, vec![(key, expected)], "{case}");
             }
+        }
+
+        /// A pod that predates cutoffs writes over a cutoff, and a fresh
+        /// upgraded pod restores what it wrote as a whole-key deny.
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn redis_pre_cutoff_writer_then_fresh_restore_is_whole_key() {
+            let url = std::env::var("BUZZ_TEST_REDIS_URL")
+                .or_else(|_| std::env::var("REDIS_URL"))
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+            let mut conn = buzz_pubsub::redis_connection(&url).expect("redis pool");
+            let namespace = test_namespace();
+            let prefix = format!("{namespace}:deny");
+            let store = redis_guard_in(&namespace);
+            let (cut, fresh) = (
+                nostr::Keys::generate().public_key(),
+                nostr::Keys::generate().public_key(),
+            );
+            let now = chrono::Utc::now();
+            let until = now + chrono::Duration::seconds(120);
+            let c = now.timestamp();
+            let outcome = store
+                .try_claim(buzz_auth::CommandClaim {
+                    issuer: TEST_ISS,
+                    jti: "cutoff",
+                    ttl_secs: 60,
+                    target: &cut,
+                    until,
+                    scope: buzz_auth::DenyScope::IssuedThrough(c),
+                    capacity: 10,
+                    now,
+                })
+                .await
+                .unwrap();
+            assert_eq!(outcome, buzz_auth::ClaimOutcome::Claimed);
+            for (jti, target) in [("old-a", &cut), ("old-b", &fresh)] {
+                let reply =
+                    pre_cutoff::accept(&mut conn, &prefix, TEST_ISS, jti, target, until, now).await;
+                assert_eq!(reply, "claimed");
+            }
+
+            let pod = store_pod(10, Arc::clone(&store)).await;
+            let deny_map = pod.nip_fi_deny_map.as_deref().unwrap();
+            let generation = deny_map.begin_restore();
+            assert_eq!(restore_nip_fi_denies(&pod, &[store]).await, Ok(()));
+            assert!(deny_map.finish_restore(generation));
+            let after =
+                chrono::DateTime::from_timestamp(c, 0).unwrap() + chrono::Duration::seconds(1);
+            for key in [cut, fresh] {
+                assert!(
+                    deny_map.denies(TEST_ISS, &key, after, chrono::Utc::now()),
+                    "the old writer's full revoke restores as the whole key"
+                );
+            }
+        }
+
+        /// Expiry is judged by Redis as the script runs, not by the clock the
+        /// command was authenticated under: a full revoke whose `until` passes
+        /// before its write changes nothing, and a stored full revoke that
+        /// expired meanwhile no longer overrides a cutoff.
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn redis_accept_judges_expiry_at_the_write() {
+            use buzz_auth::{DenyEntry, DenyScope};
+            let store = redis_guard();
+            let (key, other) = (
+                nostr::Keys::generate().public_key(),
+                nostr::Keys::generate().public_key(),
+            );
+            let authenticated = chrono::Utc::now();
+            let ms = chrono::Duration::milliseconds;
+            let claim = |jti, target, until, scope| buzz_auth::CommandClaim {
+                issuer: TEST_ISS,
+                jti,
+                ttl_secs: 60,
+                target,
+                until,
+                scope,
+                capacity: 10,
+                now: authenticated,
+            };
+            let until = authenticated + chrono::Duration::seconds(60);
+            let cut = DenyScope::IssuedThrough(10);
+            let lapsing = authenticated + ms(300);
+            store
+                .try_claim(claim("cutoff", &key, until, cut))
+                .await
+                .unwrap();
+            store
+                .try_claim(claim("lapsing", &other, lapsing, DenyScope::WholeKey))
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            store
+                .try_claim(claim("lapsed", &key, lapsing, DenyScope::WholeKey))
+                .await
+                .unwrap();
+            store
+                .try_claim(claim("over", &other, until, cut))
+                .await
+                .unwrap();
+            let mut loaded = store
+                .load_denies(TEST_ISS, chrono::Utc::now())
+                .await
+                .unwrap();
+            loaded.sort_by_key(|(k, _)| k.to_hex());
+            let mut expected = vec![
+                (key, DenyEntry { until, scope: cut }),
+                (other, DenyEntry { until, scope: cut }),
+            ];
+            expected.sort_by_key(|(k, _)| k.to_hex());
+            assert_eq!(
+                loaded, expected,
+                "an expired full revoke neither widens nor overrides a cutoff"
+            );
         }
 
         /// A cutoff that doesn't decode, or names no stored deny, fails the
@@ -5570,7 +5882,7 @@ mod route_integration_tests {
                 nostr::Keys::generate().public_key(),
                 nostr::Keys::generate().public_key(),
             );
-            let t = chrono::Utc::now() + chrono::Duration::hours(1);
+            let t = chrono::Utc::now();
             let s = chrono::Duration::seconds;
             let claim = |jti, target, until, now| buzz_auth::CommandClaim {
                 issuer: &issuer,
@@ -5625,8 +5937,12 @@ mod route_integration_tests {
                 assert!(!held(&a).await, "{case} until clears the cutoff");
             }
             // b expires before the next accept's now and is pruned.
-            store.try_claim(claim("c3", &b, t + s(1), t)).await.unwrap();
+            store
+                .try_claim(claim("c3", &b, t + chrono::Duration::milliseconds(300), t))
+                .await
+                .unwrap();
             seed(&b).await;
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
             store
                 .try_claim(claim("c4", &a, t + s(120), t + s(10)))
                 .await

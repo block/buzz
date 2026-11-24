@@ -40,18 +40,27 @@ pub const DENY_STORE_PREFIX: &str = "buzz:nip-fi:deny";
 pub const SHADOW_DENY_STORE_PREFIX: &str = "buzz:nip-fi:shadow-deny";
 
 /// KEYS: claim, index, exact, cutoff.  ARGV: ttl, pubkey_hex, score_ms, secs, nanos,
-/// capacity, now_ms, active (0/1), now_secs, now_nanos, revoke_through ('' for
-/// the whole key).
+/// capacity, revoke_through ('' for the whole key).  Whether the command and
+/// the stored entry are still active is judged by Redis `TIME` as the script
+/// runs, not by the clock the command was authenticated under.
 const ACCEPT_SCRIPT: &str = r"
 if redis.call('EXISTS', KEYS[1]) == 1 then return 'replay' end
-local active = ARGV[8] == '1'
+local t = redis.call('TIME')
+local ts, tn = tonumber(t[1]), tonumber(t[2]) * 1000
+local now_ms = string.format('%.0f', ts * 1000 + math.floor(tn / 1000000))
+local function live(v)
+  local s, n = string.match(v, '^(%-?%d+):(%d+)$')
+  s, n = tonumber(s), tonumber(n)
+  return s > ts or (s == ts and n > tn)
+end
+local active = live(ARGV[4] .. ':' .. ARGV[5])
 if active then
-  local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', '(' .. ARGV[7])
+  local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', '(' .. now_ms)
   for _, member in ipairs(expired) do
     redis.call('HDEL', KEYS[3], member)
     redis.call('HDEL', KEYS[4], member)
   end
-  redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', '(' .. ARGV[7])
+  redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', '(' .. now_ms)
   if not redis.call('ZSCORE', KEYS[2], ARGV[2])
      and redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[6]) then
     return 'full'
@@ -71,18 +80,13 @@ if active then
   if not keep then redis.call('HSET', KEYS[3], ARGV[2], ARGV[4] .. ':' .. ARGV[5]) end
   -- Scope merge: an active stored entry without a cutoff is the whole key and
   -- wins; two cutoffs keep the later one.  An expired entry contributes none.
-  local cut = ARGV[11]
-  if cut ~= '' and cur then
-    local s, n = string.match(cur, '^(%-?%d+):(%d+)$')
-    s, n = tonumber(s), tonumber(n)
-    local ts, tn = tonumber(ARGV[9]), tonumber(ARGV[10])
-    if s > ts or (s == ts and n > tn) then
-      local prior = redis.call('HGET', KEYS[4], ARGV[2])
-      if not prior or not tonumber(prior) then
-        cut = ''
-      elseif tonumber(prior) > tonumber(cut) then
-        cut = prior
-      end
+  local cut = ARGV[7]
+  if cut ~= '' and cur and live(cur) then
+    local prior = redis.call('HGET', KEYS[4], ARGV[2])
+    if not prior or not tonumber(prior) then
+      cut = ''
+    elseif tonumber(prior) > tonumber(cut) then
+      cut = prior
     end
   end
   if cut == '' then
@@ -189,10 +193,6 @@ impl CommandReplayGuard for RedisCommandReplayGuard {
                 .arg(claim.until.timestamp())
                 .arg(claim.until.timestamp_subsec_nanos())
                 .arg(claim.capacity)
-                .arg(claim.now.timestamp_millis())
-                .arg(u8::from(claim.until > claim.now))
-                .arg(claim.now.timestamp())
-                .arg(claim.now.timestamp_subsec_nanos())
                 .arg(
                     claim
                         .scope
@@ -276,7 +276,7 @@ return {redis.call('HGETALL', KEYS[1]), redis.call('HGETALL', KEYS[2])}
 /// in relays that predate cutoffs, which therefore read every entry as a
 /// whole-key deny.  An unreadable record is noted in `bad` and left out; the
 /// others still decode.
-pub fn decode_untils(
+fn decode_untils(
     entries: &[(String, String)],
     now: DateTime<Utc>,
     bad: &mut Option<String>,
@@ -361,6 +361,24 @@ mod tests {
             deny_store_keys(SHADOW_DENY_STORE_PREFIX, "i").0,
             deny_store_keys(DENY_STORE_PREFIX, "i").0
         );
+    }
+
+    /// The join is linear: a full issuer at the default capacity restores in
+    /// well under a second rather than comparing every pair of keys.
+    #[test]
+    fn cutoff_join_is_linear_at_capacity() {
+        let entries: Vec<_> = (0..50_000)
+            .map(|i| (format!("{i:064x}"), "1:0".to_owned()))
+            .collect();
+        let cutoffs = entries
+            .iter()
+            .map(|(k, _)| (k.clone(), "10".to_owned()))
+            .collect();
+        let started = std::time::Instant::now();
+        let mut bad = None;
+        join_cutoffs(Vec::new(), &entries, cutoffs, &mut bad);
+        assert_eq!(bad, None);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[test]
