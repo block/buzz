@@ -10,6 +10,7 @@ description = "Community-scoped message search for Buzz: Postgres full-text sear
 [dependencies]
 buzz-core   = { workspace = true }
 buzz-db     = { workspace = true }
+buzz-feature-flags = { workspace = true }
 buzz-datastore-tracing = { workspace = true }
 sqlx        = { workspace = true }
 uuid        = { workspace = true }

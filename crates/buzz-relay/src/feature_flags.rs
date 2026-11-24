@@ -140,6 +140,12 @@ impl FeatureFlags {
         self.evaluator.as_ref()
     }
 
+    /// A handle to the shared evaluator, for consumers that outlive a borrow
+    /// (the search service reads `search.backend` on every search).
+    pub fn shared_evaluator(&self) -> Arc<dyn FlagEvaluator> {
+        Arc::clone(&self.evaluator)
+    }
+
     /// Report provider health after a round of evaluations: log malformed
     /// environment values once each, and publish whether the provider has
     /// initialized (`buzz_feature_flags_ready`). It does not track the

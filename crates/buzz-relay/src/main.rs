@@ -48,6 +48,22 @@ async fn connect_audit_pool(config: &DbConfig) -> anyhow::Result<sqlx::PgPool> {
         .map_err(Into::into)
 }
 
+/// Publish the search outbox's depth and index lag every
+/// [`buzz_search::outbox_metrics::SAMPLE_INTERVAL`], starting at a random
+/// point in the first interval so a fleet restart does not sample in step.
+async fn sample_search_outbox(pool: sqlx::PgPool) {
+    let interval = buzz_search::outbox_metrics::SAMPLE_INTERVAL;
+    tokio::time::sleep(interval.mul_f64(rand::random::<f64>())).await;
+    let mut ticks = tokio::time::interval(interval);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticks.tick().await;
+        if let Err(error) = buzz_search::outbox_metrics::record(&pool).await {
+            warn!(error_kind = %error.kind(), "search outbox sample failed");
+        }
+    }
+}
+
 /// The search pool. Search is lag-tolerant, so it prefers the read replica
 /// when one is configured. Like the main read pool it is lazy, so a reader
 /// that is down at boot fails searches, not startup, and it waits no longer
@@ -653,16 +669,13 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // same Postgres over its own pool (see `connect_search_pool`).
     let search_pool = connect_search_pool(&db_config)?;
     let search_metrics_pool = search_pool.clone();
-    let search = SearchService::new(search_pool);
-    info!(
-        replica = config.read_database_url.is_some(),
-        "Search service ready (Postgres FTS)"
-    );
 
     // With an OpenSearch address, admission queues searchable events in the
-    // search outbox and the indexer (spawned below) drains it. Searches stay
-    // on Postgres for now.
-    let search_indexer = match &config.opensearch {
+    // search outbox, the indexer (spawned below) drains it, and the
+    // `search.backend` flag chooses for the whole relay whether searches use
+    // Postgres, shadow OpenSearch, or OpenSearch. Without one, Postgres
+    // serves every search and the flag is never read.
+    let search_index = match &config.opensearch {
         Some(opensearch) => {
             let index = buzz_search::opensearch::SearchIndex::new(opensearch)
                 .map_err(|e| anyhow::anyhow!("OpenSearch client: {}", e.kind()))?;
@@ -670,13 +683,27 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                 .await
                 .map_err(|e| anyhow::anyhow!("search outbox: {e}"))?;
             info!(url = %opensearch.url, "search outbox enabled");
-            Some(
-                buzz_search::indexer::Indexer::new(db.clone(), index)
-                    .with_workers(config.search_indexer_workers),
-            )
+            Some(index)
         }
         None => None,
     };
+    let search = match &search_index {
+        Some(index) => SearchService::with_opensearch_switch(
+            search_pool,
+            index.clone(),
+            feature_flags.shared_evaluator(),
+        ),
+        None => SearchService::new(search_pool),
+    };
+    info!(
+        replica = config.read_database_url.is_some(),
+        opensearch = search_index.is_some(),
+        "Search service ready"
+    );
+    let search_indexer = search_index.map(|index| {
+        buzz_search::indexer::Indexer::new(db.clone(), index)
+            .with_workers(config.search_indexer_workers)
+    });
 
     let workflow_config = buzz_workflow::WorkflowConfig {
         agent_mentions: config.workflow_agent_mentions,
@@ -1170,6 +1197,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     if let Some(indexer) = search_indexer {
         tokio::spawn(indexer.run());
         info!("search indexer started");
+        tokio::spawn(sample_search_outbox(state.db.pool().clone()));
     }
 
     // Admin outbox delivery worker — drives `relay_admin_outbox` rows.

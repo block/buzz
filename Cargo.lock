@@ -1931,6 +1931,7 @@ dependencies = [
  "buzz-core",
  "buzz-datastore-tracing",
  "buzz-db",
+ "buzz-feature-flags",
  "chrono",
  "hex",
  "metrics",

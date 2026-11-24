@@ -132,7 +132,8 @@ async fn find(service: &SearchService, community: CommunityId, q: &str) -> Vec<[
             community,
             q: q.into(),
             channel_scope: ChannelScope::Any,
-            kinds: None,
+            // A search of every kind stays on Postgres.
+            kinds: Some(search_outbox::SEARCHABLE_KINDS.to_vec()),
             authors: None,
             since: None,
             until: None,

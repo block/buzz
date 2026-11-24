@@ -159,6 +159,14 @@ const GIT_BYTES_BUCKETS: [f64; 9] = [
 /// Pack-count buckets bounded by the manifest's maximum pack count.
 const GIT_PACK_BUCKETS: [f64; 9] = [0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0];
 
+/// Seconds buckets for search latency, per backend.
+const SEARCH_DURATION_BUCKETS_S: [f64; 12] = [
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 5.0, 10.0,
+];
+
+/// Ratio buckets for the shadow search's top-hit overlap.
+const SEARCH_OVERLAP_BUCKETS: [f64; 11] = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+
 /// Integer-count buckets for fan-out recipient histograms.
 const FANOUT_BUCKETS: [f64; 9] = [0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 500.0, 1000.0];
 
@@ -175,6 +183,16 @@ fn configured_prometheus_builder(gauge_idle_timeout_secs: u64) -> PrometheusBuil
             &LATENCY_BUCKETS_MS,
         )
         .expect("valid ms bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full("buzz_search_duration_seconds".to_owned()),
+            &SEARCH_DURATION_BUCKETS_S,
+        )
+        .expect("valid search duration bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full("buzz_search_shadow_overlap_ratio".to_owned()),
+            &SEARCH_OVERLAP_BUCKETS,
+        )
+        .expect("valid search overlap bucket boundaries")
         .set_buckets_for_metric(
             Matcher::Full("buzz_git_hydrate_seconds".to_owned()),
             &GIT_DURATION_BUCKETS_S,
