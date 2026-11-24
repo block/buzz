@@ -33,7 +33,13 @@ pub(super) async fn query(
     }
     let head = state
         .db
-        .governance_head(tenant.community(), &id, actor.as_bytes(), grant)
+        .governance_head(
+            tenant.community(),
+            &id,
+            actor.as_bytes(),
+            grant,
+            !state.config.require_relay_membership,
+        )
         .await
         .map_err(|error| match error {
             buzz_db::DbError::AccessDenied(_) => {

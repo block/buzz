@@ -395,6 +395,7 @@ async fn unrecorded_governance() {
             &document.parse().unwrap(),
             keys.public_key().as_bytes(),
             None,
+            !state.config.require_relay_membership,
         )
         .await
         .unwrap()
@@ -450,7 +451,13 @@ async fn announcer_rebinds() {
     let id: buzz_core::governance::DocumentId = format!("bind:{}", subject.repo).parse().unwrap();
     state
         .db
-        .governance_head(tenant.community(), &id, keys.public_key().as_bytes(), None)
+        .governance_head(
+            tenant.community(),
+            &id,
+            keys.public_key().as_bytes(),
+            None,
+            !state.config.require_relay_membership,
+        )
         .await
         .unwrap();
     let bound = pin(&state, &tenant, &repo)
@@ -558,7 +565,13 @@ async fn channel_tags_protect() {
     let id = document.parse().unwrap();
     let before = state
         .db
-        .governance_head(tenant.community(), &id, keys.public_key().as_bytes(), None)
+        .governance_head(
+            tenant.community(),
+            &id,
+            keys.public_key().as_bytes(),
+            None,
+            !state.config.require_relay_membership,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -588,7 +601,13 @@ async fn channel_tags_protect() {
     .unwrap();
     let after = state
         .db
-        .governance_head(tenant.community(), &id, keys.public_key().as_bytes(), None)
+        .governance_head(
+            tenant.community(),
+            &id,
+            keys.public_key().as_bytes(),
+            None,
+            !state.config.require_relay_membership,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -636,6 +655,7 @@ async fn receipts_page_real_actions_and_recheck_current_access() {
             None,
             None,
             2,
+            !state.config.require_relay_membership,
         )
         .await
         .unwrap();
@@ -650,6 +670,7 @@ async fn receipts_page_real_actions_and_recheck_current_access() {
             None,
             first.next_before,
             2,
+            !state.config.require_relay_membership,
         )
         .await
         .unwrap();
@@ -667,7 +688,8 @@ async fn receipts_page_real_actions_and_recheck_current_access() {
                 outsider.public_key().as_bytes(),
                 None,
                 None,
-                2
+                2,
+                !state.config.require_relay_membership
             )
             .await,
         Err(buzz_db::DbError::AccessDenied(_))
@@ -687,7 +709,8 @@ async fn receipts_page_real_actions_and_recheck_current_access() {
                 keys.public_key().as_bytes(),
                 None,
                 None,
-                2
+                2,
+                !state.config.require_relay_membership
             )
             .await,
         Err(buzz_db::DbError::AccessDenied(_))
@@ -811,6 +834,7 @@ async fn receipt_read_persists_pin_for_later_reads_and_evidence() {
             None,
             None,
             30,
+            !state.config.require_relay_membership,
         )
         .await
         .unwrap();
@@ -851,6 +875,7 @@ async fn receipt_read_persists_pin_for_later_reads_and_evidence() {
             None,
             None,
             30,
+            !state.config.require_relay_membership,
         )
         .await
         .expect("original channel retains receipt access after reannouncement");
@@ -863,7 +888,8 @@ async fn receipt_read_persists_pin_for_later_reads_and_evidence() {
                 outsider.public_key().as_bytes(),
                 None,
                 None,
-                30
+                30,
+                !state.config.require_relay_membership
             )
             .await,
         Err(buzz_db::DbError::AccessDenied(_))
@@ -1133,7 +1159,13 @@ async fn community_documents_are_readable_by_every_key_they_govern() {
         for id in [DocumentId::Floor, DocumentId::Trusted] {
             let read = state
                 .db
-                .governance_head(tenant.community(), &id, key.public_key().as_bytes(), None)
+                .governance_head(
+                    tenant.community(),
+                    &id,
+                    key.public_key().as_bytes(),
+                    None,
+                    !state.config.require_relay_membership,
+                )
                 .await;
             match read {
                 Ok(head) => {
@@ -1171,4 +1203,108 @@ async fn an_archived_repo_admin_still_governs() {
     ingest_event(&state, &tenant, event, auth(&keys))
         .await
         .expect("an archived repo admin governs");
+}
+
+/// Direct agent admission does not substitute for its recorded owner's admission.
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn restricted_governance_requires_recorded_owner_admission() {
+    use axum::{
+        body::{to_bytes, Body},
+        http::Request,
+    };
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    use tower::ServiceExt;
+    let (state, tenant, agent, subject) = fixture_on(
+        crate::api::bridge::postgres_tests::bridge_handler_test_state()
+            .await
+            .unwrap(),
+    )
+    .await;
+    let owner = Keys::generate();
+    community_role(&state, &tenant, &agent, "member").await;
+    sqlx::query("UPDATE channel_members SET role='admin' WHERE community_id=$1 AND pubkey=$2")
+        .bind(tenant.community().as_uuid())
+        .bind(agent.public_key().as_bytes())
+        .execute(state.db.pool())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users (community_id,pubkey,agent_owner_pubkey) VALUES ($1,$2,$3) ON CONFLICT (community_id,pubkey) DO UPDATE SET agent_owner_pubkey=EXCLUDED.agent_owner_pubkey")
+        .bind(tenant.community().as_uuid()).bind(agent.public_key().as_bytes()).bind(owner.public_key().as_bytes()).execute(state.db.pool()).await.unwrap();
+    let rules = command(&tenant, &agent, &format!("rules:{}", subject.repo), RULES);
+    let next = create_channel(&state, &tenant, &agent, &[]).await;
+    let bind = command(
+        &tenant,
+        &agent,
+        &format!("bind:{}", subject.repo),
+        &serde_json::json!({"version":1,"body":{"type":"bind","channel":next}}).to_string(),
+    );
+    for (open, owner_member, status) in
+        [(false, false, 403), (true, false, 200), (false, true, 200)]
+    {
+        if owner_member {
+            community_role(&state, &tenant, &owner, "member").await;
+        }
+        let mut configured = (*state).clone();
+        std::sync::Arc::make_mut(&mut configured.config).require_relay_membership = !open;
+        let configured = std::sync::Arc::new(configured);
+        for filter in [
+            serde_json::json!([{"governance_head":1,"document":format!("rules:{}",subject.repo)}]),
+            serde_json::json!([{"git_effective":1,"repo":subject.repo}]),
+            serde_json::json!([{"git_receipts":1,"repo":subject.repo}]),
+        ] {
+            let body = serde_json::to_vec(&filter).unwrap();
+            let url = crate::api::bridge::nip98_expected_url(
+                &configured.config.relay_url,
+                &tenant,
+                "/query",
+            );
+            let proof = EventBuilder::new(Kind::Custom(27235), "")
+                .tags([
+                    Tag::parse(["u", &url]).unwrap(),
+                    Tag::parse(["method", "POST"]).unwrap(),
+                    Tag::parse(["payload", &hex::encode(Sha256::digest(&body))]).unwrap(),
+                    Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()]).unwrap(),
+                ])
+                .sign_with_keys(&agent)
+                .unwrap();
+            let authorization = format!(
+                "Nostr {}",
+                base64::engine::general_purpose::STANDARD
+                    .encode(serde_json::to_vec(&proof).unwrap())
+            );
+            let response = crate::router::build_router(configured.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/query")
+                        .header("host", tenant.host())
+                        .header("authorization", authorization)
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let actual = response.status().as_u16();
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            assert_eq!(
+                actual,
+                status,
+                "open={open} owner_member={owner_member} filter={filter}: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+        // The shared HTTP/WS ingestion path must also enforce the configured policy.
+        if !open {
+            for event in [&rules, &bind] {
+                let result = ingest_event(&configured, &tenant, event.clone(), auth(&agent)).await;
+                if owner_member {
+                    result.unwrap();
+                } else {
+                    authority_denied(result);
+                }
+            }
+        }
+    }
 }

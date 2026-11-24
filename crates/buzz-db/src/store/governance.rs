@@ -260,20 +260,29 @@ async fn repo_admin(
     key: &[u8],
     ch: Uuid,
     grant: Option<&GitGrant>,
+    open: bool,
 ) -> Result<bool> {
-    if !active(tx, key).await? {
+    let facts = crate::git_land::key_facts(tx, ch, key).await?;
+    if !admitted(&facts, open) {
         return Ok(false);
     }
-    let own_admin = admin(channel_role(tx, ch, key).await?.as_deref());
-    if let Some(owner) = owner(tx, key).await? {
-        if !active(tx, &owner).await? {
-            return Ok(false);
-        }
+    let own_admin = admin(facts.key.channel_role.as_deref());
+    if let Some((owner, owner_facts)) = &facts.owner {
         return Ok(own_admin
-            || (admin(channel_role(tx, ch, &owner).await?.as_deref())
-                && live_grant_level(tx, grant, repo, &owner).await? == Some(GrantAction::Manage)));
+            || (admin(owner_facts.channel_role.as_deref())
+                && live_grant_level(tx, grant, repo, owner).await? == Some(GrantAction::Manage)));
     }
     Ok(own_admin)
+}
+
+/// Same community admission as a Git land, including the recorded owner
+/// on both the membership and grant routes.
+fn admitted(facts: &crate::git_land::KeyFacts, open: bool) -> bool {
+    facts.admitted(open)
+        && facts
+            .owner
+            .as_ref()
+            .is_none_or(|(_, owner)| owner.admitted(open))
 }
 
 /// The level of the grant presented for this repository, if live: signed by
@@ -318,6 +327,7 @@ pub async fn authorize(
     command: &Command,
     actor: &[u8],
     grant: Option<&GitGrant>,
+    open: bool,
 ) -> Result<Option<Uuid>> {
     if command.community != *tx.community().as_uuid() {
         return Err(denied());
@@ -339,9 +349,9 @@ pub async fn authorize(
         }
         DocumentId::Rules(repo) | DocumentId::Bind(repo) => {
             let current = channel.ok_or_else(denied)?;
-            let mut allowed = repo_admin(tx, repo, actor, current, grant).await?;
+            let mut allowed = repo_admin(tx, repo, actor, current, grant, open).await?;
             if let Body::Bind { channel: next } = command.body.body {
-                allowed &= repo_admin(tx, repo, actor, next, grant).await?;
+                allowed &= repo_admin(tx, repo, actor, next, grant, open).await?;
             }
             allowed
         }
@@ -355,23 +365,28 @@ pub async fn authorize(
 
 /// Authorize a current-document read; errors reveal no repository existence.
 /// Channel membership and an owner-capped live grant are independent routes.
+/// `open` permits nonmembers of the community, but never bypasses a ban.
 pub async fn authorize_read(
     tx: &mut AdmittedTx,
     id: &DocumentId,
     actor: &[u8],
     grant: Option<&GitGrant>,
+    open: bool,
 ) -> Result<()> {
     if !active(tx, actor).await? {
         return Err(denied());
     }
     if let Some(repo) = id.repo() {
         let ch = repo_channel(tx, repo).await?;
-        let own_read = reader(channel_role(tx, ch, actor).await?.as_deref());
-        let allowed = if let Some(owner) = owner(tx, actor).await? {
-            active(tx, &owner).await?
-                && (own_read
-                    || (reader(channel_role(tx, ch, &owner).await?.as_deref())
-                        && live_grant_level(tx, grant, repo, &owner).await?.is_some()))
+        let facts = crate::git_land::key_facts(tx, ch, actor).await?;
+        if !admitted(&facts, open) {
+            return Err(denied());
+        }
+        let own_read = reader(facts.key.channel_role.as_deref());
+        let allowed = if let Some((owner, owner_facts)) = &facts.owner {
+            own_read
+                || (reader(owner_facts.channel_role.as_deref())
+                    && live_grant_level(tx, grant, repo, owner).await?.is_some())
         } else {
             own_read
         };
@@ -382,7 +397,7 @@ pub async fn authorize_read(
         // A community document governs every key with a place in the
         // community: a relay member, or a role in any live channel of it
         // other than a DM, archived or not, guest included. An agent's owner
-        // must be unbanned.
+        // must also be admitted.
         let community = tx.community();
         let member: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM relay_members WHERE community_id=$1 AND pubkey=encode($2,'hex')) \
@@ -397,10 +412,9 @@ pub async fn authorize_read(
         if !member {
             return Err(denied());
         }
-        if let Some(owner) = owner(tx, actor).await? {
-            if !active(tx, &owner).await? {
-                return Err(denied());
-            }
+        let facts = crate::git_land::key_facts(tx, Uuid::nil(), actor).await?;
+        if !admitted(&facts, open) {
+            return Err(denied());
         }
     }
     Ok(())
@@ -436,9 +450,10 @@ impl Db {
         event: &Event,
         grant: Option<&GitGrant>,
         keys: &Keys,
+        open: bool,
     ) -> Result<Prepared> {
         let command = Command::parse(event).map_err(invalid)?;
-        let channel = authorize(tx, &command, event.pubkey.as_bytes(), grant).await?;
+        let channel = authorize(tx, &command, event.pubkey.as_bytes(), grant, open).await?;
         let community = tx.community();
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 39010))")
             .bind(format!("{}:{}", community, command.document))
@@ -587,10 +602,11 @@ impl Db {
         id: &DocumentId,
         actor: &[u8],
         grant: Option<&GitGrant>,
+        open: bool,
     ) -> Result<Option<Event>> {
         let mut tx = self.begin_event_write_transaction(community).await?;
         fence_authority_read(&mut tx, id).await?;
-        authorize_read(&mut tx, id, actor, grant).await?;
+        authorize_read(&mut tx, id, actor, grant, open).await?;
         let result = head(&mut tx, id).await?;
         // Commit: resolving the repository may have pinned its channel.
         tx.commit().await?;

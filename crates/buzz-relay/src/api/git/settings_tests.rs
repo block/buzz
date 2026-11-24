@@ -4502,6 +4502,7 @@ mod external_infra {
                 &labels_id,
                 f.owner.public_key().as_bytes(),
                 None,
+                !f.state.config.require_relay_membership,
             )
             .await
             .unwrap()

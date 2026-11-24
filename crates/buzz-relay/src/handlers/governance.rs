@@ -51,7 +51,13 @@ pub(super) async fn apply(
         .map_err(db_error)?;
     let prepared = state
         .db
-        .prepare_governance_command(&mut tx, event, grant.as_ref(), &state.relay_keypair)
+        .prepare_governance_command(
+            &mut tx,
+            event,
+            grant.as_ref(),
+            &state.relay_keypair,
+            !state.config.require_relay_membership,
+        )
         .await
         .map_err(db_error)?;
     if !prepared.replay {
@@ -85,9 +91,14 @@ pub(super) async fn evidence(
         .begin_event_write_transaction(tenant.community())
         .await
         .map_err(db_error)?;
-    let (evidence, replay) = buzz_db::git_evidence::prepare(&mut tx, event, grant.as_ref())
-        .await
-        .map_err(db_error)?;
+    let (evidence, replay) = buzz_db::git_evidence::prepare(
+        &mut tx,
+        event,
+        grant.as_ref(),
+        !state.config.require_relay_membership,
+    )
+    .await
+    .map_err(db_error)?;
     if replay {
         tx.rollback().await.map_err(db_error)?;
         return Ok(());

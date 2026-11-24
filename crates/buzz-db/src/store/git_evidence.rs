@@ -65,6 +65,7 @@ pub async fn prepare(
     tx: &mut AdmittedTx,
     event: &nostr::Event,
     grant: Option<&buzz_core::governance::GitGrant>,
+    open: bool,
 ) -> Result<(Evidence, bool)> {
     use super::governance;
     use buzz_core::governance::DocumentId;
@@ -79,8 +80,14 @@ pub async fn prepare(
     governance::fence_community_shared(tx, community).await?;
     // Every kind can supersede evidence a land counted. One exclusive rule.
     governance::fence_repo_exclusive(tx, &repo).await?;
-    governance::authorize_read(tx, &DocumentId::Rules(repo), event.pubkey.as_bytes(), grant)
-        .await?;
+    governance::authorize_read(
+        tx,
+        &DocumentId::Rules(repo),
+        event.pubkey.as_bytes(),
+        grant,
+        open,
+    )
+    .await?;
     let replay: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audit_log WHERE community_id=$1 AND action='git_evidence' AND object_id=$2)")
         .bind(community.as_uuid()).bind(event.id.to_hex()).fetch_one(tx.conn()).await?;
     if !replay {

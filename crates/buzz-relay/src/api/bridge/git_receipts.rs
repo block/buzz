@@ -55,6 +55,7 @@ pub(super) async fn query(
             grant,
             request.before,
             request.limit,
+            !state.config.require_relay_membership,
         )
         .await
         .map_err(|error| match error {

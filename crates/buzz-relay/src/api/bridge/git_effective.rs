@@ -77,6 +77,7 @@ async fn resolve(
         &DocumentId::Rules(repo.clone()),
         actor.as_bytes(),
         grant,
+        !state.config.require_relay_membership,
     )
     .await?;
     let channel = buzz_db::governance::repo_channel(&mut tx, repo).await?;

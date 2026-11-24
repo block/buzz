@@ -108,9 +108,15 @@ impl Fixture {
             .expect("tx");
         let id = DocumentId::Rules(self.repo.clone());
         assert_eq!(
-            authorize_read(&mut tx, &id, self.agent.public_key().as_bytes(), grant)
-                .await
-                .is_ok(),
+            authorize_read(
+                &mut tx,
+                &id,
+                self.agent.public_key().as_bytes(),
+                grant,
+                true
+            )
+            .await
+            .is_ok(),
             read,
             "read {grant:?}"
         );
@@ -120,7 +126,8 @@ impl Fixture {
                 &self.repo,
                 self.agent.public_key().as_bytes(),
                 self.channel,
-                grant
+                grant,
+                true,
             )
             .await
             .expect("admin"),
@@ -128,6 +135,69 @@ impl Fixture {
             "manage {grant:?}"
         );
         tx.rollback().await.expect("rollback");
+    }
+
+    async fn admission_outcomes(&self, open: bool) -> [bool; 4] {
+        let read = self
+            .db
+            .governance_head(
+                self.community,
+                &DocumentId::Rules(self.repo.clone()),
+                self.agent.public_key().as_bytes(),
+                None,
+                open,
+            )
+            .await
+            .is_ok();
+        let receipts = self
+            .db
+            .git_receipts(
+                self.community,
+                &self.repo,
+                self.agent.public_key().as_bytes(),
+                None,
+                None,
+                10,
+                open,
+            )
+            .await
+            .is_ok();
+        let mut writes = Vec::new();
+        for (id, body) in [
+            (
+                DocumentId::Rules(self.repo.clone()),
+                r#"{"version":1,"body":{"type":"rules","rules":[]}}"#.to_owned(),
+            ),
+            (
+                DocumentId::Bind(self.repo.clone()),
+                serde_json::json!({"version":1,"body":{"type":"bind","channel":self.next}})
+                    .to_string(),
+            ),
+        ] {
+            let event = buzz_core::governance::command_builder(
+                *self.community.as_uuid(),
+                &id,
+                &ExpectedHead::Absent,
+                &body,
+            )
+            .expect("command")
+            .sign_with_keys(&self.agent)
+            .expect("sign");
+            let mut tx = self
+                .db
+                .begin_event_write_transaction(self.community)
+                .await
+                .expect("tx");
+            fence_authority_write(&mut tx, &id).await.expect("fence");
+            writes.push(
+                self.db
+                    .prepare_governance_command(&mut tx, &event, None, &self.owner, open)
+                    .await
+                    .is_ok(),
+            );
+            tx.rollback().await.expect("rollback");
+        }
+        [read, receipts, writes[0], writes[1]]
     }
 
     async fn prepared(&self, grant: Option<&GitGrant>, bind: bool) -> Prepared {
@@ -160,7 +230,7 @@ impl Fixture {
         fence_authority_write(&mut tx, &id).await.expect("fence");
         let prepared = self
             .db
-            .prepare_governance_command(&mut tx, &event, grant, &self.owner)
+            .prepare_governance_command(&mut tx, &event, grant, &self.owner, true)
             .await
             .expect("prepare");
         tx.rollback().await.expect("rollback");
@@ -235,4 +305,53 @@ async fn membership_and_delegation_independently_authorize_repo_documents() {
         .bind(f.community.as_uuid()).bind(f.owner.public_key().as_bytes())
         .execute(f.db.pool()).await.expect("ban");
     f.check(Some(&manage), false, false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn closed_git_governance_requires_the_recorded_owners_admission() {
+    let f = Fixture::new().await;
+    // The agent is admitted itself and independently administers both channels.
+    // Its unbanned owner is intentionally absent from relay_members.
+    sqlx::query("INSERT INTO relay_members (community_id,pubkey,role) VALUES ($1,$2,'member')")
+        .bind(f.community.as_uuid())
+        .bind(f.agent.public_key().to_hex())
+        .execute(f.db.pool())
+        .await
+        .expect("admit agent");
+    for ch in [f.channel, f.next] {
+        f.role(ch, &f.agent, Some("admin")).await;
+    }
+    assert_eq!(
+        f.admission_outcomes(false).await,
+        [false; 4],
+        "closed: owner not admitted (read, receipts, rules, bind)"
+    );
+    assert_eq!(
+        f.admission_outcomes(true).await,
+        [true; 4],
+        "open community admits the unbanned owner"
+    );
+    sqlx::query("INSERT INTO relay_members (community_id,pubkey,role) VALUES ($1,$2,'member')")
+        .bind(f.community.as_uuid())
+        .bind(f.owner.public_key().to_hex())
+        .execute(f.db.pool())
+        .await
+        .expect("admit owner");
+    assert_eq!(
+        f.admission_outcomes(false).await,
+        [true; 4],
+        "closed community now admits the owner"
+    );
+    sqlx::query("DELETE FROM relay_members WHERE community_id=$1 AND pubkey=$2")
+        .bind(f.community.as_uuid())
+        .bind(f.owner.public_key().to_hex())
+        .execute(f.db.pool())
+        .await
+        .expect("remove owner");
+    assert_eq!(
+        f.admission_outcomes(false).await,
+        [false; 4],
+        "removing owner admission revokes all Git policy routes"
+    );
 }

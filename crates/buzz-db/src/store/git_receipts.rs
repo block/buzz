@@ -34,6 +34,9 @@ pub struct Page {
 impl Db {
     /// Read receipts only under current repository authority. The caller must
     /// not infer repository existence from a denial.
+    // Keep the repository identity, authorization context and page bounds
+    // explicit at this database boundary.
+    #[allow(clippy::too_many_arguments)]
     pub async fn git_receipts(
         &self,
         community: CommunityId,
@@ -42,6 +45,7 @@ impl Db {
         grant: Option<&buzz_core::governance::GitGrant>,
         before: Option<i64>,
         limit: u32,
+        open: bool,
     ) -> Result<Page> {
         if !(1..=200).contains(&limit) || before.is_some_and(|n| n <= 0) {
             return Err(DbError::InvalidData("invalid receipt page".into()));
@@ -50,8 +54,14 @@ impl Db {
         crate::git_land::hold(&mut tx, repo)
             .await?
             .ok_or_else(|| DbError::AccessDenied("restricted: repository read denied".into()))?;
-        crate::governance::authorize_read(&mut tx, &DocumentId::Rules(repo.clone()), actor, grant)
-            .await?;
+        crate::governance::authorize_read(
+            &mut tx,
+            &DocumentId::Rules(repo.clone()),
+            actor,
+            grant,
+            open,
+        )
+        .await?;
         let rows = sqlx::query("SELECT seq,action,encode(actor_pubkey,'hex') AS actor,detail,created_at FROM audit_log WHERE community_id=$1 AND object_id=$2 AND action IN ('git_landed','git_refused') AND ($3::bigint IS NULL OR seq<$3) ORDER BY seq DESC LIMIT $4")
             .bind(community.as_uuid()).bind(repo.to_string()).bind(before).bind(i64::from(limit)+1).fetch_all(tx.conn()).await?;
         let more = rows.len() > limit as usize;
