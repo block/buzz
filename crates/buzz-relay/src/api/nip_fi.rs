@@ -284,7 +284,9 @@ pub fn restore_sources(
 /// Entries are merged first; sessions are closed afterwards, only for targets
 /// the merge added or extended, on every exit, so a retry that finds an entry
 /// unchanged never hides a close.  A capacity or poison miss gets the same
-/// failsafe close as live delivery.
+/// failsafe close as live delivery.  A failure does not end the pass: every
+/// remaining entry, issuer and source is still merged or closed, and the
+/// first failure is returned.
 pub async fn restore_nip_fi_denies(
     state: &crate::state::AppState,
     sources: &[Arc<dyn buzz_auth::CommandReplayGuard>],
@@ -307,13 +309,16 @@ async fn merge_stored_denies(
     changed: &mut Vec<buzz_pubsub::NipFiDisconnect>,
 ) -> Result<(), &'static str> {
     use buzz_auth::CrossPodMergeResult;
+    // Keep going past a failure so every reachable target is closed in this
+    // pass; the first failure still fails the restore.
+    let mut result = Ok(());
     for source in sources {
         for issuer in deny_map.issuers() {
             let now = chrono::Utc::now();
-            let entries = source
-                .load_denies(&issuer, now)
-                .await
-                .map_err(|_| "store")?;
+            let Ok(entries) = source.load_denies(&issuer, now).await else {
+                result = result.and(Err("store"));
+                continue;
+            };
             for (key, until) in entries {
                 let message = buzz_pubsub::NipFiDisconnect {
                     issuer: issuer.clone(),
@@ -328,16 +333,18 @@ async fn merge_stored_denies(
                     NipFiDisconnectApplyResult::Applied(CrossPodMergeResult::Unchanged) => {}
                     NipFiDisconnectApplyResult::Applied(merge) => {
                         close_after_merge(state, &message, merge);
-                        return Err("capacity");
+                        result = result.and(Err("capacity"));
                     }
                     NipFiDisconnectApplyResult::Disabled | NipFiDisconnectApplyResult::Rejected => {
-                        return Err("capacity")
+                        // Unreachable with consistent config; close defensively.
+                        close_nip_fi_sessions(state, &message, "rejected");
+                        result = result.and(Err("capacity"));
                     }
                 }
             }
         }
     }
-    Ok(())
+    result
 }
 
 /// The single owner of this pod's deny map restoration and cross-pod
@@ -3980,12 +3987,20 @@ mod route_integration_tests {
         store: &buzz_auth::InMemoryCommandReplayGuard,
         target: &nostr::PublicKey,
     ) -> buzz_pubsub::NipFiDisconnect {
+        store_deny_for(store, TEST_ISS, target).await
+    }
+
+    async fn store_deny_for(
+        store: &buzz_auth::InMemoryCommandReplayGuard,
+        issuer: &str,
+        target: &nostr::PublicKey,
+    ) -> buzz_pubsub::NipFiDisconnect {
         use buzz_auth::CommandReplayGuard as _;
         let until = chrono::Utc::now() + chrono::Duration::seconds(300);
         let jti = uuid::Uuid::new_v4().to_string();
         let outcome = store
             .try_claim(buzz_auth::CommandClaim {
-                issuer: TEST_ISS,
+                issuer,
                 jti: &jti,
                 ttl_secs: 60,
                 target,
@@ -3997,7 +4012,7 @@ mod route_integration_tests {
             .unwrap();
         assert_eq!(outcome, buzz_auth::ClaimOutcome::Claimed);
         buzz_pubsub::NipFiDisconnect {
-            issuer: TEST_ISS.to_owned(),
+            issuer: issuer.to_owned(),
             pubkey_bytes: target.to_bytes().to_vec(),
             until_unix: until.timestamp(),
             until_unix_nanos: until.timestamp_subsec_nanos(),
@@ -4290,50 +4305,101 @@ mod route_integration_tests {
         sessions[2].assert_closed("entry extended");
     }
 
-    /// A restore that fails part-way still closes the targets it already
-    /// added, so a retry that finds them unchanged hides no close.
+    /// A restore that fails part-way still closes every target it can reach:
+    /// a failure ends neither the pass over entries, nor over issuers and
+    /// sources, and the first failure still fails the restore.
     #[tokio::test]
     async fn failed_restore_still_closes_targets_it_added() {
         let store = Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
-        let (a, b) = (
-            nostr::Keys::generate().public_key(),
-            nostr::Keys::generate().public_key(),
-        );
-        store_deny(&store, &a).await;
-        // Capacity: the first entry fits, the second misses.
-        store_deny(&store, &b).await;
-        let full = store_pod(
-            1,
-            Arc::clone(&store) as Arc<dyn buzz_auth::CommandReplayGuard>,
-        )
-        .await;
-        let sessions = [&a, &b].map(|k| IssuerSessions::register(&full, TEST_ISS, k));
+        let keys = [(); 3].map(|()| nostr::Keys::generate().public_key());
+        for key in &keys {
+            store_deny(&store, key).await;
+        }
+        let closed = |pod: &AppState| {
+            assert!(
+                is_denied(pod, &nostr::Keys::generate().public_key()),
+                "admission stays closed"
+            );
+        };
+
+        // Capacity: the first entry fits, the next two miss.
+        let full = store_pod(1, Arc::clone(&store) as _).await;
+        let sessions = keys
+            .each_ref()
+            .map(|k| IssuerSessions::register(&full, TEST_ISS, k));
         full.nip_fi_deny_map.as_deref().unwrap().begin_restore();
         assert_eq!(
             restore_nip_fi_denies(&full, &[Arc::clone(&store) as _]).await,
             Err("capacity")
         );
-        sessions[0].assert_closed("first target");
-        sessions[1].assert_closed("second target");
+        for session in &sessions {
+            session.assert_closed("target past a capacity miss");
+        }
+        closed(&full);
 
-        // Store: the first source merges, the second fails to load.
-        let pod = store_pod(
-            10,
-            Arc::clone(&store) as Arc<dyn buzz_auth::CommandReplayGuard>,
-        )
-        .await;
-        let sessions = [&a, &b].map(|k| IssuerSessions::register(&pod, TEST_ISS, k));
+        // Store: a failing source, then a healthy one.
+        let pod = store_pod(10, Arc::clone(&store) as _).await;
+        let sessions = keys
+            .each_ref()
+            .map(|k| IssuerSessions::register(&pod, TEST_ISS, k));
         pod.nip_fi_deny_map.as_deref().unwrap().begin_restore();
         let failing = Arc::new(FailingReplayGuard {
             load_fails: true,
             ..Default::default()
         });
         assert_eq!(
-            restore_nip_fi_denies(&pod, &[Arc::clone(&store) as _, failing]).await,
+            restore_nip_fi_denies(&pod, &[failing, Arc::clone(&store) as _]).await,
             Err("store")
         );
-        sessions[0].assert_closed("merged before the store error");
-        sessions[1].assert_closed("merged before the store error");
+        for session in &sessions {
+            session.assert_closed("source after a store error");
+        }
+        closed(&pod);
+
+        // Store: one issuer fails to load, the other still closes, whichever
+        // the map visits first.
+        const OTHER_ISS: &str = "https://other-issuer.example";
+        for failed in [TEST_ISS, OTHER_ISS] {
+            let inner = Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
+            let (a, b) = (
+                nostr::Keys::generate().public_key(),
+                nostr::Keys::generate().public_key(),
+            );
+            store_deny_for(&inner, TEST_ISS, &a).await;
+            store_deny_for(&inner, OTHER_ISS, &b).await;
+            let source = Arc::new(FailingReplayGuard {
+                inner,
+                fail_issuer: Some(failed),
+                ..Default::default()
+            });
+            let mut config = crate::config::Config::for_test();
+            config.nip_fi.registry.insert(test_issuer_policy());
+            config.nip_fi.registry.insert(issuer_policy(OTHER_ISS));
+            let mut state = build_test_app_state(10, config).await;
+            let capacity = |issuer: &str| IssuerCapacity {
+                issuer: issuer.to_owned(),
+                capacity: 10,
+            };
+            state.nip_fi_deny_map = Some(Arc::new(NipFiDenyMap::new(
+                10,
+                vec![capacity(TEST_ISS), capacity(OTHER_ISS)],
+            )));
+            let pod = Arc::new(state);
+            let live = if failed == TEST_ISS {
+                (OTHER_ISS, &b)
+            } else {
+                (TEST_ISS, &a)
+            };
+            let session = IssuerSessions::register(&pod, live.0, live.1);
+            pod.nip_fi_deny_map.as_deref().unwrap().begin_restore();
+            assert_eq!(
+                restore_nip_fi_denies(&pod, &[source as _]).await,
+                Err("store"),
+                "{failed} failed"
+            );
+            session.assert_closed("issuer after a store error");
+            closed(&pod);
+        }
     }
 
     /// Live delivery still closes sessions when the entry is unchanged.
@@ -4412,6 +4478,8 @@ mod route_integration_tests {
         inner: Arc<buzz_auth::InMemoryCommandReplayGuard>,
         applies: bool,
         load_fails: bool,
+        /// Fails loads for this issuer only.
+        fail_issuer: Option<&'static str>,
         loads: std::sync::atomic::AtomicUsize,
     }
 
@@ -4443,7 +4511,7 @@ mod route_integration_tests {
             now: chrono::DateTime<chrono::Utc>,
         ) -> buzz_auth::LoadDenies<'a> {
             self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if self.load_fails {
+            if self.load_fails || self.fail_issuer == Some(issuer) {
                 return Box::pin(async {
                     Err(buzz_auth::AuthError::Internal(
                         "simulated Redis outage".into(),
