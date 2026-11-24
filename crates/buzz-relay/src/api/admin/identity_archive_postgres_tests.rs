@@ -1,7 +1,4 @@
-//! Route journey for identity retirement: Operator-only, feature-gated,
-//! inventory-bound archive with NIP-IA publication, replay and conflict,
-//! no operator unarchive route, release that never clears an archive, and a
-//! replay superseded by a later NIP-IA unarchive.
+//! Admin-host archive journey exercising Operator authorization, confirmation and NIP-IA.
 
 use std::sync::Arc;
 
@@ -70,7 +67,7 @@ async fn state(enabled: bool) -> (sqlx::PgPool, Arc<AppState>) {
     let pool = sqlx::PgPool::connect(&database_url()).await.unwrap();
     let mut state = nip98_state_with_real_pool(pool.clone()).await;
     let state_mut = Arc::get_mut(&mut state).expect("fresh state");
-    Arc::make_mut(&mut state_mut.config).admin_identity_retirement = enabled;
+    Arc::make_mut(&mut state_mut.config).admin_identity_archive = enabled;
     (pool, state)
 }
 
@@ -117,7 +114,7 @@ async fn tags(pool: &sqlx::PgPool, c: CommunityId, kind: i32) -> Vec<Value> {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn retirement_routes_are_operator_only_gated_bound_and_idempotent() {
+async fn admin_archive_is_operator_only_gated_and_inventory_bound() {
     let operator = test_operator_keys();
     let root = hex::encode(ROOT);
     let agent = hex::encode(AGENT);
@@ -132,7 +129,7 @@ async fn retirement_routes_are_operator_only_gated_bound_and_idempotent() {
         (status, err["error"]["code"].as_str()),
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            Some("identity_retirement_disabled")
+            Some("identity_archive_disabled")
         )
     );
 
@@ -216,21 +213,11 @@ async fn retirement_routes_are_operator_only_gated_bound_and_idempotent() {
         json!({"requestId": request_id, "reason": "left-company", "inventoryVersion": version});
     let (status, first) = call(&on, &operator, "POST", &archive, &body).await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    assert_eq!(first["replayed"], false);
+    assert_eq!(first["requestId"], body["requestId"]);
     assert_eq!(first["communityHost"], host);
     assert_eq!(first["pubkey"], root);
     assert_eq!(first["identities"].as_array().unwrap().len(), 2);
-    assert_eq!(first["workflows"][0]["status"], "archived");
-    assert_eq!(
-        first["stages"],
-        json!({
-            "visibility": "confirmed",
-            "newWorkAdmission": "blocked",
-            "workflows": "confirmed",
-            "inFlightRuns": "none",
-            "agentRuntime": "unsupported",
-        })
-    );
+    assert_eq!(first["stages"], json!({"visibility": "confirmed"}));
 
     // NIP-IA: relay-consent deltas without request reference, and the snapshot.
     let deltas = tags(&pool, c, 8002).await;
@@ -244,101 +231,16 @@ async fn retirement_routes_are_operator_only_gated_bound_and_idempotent() {
     let latest = snapshot.last().unwrap().as_array().unwrap();
     assert!(latest.contains(&json!(["p", root])) && latest.contains(&json!(["p", agent])));
 
-    // Replay: same stored result, no new deltas. Any change: conflict.
     let (status, again) = call(&on, &operator, "POST", &archive, &body).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(again["replayed"], true);
-    assert_eq!(again["actionId"], first["actionId"]);
-    assert_eq!(again["identities"], first["identities"]);
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert!(again["identities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["changed"] == false));
     assert_eq!(tags(&pool, c, 8002).await.len(), 2);
-    let changed = json!({"requestId": request_id, "reason": "other", "inventoryVersion": version});
-    let (status, err) = call(&on, &operator, "POST", &archive, &changed).await;
-    assert_eq!(
-        (status, err["error"]["code"].as_str()),
-        (StatusCode::CONFLICT, Some("request_id_conflict"))
-    );
 
-    // There is no operator unarchive: a signed DELETE on the archive route is
-    // refused by routing and applies nothing.
-    let (status, _) = call(
-        &on,
-        &operator,
-        "DELETE",
-        &archive,
-        &json!({"requestId": Uuid::new_v4()}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
-    assert_eq!(actions(&pool, c).await, 1);
-    assert_eq!(archived(&pool, c).await, 2);
-    assert!(tags(&pool, c, 8003).await.is_empty());
-
-    // Release the agent, then the root.
-    let hold = |key: &str| format!("/members/{key}/execution-hold?communityHost={host}");
-    let (status, released) = call(
-        &on,
-        &operator,
-        "DELETE",
-        &hold(&agent),
-        &json!({"requestId": Uuid::new_v4()}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{released}");
-    assert_eq!(released["stages"]["visibility"], "unchanged");
-    assert_eq!(released["stages"]["newWorkAdmission"], "blocked");
-    assert_eq!(released["workflows"][0]["status"], "active");
-    // Inspected directly, the released agent still shows its owner's hold.
-    let agent_view = format!("/members/{agent}/ownership?communityHost={host}");
-    let request = Request::builder()
-        .uri(&agent_view)
-        .header(header::HOST, "admin.example")
-        .header(
-            header::AUTHORIZATION,
-            make_nostr_auth(&operator, &agent_view),
-        )
-        .body(Body::empty())
-        .unwrap();
-    let (_, view) = send(&on, request).await;
-    assert_eq!(view["identities"][0]["executionHeld"], false, "{view}");
-    assert_eq!(view["identities"][0]["ownerExecutionHeld"], true, "{view}");
-    let (_, released) = call(
-        &on,
-        &operator,
-        "DELETE",
-        &hold(&root),
-        &json!({"requestId": Uuid::new_v4()}),
-    )
-    .await;
-    assert_eq!(released["stages"]["newWorkAdmission"], "released");
-    // Release lifts holds only; both keys stay archived.
-    assert_eq!(released["identities"][0]["archived"], true);
-    assert_eq!(archived(&pool, c).await, 2);
-    assert!(tags(&pool, c, 8003).await.is_empty());
-
-    // A signed NIP-IA unarchive clears the agent. Replaying the archive keeps
-    // its recorded result but no longer claims the snapshot reflects it.
-    assert!(on.db.unarchive(c, &agent).await.unwrap());
-    let (status, superseded) = call(&on, &operator, "POST", &archive, &body).await;
-    assert_eq!(status, StatusCode::OK, "{superseded}");
-    assert_eq!(superseded["replayed"], true);
-    assert_eq!(superseded["identities"], first["identities"]);
-    assert_eq!(superseded["stages"]["visibility"], "superseded");
-    assert_eq!(actions(&pool, c).await, 3);
-    assert_eq!(archived(&pool, c).await, 1);
-}
-
-async fn actions(pool: &sqlx::PgPool, c: CommunityId) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM identity_retirement_actions WHERE community_id = $1")
-        .bind(c.as_uuid())
-        .fetch_one(pool)
-        .await
-        .unwrap()
-}
-
-async fn archived(pool: &sqlx::PgPool, c: CommunityId) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM archived_identities WHERE community_id = $1")
-        .bind(c.as_uuid())
-        .fetch_one(pool)
-        .await
-        .unwrap()
+    let release = format!("/members/{root}/execution-hold?communityHost={host}");
+    let (status, _) = call(&on, &operator, "DELETE", &release, &body).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

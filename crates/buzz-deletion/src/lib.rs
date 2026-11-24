@@ -3001,25 +3001,15 @@ mod postgres_tests {
             .id
             .as_uuid();
         for community in [target, bystander] {
-            for insert in [
-                "INSERT INTO identity_retirement_actions \
-                 (community_id, id, request_id, operation, target_pubkey, actor_pubkey, request, result) \
-                 VALUES ($1, gen_random_uuid(), gen_random_uuid(), 'archive', $2, $2, '{}', '{}')",
-                "INSERT INTO identity_retirement_holds (community_id, pubkey, action_id) \
-                 VALUES ($1, $2, gen_random_uuid())",
-                "INSERT INTO identity_retirement_workflows \
-                 (community_id, workflow_id, owner_pubkey, action_id, archived_at) \
-                 VALUES ($1, gen_random_uuid(), $2, gen_random_uuid(), now())",
+            sqlx::query(
                 "INSERT INTO search_outbox (community_id, event_id, event_created_at) \
                  VALUES ($1, $2, now())",
-            ] {
-                sqlx::query(insert)
-                    .bind(community)
-                    .bind(vec![9_u8; 32])
-                    .execute(db.pool())
-                    .await
-                    .expect("seed forward table");
-            }
+            )
+            .bind(community)
+            .bind(vec![9_u8; 32])
+            .execute(db.pool())
+            .await
+            .expect("seed forward table");
         }
         // Pending tables appear only after approval, from a later expand
         // migration.

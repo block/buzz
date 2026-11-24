@@ -1,4 +1,4 @@
--- Contract step for 0098's widened consent CHECK. Every existing row already
+-- Contract step for 0107's widened consent CHECK. Every existing row already
 -- satisfies it; the scan does not block writes.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';

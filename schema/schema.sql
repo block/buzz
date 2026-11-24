@@ -168,7 +168,3 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 \i tables/public/media_uploaders.sql
 \i tables/public/media_publications.sql
-
-\i tables/public/identity_retirement_actions.sql
-\i tables/public/identity_retirement_holds.sql
-\i tables/public/identity_retirement_workflows.sql

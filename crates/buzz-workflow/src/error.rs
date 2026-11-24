@@ -69,14 +69,6 @@ pub enum WorkflowError {
     /// The action is defined but not yet implemented.
     #[error("action not implemented: {0}")]
     NotImplemented(String),
-
-    /// The run was cancelled while executing; no further step runs.
-    #[error("workflow run was cancelled")]
-    RunCancelled,
-
-    /// The owner is under an identity-retirement execution hold.
-    #[error("workflow owner is under an identity retirement hold")]
-    ExecutionHeld,
 }
 
 impl WorkflowError {
@@ -94,8 +86,6 @@ impl WorkflowError {
             Self::Unauthorized(_) => "owner_unauthorized",
             Self::OwnerBanned => "owner_banned",
             Self::NotImplemented(_) => "action_not_implemented",
-            Self::RunCancelled => "run_cancelled",
-            Self::ExecutionHeld => "execution_held",
         }
     }
 
@@ -116,11 +106,7 @@ impl WorkflowError {
 
 impl From<buzz_db::error::DbError> for WorkflowError {
     fn from(e: buzz_db::error::DbError) -> Self {
-        match e {
-            buzz_db::error::DbError::RunCancelled(_) => WorkflowError::RunCancelled,
-            buzz_db::error::DbError::ExecutionHeld => WorkflowError::ExecutionHeld,
-            e => WorkflowError::Database(e.to_string()),
-        }
+        WorkflowError::Database(e.to_string())
     }
 }
 

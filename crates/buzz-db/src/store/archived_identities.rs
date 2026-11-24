@@ -18,7 +18,7 @@ use crate::Db;
 pub struct ArchivedIdentity {
     /// 64-char lowercase hex pubkey of the archived identity.
     pub pubkey: String,
-    /// Consent path that authorized the archive: `"self"`, `"owner"`, or `"admin"`.
+    /// Consent path that authorized the archive: `"self"`, `"owner"`, `"admin"`, or `"relay"`.
     pub consent_path: String,
     /// 64-char lowercase hex pubkey of the actor that requested the archive.
     pub actor: String,
@@ -26,7 +26,7 @@ pub struct ArchivedIdentity {
     pub reason: Option<String>,
     /// Optional 64-char lowercase hex pubkey replacing this identity.
     pub replaced_by: Option<String>,
-    /// Hex event ID of the archive request that created this row.
+    /// Hex event ID of the archive request, or empty for a relay-initiated archive.
     pub request_event_id: String,
     /// When the identity was archived.
     pub archived_at: DateTime<Utc>,
@@ -70,13 +70,37 @@ pub async fn archive(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    let changed = archive_in_tx(
+        &mut tx,
+        pubkey,
+        consent_path,
+        actor,
+        reason,
+        replaced_by,
+        request_event_id,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+/// Archive an identity in the caller's admitted community. Returns whether it changed.
+pub(crate) async fn archive_in_tx(
+    tx: &mut crate::AdmittedTx,
+    pubkey: &str,
+    consent_path: &str,
+    actor: &str,
+    reason: Option<&str>,
+    replaced_by: Option<&str>,
+    request_event_id: &str,
+) -> Result<bool> {
     let result = sqlx::query(
         "INSERT INTO archived_identities \
          (community_id, pubkey, consent_path, actor, reason, replaced_by, request_event_id) \
          VALUES ($1, $2, $3, $4, $5, $6, $7) \
          ON CONFLICT (community_id, pubkey) DO NOTHING",
     )
-    .bind(community_id.as_uuid())
+    .bind(tx.community().as_uuid())
     .bind(pubkey)
     .bind(consent_path)
     .bind(actor)
@@ -85,7 +109,6 @@ pub async fn archive(
     .bind(request_event_id)
     .execute(tx.conn())
     .await?;
-    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -100,13 +123,19 @@ pub async fn unarchive(pool: &PgPool, community_id: CommunityId, pubkey: &str) -
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    let changed = unarchive_in_tx(&mut tx, pubkey).await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+/// Unarchive an identity in the caller's admitted community. Returns whether it changed.
+pub(crate) async fn unarchive_in_tx(tx: &mut crate::AdmittedTx, pubkey: &str) -> Result<bool> {
     let result =
         sqlx::query("DELETE FROM archived_identities WHERE community_id = $1 AND pubkey = $2")
-            .bind(community_id.as_uuid())
+            .bind(tx.community().as_uuid())
             .bind(pubkey)
             .execute(tx.conn())
             .await?;
-    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 

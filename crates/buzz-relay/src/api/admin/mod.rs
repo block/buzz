@@ -9,8 +9,8 @@
 mod auth;
 mod direct;
 mod error;
+mod identity_archive;
 mod reads;
-mod retirement;
 
 use std::sync::Arc;
 
@@ -42,8 +42,8 @@ pub(crate) fn is_admin_host(state: &crate::state::AppState, headers: &HeaderMap)
 /// the advertised origin without reaching into the private `auth` module.
 pub(crate) use auth::admin_api_origin;
 pub(crate) use auth::is_relay_operator;
+pub(crate) use identity_archive::{execute as execute_identity_archive, ArchiveOperation};
 pub(crate) use reads::{identity_inventory_in, search_members_in, MemberSearchQuery};
-pub(crate) use retirement::execute as execute_identity_retirement;
 
 /// Build the deployment-admin routes.
 ///
@@ -76,11 +76,7 @@ pub fn router(state: Arc<crate::state::AppState>) -> Router {
         )
         .route(
             "/members/{pubkey}/archive",
-            axum::routing::post(retirement::archive),
-        )
-        .route(
-            "/members/{pubkey}/execution-hold",
-            delete(retirement::release),
+            axum::routing::post(identity_archive::archive),
         )
         .route("/events/{id}", get(reads::event_preview))
         .route("/members/restrictions", get(list_member_restrictions))

@@ -412,14 +412,6 @@ async fn set_agent_owner_with_operation(
         "agent owner user",
     )
     .await?;
-    // A new link to a held owner is refused (an existing link returned above).
-    // Retirement writes holds under this admission lock.
-    if crate::store::identity_retirement::owner_is_held(tx.conn(), community_id, owner_pubkey)
-        .await?
-    {
-        tx.rollback().await?;
-        return Err(crate::error::DbError::ExecutionHeld);
-    }
     // First mint wins: the locked read above saw no owner, and the lock keeps
     // it that way until this transaction ends.
     sqlx::query(

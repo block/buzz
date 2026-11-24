@@ -10,10 +10,13 @@ mod postgres_tests {
     const AGENT: [u8; 32] = [0xb2; 32];
     const BASE: &str = "/operator/communities/members";
 
-    async fn retirement_state(operator: &Keys, enabled: bool) -> Option<Arc<AppState>> {
-        let mut state = operator_test_state(std::slice::from_ref(operator)).await?;
+    async fn identity_archive_state(operator: &Keys, enabled: bool) -> Option<Arc<AppState>> {
+        let redis = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let mut state =
+            operator_test_state_with_policy_and_redis(std::slice::from_ref(operator), None, &redis)
+                .await?;
         let config = &mut Arc::get_mut(&mut state).expect("single owner").config;
-        Arc::make_mut(config).admin_identity_retirement = enabled;
+        Arc::make_mut(config).admin_identity_archive = enabled;
         Some(state)
     }
 
@@ -51,14 +54,15 @@ mod postgres_tests {
         (community, host)
     }
 
-    async fn actions(state: &AppState, community: CommunityId) -> i64 {
+    async fn event_tags(state: &AppState, community: CommunityId, kind: i32) -> Vec<Value> {
         sqlx::query_scalar(
-            "SELECT count(*) FROM identity_retirement_actions WHERE community_id = $1",
+            "SELECT tags FROM events WHERE community_id = $1 AND kind = $2 AND deleted_at IS NULL",
         )
         .bind(community.as_uuid())
-        .fetch_one(state.db.pool())
+        .bind(kind)
+        .fetch_all(state.db.pool())
         .await
-        .expect("count actions")
+        .expect("event tags")
     }
 
     /// Send `target` with `auth`, as the operator ingress delivers it.
@@ -117,99 +121,95 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn operator_member_routes_share_the_retirement_lifecycle() {
+    async fn operator_archive_and_unarchive_repair_visibility_on_retry() {
         let operator = Keys::generate();
-        let Some(state) = retirement_state(&operator, true).await else {
-            return;
-        };
-        let (community, host) = community(&state).await;
+        let state = identity_archive_state(&operator, true)
+            .await
+            .expect("test state");
+        let (c, host) = community(&state).await;
+        let (other, other_host) = community(&state).await;
         let root = hex::encode(ROOT);
         let agent = hex::encode(AGENT);
 
-        // Search binds the percent-encoded query exactly as sent.
         let search = format!("{BASE}/search?communityHost={host}&q=alex%20root&limit=5");
         let (status, page) = call(&state, &operator, "GET", &search, None).await;
         assert_eq!(status, StatusCode::OK, "{page}");
-        assert_eq!(page["items"][0]["pubkey"], root, "{page}");
-        assert_eq!(page["items"][0]["displayName"], "Alex Root");
+        assert_eq!(page["items"][0]["pubkey"], root);
 
         let ownership = format!("{BASE}/{root}/ownership?communityHost={host}");
         let (status, inventory) = call(&state, &operator, "GET", &ownership, None).await;
         assert_eq!(status, StatusCode::OK, "{inventory}");
-        let version = inventory["inventoryVersion"]
-            .as_str()
-            .expect("version")
-            .to_owned();
-
+        let version = inventory["inventoryVersion"].as_str().expect("version");
         let archive = format!("{BASE}/{root}/archive?communityHost={host}");
-        let request_id = Uuid::new_v4();
-        let body = serde_json::json!({
-            "requestId": request_id, "reason": "left-company", "inventoryVersion": version,
+        let unarchive = format!("{BASE}/{root}/unarchive?communityHost={host}");
+        let archive_body = serde_json::json!({
+            "requestId": Uuid::new_v4(), "reason": "duplicate", "inventoryVersion": version,
         });
-        let (status, first) = call(&state, &operator, "POST", &archive, Some(&body)).await;
-        assert_eq!(status, StatusCode::OK, "{first}");
-        assert_eq!(first["replayed"], false);
-        assert_eq!(first["communityHost"], host);
-        assert_eq!(first["identities"].as_array().expect("identities").len(), 2);
-        assert_eq!(first["workflows"][0]["status"], "archived");
-        assert_eq!(first["stages"]["newWorkAdmission"], "blocked");
-        let actor: Vec<u8> = sqlx::query_scalar(
-            "SELECT actor_pubkey FROM identity_retirement_actions WHERE community_id = $1",
+
+        crate::handlers::side_effects::publish_test_hooks::fail_next(c);
+        let other_archive = format!("{BASE}/{root}/archive?communityHost={other_host}");
+        let (status, bystander) = call(
+            &state,
+            &operator,
+            "POST",
+            &other_archive,
+            Some(&archive_body),
         )
-        .bind(community.as_uuid())
-        .fetch_one(state.db.pool())
-        .await
-        .expect("actor");
-        assert_eq!(actor, operator.public_key().to_bytes().to_vec());
+        .await;
+        assert_eq!(status, StatusCode::OK, "{bystander}");
+        assert_eq!(event_tags(&state, other, 13535).await.len(), 1);
 
-        // A fresh signature over the same request replays the stored result;
-        // any change to it conflicts.
-        let (status, again) = call(&state, &operator, "POST", &archive, Some(&body)).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(again["replayed"], true);
-        assert_eq!(again["actionId"], first["actionId"]);
-        let changed = serde_json::json!({
-            "requestId": request_id, "reason": "other", "inventoryVersion": version,
-        });
-        let (status, err) = call(&state, &operator, "POST", &archive, Some(&changed)).await;
+        let (status, first) = call(&state, &operator, "POST", &archive, Some(&archive_body)).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{first}");
+        assert_eq!(first["stages"]["visibility"], "pending");
+        assert_eq!(first["identities"][0]["changed"], true);
+        assert_eq!(first["identities"][1]["changed"], true);
+        assert!(event_tags(&state, c, 13535).await.is_empty());
+
+        let (status, retry) = call(&state, &operator, "POST", &archive, Some(&archive_body)).await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(retry["requestId"], archive_body["requestId"]);
+        assert_eq!(retry["stages"]["visibility"], "confirmed");
+        assert_eq!(retry["identities"][0]["changed"], false);
+        assert_eq!(retry["identities"][1]["changed"], false);
+        assert_eq!(event_tags(&state, c, 8002).await.len(), 2);
+        let snapshot = event_tags(&state, c, 13535).await;
+        assert_eq!(snapshot.len(), 1);
+        let snapshot = snapshot[0].as_array().unwrap();
+        assert!(snapshot.contains(&serde_json::json!(["p", root])));
+        assert!(snapshot.contains(&serde_json::json!(["p", agent])));
+
+        let unarchive_body = serde_json::json!({"requestId": Uuid::new_v4()});
+        let (status, restored) =
+            call(&state, &operator, "POST", &unarchive, Some(&unarchive_body)).await;
+        assert_eq!(status, StatusCode::OK, "{restored}");
+        assert_eq!(restored["operation"], "unarchive");
         assert_eq!(
-            (status, lifecycle_code(&err)),
-            (StatusCode::CONFLICT, Some("request_id_conflict"))
+            restored["identities"],
+            serde_json::json!([
+                {"pubkey": root, "role": "root", "archived": false, "changed": true},
+            ])
         );
-        let staff = format!(
-            "{BASE}/{}/archive?communityHost={host}",
-            operator.public_key().to_hex()
-        );
-        let (_, err) = call(&state, &operator, "POST", &staff, Some(&body)).await;
-        assert_eq!(lifecycle_code(&err), Some("target_is_staff"));
+        let (status, retry) =
+            call(&state, &operator, "POST", &unarchive, Some(&unarchive_body)).await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(retry["identities"][0]["changed"], false);
+        let deltas = event_tags(&state, c, 8003).await;
+        assert_eq!(deltas.len(), 1);
+        let delta = deltas[0].as_array().unwrap();
+        assert!(delta.contains(&serde_json::json!(["p", root])));
+        assert!(delta.contains(&serde_json::json!(["consent", "relay"])));
+        assert!(!delta.iter().any(|tag| tag[0] == "e"));
+        let snapshot = event_tags(&state, c, 13535).await;
+        let snapshot = snapshot[0].as_array().unwrap();
+        assert!(!snapshot.contains(&serde_json::json!(["p", root])));
+        assert!(snapshot.contains(&serde_json::json!(["p", agent])));
+        assert!(state.db.is_archived(c, &agent).await.unwrap());
+        assert!(state.db.is_archived(other, &root).await.unwrap());
+        assert!(state.db.is_archived(other, &agent).await.unwrap());
 
-        // There is no operator unarchive: a signed DELETE on the archive
-        // route is refused by routing and applies nothing.
-        let unarchive = serde_json::json!({"requestId": Uuid::new_v4()});
-        let (status, _) = call(&state, &operator, "DELETE", &archive, Some(&unarchive)).await;
-        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
-        assert_eq!(actions(&state, community).await, 1);
-
-        // Release is per key and lifts holds only: both keys stay archived.
-        let hold = |key: &str| format!("{BASE}/{key}/execution-hold?communityHost={host}");
-        let release = serde_json::json!({"requestId": Uuid::new_v4()});
-        let (status, released) =
-            call(&state, &operator, "DELETE", &hold(&agent), Some(&release)).await;
-        assert_eq!(status, StatusCode::OK, "{released}");
-        assert_eq!(released["stages"]["newWorkAdmission"], "blocked");
-        assert_eq!(released["workflows"][0]["status"], "active");
-        let release = serde_json::json!({"requestId": Uuid::new_v4()});
-        let (_, released) = call(&state, &operator, "DELETE", &hold(&root), Some(&release)).await;
-        assert_eq!(released["stages"]["newWorkAdmission"], "released");
-        assert_eq!(released["identities"][0]["archived"], true);
-        let still_archived: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM archived_identities WHERE community_id = $1")
-                .bind(community.as_uuid())
-                .fetch_one(state.db.pool())
-                .await
-                .expect("archived");
-        assert_eq!(still_archived, 2);
-        assert_eq!(actions(&state, community).await, 3);
+        let (_, after) = call(&state, &operator, "GET", &ownership, None).await;
+        assert_eq!(after["workflows"], inventory["workflows"]);
     }
 
     #[tokio::test]
@@ -217,15 +217,20 @@ mod postgres_tests {
     async fn operator_member_routes_refuse_before_applying_anything() {
         let operator = Keys::generate();
         let outsider = Keys::generate();
-        let Some(mut state) = retirement_state(&operator, true).await else {
-            return;
-        };
+        let mut state = identity_archive_state(&operator, true)
+            .await
+            .expect("test state");
         Arc::get_mut(&mut state).expect("single owner").nip98_replay =
             Arc::new(SeenOnceReplayGuard(Mutex::new(HashSet::new())));
         let (community, host) = community(&state).await;
         let root = hex::encode(ROOT);
-        let hold = format!("{BASE}/{root}/execution-hold?communityHost={host}");
+        let unarchive = format!("{BASE}/{root}/unarchive?communityHost={host}");
         let ownership = format!("{BASE}/{root}/ownership?communityHost={host}");
+        state
+            .db
+            .archive(community, &root, "self", &root, None, None, &"a".repeat(64))
+            .await
+            .unwrap();
         let body =
             serde_json::to_vec(&serde_json::json!({"requestId": Uuid::new_v4()})).expect("body");
         let url = |target: &str| format!("http://{INGRESS_HOST}{target}");
@@ -234,7 +239,7 @@ mod postgres_tests {
         let refusals = [
             (
                 "not allowlisted",
-                nip98_auth_header(&outsider, &url(&hold), "DELETE", Some(&body)),
+                nip98_auth_header(&outsider, &url(&unarchive), "POST", Some(&body)),
                 StatusCode::FORBIDDEN,
                 "not_operator",
             ),
@@ -242,8 +247,8 @@ mod postgres_tests {
                 "admin-host origin",
                 nip98_auth_header(
                     &operator,
-                    &format!("https://{INGRESS_HOST}{hold}"),
-                    "DELETE",
+                    &format!("https://{INGRESS_HOST}{unarchive}"),
+                    "POST",
                     Some(&body),
                 ),
                 StatusCode::UNAUTHORIZED,
@@ -254,9 +259,9 @@ mod postgres_tests {
                 nip98_auth_header(
                     &operator,
                     &url(&format!(
-                        "{BASE}/{root}/execution-hold?communityHost=other.example"
+                        "{BASE}/{root}/unarchive?communityHost=other.example"
                     )),
-                    "DELETE",
+                    "POST",
                     Some(&body),
                 ),
                 StatusCode::UNAUTHORIZED,
@@ -266,34 +271,34 @@ mod postgres_tests {
                 "query not signed",
                 nip98_auth_header(
                     &operator,
-                    &url(&format!("{BASE}/{root}/execution-hold")),
-                    "DELETE",
+                    &url(&format!("{BASE}/{root}/unarchive")),
+                    "POST",
                     Some(&body),
                 ),
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
             ),
             (
-                "different DELETE body signed",
-                nip98_auth_header(&operator, &url(&hold), "DELETE", Some(b"{}")),
+                "different POST body signed",
+                nip98_auth_header(&operator, &url(&unarchive), "POST", Some(b"{}")),
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
             ),
             (
-                "DELETE body without payload tag",
-                nip98_auth_header_without_payload(&operator, &url(&hold), "DELETE"),
+                "POST body without payload tag",
+                nip98_auth_header_without_payload(&operator, &url(&unarchive), "POST"),
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
             ),
             (
                 "method not signed",
-                nip98_auth_header(&operator, &url(&hold), "POST", Some(&body)),
+                nip98_auth_header(&operator, &url(&unarchive), "DELETE", Some(&body)),
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
             ),
         ];
         for (case, auth, status, code) in refusals {
-            let (actual, json) = send(&state, "DELETE", &hold, Some(body.clone()), auth).await;
+            let (actual, json) = send(&state, "POST", &unarchive, Some(body.clone()), auth).await;
             assert_eq!(actual, status, "{case}: {json}");
             assert_eq!(json["code"], code, "{case}: {json}");
             assert!(json["error"].is_string(), "{case}: {json}");
@@ -312,11 +317,11 @@ mod postgres_tests {
         );
 
         // Lifecycle refusals use the admin envelope.
-        let unknown = format!("{BASE}/{root}/execution-hold?communityHost=unmapped.example");
+        let unknown = format!("{BASE}/{root}/unarchive?communityHost=unmapped.example");
         let (status, json) = call(
             &state,
             &operator,
-            "DELETE",
+            "POST",
             &unknown,
             Some(&serde_json::json!({"requestId": Uuid::new_v4()})),
         )
@@ -329,46 +334,24 @@ mod postgres_tests {
         // Over the 4096-byte limit.
         let large = serde_json::json!({"requestId": Uuid::new_v4(), "reason": "a".repeat(5000)});
         assert_eq!(
-            call(&state, &operator, "DELETE", &hold, Some(&large))
+            call(&state, &operator, "POST", &unarchive, Some(&large))
                 .await
                 .0,
             StatusCode::PAYLOAD_TOO_LARGE
         );
 
-        // A held retirement lock: definite retry_later, nothing applied.
-        let mut blocker = state.db.pool().begin().await.expect("blocker");
-        sqlx::query(
-            "SELECT pg_advisory_xact_lock(hashtextextended('identity-retirement:' || $1::text, 0))",
-        )
-        .bind(community.as_uuid())
-        .execute(&mut *blocker)
-        .await
-        .expect("hold retirement lock");
-        let (status, json) = call(
-            &state,
-            &operator,
-            "DELETE",
-            &hold,
-            Some(&serde_json::json!({"requestId": Uuid::new_v4()})),
-        )
-        .await;
-        blocker.rollback().await.expect("release lock");
-        assert_eq!(
-            (status, lifecycle_code(&json)),
-            (StatusCode::SERVICE_UNAVAILABLE, Some("retry_later")),
-            "{json}"
-        );
-        assert_eq!(actions(&state, community).await, 0);
+        assert!(state.db.is_archived(community, &root).await.unwrap());
+        assert!(event_tags(&state, community, 8003).await.is_empty());
     }
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn operator_retirement_is_refused_while_the_flag_is_off() {
+    async fn operator_archive_is_refused_while_the_flag_is_off() {
         let operator = Keys::generate();
         let outsider = Keys::generate();
-        let Some(state) = retirement_state(&operator, false).await else {
-            return;
-        };
+        let state = identity_archive_state(&operator, false)
+            .await
+            .expect("test state");
         let (community, host) = community(&state).await;
         let archive = format!("{BASE}/{}/archive?communityHost={host}", hex::encode(ROOT));
         let body =
@@ -385,9 +368,13 @@ mod postgres_tests {
             (status, lifecycle_code(&json)),
             (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Some("identity_retirement_disabled")
+                Some("identity_archive_disabled")
             )
         );
-        assert_eq!(actions(&state, community).await, 0);
+        assert!(!state
+            .db
+            .is_archived(community, &hex::encode(ROOT))
+            .await
+            .unwrap());
     }
 }

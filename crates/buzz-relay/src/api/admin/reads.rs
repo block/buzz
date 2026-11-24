@@ -25,7 +25,7 @@ use crate::state::AppState;
 
 type AppStateRef = State<Arc<AppState>>;
 
-/// Operator-only ownership preview; never a retirement command or complete
+/// Operator-only ownership preview; never an archive command or complete
 /// inventory of external agent hosts, issuer enrollments, or credentials.
 pub(super) async fn identity_inventory(
     State(state): AppStateRef,

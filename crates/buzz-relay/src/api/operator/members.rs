@@ -1,29 +1,26 @@
-//! Member search, the ownership preview, identity retirement and hold release
+//! Member search, the ownership preview, identity archive and unarchive
 //! on the deployment-operator API, for an operator that reaches the relay at
 //! `RELAY_OPERATOR_API_ORIGIN` instead of the admin host.
 //!
 //! Authority is the `RELAY_OPERATOR_PUBKEYS` allowlist. The NIP-98 `u` tag
 //! must equal the configured origin plus the received path and raw query, so
 //! the signature binds `communityHost`; mutations also bind the exact body
-//! bytes, DELETE included. After that check each route runs the same core as
-//! its `/api/admin/v1` counterpart and answers with that route's success body
-//! and lifecycle error envelope. Auth refusals keep this surface's own
+//! bytes. After that check each route runs the shared member-operation core. Auth refusals keep this surface's own
 //! envelope, with a `code` of `unauthorized` (401) or `not_operator` (403).
-//! See `docs/operator-identity-retirement.md`.
+//! See `docs/operator-identity-archive.md`.
 
 use axum::{
     body::Bytes,
     extract::Path,
     http::{Method, Uri},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{get, post},
     Router,
 };
-use buzz_db::identity_retirement::RetirementOperation;
 use tower_http::limit::RequestBodyLimitLayer;
 
 use super::*;
-use crate::api::admin::{self, CommunityQuery, MemberSearchQuery};
+use crate::api::admin::{self, ArchiveOperation, CommunityQuery, MemberSearchQuery};
 
 /// Same cap as the admin API: mutation bodies are a few hundred bytes.
 const BODY_LIMIT: usize = 4096;
@@ -41,8 +38,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(archive),
         )
         .route(
-            "/operator/communities/members/{pubkey}/execution-hold",
-            delete(release),
+            "/operator/communities/members/{pubkey}/unarchive",
+            post(unarchive),
         )
         .layer(RequestBodyLimitLayer::new(BODY_LIMIT))
         .with_state(state)
@@ -119,16 +116,15 @@ async fn identity_inventory(
         .into_response()
 }
 
-/// The retirement mutations: authorize over the exact body, then the
-/// shared lifecycle core.
+/// Authorize the exact body before changing visibility.
 #[allow(clippy::too_many_arguments)] // one Axum extractor per argument, plus the operation
-async fn retire(
+async fn change_visibility(
     state: Arc<AppState>,
     slot: AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    operation: RetirementOperation,
+    operation: ArchiveOperation,
     target: String,
     query: CommunityQuery,
     body: Bytes,
@@ -137,7 +133,7 @@ async fn retire(
         Ok(actor) => actor,
         Err(refusal) => return refusal.into_response(),
     };
-    admin::execute_identity_retirement(
+    admin::execute_identity_archive(
         &state,
         actor,
         operation,
@@ -161,16 +157,16 @@ async fn archive(
     Query(query): Query<CommunityQuery>,
     body: Bytes,
 ) -> Response {
-    let operation = RetirementOperation::Archive;
-    retire(
+    let operation = ArchiveOperation::Archive;
+    change_visibility(
         state, slot, method, uri, headers, operation, target, query, body,
     )
     .await
 }
 
-/// `DELETE /operator/communities/members/{pubkey}/execution-hold?communityHost=`
+/// `POST /operator/communities/members/{pubkey}/unarchive?communityHost=`
 #[allow(clippy::too_many_arguments)] // one Axum extractor per argument
-async fn release(
+async fn unarchive(
     State(state): State<Arc<AppState>>,
     slot: AccessSlot,
     method: Method,
@@ -180,8 +176,8 @@ async fn release(
     Query(query): Query<CommunityQuery>,
     body: Bytes,
 ) -> Response {
-    let operation = RetirementOperation::Release;
-    retire(
+    let operation = ArchiveOperation::Unarchive;
+    change_visibility(
         state, slot, method, uri, headers, operation, target, query, body,
     )
     .await

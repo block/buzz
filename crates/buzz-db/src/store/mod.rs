@@ -29,12 +29,12 @@ mod event_deletion;
 /// App-owned push enqueue and channel TTL refresh for inserted events.
 pub(crate) mod event_follow_up;
 mod event_hydration;
-/// Operator identity retirement: archive, execution hold and release.
-pub mod identity_retirement;
-#[cfg(test)]
-mod identity_retirement_postgres_tests;
 /// Per-community NIP-FI issuer bindings.
 pub mod nip_fi_binding;
+/// Transactional Operator archive of a confirmed identity set.
+pub mod operator_identity_archive;
+#[cfg(test)]
+mod operator_identity_archive_postgres_tests;
 /// Recent-first passes for newest-first `events` page reads.
 pub(crate) mod recent_pass;
 /// In-transaction parent checks for channel, user and relay-member references.
