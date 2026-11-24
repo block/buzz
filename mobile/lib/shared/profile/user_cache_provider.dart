@@ -153,15 +153,15 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
 
   /// Whether [requestLinked] would ask the relay for [pubkey], or enroll it
   /// for the reconnect retry: it has no profile, or only a restored one not
-  /// yet revalidated, and no recent answer said it has none. A key another
-  /// lookup already has on the way still enrolls once, so a link to it is
-  /// retried if that batch fails. Cheap, so a build can check it.
+  /// yet revalidated, no recent answer said it has none, and it isn't
+  /// already enrolled. An enrolled key is asked again only when the relay
+  /// reconnects, so a lookup that failed on a live connection isn't resent on
+  /// every rebuild. A key another lookup already has on the way still enrolls
+  /// once, so a link to it is retried if that batch fails. Cheap, so a build
+  /// can check it.
   bool needsLinkedLookup(String pubkey) {
     final key = pubkey.toLowerCase();
-    if (_isCached(key)) return false;
-    if (_pending.contains(key) || _inFlight.contains(key)) {
-      return !_linkedUnanswered.contains(key);
-    }
+    if (_isCached(key) || _linkedUnanswered.contains(key)) return false;
     final absent = _absentSince[key];
     return absent == null || DateTime.now().difference(absent) >= _absentFor;
   }

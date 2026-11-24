@@ -399,7 +399,9 @@ class _OriginalPost extends ConsumerWidget {
                   profile: profile,
                   pubkey: post.pubkey,
                   radius: 16,
-                  isAgent: agentMentionPubkeys.contains(pk),
+                  isAgent:
+                      agentMentionPubkeys.contains(pk) ||
+                      profile?.ownerPubkey != null,
                 ),
               ),
               const SizedBox(width: Grid.xxs),
@@ -535,7 +537,9 @@ class _ReplyRow extends ConsumerWidget {
                   profile: profile,
                   pubkey: reply.pubkey,
                   radius: 12,
-                  isAgent: agentMentionPubkeys.contains(pk),
+                  isAgent:
+                      agentMentionPubkeys.contains(pk) ||
+                      profile?.ownerPubkey != null,
                 ),
               ),
               const SizedBox(width: Grid.xxs),

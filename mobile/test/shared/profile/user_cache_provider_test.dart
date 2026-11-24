@@ -483,6 +483,11 @@ void main() {
 
     firstBatch.completeError('offline');
     expect(await preload, isFalse);
+    // Rebuilds on the same connection don't resend the failed lookup.
+    expect(cache.needsLinkedLookup('a'), isFalse);
+    cache.requestLinked(['a']);
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(session.requestCount, 1);
     session.setStatus(SessionStatus.disconnected);
     session.setStatus(SessionStatus.connected);
     // The retry rides the next coalesced batch.

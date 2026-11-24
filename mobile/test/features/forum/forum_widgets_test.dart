@@ -803,46 +803,51 @@ void main() {
       },
     );
 
-    testWidgets('uses bot-role classification for an uncached reply author', (
+    testWidgets('marks bot-role and profile-owned reply authors as agents', (
       tester,
     ) async {
+      ThreadReply reply(String id, String pubkey) => ThreadReply(
+        eventId: id,
+        pubkey: pubkey,
+        content: 'Automated reply',
+        kind: 45003,
+        createdAt: 2000,
+        channelId: _channelId,
+        tags: const [
+          ['h', _channelId],
+        ],
+        depth: 1,
+      );
       await tester.pumpWidget(
         _buildThreadPage(
           threadResponse: ForumThreadResponse(
-            post: _makePost(),
-            replies: const [
-              ThreadReply(
-                eventId: 'bot-reply',
-                pubkey: 'channel-bot',
-                content: 'Automated reply',
-                kind: 45003,
-                createdAt: 2000,
-                channelId: _channelId,
-                tags: [
-                  ['h', _channelId],
-                ],
-                depth: 1,
-              ),
+            post: _makePost(pubkey: 'owned-agent'),
+            replies: [
+              reply('bot-reply', 'channel-bot'),
+              reply('owned-reply', 'owned-agent'),
+              reply('human-reply', 'alice'),
             ],
-            totalReplies: 1,
+            totalReplies: 3,
           ),
-          users: const {'alice': _aliceProfile},
+          users: const {
+            'alice': _aliceProfile,
+            'owned-agent': UserProfile(
+              pubkey: 'owned-agent',
+              displayName: 'Helper',
+              ownerPubkey: 'alice',
+            ),
+          },
           channelBotPubkeys: const {'channel-bot'},
         ),
       );
       await tester.pumpAndSettle();
 
-      expect(
-        avatarIn(
-          tester,
-          const ValueKey('forum-reply-avatar-bot-reply'),
-        ).isAgent,
-        isTrue,
-      );
-      expect(
-        avatarIn(tester, const ValueKey('forum-original-avatar-post1')).isAgent,
-        isFalse,
-      );
+      bool isAgent(String key) => avatarIn(tester, ValueKey(key)).isAgent;
+      expect(isAgent('forum-reply-avatar-bot-reply'), isTrue);
+      // Known as an agent only through its profile's owner.
+      expect(isAgent('forum-reply-avatar-owned-reply'), isTrue);
+      expect(isAgent('forum-original-avatar-post1'), isTrue);
+      expect(isAgent('forum-reply-avatar-human-reply'), isFalse);
     });
 
     testWidgets('shows original post and replies header', (tester) async {

@@ -15453,6 +15453,7 @@ void main() {
       'a tagged mention loads its profile and only its row rebuilds',
       (tester) async {
         final mary = 'a' * 64;
+        final owner = 'b' * 64;
         final requested = <String>{};
         final profiles = _FakeUserCacheNotifier(
           {},
@@ -15471,6 +15472,17 @@ void main() {
                 content: 'thanks @Mary Jane',
                 extraTags: [
                   ['p', mary],
+                ],
+              ),
+              // A workflow post's owner attribution mentions no one.
+              _textMsg(
+                id: 'workflow',
+                pubkey: 'alice',
+                content: 'Deploy finished',
+                createdAt: 1000,
+                extraTags: [
+                  ['buzz:workflow', 'true'],
+                  ['p', owner, '', 'owner'],
                 ],
               ),
               for (var i = 0; i < 4; i++)

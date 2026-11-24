@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 
+import '../../shared/mentions/mention_tags.dart';
 import '../../shared/relay/relay.dart';
 
 /// A top-level forum post with an optional thread summary.
@@ -56,11 +57,8 @@ class ForumPost {
     );
   }
 
-  /// Extract mention pubkeys from p-tags.
-  List<String> get mentionPubkeys => [
-    for (final tag in tags)
-      if (tag.length >= 2 && tag[0] == 'p') tag[1],
-  ];
+  /// Keys the post mentions: `p` tags and `mention` references.
+  List<String> get mentionPubkeys => mentionedPubkeysFromTags(tags).toList();
 }
 
 /// Summary of replies on a forum post.
@@ -153,11 +151,8 @@ class ThreadReply {
     );
   }
 
-  /// Extract mention pubkeys from p-tags.
-  List<String> get mentionPubkeys => [
-    for (final tag in tags)
-      if (tag.length >= 2 && tag[0] == 'p') tag[1],
-  ];
+  /// Keys the reply mentions: `p` tags and `mention` references.
+  List<String> get mentionPubkeys => mentionedPubkeysFromTags(tags).toList();
 }
 
 /// Paginated response for forum posts.

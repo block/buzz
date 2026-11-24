@@ -239,10 +239,15 @@ Set<String> loadMentionProfiles(
   List<List<String>> tags,
   Map<String, String> mentionNames,
 ) {
-  final keys = mentionedPubkeysFromTags(tags);
+  final read = readMentionTags(tags);
+  bool unnamed(String pubkey) =>
+      mentionIdentityLinkName(pubkey, mentionNames[pubkey]) == null;
   requestLinkedProfiles(ref, [
-    for (final pubkey in keys)
-      if (!mentionNames.containsKey(pubkey)) pubkey,
+    // A workflow's owner attribution names no one in the text.
+    for (final pubkey in read.mentions)
+      if (tagsAddress(tags, pubkey) && unnamed(pubkey)) pubkey,
+    for (final pubkey in read.references)
+      if (unnamed(pubkey)) pubkey,
   ]);
-  return keys;
+  return {...read.mentions, ...read.references};
 }

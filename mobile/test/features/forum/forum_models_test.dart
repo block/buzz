@@ -93,41 +93,49 @@ void main() {
       expect(post.threadSummary, isNull);
     });
 
-    test('extracts mention pubkeys from p-tags', () {
-      final post = ForumPost.fromJson(
-        _postJson(
-          tags: [
-            ['h', 'ch1'],
-            ['p', 'bob'],
-            ['p', 'carol'],
+    test('extracts mentioned and referenced keys', () {
+      final bob = 'b' * 64;
+      final carol = 'c' * 64;
+      final dave = 'd' * 64;
+      final cases = <(List<List<String>>, List<String>)>[
+        ([], []),
+        (
+          [
+            ['p', bob],
+            ['p', carol],
           ],
+          [bob, carol],
         ),
-      );
-      expect(post.mentionPubkeys, ['bob', 'carol']);
-    });
-
-    test('returns empty mentions when no p-tags', () {
-      final post = ForumPost.fromJson(
-        _postJson(
-          tags: [
-            ['h', 'ch1'],
+        // A two-field mention tag is a reference the composer writes for a
+        // non-member; a three-field one is agent display metadata.
+        (
+          [
+            ['p', bob],
+            ['mention', carol],
+            ['mention', dave, 'agent'],
           ],
+          [bob, carol],
         ),
-      );
-      expect(post.mentionPubkeys, isEmpty);
-    });
-
-    test('skips malformed p-tags with length < 2', () {
-      final post = ForumPost.fromJson(
-        _postJson(
-          tags: [
-            ['h', 'ch1'],
+        (
+          [
             ['p'],
-            ['p', 'bob'],
+            ['p', 'not-a-key'],
+            ['p', bob],
           ],
+          [bob],
         ),
-      );
-      expect(post.mentionPubkeys, ['bob']);
+      ];
+      for (final (tags, expected) in cases) {
+        final json = _postJson(
+          tags: [
+            ['h', 'ch1'],
+            ...tags,
+          ],
+        );
+        expect(ForumPost.fromJson(json).mentionPubkeys, expected);
+        final reply = _replyJson()..['tags'] = json['tags'];
+        expect(ThreadReply.fromJson(reply).mentionPubkeys, expected);
+      }
     });
   });
 
