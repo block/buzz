@@ -555,7 +555,7 @@ class MeFilingClosed implements Exception {
 
   @override
   String toString() =>
-      'Workspaces are now organized on desktop. Create this one there.';
+      'Workspaces are now organized on desktop. Make changes there.';
 }
 
 bool _filingsDiffer(MeGroups a, MeGroups b) =>

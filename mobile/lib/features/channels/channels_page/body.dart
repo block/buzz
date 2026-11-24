@@ -386,8 +386,8 @@ class _SliverChannelsList extends HookConsumerWidget {
       );
     }
 
-    // Only the team sections record can be edited, and only until desktop's
-    // unified workspaces exist. The mobile display order is stored separately.
+    // Legacy Team and Solo workspaces are editable until desktop takes over.
+    // The mobile display order is stored separately.
     final teamSections = sectionsState.editable
         ? (sectionsState.store.sections.toList()
             ..sort((a, b) => a.order.compareTo(b.order)))
@@ -689,6 +689,48 @@ class _SliverChannelsList extends HookConsumerWidget {
       ],
     );
     if (orderKey == null) return content;
+
+    Future<void> deleteSoloWorkspace(String id, String name) async {
+      if (!context.mounted) return;
+      final container = ProviderScope.containerOf(context, listen: false);
+      final sync = ref.read(meSyncProvider);
+      bool sameAccount() =>
+          !sync.disposed &&
+          container.read(mobileSectionOrderKeyProvider) == orderKey;
+      bool mayFile() =>
+          sameAccount() && container.read(channelSectionsProvider).editable;
+      if (!mayFile()) return;
+      try {
+        final confirmed = await showDestructiveConfirmation(
+          context: context,
+          title: 'Delete “$name”?',
+          message: 'Chats in this workspace will move back to Solo.',
+          confirmLabel: 'Delete workspace',
+        );
+        if (!confirmed || !context.mounted || !sameAccount()) return;
+        if (!mayFile()) throw const MeFilingClosed();
+        try {
+          await sync.update(
+            (groups) => groups.removeWorkspace(id),
+            mayFile: mayFile,
+          );
+        } on MeRecoveryConflict {
+          if (context.mounted && sameAccount()) {
+            await offerMeRecovery(context, sync);
+          }
+        }
+        if (context.mounted && sameAccount()) ref.invalidate(meGroupsProvider);
+      } catch (error) {
+        if (context.mounted && sameAccount()) {
+          showBuzzToast(
+            context,
+            error.toString().replaceFirst('Bad state: ', ''),
+            kind: ToastKind.error,
+          );
+        }
+      }
+    }
+
     return SectionOrderScope(
       labels: labels,
       sectionIds: {
@@ -699,6 +741,14 @@ class _SliverChannelsList extends HookConsumerWidget {
         final actions = editsFor(section, key.substring(6));
         await (remove ? actions.onDelete : actions.onRename)();
       },
+      soloSectionIds: {
+        if (sectionsState.editable)
+          for (final section in layout.sections)
+            if (section.teamId == null &&
+                labels.containsKey('group:${section.id}'))
+              'group:${section.id}': section.id,
+      },
+      onDeleteSolo: deleteSoloWorkspace,
       defaultOrder: keys,
       storageKey: orderKey,
       child: content,
