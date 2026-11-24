@@ -3,6 +3,8 @@ import 'dart:math';
 
 const defaultActiveWindowSeconds = 30 * 86400;
 
+const sectionCounts = [5, 10, 15, 20, 0]; // Zero means all matching chats.
+
 enum ChannelFilterMode { all, unreads, active }
 
 bool validActiveWindow(Object? value) =>
@@ -45,6 +47,12 @@ class ChannelFilterStore {
     }
 
     copy['groups'] = salvage(copy['groups'], _mode);
+    if (copy.containsKey('previewCounts')) {
+      copy['previewCounts'] = salvage(
+        copy['previewCounts'],
+        (value) => value is int && sectionCounts.contains(value),
+      );
+    }
     if (copy.containsKey('activeWindowSeconds')) {
       copy['activeWindowSeconds'] = salvage(
         copy['activeWindowSeconds'],
@@ -99,6 +107,16 @@ class ChannelFilterStore {
     };
   }
 
+  int countFor(String group) =>
+      (_record['previewCounts'] as Map?)?[group] as int? ?? sectionCounts.first;
+
+  int? limitFor(String group) {
+    final count = countFor(group);
+    return modeFor(group) == ChannelFilterMode.active || count == 0
+        ? null
+        : count;
+  }
+
   int windowFor(String group) =>
       (_record['activeWindowSeconds'] as Map?)?[group] as int? ??
       defaultActiveWindowSeconds;
@@ -108,11 +126,13 @@ class ChannelFilterStore {
   ChannelFilterStore edit(
     String group,
     ChannelFilterMode mode, {
+    int? previewCount,
     int? windowSeconds,
     bool removeWindow = false,
     int remoteCreatedAt = 0,
   }) {
     if (!_key(group) ||
+        (previewCount != null && !sectionCounts.contains(previewCount)) ||
         (windowSeconds != null &&
             (!validActiveWindow(windowSeconds) ||
                 mode != ChannelFilterMode.active))) {
@@ -153,6 +173,19 @@ class ChannelFilterStore {
       for (final e in registers.entries)
         if ((e.value as List)[2] != null) e.key: e.value[2],
     };
+    if (previewCount != null || removeWindow) {
+      final counts = (data['previewCounts'] as Map?) ?? {};
+      if (removeWindow || previewCount == sectionCounts.first) {
+        counts.remove(group);
+      } else {
+        counts[group] = previewCount;
+      }
+      if (counts.isEmpty) {
+        data.remove('previewCounts');
+      } else {
+        data['previewCounts'] = counts;
+      }
+    }
     final windows =
         (data['activeWindowSeconds'] as Map?)?.cast<String, dynamic>() ??
         <String, dynamic>{};

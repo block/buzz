@@ -116,6 +116,7 @@ jobs:
               - 'scripts/test-mobile-pagination-accessibility.sh'
               - 'scripts/test-mobile-carousel.sh'
               - 'scripts/test-mobile-member-picker.sh'
+              - 'scripts/test-mobile-setting-menu.sh'
               - 'scripts/mobile-release.sh'
               - 'scripts/mobile-release-source.sh'
               - 'scripts/mobile-worktree-overrides.sh'
@@ -145,6 +146,7 @@ jobs:
               - 'scripts/test-mobile-pagination-accessibility.sh'
               - 'scripts/test-mobile-carousel.sh'
               - 'scripts/test-mobile-member-picker.sh'
+              - 'scripts/test-mobile-setting-menu.sh'
               - '.github/workflows/ci.yml'
               - '.github/workflows/_ci-clients.yml'
       - name: Select runtime suites conservatively at the PR file-list limit

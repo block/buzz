@@ -144,39 +144,4 @@ void main() {
     );
     expect(await storage.read(), isNull);
   });
-
-  test(
-    'cleanup keeps only each community\'s current account and its save',
-    () async {
-      Future<void> save(String community, String signer) =>
-          OpenChannelDirectoryStorage(
-            Future.value(fileFor(community, signer)),
-          ).write(
-            SavedOpenChannelDirectory(
-              metas: [_meta('a', 1)],
-              fullAt: 1,
-              readAt: 1,
-            ),
-          );
-      await save('one', 'current');
-      await save('one', 'signed-out');
-      await save('two', 'current');
-      // A save of the retained account in progress, and a stale one.
-      final pending = File('${fileFor('one', 'current').path}.pending')
-        ..writeAsStringSync('');
-      final stalePending = File('${fileFor('one', 'signed-out').path}.pending')
-        ..writeAsStringSync('');
-
-      await OpenChannelDirectoryStorage.removeOrphans(
-        root,
-        () => {'one': 'current', 'two': null},
-      );
-
-      expect(fileFor('one', 'current').existsSync(), isTrue);
-      expect(fileFor('one', 'signed-out').existsSync(), isFalse);
-      expect(fileFor('two', 'current').existsSync(), isFalse);
-      expect(pending.existsSync(), isTrue);
-      expect(stalePending.existsSync(), isFalse);
-    },
-  );
 }

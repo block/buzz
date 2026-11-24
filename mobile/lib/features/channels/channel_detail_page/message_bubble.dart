@@ -39,6 +39,7 @@ class _MessageBubble extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final container = ProviderScope.containerOf(context, listen: false);
     final startsThreads = ref.watch(
       channelStartsThreadsProvider(currentChannelId),
     );
@@ -74,10 +75,6 @@ class _MessageBubble extends HookConsumerWidget {
     final isAgent =
         ref.watch(agentMentionPubkeysProvider(currentChannelId)).contains(pk) ||
         profile?.ownerPubkey != null;
-    final canManageMessage =
-        currentPubkey?.toLowerCase() == pk ||
-        (profile?.ownerPubkey != null &&
-            profile?.ownerPubkey == currentPubkey?.toLowerCase());
 
     // Watch only profiles referenced by this message. A batched profile fetch
     // should not rebuild every visible message just because an unrelated user
@@ -128,7 +125,7 @@ class _MessageBubble extends HookConsumerWidget {
         ref: ref,
         message: message,
         channelId: currentChannelId,
-        canManageMessage: canManageMessage,
+        canManageMessage: readCanManageMessage(ref, pk, currentPubkey),
         allMessages: allMessages,
         currentPubkey: currentPubkey,
         isMember: isMember,
@@ -220,17 +217,15 @@ class _MessageBubble extends HookConsumerWidget {
                                       reactions: message.reactions,
                                       onToggle: (emoji) => toggleReaction(
                                         context,
-                                        ref,
+                                        container,
                                         message,
                                         emoji,
                                       ),
                                       showAddButton: isMember && !isArchived,
-                                      onAddReaction: () =>
-                                          showAddReactionPicker(
-                                            context: context,
-                                            ref: ref,
-                                            message: message,
-                                          ),
+                                      onAddReaction: addReactionPickerFor(
+                                        context: context,
+                                        message: message,
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -280,8 +275,12 @@ class _MessageBubble extends HookConsumerWidget {
                                     Padding(
                                       padding: EdgeInsets.only(
                                         bottom: Grid.quarter,
-                                        left: ownMessage ? 0 : Grid.xs,
-                                        right: ownMessage ? Grid.xs : 0,
+                                        left: ownMessage
+                                            ? 0
+                                            : messageBubbleHorizontalInset,
+                                        right: ownMessage
+                                            ? messageBubbleHorizontalInset
+                                            : 0,
                                       ),
                                       child: MessageLongPressTarget(
                                         child: MessageAuthorMeta(
@@ -293,23 +292,13 @@ class _MessageBubble extends HookConsumerWidget {
                                           alignment: ownMessage
                                               ? MainAxisAlignment.end
                                               : MainAxisAlignment.start,
-                                          nameStyle: messageUsernameTextStyle
+                                          nameStyle: messageBylineTextStyle
                                               .copyWith(
                                                 fontWeight: FontWeight.w500,
-                                                fontSize: 11,
-                                                height: 17 / 11,
                                               ),
-                                          metadataStyle:
-                                              messageMetadataTextStyle.copyWith(
-                                                fontSize: 11,
-                                                height: 17 / 11,
-                                              ),
+                                          metadataStyle: messageBylineTextStyle,
                                           timestampStyle:
-                                              messageTimestampTextStyle
-                                                  .copyWith(
-                                                    fontSize: 11,
-                                                    height: 17 / 11,
-                                                  ),
+                                              messageBylineTextStyle,
                                           displayName: ownMessage
                                               ? 'You'
                                               : displayName,
@@ -408,7 +397,12 @@ class _MessageBubble extends HookConsumerWidget {
                                           ref: ref,
                                           message: message,
                                           channelId: currentChannelId,
-                                          canManageMessage: canManageMessage,
+                                          canManageMessage: () =>
+                                              readCanManageMessage(
+                                                ref,
+                                                pk,
+                                                currentPubkey,
+                                              ),
                                         ),
                                         onMediaMore:
                                             (viewerContext, imageUrl) =>
@@ -419,7 +413,11 @@ class _MessageBubble extends HookConsumerWidget {
                                                   channelId: currentChannelId,
                                                   imageUrl: imageUrl,
                                                   canManageMessage:
-                                                      canManageMessage,
+                                                      readCanManageMessage(
+                                                        ref,
+                                                        pk,
+                                                        currentPubkey,
+                                                      ),
                                                   onDeleted: () {
                                                     if (viewerContext.mounted) {
                                                       Navigator.of(

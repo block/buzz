@@ -97,10 +97,17 @@ class _ComposeBarLayout extends HookWidget {
     BuildContext context,
     Animation<double> recordingTransition,
   ) {
-    final trimmedDraft = controller.text.trim();
-    final collapsedText = trimmedDraft.isEmpty
-        ? resolvedHint
-        : trimmedDraft.replaceAll(RegExp(r'\s+'), ' ');
+    final hasDraft = controller.text.isNotEmpty;
+    final inactiveText = Text(
+      hasDraft ? controller.text : resolvedHint,
+      maxLines: hasDraft ? null : 1,
+      overflow: hasDraft ? TextOverflow.clip : TextOverflow.ellipsis,
+      style: messageBodyTextStyle.copyWith(
+        color: hasDraft
+            ? context.colors.onSurface
+            : context.colors.onSurfaceVariant,
+      ),
+    );
     final hasVoiceNoteAttachment = attachments.any(
       (attachment) => attachment.kind == _PendingAttachmentKind.voiceNote,
     );
@@ -124,7 +131,7 @@ class _ComposeBarLayout extends HookWidget {
             alignment: Alignment.centerLeft,
             child: Text(
               error,
-              style: context.textTheme.bodySmall?.copyWith(
+              style: messageCaptionTextStyle.copyWith(
                 color: context.colors.error,
               ),
             ),
@@ -179,21 +186,29 @@ class _ComposeBarLayout extends HookWidget {
                       onTap: () => _runComposerAction(onExpand),
                       child: Padding(
                         padding: EdgeInsets.symmetric(
-                          vertical: keyboardToolbar ? 0 : Grid.half,
-                          horizontal: keyboardToolbar ? Grid.half : 0,
+                          vertical: hasDraft
+                              ? Grid.half
+                              : keyboardToolbar
+                              ? 0
+                              : Grid.half,
+                          horizontal: keyboardToolbar || hasDraft
+                              ? Grid.half
+                              : 0,
                         ),
                         child: Align(
                           alignment: Alignment.centerLeft,
-                          child: Text(
-                            collapsedText,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: context.textTheme.bodyLarge?.copyWith(
-                              color: trimmedDraft.isEmpty
-                                  ? context.colors.onSurfaceVariant
-                                  : context.colors.onSurface,
-                            ),
-                          ),
+                          child: hasDraft
+                              ? ConstrainedBox(
+                                  constraints: BoxConstraints(
+                                    maxHeight:
+                                        MediaQuery.sizeOf(context).height / 2,
+                                  ),
+                                  child: SingleChildScrollView(
+                                    primary: false,
+                                    child: inactiveText,
+                                  ),
+                                )
+                              : inactiveText,
                         ),
                       ),
                     ),
@@ -319,9 +334,7 @@ class _ComposeBarLayout extends HookWidget {
       builder: (context, child) {
         final progress = expansionAnimation.value.clamp(0.0, 1.0).toDouble();
         final usesCapsule =
-            (!isExpanded || controller.text.isEmpty) &&
-            attachments.isEmpty &&
-            uploadError == null;
+            !hasDraft && attachments.isEmpty && uploadError == null;
         final composerRadius =
             defaultTargetPlatform == TargetPlatform.iOS && usesCapsule
             ? Radii.full
@@ -336,6 +349,11 @@ class _ComposeBarLayout extends HookWidget {
         final voiceNoteInsetProgress = hasVoiceNoteAttachment
             ? 1.0
             : recordingTransition.value;
+        // Both draft presentations include four points around the text.
+        final messageInsets =
+            (hasDraft || (!keyboardToolbar && isExpanded)) &&
+            voiceNoteRecorder == null &&
+            voiceNoteInsetProgress == 0;
         final composer = KeyedSubtree(
           key: surfaceKey,
           child: Container(
@@ -351,9 +369,17 @@ class _ComposeBarLayout extends HookWidget {
               ),
             ),
             padding: EdgeInsets.symmetric(
-              horizontal: Grid.xxs + Grid.half * voiceNoteInsetProgress,
+              horizontal:
+                  (messageInsets
+                      ? messageBubbleHorizontalInset - Grid.half - 1
+                      : Grid.xxs) +
+                  Grid.half * voiceNoteInsetProgress,
               vertical:
-                  (usesIosConcentricSurface ? 5 : Grid.xxs) +
+                  (messageInsets
+                      ? messageBubbleVerticalInset - Grid.half - 1
+                      : usesIosConcentricSurface
+                      ? 5
+                      : Grid.xxs) +
                   Grid.half * voiceNoteInsetProgress,
             ),
             child: child,
@@ -418,6 +444,7 @@ class _ComposeBarLayout extends HookWidget {
       readOnly: readOnly,
       inputFormatters: [_ComposerChipEditingFormatter(controller)],
       keyboardType: TextInputType.multiline,
+      textCapitalization: TextCapitalization.sentences,
       textInputAction: TextInputAction.newline,
       contextMenuBuilder: contextMenuBuilder,
       // Flutter's Cupertino magnifier rebuilds its overlay on every
@@ -433,11 +460,11 @@ class _ComposeBarLayout extends HookWidget {
       ),
       minLines: 1,
       maxLines: 5,
-      style: context.textTheme.bodyLarge,
+      style: messageBodyTextStyle,
       decoration: InputDecoration(
         hintText: resolvedHint,
         hintMaxLines: 1,
-        hintStyle: context.textTheme.bodyLarge?.copyWith(
+        hintStyle: messageBodyTextStyle.copyWith(
           color: context.colors.onSurfaceVariant,
         ),
         border: InputBorder.none,
@@ -445,7 +472,7 @@ class _ComposeBarLayout extends HookWidget {
         focusedBorder: InputBorder.none,
         contentPadding: EdgeInsets.symmetric(
           horizontal: Grid.half,
-          vertical: keyboardToolbar ? 0 : Grid.half,
+          vertical: keyboardToolbar && controller.text.isEmpty ? 0 : Grid.half,
         ),
         isDense: true,
       ),
