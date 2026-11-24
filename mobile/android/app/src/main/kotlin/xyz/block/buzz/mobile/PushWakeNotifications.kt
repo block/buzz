@@ -221,12 +221,13 @@ internal class WakeNotifier(private val context: Context) {
         if (!genericLost()) manager.cancel(GENERIC_TAG, GENERIC_ID)
     }
 
-    private fun genericLost(): Boolean =
-        manager.activeNotifications
-            .firstOrNull { it.tag == GENERIC_TAG && it.id == GENERIC_ID }
-            ?.notification
-            ?.extras
-            ?.getBoolean(LOST_EXTRA) == true
+    /** Whether the generic notification is still showing. */
+    fun genericActive(): Boolean = activeGeneric() != null
+
+    private fun genericLost(): Boolean = activeGeneric()?.notification?.extras?.getBoolean(LOST_EXTRA) == true
+
+    private fun activeGeneric() =
+        manager.activeNotifications.firstOrNull { it.tag == GENERIC_TAG && it.id == GENERIC_ID }
 
     private fun existingStyle(tag: String): NotificationCompat.MessagingStyle? =
         manager.activeNotifications

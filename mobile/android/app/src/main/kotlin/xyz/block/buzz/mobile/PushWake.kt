@@ -208,6 +208,9 @@ internal object PushWake {
         }
 
         private fun keepGeneric(silent: Boolean) {
+            // A card this wake already showed, and the user has since cleared,
+            // stays cleared.
+            if (genericShown && !notifier.genericActive()) return
             genericShown = true
             notifier.postGeneric(silent, lost = true)
         }
