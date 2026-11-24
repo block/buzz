@@ -77,6 +77,8 @@ import 'package:buzz/features/channels/channel_stars/channel_stars_provider.dart
 import 'package:buzz/features/channels/channel_stars/channel_stars_storage.dart';
 import 'package:buzz/features/channels/channel_typing_provider.dart';
 import 'package:buzz/features/channels/composer_dock_size_reporter.dart';
+import 'package:buzz/features/channels/composer_geometry.dart';
+import 'package:buzz/features/channels/conversation_list_icon.dart';
 import 'package:buzz/features/channels/date_formatters.dart';
 import 'package:buzz/features/channels/day_divider.dart';
 import 'package:buzz/shared/emoji/emoji_picker.dart';

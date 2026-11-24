@@ -141,6 +141,9 @@ class IosNavigationBar extends HookConsumerWidget {
     this.titlePresenceColor,
     this.titleRefreshing = false,
     this.onTitlePressed,
+    this.subtitleIcon,
+    this.titleDisclosure = false,
+    this.titleAccessibilityLabel,
     this.largeTitle = false,
     this.externalExpandedTitle = false,
     this.alwaysFrosted = false,
@@ -176,6 +179,16 @@ class IosNavigationBar extends HookConsumerWidget {
   /// Shows a refresh bar along the bottom of the subtitled title capsule.
   final bool titleRefreshing;
   final VoidCallback? onTitlePressed;
+
+  /// Custom font artwork leading the capsule's subtitle, tinted as its text.
+  final IconData? subtitleIcon;
+
+  /// Ends the subtitle with a chevron: the capsule opens what it names.
+  final bool titleDisclosure;
+
+  /// What the capsule announces, in place of its title, subtitle and the
+  /// settings hint. A capsule with no [onTitlePressed] announces it dimmed.
+  final String? titleAccessibilityLabel;
   final bool largeTitle;
   final bool externalExpandedTitle;
 
@@ -302,6 +315,7 @@ class IosNavigationBar extends HookConsumerWidget {
     );
     final iconImages = useState(<String, ({IconData icon, String data})>{});
     final icons = <String, IconData>{
+      'subtitle': ?subtitleIcon,
       if (leading?.icon != null) 'leading': leading!.icon!,
       for (var i = 0; i < actions.length; i++)
         if (actions[i].icon != null) '$i': actions[i].icon!,
@@ -399,6 +413,13 @@ class IosNavigationBar extends HookConsumerWidget {
       'titleRefreshing': titleRefreshing,
       'titleRefreshColor': ChatColors.of(context).outgoing.toARGB32(),
       'titleEnabled': onTitlePressed != null,
+      // The slot is held while the artwork renders, so the label stays put.
+      'subtitleIcon': subtitleIcon != null,
+      if (subtitleIcon != null &&
+          iconImages.value['subtitle']?.icon == subtitleIcon)
+        'subtitleIconData': iconImages.value['subtitle']!.data,
+      'titleDisclosure': titleDisclosure,
+      'titleAccessibilityLabel': titleAccessibilityLabel,
       'largeTitle': largeTitle,
       'externalExpandedTitle': externalExpandedTitle,
       'alwaysFrosted': alwaysFrosted,

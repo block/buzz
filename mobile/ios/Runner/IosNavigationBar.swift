@@ -643,6 +643,16 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       let accessibleTitle = [item.title ?? "", subtitle].filter { !$0.isEmpty }.joined(separator: ", ")
       button.accessibilityLabel = enabled ? "Open settings for \(accessibleTitle)" : accessibleTitle
       button.accessibilityTraits = enabled ? .button : .header
+      if let spoken = args["titleAccessibilityLabel"] as? String {
+        // A capsule that goes somewhere says where; one that cannot act yet
+        // stays a dimmed button rather than becoming a heading.
+        button.accessibilityLabel = spoken
+        button.accessibilityTraits = enabled ? .button : [.button, .notEnabled]
+      }
+      if args["subtitleIcon"] as? Bool == true {
+        button.setSubtitleIcon(Self.fontArtwork(args["subtitleIconData"]))
+      }
+      if args["titleDisclosure"] as? Bool == true { button.setDisclosure() }
       button.isUserInteractionEnabled = enabled
       if enabled {
         button.onActivate = { [weak self] in self?.channel.invokeMethod("action", arguments: "title") }
@@ -1027,11 +1037,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     item.accessibilityLabel = data["label"] as? String
     item.isEnabled = data["enabled"] as? Bool == true
     if data["avatarInitial"] is String { item.title = nil }
-    if let encoded = data["iconData"] as? String,
-       let bytes = Data(base64Encoded: encoded), let image = UIImage(data: bytes) {
-      item.image = UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24)).image { _ in
-        image.draw(in: CGRect(x: 0, y: 0, width: 24, height: 24))
-      }.withRenderingMode(.alwaysTemplate)
+    if let artwork = Self.fontArtwork(data["iconData"]) {
+      item.image = artwork
       item.title = nil
     }
 
@@ -1112,6 +1119,15 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       return avatarItem
     }
     return item
+  }
+
+  /// Flutter's rendering of a custom icon-font glyph, as a 24pt template.
+  private static func fontArtwork(_ encoded: Any?) -> UIImage? {
+    guard let encoded = encoded as? String,
+          let bytes = Data(base64Encoded: encoded), let image = UIImage(data: bytes) else { return nil }
+    return UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24)).image { _ in
+      image.draw(in: CGRect(x: 0, y: 0, width: 24, height: 24))
+    }.withRenderingMode(.alwaysTemplate)
   }
 
   private static func color(_ value: Any?) -> UIColor {

@@ -172,7 +172,7 @@ class _MeChatRow extends ConsumerWidget {
                 child: Align(
                   alignment: Alignment.centerLeft,
                   child: Icon(
-                    BuzzIcons.messageCircle,
+                    soloChatListIcon,
                     size: Grid.inventoryIconSize,
                     color: navigationRowIconForeground(context),
                   ),

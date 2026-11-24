@@ -44,10 +44,17 @@ class _PinRecordingMessagesNotifier extends _FakeMessagesNotifier {
 
 final _threadUpRow = find.byKey(const ValueKey('thread-up-level'));
 
+final _threadUpChevron = find.byKey(const ValueKey('thread-up-level-chevron'));
+final _threadUpLoading = find.byKey(const ValueKey('thread-up-level-loading'));
+
 String _threadUpLabel(WidgetTester tester) => tester
     .widget<Text>(find.byKey(const ValueKey('thread-up-level-label')))
-    .textSpan!
-    .toPlainText();
+    .data!;
+
+/// The glyph leading the label, or null when it has none.
+Icon? _threadUpIcon(WidgetTester tester) => tester
+    .widgetList<Icon>(find.byKey(const ValueKey('thread-up-level-icon')))
+    .firstOrNull;
 
 ThreadDetailPage _shownThread(WidgetTester tester) =>
     tester.widget<ThreadDetailPage>(find.byType(ThreadDetailPage));
@@ -111,6 +118,7 @@ const _threadUpUsers = {
 Channel _threadUpChannel({
   required String name,
   String channelType = 'stream',
+  String visibility = 'open',
   List<String> labels = const [],
   List<String> participants = const [],
   List<String> participantPubkeys = const [],
@@ -119,7 +127,7 @@ Channel _threadUpChannel({
   name: name,
   channelType: channelType,
   labels: labels,
-  visibility: 'open',
+  visibility: visibility,
   description: '',
   createdBy: 'abc123',
   createdAt: DateTime(2025),
@@ -146,37 +154,76 @@ enum _ThreadLanding {
 
 void threadUpLevelTests() {
   group('thread up one level', () {
-    for (final (kind, channel, label) in [
-      ('channel', _testChannel, '#general'),
-      (
-        'DM',
-        _threadUpChannel(
-          name: 'DM',
-          channelType: 'dm',
-          participantPubkeys: ['self', 'alice'],
-          participants: ['Me', 'Alice'],
-        ),
-        'DM · Alice',
-      ),
-      (
-        'Solo chat',
-        _threadUpChannel(name: 'Research notes', labels: ['buzz.solo']),
-        'Research notes',
-      ),
-    ]) {
-      testWidgets('names its $kind and hides when that is unresolved', (
-        tester,
-      ) async {
+    for (final (kind, channel, legacySolo, icon, label, dark, textScale)
+        in <(String, Channel, bool, IconData?, String, bool, double)>[
+          (
+            'public channel',
+            _testChannel,
+            false,
+            BuzzIcons.hash,
+            'general',
+            false,
+            1,
+          ),
+          (
+            'private channel',
+            _threadUpChannel(name: 'leads', visibility: 'private'),
+            false,
+            BuzzIcons.lock,
+            'leads',
+            true,
+            1,
+          ),
+          (
+            'DM',
+            _threadUpChannel(
+              name: 'DM',
+              channelType: 'dm',
+              participantPubkeys: ['self', 'alice'],
+              participants: ['Me', 'Alice'],
+            ),
+            false,
+            // The Messages list leads a DM with avatars, not a glyph.
+            null,
+            'DM · Alice',
+            false,
+            1,
+          ),
+          (
+            'Solo chat in large text',
+            _threadUpChannel(name: 'Research notes', labels: ['buzz.solo']),
+            false,
+            BuzzIcons.messageCircle,
+            'Research notes',
+            true,
+            2,
+          ),
+          (
+            'Solo chat from before the Solo label',
+            _threadUpChannel(name: 'Old notes', visibility: 'private'),
+            true,
+            BuzzIcons.messageCircle,
+            'Old notes',
+            false,
+            1,
+          ),
+        ]) {
+      testWidgets('names its $kind as the Messages list marks it, and is '
+          'plain when that is unresolved', (tester) async {
         final semantics = tester.ensureSemantics();
         final channels = _FakeChannelsNotifier([channel]);
         final root = _textMsg(id: threadIdRoot, pubkey: 'alice', content: 'Hi');
         final timeline = formatTimeline([root]);
+        final legacy = legacySolo ? [channel.id] : const <String>[];
         await tester.pumpWidget(
           _buildTestable(
             messages: [root],
             channel: channel,
             channelsNotifier: channels,
             users: _threadUpUsers,
+            darkTheme: dark,
+            textScaler: TextScaler.linear(textScale),
+            organization: Stream.value(MeGroups(channels: legacy)),
             threadReplies: const {threadIdRoot: []},
             home: ThreadDetailPage(
               threadHead: timeline.single,
@@ -190,7 +237,19 @@ void threadUpLevelTests() {
         );
         await tester.pumpAndSettle();
 
-        expect(_threadUpLabel(tester), 'In $label');
+        // The list's glyph stands where a "#" would otherwise be written.
+        expect(_threadUpLabel(tester), label);
+        expect(_threadUpIcon(tester)?.icon, icon);
+        expect(icon, conversationListIcon(channel, legacySoloChannels: legacy));
+        // It reads as "opens something", in the theme's own muted ink.
+        final theme = Theme.of(tester.element(_threadUpRow));
+        expect(theme.brightness, dark ? Brightness.dark : Brightness.light);
+        final muted = theme.colorScheme.onSurfaceVariant;
+        final chevron = tester.widget<Icon>(_threadUpChevron);
+        expect(chevron.icon, BuzzIcons.chevronRight);
+        expect(chevron.color, muted);
+        expect(_threadUpIcon(tester)?.color, icon == null ? null : muted);
+        expect(_threadUpLoading, findsNothing);
         // One stop that says where it goes; the visible text is not a second.
         expect(
           tester.getSemantics(_threadUpRow),
@@ -202,22 +261,35 @@ void threadUpLevelTests() {
             hasTapAction: true,
           ),
         );
-        expect(find.bySemanticsLabel(RegExp('^In ')), findsNothing);
-        // Pinned under the header, above the scrolling head.
+        expect(find.bySemanticsLabel(label), findsNothing);
+        expect(find.bySemanticsLabel('Thread'), findsNothing);
+        // Large text grows the bar instead of clipping the title, and the
+        // thread still starts below it.
+        final head = find.byKey(ValueKey('thread-message-group-$threadIdRoot'));
+        final headTop = tester.getRect(head).top;
         expect(
-          tester.getRect(_threadUpRow).bottom,
-          lessThanOrEqualTo(
-            tester
-                .getRect(
-                  find.byKey(ValueKey('thread-message-group-$threadIdRoot')),
-                )
-                .top,
-          ),
+          headTop,
+          greaterThanOrEqualTo(tester.getRect(_threadUpRow).bottom),
         );
 
+        // Unresolved, the title is the plain one it was before it led up,
+        // and at the default text size leading up took no height from the
+        // thread.
         channels.setChannels([]);
         await tester.pumpAndSettle();
         expect(_threadUpRow, findsNothing);
+        expect(
+          find.byKey(const ValueKey('thread-up-level-label')),
+          findsNothing,
+        );
+        expect(
+          tester
+              .widget<Text>(find.byKey(const ValueKey('thread-app-bar-title')))
+              .data,
+          'Thread',
+        );
+        expect(find.bySemanticsLabel(RegExp('^Go to ')), findsNothing);
+        if (textScale == 1) expect(tester.getRect(head).top, headTop);
         expect(tester.takeException(), isNull);
         semantics.dispose();
       });
@@ -314,7 +386,7 @@ void threadUpLevelTests() {
         await tester.pumpAndSettle();
 
         expect(_shownThread(tester).threadHead.id, threadIdRoot);
-        expect(_threadUpLabel(tester), 'In #general');
+        expect(_threadUpLabel(tester), 'general');
         // No channel beneath has jumped to the root: it was never laid out.
         expect(_channelRow(threadIdRoot, skipOffstage: false), findsNothing);
 
@@ -468,7 +540,10 @@ void threadUpLevelTests() {
       await tester.pump(const Duration(seconds: 4));
 
       expect(_shownThread(tester).threadHead.id, threadIdParent);
-      expect(_threadUpLabel(tester), 'In thread · Thread root');
+      // A sub-thread names its parent thread, marked as a thread.
+      expect(_threadUpLabel(tester), 'Thread root');
+      expect(_threadUpIcon(tester)?.icon, BuzzIcons.messageSquareReply);
+      expect(_threadUpChevron, findsOneWidget);
       expect(
         tester.getSemantics(_threadUpRow),
         matchesSemantics(
@@ -496,12 +571,13 @@ void threadUpLevelTests() {
                   .decoration
               as BoxDecoration;
       expect(highlight.color!.a, closeTo(0.12, 0.001));
-      expect(_threadUpLabel(tester), 'In #general');
+      expect(_threadUpLabel(tester), 'general');
+      expect(_threadUpIcon(tester)?.icon, BuzzIcons.hash);
 
       // A screen reader's activation takes the second step, once: a repeat
       // before the page has changed opens nothing more.
-      tester.semantics.tap(find.semantics.byLabel('Go to #general'));
-      tester.semantics.tap(find.semantics.byLabel('Go to #general'));
+      tester.semantics.tap(find.semantics.byLabel('Go to general'));
+      tester.semantics.tap(find.semantics.byLabel('Go to general'));
       await tester.pumpAndSettle();
 
       expect(find.byType(ThreadDetailPage), findsNothing);
@@ -590,7 +666,12 @@ void threadUpLevelTests() {
         await tester.pump(const Duration(milliseconds: 100));
 
         expect(session.requested, [threadIdRoot]);
-        expect(_threadUpLabel(tester), 'In thread');
+        // It shows that it is loading rather than offering a tap that
+        // would do nothing.
+        expect(_threadUpLabel(tester), 'Parent thread');
+        expect(_threadUpIcon(tester)?.icon, BuzzIcons.messageSquareReply);
+        expect(_threadUpLoading, findsOneWidget);
+        expect(_threadUpChevron, findsNothing);
         expect(
           tester.getSemantics(_threadUpRow),
           matchesSemantics(
@@ -607,9 +688,32 @@ void threadUpLevelTests() {
         expect(session.requested, [threadIdRoot]);
         expect(
           _threadUpLabel(tester),
-          fail
-              ? 'In #general'
-              : 'In thread · See the plan for details ${'x' * 55}',
+          fail ? 'general' : 'See the plan for details ${'x' * 55}',
+        );
+        expect(
+          _threadUpIcon(tester)?.icon,
+          fail ? BuzzIcons.hash : BuzzIcons.messageSquareReply,
+        );
+        expect(_threadUpLoading, findsNothing);
+        // A long snippet ends in an ellipsis inside the bar, chevron and all.
+        final barRight =
+            tester.view.physicalSize.width / tester.view.devicePixelRatio -
+            Grid.gutter;
+        expect(tester.getRect(_threadUpRow).right, lessThanOrEqualTo(barRight));
+        expect(
+          tester.getRect(_threadUpChevron).right,
+          lessThanOrEqualTo(barRight),
+        );
+        expect(
+          tester
+              .renderObject<RenderParagraph>(
+                find.descendant(
+                  of: find.byKey(const ValueKey('thread-up-level-label')),
+                  matching: find.byType(RichText),
+                ),
+              )
+              .didExceedMaxLines,
+          !fail,
         );
 
         await tester.tap(_threadUpRow);
@@ -673,7 +777,7 @@ void threadUpLevelTests() {
       );
       await tester.pumpAndSettle();
 
-      expect(_threadUpLabel(tester), 'In thread · Parent reply');
+      expect(_threadUpLabel(tester), 'Parent reply');
       expect(session.requested, isEmpty);
       expect(tester.takeException(), isNull);
     });

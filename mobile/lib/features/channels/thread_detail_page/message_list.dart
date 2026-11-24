@@ -6,8 +6,8 @@ class _ThreadMessageList extends HookWidget {
   final ValueChanged<double> onHeadHeightChanged;
   final LaidOutViewport viewport;
 
-  /// Height of the "up one level" row pinned under the app bar.
-  final double topInset;
+  /// Extra height the header's title takes; see [frostedAppBarHeight].
+  final double titleContentHeight;
   final VoidCallback onUserScrollStart;
   final VoidCallback onUserScrollEnd;
   final bool visible;
@@ -44,7 +44,7 @@ class _ThreadMessageList extends HookWidget {
     required this.headHeight,
     required this.onHeadHeightChanged,
     required this.viewport,
-    required this.topInset,
+    required this.titleContentHeight,
     required this.onUserScrollStart,
     required this.onUserScrollEnd,
     required this.visible,
@@ -201,7 +201,10 @@ class _ThreadMessageList extends HookWidget {
         : allMessages
               .where((message) => !savedOnlyIds.contains(message.id))
               .toList();
-    final headerHeight = frostedAppBarHeight(context) + topInset;
+    final headerHeight = frostedAppBarHeight(
+      context,
+      titleContentHeight: titleContentHeight,
+    );
     final headLink = useMemoized(LayerLink.new);
     final loadingHeadLink = useMemoized(LayerLink.new);
     final headScrollPosition = useRef<ScrollPosition?>(null);

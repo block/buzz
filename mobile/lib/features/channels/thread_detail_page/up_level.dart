@@ -1,8 +1,17 @@
 part of '../thread_detail_page.dart';
 
-/// The pinned "up one level" row and the header height it adds. [row] is
-/// null, and [height] zero, while the thread's conversation is unresolved.
-typedef _ThreadUpLevel = ({Widget? row, double height});
+/// Where "up one level" leads from a thread, as its title shows it: [icon]
+/// and [label] name the place and [onPressed] goes there. A null [onPressed]
+/// is a parent thread that is still loading.
+typedef _ThreadUpLevel = ({
+  IconData? icon,
+  String label,
+  String semanticLabel,
+  VoidCallback? onPressed,
+});
+
+/// Marks a thread as the Reply action that opens one does.
+const _threadUpLevelThreadIcon = BuzzIcons.messageSquareReply;
 
 /// The head each open thread page shows, by its route, so a sub-thread can
 /// tell when its parent thread is the page directly beneath it.
@@ -22,19 +31,12 @@ String _threadSnippet(String content) => content
     .take(80)
     .toString();
 
-/// The conversation named as desktop's thread panel and Inbox rows name it.
-String _threadConversationLabel(Channel channel, String displayName) =>
-    channel.isDm
-    ? 'DM · $displayName'
-    : channel.isSolo
-    ? displayName
-    : '#$displayName';
-
 /// Resolves where "up" leads from [page]: the thread whose head is the
 /// direct parent of this page's head, or the conversation for a top-level
 /// thread. A parent message that is not loaded is fetched once the thread's
-/// own replies have settled without it, and the row waits, inert, until then.
-_ThreadUpLevel _useThreadUpLevel(
+/// own replies have settled without it, and the title waits, inert, until
+/// then. Null while the thread's conversation is unresolved.
+_ThreadUpLevel? _useThreadUpLevel(
   BuildContext context,
   WidgetRef ref,
   ThreadDetailPage page,
@@ -45,12 +47,12 @@ _ThreadUpLevel _useThreadUpLevel(
   final head = page.threadHead;
   final channelId = page.channelId;
   final channel = ref.watch(channelByIdProvider(channelId));
-  final conversation = channel == null
+  final conversationName = channel == null
       ? null
-      : _threadConversationLabel(
-          channel,
-          _threadConversationName(ref, channel, currentPubkey),
-        );
+      : _threadConversationName(ref, channel, currentPubkey);
+  final legacySoloChannels = ref.watch(
+    meGroupsProvider.select((g) => g.value?.channels ?? const <String>[]),
+  );
   final route = ModalRoute.of(context);
   useEffect(() {
     if (route != null) _openThreadHeads[route] = head.id;
@@ -88,7 +90,7 @@ _ThreadUpLevel _useThreadUpLevel(
     };
   }, [needsLookup, parentId, channelId]);
 
-  if (channel == null || conversation == null) return (row: null, height: 0);
+  if (channel == null || conversationName == null) return null;
 
   void open(Route<void> Function() target, bool Function(Route<dynamic>) isIt) {
     // A second tap lands after this page has already left the top.
@@ -134,26 +136,34 @@ _ThreadUpLevel _useThreadUpLevel(
     (below) => _openThreadHeads[below] == parent.id,
   );
 
-  final Widget row;
   if (parent != null) {
     final snippet = _threadSnippet(parent.content);
-    row = _ThreadUpLevelRow(
-      target: snippet.isEmpty ? 'thread' : 'thread · $snippet',
+    return (
+      icon: _threadUpLevelThreadIcon,
+      label: snippet.isEmpty ? 'Parent thread' : snippet,
       semanticLabel: 'Go to parent thread',
       onPressed: () => openParentThread(parent),
     );
-  } else if (parentId != null && !lookupSettled.value) {
-    row = const _ThreadUpLevelRow(
-      target: 'thread',
+  }
+  if (parentId != null && !lookupSettled.value) {
+    return (
+      icon: _threadUpLevelThreadIcon,
+      label: 'Parent thread',
       semanticLabel: 'Loading parent thread',
       onPressed: null,
     );
-  } else {
-    row = _ThreadUpLevelRow(
-      target: conversation,
-      semanticLabel: 'Go to $conversation',
-      onPressed: openConversation,
-    );
   }
-  return (row: row, height: _threadUpLevelRowHeight(context));
+  // The Messages list's glyph stands where a "#" would be written. A DM has
+  // none there, only its people's avatars, so it is named in words.
+  final icon = conversationListIcon(
+    channel,
+    legacySoloChannels: legacySoloChannels,
+  );
+  final label = icon == null ? 'DM · $conversationName' : conversationName;
+  return (
+    icon: icon,
+    label: label,
+    semanticLabel: 'Go to $label',
+    onPressed: openConversation,
+  );
 }

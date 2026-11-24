@@ -83,6 +83,7 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../onboarding_app_entry.dart';
 import '../pairing/pairing_provider.dart';
 import 'channel.dart';
+import 'conversation_list_icon.dart';
 import 'ios_create_channel_sheet.dart';
 import 'ios_add_members_sheet.dart';
 import 'channel_actions_sheet.dart';

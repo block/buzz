@@ -941,6 +941,46 @@ void main() {
       isNull,
       reason: 'old artwork must not appear while the new glyph renders',
     );
+
+    // A subtitle glyph is rendered the same way. Its slot is announced at
+    // once, so the capsule's label does not shift when the artwork lands.
+    Map params() =>
+        tester.widget<UiKitView>(find.byType(UiKitView)).creationParams as Map;
+    Widget linked(IconData? icon) => _testApp(
+      home: IosNavigationBar(
+        title: 'Thread',
+        subtitle: 'general',
+        subtitleIcon: icon,
+        titleDisclosure: true,
+        titleAccessibilityLabel: 'Go to general',
+        onTitlePressed: () {},
+      ),
+    );
+    await tester.pumpWidget(linked(Icons.tag));
+    expect(params()['subtitleIcon'], true);
+    expect(params()['subtitleIconData'], isNull);
+    expect(params()['titleDisclosure'], true);
+    expect(params()['titleAccessibilityLabel'], 'Go to general');
+    await tester.runAsync(() async {
+      for (
+        var attempt = 0;
+        attempt < 100 && params()['subtitleIconData'] == null;
+        attempt++
+      ) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        await tester.pump();
+      }
+    });
+    expect(params()['subtitleIconData'], isNotNull);
+    await tester.pumpWidget(linked(Icons.lock));
+    expect(
+      params()['subtitleIconData'],
+      isNull,
+      reason: 'a channel must not wear the last one\'s glyph',
+    );
+    await tester.pumpWidget(linked(null));
+    expect(params()['subtitleIcon'], false);
+    expect(params().containsKey('subtitleIconData'), isFalse);
     await tester.pumpWidget(const SizedBox());
     debugDefaultTargetPlatformOverride = null;
   });

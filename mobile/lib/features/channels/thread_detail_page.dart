@@ -10,7 +10,8 @@ import 'reply_summary_link.dart';
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart' show ValueListenable;
+import 'package:flutter/foundation.dart'
+    show ValueListenable, defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart'
     show Drag, GestureBinding, PointerScrollEvent;
@@ -44,11 +45,14 @@ import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
 import 'inline_agent_typing.dart';
 import '../../shared/me/me_assistants.dart';
+import '../../shared/me/me_sync.dart';
 import 'thread_replies_provider.dart';
 import 'open_channel_routes.dart';
 import 'channel_ids_by_name_provider.dart';
 import 'channels_provider.dart';
 import 'compose_bar.dart';
+import 'composer_geometry.dart';
+import 'conversation_list_icon.dart';
 import 'composer_dock_size_reporter.dart';
 import 'date_formatters.dart';
 import 'dm_channel_labels.dart';
@@ -88,7 +92,7 @@ part 'thread_detail_page/avatar.dart';
 part 'thread_detail_page/app_bar.dart';
 part 'thread_detail_page/landing_highlight.dart';
 part 'thread_detail_page/up_level.dart';
-part 'thread_detail_page/up_level_row.dart';
+part 'thread_detail_page/up_level_title.dart';
 
 /// Full-screen thread detail page.
 ///
@@ -999,7 +1003,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                       if (context.mounted) headHeight.value = height;
                     },
                     viewport: listViewport,
-                    topInset: up.height,
+                    titleContentHeight: _threadTitleContentHeight(context, up),
                     onUserScrollStart: () {
                       hidesLatestForInitialTailSettle.value = false;
                       hidesLatestForComposerTailCorrection.value = false;
