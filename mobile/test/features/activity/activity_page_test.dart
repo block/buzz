@@ -1509,6 +1509,125 @@ void main() {
     expect(find.text('Reminder updated'), findsOneWidget);
   });
 
+  testWidgets('Reminders offers New reminder from the header and the empty '
+      'state, and only there', (tester) async {
+    final reminders = _CapturingReminderService();
+    final remindersNotifier = _FakeRemindersNotifier(const []);
+    await tester.pumpWidget(
+      await buildTestable(
+        remindersNotifier: () => remindersNotifier,
+        overrides: [
+          reminder.reminderServiceProvider.overrideWithValue(reminders),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('New reminder'), findsNothing);
+
+    await _chooseActivityType(tester, 'Reminders');
+    expect(find.byTooltip('New reminder'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, 'New reminder'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('New reminder'));
+    await tester.pumpAndSettle();
+    expect(find.text('Reminder text'), findsOneWidget);
+    await tester.enterText(
+      find.byKey(const ValueKey('reminder-text-field')),
+      'Call the dentist',
+    );
+    await tester.pump();
+    await tester.tap(find.widgetWithText(FilledButton, 'Set reminder'));
+    await tester.pumpAndSettle();
+
+    expect(reminders.created.single.text, 'Call the dentist');
+    expect(find.text('Reminder set'), findsOneWidget);
+    expect(remindersNotifier.refreshes, 1);
+
+    // The empty state's own action opens the same sheet.
+    await tester.tap(find.widgetWithText(FilledButton, 'New reminder'));
+    await tester.pumpAndSettle();
+    expect(find.text('Reminder text'), findsOneWidget);
+  });
+
+  testWidgets('a reminder row edits its note and keeps its target and '
+      'time', (tester) async {
+    final reminders = _CapturingReminderService();
+    const target = reminder.ReminderTarget(
+      eventId: 'm1',
+      channelId: 'ch1',
+      preview: 'Hey check this out',
+      authorPubkey:
+          'a11ce00000000000000000000000000000000000000000000000000000000000',
+    );
+    final remindersNotifier = _FakeRemindersNotifier([
+      Reminder(
+        id: 'reminder-d1',
+        notBefore: now + 600,
+        status: 'pending',
+        target: target,
+        note: 'Reply after standup',
+        createdAt: now - 60,
+        eventId: 'reminder-event-1',
+      ),
+      Reminder(
+        id: 'reminder-d2',
+        notBefore: now + 900,
+        status: 'pending',
+        target: null,
+        note: 'Call the dentist',
+        createdAt: now - 30,
+        eventId: 'reminder-event-2',
+      ),
+    ]);
+    await tester.pumpWidget(
+      await buildTestable(
+        remindersNotifier: () => remindersNotifier,
+        overrides: [
+          reminder.reminderServiceProvider.overrideWithValue(reminders),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    await _chooseActivityType(tester, 'Reminders');
+
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(const ValueKey('reminder-row-reminder-d1')),
+        matching: find.byTooltip('Edit reminder'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Note (optional)'), findsOneWidget);
+    final field = find.byKey(const ValueKey('reminder-text-field'));
+    expect(
+      tester.widget<TextField>(field).controller!.text,
+      'Reply after standup',
+    );
+    await tester.enterText(field, '');
+    await tester.pump();
+    await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+    await tester.pumpAndSettle();
+
+    final edited = reminders.edited.single;
+    expect(edited.dTag, 'reminder-d1');
+    expect(edited.notBefore, now + 600);
+    expect(edited.target, target);
+    expect(edited.note, isEmpty);
+    expect(find.text('Reminder updated'), findsOneWidget);
+    expect(remindersNotifier.refreshes, 1);
+
+    // A written reminder edits as required text, with no target.
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(const ValueKey('reminder-row-reminder-d2')),
+        matching: find.byTooltip('Edit reminder'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Reminder text'), findsOneWidget);
+    expect(find.text('Note (optional)'), findsNothing);
+  });
+
   testWidgets('long-press omits Follow in a Solo chat', (tester) async {
     await tester.pumpWidget(
       await buildTestable(
@@ -1966,5 +2085,34 @@ class _CapturingReminderService extends reminder.ReminderService {
     String? replacingDTag,
   }) async {
     saved.add((target: target, note: note, dTag: replacingDTag));
+  }
+
+  final created = <({String text, int notBefore})>[];
+  final edited =
+      <
+        ({
+          String dTag,
+          int notBefore,
+          String? note,
+          reminder.ReminderTarget? target,
+        })
+      >[];
+
+  @override
+  Future<void> createTextReminder({
+    required String text,
+    required int notBefore,
+  }) async {
+    created.add((text: text, notBefore: notBefore));
+  }
+
+  @override
+  Future<void> updateReminderNote({
+    required String dTag,
+    required int notBefore,
+    required String? note,
+    reminder.ReminderTarget? target,
+  }) async {
+    edited.add((dTag: dTag, notBefore: notBefore, note: note, target: target));
   }
 }

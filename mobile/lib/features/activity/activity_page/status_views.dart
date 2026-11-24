@@ -72,8 +72,14 @@ class _EmptySurface extends StatelessWidget {
   final IconData icon;
   final String message;
   final String? detail;
+  final Widget? action;
 
-  const _EmptySurface({required this.icon, required this.message, this.detail});
+  const _EmptySurface({
+    required this.icon,
+    required this.message,
+    this.detail,
+    this.action,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -101,6 +107,7 @@ class _EmptySurface extends StatelessWidget {
                 textAlign: TextAlign.center,
               ),
             ],
+            if (action != null) ...[const SizedBox(height: Grid.xs), action!],
           ],
         ),
       ),

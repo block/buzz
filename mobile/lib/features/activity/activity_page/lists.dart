@@ -1,15 +1,20 @@
 part of '../activity_page.dart';
 
 /// Reminders surface for the Reminders filter — due/pending NIP-ER
-/// reminders that deep-link to their target message.
+/// reminders that deep-link to their target message, and written ones that
+/// have none.
 class _RemindersList extends ConsumerWidget {
   final ScrollController scrollController;
   final void Function(Reminder reminder) onOpen;
+  final void Function(Reminder reminder) onEdit;
+  final VoidCallback onNew;
   final Future<void> Function() onRefresh;
 
   const _RemindersList({
     required this.scrollController,
     required this.onOpen,
+    required this.onEdit,
+    required this.onNew,
     required this.onRefresh,
   });
 
@@ -30,10 +35,15 @@ class _RemindersList extends ConsumerWidget {
       );
     }
     if (reminders.isEmpty) {
-      return const _EmptySurface(
+      return _EmptySurface(
         icon: BuzzIcons.clock,
         message: 'No reminders',
         detail: 'Reminders you set will show up here.',
+        action: FilledButton.icon(
+          onPressed: onNew,
+          icon: const Icon(BuzzIcons.plus, size: 16),
+          label: const Text('New reminder'),
+        ),
       );
     }
 
@@ -67,6 +77,13 @@ class _RemindersList extends ConsumerWidget {
                         : 'Due ${_inboxTimestamp(reminder.notBefore!)}',
                   )
                 : null,
+            trailing: reminder.notBefore == null
+                ? null
+                : IconButton(
+                    icon: const Icon(BuzzIcons.pencil, size: 18),
+                    tooltip: 'Edit reminder',
+                    onPressed: () => onEdit(reminder),
+                  ),
             onTap: () => onOpen(reminder),
           );
         },

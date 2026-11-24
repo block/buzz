@@ -1,13 +1,13 @@
+import 'dart:async';
+
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../theme/theme.dart';
-import '../widgets/sheet_action_section.dart';
 import '../widgets/modal_presentation.dart';
 import 'reminder_service.dart';
-import 'reminder_time_presets.dart';
+import 'reminder_time_choices.dart';
 
 /// Bottom sheet for "Remind me later": desktop-parity presets plus a native
 /// date/time picker, publishing the same author-private kind-30300 reminder
@@ -73,76 +73,15 @@ void showRemindMeLaterSheet({
               Grid.gutter,
               Grid.xs,
             ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                SheetActionSection(
-                  children: [
-                    for (final preset in reminderTimePresets)
-                      ListTile(
-                        leading: const Icon(BuzzIcons.clock),
-                        title: Text(preset.label),
-                        onTap: () {
-                          Navigator.of(sheetContext).pop();
-                          submit(preset.getTimestamp());
-                        },
-                      ),
-                  ],
-                ),
-                SheetActionSection(
-                  children: [
-                    ListTile(
-                      leading: const Icon(BuzzIcons.calendarClock),
-                      title: const Text('Pick a date & time'),
-                      onTap: () async {
-                        final navigator = Navigator.of(sheetContext);
-                        final timestamp = await _pickCustomDateTime(context);
-                        // Cancelled or not-in-the-future: keep the preset sheet
-                        // open so retrying doesn't mean long-pressing again.
-                        if (timestamp == null) return;
-                        if (navigator.mounted) navigator.pop();
-                        await submit(timestamp);
-                      },
-                    ),
-                  ],
-                ),
-              ],
+            child: ReminderTimeChoices(
+              onChosen: (choice) {
+                Navigator.of(sheetContext).pop();
+                unawaited(submit(choice.getTimestamp()));
+              },
             ),
           ),
         ),
       ),
     ),
   );
-}
-
-/// Native date + time pickers chained together. Returns a future Unix
-/// timestamp in seconds, or null when cancelled or not in the future.
-Future<int?> _pickCustomDateTime(BuildContext context) async {
-  final now = DateTime.now();
-  final date = await showBuzzDialog<DateTime>(
-    context: context,
-    builder: (_) => DatePickerDialog(
-      initialDate: now,
-      firstDate: DateTime(now.year, now.month, now.day),
-      lastDate: now.add(const Duration(days: 365 * 2)),
-    ),
-  );
-  if (date == null || !context.mounted) return null;
-
-  final time = await showBuzzDialog<TimeOfDay>(
-    context: context,
-    builder: (_) =>
-        const TimePickerDialog(initialTime: TimeOfDay(hour: 9, minute: 0)),
-  );
-  if (time == null) return null;
-
-  final timestamp = combineCustomDateTime(date, time.hour, time.minute);
-  if (timestamp == null && context.mounted) {
-    ScaffoldMessenger.of(context).showFeedbackSnackBar(
-      const SnackBar(content: Text('Pick a time in the future')),
-      kind: ToastKind.error,
-    );
-  }
-  return timestamp;
 }
