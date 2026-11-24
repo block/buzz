@@ -177,7 +177,7 @@ void _readSeedJourney(
     expect(weight('channel-1'), FontWeight.w600);
     // The post that arrived while waiting stays unread.
     expect(weight('channel-10'), FontWeight.w600);
-    expect(weight('channel-100'), FontWeight.w400);
+    expect(weight('channel-100'), FontWeight.w500);
     final saved = ReadStateStorage(prefs).readJournal(scope)!;
     expect(saved.containsKey('seedPending'), isFalse);
     expect(saved['observed'], reads);
