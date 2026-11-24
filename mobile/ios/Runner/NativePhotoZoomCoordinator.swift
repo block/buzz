@@ -931,6 +931,7 @@ private final class NativeVideoTransport: UIView {
   func setSpeed(_ rate: Float) {
     options.setTitle(Self.speed(rate), for: .normal)
     options.accessibilityValue = "\(Self.speed(rate)) speed"
+    setNeedsLayout()
   }
   static func speed(_ rate: Float) -> String {
     let text = String(format: "%.2f", rate).replacingOccurrences(of: #"\.?0+$"#, with: "", options: .regularExpression)
@@ -974,6 +975,8 @@ private final class NativeVideoTransport: UIView {
   override func layoutSubviews() {
     super.layoutSubviews()
     let oneRow = bounds.height < Self.rowHeight * 2
+    // A wider speed or time label can change the row count, and the page decides our height, so ask it to lay out again.
+    if fitsOneRow(width: bounds.width) != oneRow { superview?.setNeedsLayout() }
     let buttons = CGRect(x: 0, y: oneRow ? 0 : Self.rowHeight, width: bounds.width, height: Self.rowHeight)
     playPause.frame = CGRect(x: 0, y: buttons.minY, width: 44, height: buttons.height)
     mute.frame = CGRect(x: buttons.maxX - 44, y: buttons.minY, width: 44, height: buttons.height)

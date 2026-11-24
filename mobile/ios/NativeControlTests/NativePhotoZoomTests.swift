@@ -74,6 +74,7 @@ struct NativePhotoZoomTests {
       railJourney(data: data)
       videoJourney(data: data)
       textSizeJourney()
+      speedChangeJourney()
       loaderJourney()
 
     }
@@ -338,6 +339,24 @@ struct NativePhotoZoomTests {
     }
     print("PASS: native video transport fits every text size")
   }
+  // A wider speed label that no longer fits one row moves the timeline up without waiting for an unrelated page layout.
+  @MainActor static func speedChangeJourney() {
+    let host = TransportHost(frame: .zero), transport = host.transport
+    host.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
+    host.updateTraitsIfNeeded(); transport.updateTraitsIfNeeded()
+    transport.setSpeed(1); transport.update(time: 1, duration: 30)
+    let oneRowWidth = (200...600).first {
+      transport.sizeThatFits(CGSize(width: CGFloat($0), height: 0)).height == NativeVideoTransport.rowHeight
+    }!
+    host.frame = CGRect(x: 0, y: 0, width: CGFloat(oneRowWidth), height: 200); host.layoutIfNeeded()
+    precondition(transport.bounds.height == NativeVideoTransport.rowHeight, "1× fits one row at \(oneRowWidth) pt")
+    transport.setSpeed(0.75)
+    transport.layoutIfNeeded() // The label change alone squeezes the scrubber in one row,
+    host.layoutIfNeeded() // so the transport asks the page for another pass.
+    precondition(transport.bounds.height == NativeVideoTransport.rowHeight * 2, "0.75× moves the timeline to its own row")
+    precondition(transport.slider.frame.width >= NativeVideoTransport.minimumScrubber, "The scrubber keeps room to seek")
+    print("PASS: native video transport re-lays out when the speed label grows")
+  }
   @MainActor static func isShown(_ view: UIView) -> Bool {
     view.alpha == 1 && view.isUserInteractionEnabled && !view.accessibilityElementsHidden
   }
@@ -381,4 +400,16 @@ struct NativePhotoZoomTests {
 private final class GalleryFeedbackSpy: UISelectionFeedbackGenerator {
   var clicks = 0
   override func selectionChanged() { clicks += 1 }
+}
+
+// Sizes its transport the way the video page does, so a layout request from the transport takes effect.
+@MainActor
+private final class TransportHost: UIView {
+  let transport = NativeVideoTransport()
+  override init(frame: CGRect) { super.init(frame: frame); addSubview(transport) }
+  required init?(coder: NSCoder) { nil }
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    transport.frame = CGRect(origin: .zero, size: transport.sizeThatFits(CGSize(width: bounds.width, height: 0)))
+  }
 }
