@@ -8,10 +8,16 @@ class AppListInset extends InheritedWidget {
   const AppListInset({
     super.key,
     required this.horizontal,
+    this.iconColumnWidth,
     required super.child,
   });
 
   final double horizontal;
+  final double? iconColumnWidth;
+
+  static double? iconWidthOf(BuildContext context) => context
+      .dependOnInheritedWidgetOfExactType<AppListInset>()
+      ?.iconColumnWidth;
 
   static double of(BuildContext context) =>
       context.dependOnInheritedWidgetOfExactType<AppListInset>()?.horizontal ??
@@ -19,5 +25,6 @@ class AppListInset extends InheritedWidget {
 
   @override
   bool updateShouldNotify(AppListInset oldWidget) =>
-      oldWidget.horizontal != horizontal;
+      oldWidget.horizontal != horizontal ||
+      oldWidget.iconColumnWidth != iconColumnWidth;
 }

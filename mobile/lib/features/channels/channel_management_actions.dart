@@ -49,6 +49,10 @@ class DmAddUnconfirmed implements Exception {
   String toString() => 'Added. Tap Add again to open the DM.';
 }
 
+/// How long a DM agent refusal waits for profiles before naming with what
+/// it has.
+const _refusalNamingDeadline = Duration(milliseconds: 1500);
+
 class ChannelActions {
   final Ref _ref;
   final RelaySessionNotifier _session;
@@ -186,13 +190,25 @@ class ChannelActions {
         );
     NostrEvent result;
     try {
-      result = await submit(includeHistory: includeHistory);
-    } catch (error) {
-      if (!includeHistory || relayErrorText(error) != _onlyPeopleShareHistory) {
-        rethrow;
+      try {
+        result = await submit(includeHistory: includeHistory);
+      } catch (error) {
+        if (!includeHistory ||
+            relayErrorText(error) != _onlyPeopleShareHistory) {
+          rethrow;
+        }
+        _ensureCommunityValid();
+        result = await submit(includeHistory: false);
       }
-      _ensureCommunityValid();
-      result = await submit(includeHistory: false);
+    } on StateError {
+      rethrow;
+    } catch (error) {
+      await _throwIfAgentRefused(
+        relayErrorText(error),
+        adding: false,
+        context: pubkeys,
+      );
+      rethrow;
     }
     _ensureCommunityValid();
     final response = parseCommandResponse(result.content);
@@ -315,6 +331,18 @@ class ChannelActions {
               reason == 'invalid: history must be "include", got "ask"')) {
         throw const DmNeedsHistoryChoice();
       }
+      await _throwIfAgentRefused(
+        reason,
+        adding: true,
+        // channelById also finds a DM opened ahead of the list.
+        context: [
+          ...?_ref
+              .read(channelsProvider.notifier)
+              .channelById(channelId)
+              ?.participantPubkeys,
+          ...pubkeys,
+        ],
+      );
       throw Exception(
         reason.contains('at most 9 people')
             ? dmAdditionFailedMessage
@@ -334,6 +362,75 @@ class ChannelActions {
       );
     }
     return openAddedDm(id);
+  }
+
+  /// Throws [DmAgentRefused] naming the agent when [reason] is an agent's
+  /// add-policy refusal of a DM. The agent and its verified owner are named
+  /// as the app's identity labels do, compared against [context] (the DM's
+  /// people, as its own label compares them) and this account, so namesakes
+  /// stay distinguishable, using whichever of them are cached. A failed name
+  /// read still refuses, without the name.
+  Future<void> _throwIfAgentRefused(
+    String reason, {
+    required bool adding,
+    required Iterable<String> context,
+  }) async {
+    final refusal = dmAgentPolicyRefusal(reason);
+    if (refusal == null) return;
+    final cache = _ref.read(userCacheProvider.notifier);
+    // The relay has already refused: profiles get one short deadline, then
+    // the message uses the best names loaded so far.
+    final deadline = Future<void>.delayed(_refusalNamingDeadline);
+    Future<void> load(Iterable<String> keys) => keys.isEmpty
+        ? Future.value()
+        : Future.any([
+            cache.resolve(keys.toList()).then<void>((_) {}),
+            deadline,
+          ]).catchError((Object _) {});
+    final keys = {
+      refusal.agent,
+      for (final key in [...context, ?_currentPubkey])
+        if (isHexPubkey(key.toLowerCase())) key.toLowerCase(),
+    };
+    // Wait only for names the sentence uses: the agent's, and its owner's
+    // when the refusal names who may add it. Other keys label from cache,
+    // except that a namesake in the context needs both agents' owners, read
+    // together, to tell the two apart.
+    await load([refusal.agent]);
+    var sources = _ref.read(identityNameSourcesProvider);
+    final owner = sources.factFor(refusal.agent)?.ownerPubkey;
+    String? nameOf(String? key) =>
+        key == null ? null : sources.factFor(key)?.name.trim().toLowerCase();
+    final clashing = {nameOf(refusal.agent), ?nameOf(owner)};
+    final namesakes = [
+      for (final key in keys)
+        if (key != refusal.agent && clashing.contains(nameOf(key))) key,
+    ];
+    final owners = {
+      if (refusal.ownerOnly || namesakes.isNotEmpty) ?owner,
+      for (final key in namesakes) ?sources.factFor(key)?.ownerPubkey,
+    };
+    if (owners.isNotEmpty) {
+      await load(owners);
+      sources = _ref.read(identityNameSourcesProvider);
+    }
+    _ensureCommunityValid();
+    final names = sources.scope(
+      {...keys, ...owners},
+      agentPubkeys: {refusal.agent},
+    );
+    throw DmAgentRefused(
+      dmAgentRefusedMessage(
+        adding: adding,
+        ownerOnly: refusal.ownerOnly,
+        agent: names.hasName(refusal.agent)
+            ? names.labelFor(refusal.agent)
+            : null,
+        owner: owner != null && names.hasName(owner)
+            ? names.labelFor(owner)
+            : null,
+      ),
+    );
   }
 
   /// Confirms through the writer that the current user is in the DM
@@ -465,6 +562,41 @@ class ChannelActions {
         name: name,
         description: description,
       ),
+    );
+    _ensureCommunityValid();
+    await _refreshChannelState(channelId);
+  }
+
+  Future<void> convertSolo(
+    String channelId, {
+    required bool personalChat,
+  }) async {
+    _ensureCommunityValid();
+    final channel = await findJoinedChannel(channelId);
+    if (channel == null || !channel.isSolo || channel.isArchived) {
+      throw StateError('This Solo is no longer available for conversion.');
+    }
+    // Remove legacy placement first while the relay label still identifies the
+    // conversation as Solo. Retrying after a rejected metadata write is safe.
+    if (personalChat) {
+      final sync = _ref.read(meSyncProvider);
+      final head = await sync.head();
+      if (head != null && sync.decode(head).channels.contains(channelId)) {
+        await sync.update(
+          (groups) => MeGroups(
+            groups: groups.groups,
+            channels: groups.channels.where((id) => id != channelId).toList(),
+            assignments: groups.assignments,
+          ),
+          mayFile: () => _ref.read(channelSectionsProvider).editable,
+        );
+      }
+    }
+    _ensureCommunityValid();
+    await _signedEventRelay.submit(
+      kind: 9002,
+      content: '',
+      tags: buildSoloConversionTags(channelId, channel.labels),
     );
     _ensureCommunityValid();
     await _refreshChannelState(channelId);
@@ -633,6 +765,13 @@ class ChannelActions {
     _ensureCommunityValid();
     _ref.invalidate(channelMembersProvider(channelId));
     _ref.invalidate(channelBotPubkeysProvider(channelId));
+    // A DM's title and portraits come from the list's participants, which the
+    // relay republished before accepting the removal. List entries for other
+    // channels don't show members, so they need no re-read.
+    final channels = _ref.read(channelsProvider.notifier);
+    if (channels.channelById(channelId)?.isDm ?? false) {
+      unawaited(channels.refresh());
+    }
   }
 
   /// [targetAuthor] fills the NIP-25 `p` tag, which Activity reads by `#p`.

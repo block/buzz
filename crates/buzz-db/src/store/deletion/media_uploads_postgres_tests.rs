@@ -255,7 +255,7 @@ async fn migration_schema_upload_attribution_preserves_live_legacy_leases() {
     let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
         .await
         .unwrap();
-    crate::migration::run_migrations_through(&pool, 105)
+    crate::migration::run_migrations_through(&pool, 106)
         .await
         .unwrap();
     let id = Uuid::new_v4();

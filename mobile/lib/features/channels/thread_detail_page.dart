@@ -23,6 +23,7 @@ import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
+import 'edit_authority.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
@@ -86,7 +87,6 @@ part 'thread_detail_page/app_bar.dart';
 const _landingHighlightDuration = Duration(seconds: 3);
 const _landingHighlightDelay = Duration(milliseconds: 50);
 const _landingHighlightTransitionDuration = Duration(milliseconds: 300);
-const _landingHighlightOpacity = 0.12;
 
 /// Full-screen thread detail page.
 ///
@@ -321,7 +321,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       final update = stickyDateIndex.resolve(
         positions: positions,
         viewportHeight: viewportHeight,
-        stickyTop: frostedAppBarHeight(context) + Grid.twelve,
+        stickyTop: _threadHeaderHeight(context) + Grid.twelve,
         stickyHeaderHeight: StickyDateHeader.heightOf(context),
       );
       stickyDateHeaderState.value = update.state;
@@ -623,7 +623,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     // scrolled up to read, leave them where they are.
     final previousReplyCount = useRef(replies.length);
     final topOverlayFraction = viewportHeight > 0
-        ? frostedAppBarHeight(context) / viewportHeight
+        ? _threadHeaderHeight(context) / viewportHeight
         : 0.0;
     final settleGeometry = (
       composerDockHeight.value,
@@ -1003,7 +1003,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                 Positioned(
                   left: 0,
                   right: 0,
-                  top: frostedAppBarHeight(context) + Grid.twelve,
+                  top: _threadHeaderHeight(context) + Grid.twelve,
                   child: StickyDateHeader(
                     key: const ValueKey('thread-sticky-date-header'),
                     state: stickyDateHeaderState,

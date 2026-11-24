@@ -67,6 +67,7 @@ class BestieTranscriptionSurface extends HookWidget {
       },
       const [],
     );
+    final diameter = NavigationGlassGroup.diameterOf(context);
     final active =
         preparing ||
         recording ||
@@ -188,8 +189,8 @@ class BestieTranscriptionSurface extends HookWidget {
                 ? Duration.zero
                 : const Duration(milliseconds: 220),
             curve: Curves.easeInOutCubic,
-            width: active ? 224 + Grid.xs * 2 : 56,
-            height: 56,
+            width: active ? 224 + Grid.xs * 2 : diameter,
+            height: diameter,
             // Keep one native glass view mounted while the finger is down.
             // Replacing its UIKit subtree cancels the active iOS touch.
             child: Stack(
@@ -308,8 +309,8 @@ class BestieTranscriptionSurface extends HookWidget {
                         Positioned(
                           right: 0,
                           top: 0,
-                          width: 56,
-                          height: 56,
+                          width: diameter,
+                          height: diameter,
                           child: ExcludeSemantics(
                             excluding: active,
                             child: IgnorePointer(
@@ -340,8 +341,8 @@ class BestieTranscriptionSurface extends HookWidget {
                           Positioned(
                             right: 0,
                             top: 0,
-                            width: 56,
-                            height: 56,
+                            width: diameter,
+                            height: diameter,
                             child: IconButton(
                               tooltip: 'Send transcript',
                               onPressed: () => unawaited(finish()),

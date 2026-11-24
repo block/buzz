@@ -117,11 +117,13 @@ class ChannelFilterManager extends ChangeNotifier {
   Future<void> save(
     String group,
     ChannelFilterMode mode, {
+    int? previewCount,
     int? windowSeconds,
     bool removeWindow = false,
   }) => _save(
     group,
     mode,
+    previewCount: previewCount,
     windowSeconds: windowSeconds,
     removeWindow: removeWindow,
   );
@@ -131,6 +133,7 @@ class ChannelFilterManager extends ChangeNotifier {
   Future<void> clearDeletedSection(String sectionId) async {
     final group = 'section:$sectionId';
     if (store.modeFor(group) == ChannelFilterMode.all &&
+        store.countFor(group) == sectionCounts.first &&
         !(store.toJson()['activeWindowSeconds'] as Map? ?? {}).containsKey(
           group,
         )) {
@@ -147,6 +150,7 @@ class ChannelFilterManager extends ChangeNotifier {
   Future<void> _save(
     String group,
     ChannelFilterMode mode, {
+    int? previewCount,
     int? windowSeconds,
     bool removeWindow = false,
     bool deletedSection = false,
@@ -162,6 +166,7 @@ class ChannelFilterManager extends ChangeNotifier {
       store = store.edit(
         group,
         mode,
+        previewCount: previewCount,
         windowSeconds: windowSeconds,
         removeWindow: removeWindow,
         remoteCreatedAt: _createdAt,
@@ -174,6 +179,7 @@ class ChannelFilterManager extends ChangeNotifier {
       final next = fresh.edit(
         group,
         mode,
+        previewCount: previewCount,
         windowSeconds: windowSeconds,
         removeWindow: removeWindow,
         remoteCreatedAt: _createdAt,
@@ -186,6 +192,7 @@ class ChannelFilterManager extends ChangeNotifier {
       final confirmed = await _read();
       if (confirmed.modeFor(group) != mode ||
           confirmed.windowFor(group) != next.windowFor(group) ||
+          confirmed.countFor(group) != next.countFor(group) ||
           (removeWindow &&
               (confirmed.toJson()['activeWindowSeconds'] as Map?)?.containsKey(
                     group,
