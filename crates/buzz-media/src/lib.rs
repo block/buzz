@@ -31,3 +31,6 @@ pub use upload_record::{
     UploadRecord, UPLOAD_RECORD_VERSION,
 };
 pub use validation::{looks_like_iso_bmff, serve_inline, validate_video_file, VideoMeta};
+
+/// Admission callback for upload storage writes.
+pub use storage::UploadWriteGuard;

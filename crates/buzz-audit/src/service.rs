@@ -52,8 +52,53 @@ impl AuditService {
         fields(action = %entry.action)
     )]
     pub async fn log(&self, entry: NewAuditEntry) -> Result<AuditEntry, AuditError> {
+        self.log_admitted(entry, None).await
+    }
+
+    /// Append upload evidence before releasing its serving lease. The exact
+    /// admitted lease may finish during community quiescing.
+    pub async fn log_with_serving_lease(
+        &self,
+        entry: NewAuditEntry,
+        lease: &buzz_db::deletion::ServingWriteLease,
+    ) -> Result<AuditEntry, AuditError> {
+        if entry.community_id != lease.community_id {
+            return Err(buzz_db::DbError::AccessDenied(
+                "audit community differs from serving lease".into(),
+            )
+            .into());
+        }
+        self.log_admitted(entry, Some(lease)).await
+    }
+
+    async fn log_admitted(
+        &self,
+        entry: NewAuditEntry,
+        lease: Option<&buzz_db::deletion::ServingWriteLease>,
+    ) -> Result<AuditEntry, AuditError> {
         let mut tx = self.pool.begin().await?;
-        buzz_db::deletion::guard_community_write(&mut tx, entry.community_id).await?;
+        if let Some(lease) = lease {
+            // Upload completion must not wait indefinitely behind a busy chain.
+            // Preserve stricter operator-configured limits.
+            sqlx::query(
+                "SELECT set_config('lock_timeout',
+                    (EXTRACT(EPOCH FROM LEAST(COALESCE(
+                        NULLIF(current_setting('lock_timeout')::interval, interval '0'),
+                        interval '5 seconds'), interval '5 seconds')) * 1000)::bigint::text, true),
+                    set_config('statement_timeout',
+                    (EXTRACT(EPOCH FROM LEAST(COALESCE(
+                        NULLIF(current_setting('statement_timeout')::interval, interval '0'),
+                        interval '30 seconds'), interval '30 seconds')) * 1000)::bigint::text, true)",
+            )
+                .execute(&mut *tx)
+                .await?;
+            buzz_db::Db::from_pool(self.pool.clone())
+                .deletion_store()
+                .guard_transaction_with_serving_lease(&mut tx, lease)
+                .await?;
+        } else {
+            buzz_db::deletion::guard_community_write(&mut tx, entry.community_id).await?;
+        }
         let lock_key = format!("{AUDIT_LOCK_NAMESPACE}{}", entry.community_id);
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(&lock_key)
