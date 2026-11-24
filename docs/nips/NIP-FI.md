@@ -714,9 +714,9 @@ mutation (step 7), simultaneously reserves the `(iss, jti)` replay identity and
 inserts the deny entry — both or neither.  A capacity failure at that step rejects
 `503`; neither the jti nor the deny entry is recorded, and the caller may safely
 retry the same signed command.  A relay that keeps the deny set in shared storage and cannot learn whether its write applied MUST reject `503` `authorization_unavailable` and close no sessions. The `jti` and deny entry may already be recorded, so the caller retries with a freshly signed command (new `jti`), not the same one.
-A relay that executes deferred actions then
-commits the change "Deferred actions" specifies before it closes any
-connection.  On success, the relay MUST close every live connection
+After step 7 succeeds, a relay that executes deferred actions commits the
+change "Deferred actions" specifies before it closes any connection.  On
+success, the relay MUST close every live connection
 registered under the command's issuer (`claims.iss`) whose proven key equals
 `CommandResult.target_pubkey` or whose recorded owner equals
 `CommandResult.target_pubkey`, and whose admitting assertion falls in the
