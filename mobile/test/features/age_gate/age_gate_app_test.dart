@@ -392,31 +392,68 @@ void main() {
 
   testWidgets('retries a failed restricted notification purge', (tester) async {
     var purges = 0;
+    final firstPurge = Completer<void>();
+    final container = ProviderContainer(
+      overrides: [
+        ageSignalProvider.overrideWith(
+          () => AgeSignalNotifier(
+            requestSignal: () async => {'status': 'signal', 'ageUpper': 17},
+          ),
+        ),
+        communityListProvider.overrideWith(
+          () => _UnavailableCommunityListNotifier(),
+        ),
+        ageAllowedNotificationRestorerProvider.overrideWithValue(() async {}),
+        ageRestrictedNotificationPurgerProvider.overrideWithValue(() {
+          purges += 1;
+          return switch (purges) {
+            1 => firstPurge.future,
+            2 => Future.error(
+              StateError('injected notification purge failure'),
+            ),
+            _ => Future.value(),
+          };
+        }),
+        ageRestrictedNotificationMaintenanceScheduleProvider.overrideWithValue(
+          (_) => () {},
+        ),
+        ageSignalPushSnapshotRetryWaitProvider.overrideWithValue((_) async {}),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(ageSignalProvider.notifier).request();
+    expect(container.read(ageSignalProvider), AgeSignalState.restricted);
 
     await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          ageSignalProvider.overrideWith(() => _BlockingAgeSignalNotifier()),
-          communityListProvider.overrideWith(
-            () => _UnavailableCommunityListNotifier(),
-          ),
-          ageRestrictedNotificationPurgerProvider.overrideWithValue(() async {
-            purges += 1;
-            if (purges == 1) {
-              throw StateError('injected notification purge failure');
-            }
-          }),
-          ageSignalPushSnapshotRetryWaitProvider.overrideWithValue(
-            (_) async {},
-          ),
-        ],
+      UncontrolledProviderScope(
+        container: container,
         child: const AgeSignalPushBootstrap(child: SizedBox()),
       ),
     );
     await tester.pump();
+    expect(purges, 1);
+
+    // A resume while the confirmed purge is still running retires the effect
+    // waiting on it. The new effect purges, fails once and retries.
+    for (final state in [
+      AppLifecycleState.inactive,
+      AppLifecycleState.hidden,
+      AppLifecycleState.paused,
+      AppLifecycleState.hidden,
+      AppLifecycleState.inactive,
+      AppLifecycleState.resumed,
+    ]) {
+      tester.binding.handleAppLifecycleStateChanged(state);
+    }
+    await tester.pump();
+    await tester.pump();
+    expect(purges, 3);
+
+    firstPurge.completeError(StateError('injected notification purge failure'));
+    await tester.pump();
     await tester.pump();
 
-    expect(purges, 2);
+    expect(purges, 3);
   });
 
   testWidgets(

@@ -153,9 +153,9 @@ class _AgeRestrictedPushCleanup extends HookConsumerWidget {
             final confirmed = ref
                 .read(ageSignalProvider.notifier)
                 .takeConfirmedPurge();
-            if (confirmed == null || !await confirmed) {
-              await purgeNotifications();
-            }
+            final needsPurge = confirmed == null || !await confirmed;
+            if (cancelled) return;
+            if (needsPurge) await purgeNotifications();
             consecutivePurgeFailures.value = 0;
             if (!cancelled && remainingMaintenancePurges.value > 0) {
               remainingMaintenancePurges.value -= 1;
