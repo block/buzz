@@ -1,5 +1,9 @@
 part of '../channel_messages_provider.dart';
 
+// Channel history keeps partial reply evidence; full threads stay route-scoped.
+const _maxCachedRepliesPerRoot = 256;
+const _maxCachedReplies = 2048;
+
 extension _ChannelHistoryPagination on ChannelMessagesNotifier {
   Future<ChannelWindowPage> _fetchWindowPage(
     RelaySessionNotifier session,

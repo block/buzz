@@ -500,12 +500,13 @@ Future<void> _shareImage(
 }
 
 /// Reuses the gallery's downloads, permissions and message authority for UIKit.
+/// [canManageMessage] is read when the gallery opens and before a delete.
 NativePhotoActions nativeImageActions({
   required BuildContext context,
   required WidgetRef ref,
   required TimelineMessage message,
   required String channelId,
-  required bool canManageMessage,
+  required bool Function() canManageMessage,
 }) => NativePhotoActions(
   canDelete: canManageMessage,
   perform: (action, url) async {
@@ -532,7 +533,7 @@ NativePhotoActions nativeImageActions({
           await Clipboard.setData(ClipboardData(text: url));
           return 'Image link copied';
         case 'delete':
-          if (!canManageMessage) return 'You cannot delete this message';
+          if (!canManageMessage()) return 'You cannot delete this message';
           await ref
               .read(channelActionsProvider)
               .deleteMessage(channelId: channelId, eventId: message.id);

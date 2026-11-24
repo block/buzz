@@ -212,7 +212,7 @@ void main() {
             replied = true;
           },
           actions: NativePhotoActions(
-            canDelete: false,
+            canDelete: () => false,
             perform: (action, url) async {
               actions.add('$action:$url');
               return null;
@@ -228,6 +228,72 @@ void main() {
     },
     skip: !NativePhotoZoomPreview.enabled,
   );
+
+  testWidgets('native gallery checks delete permission again before deleting', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    final key = GlobalKey();
+    late BuildContext context;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (value) {
+            context = value;
+            return SizedBox(key: key, width: 100, height: 100);
+          },
+        ),
+      ),
+    );
+    var allowed = true;
+    final performed = <String>[];
+    const codec = StandardMethodCodec();
+    messenger.setMockMethodCallHandler(NativePhotoZoomPreview.channel, (
+      call,
+    ) async {
+      if (call.method == 'isSupported') return true;
+      final args = call.arguments as Map;
+      expect(args['canDelete'], isTrue);
+      // Permission is withdrawn while the gallery is open.
+      allowed = false;
+      final reply = Completer<Object?>();
+      await messenger.handlePlatformMessage(
+        NativePhotoZoomPreview.channel.name,
+        codec.encodeMethodCall(
+          MethodCall('action', {
+            'session': args['session'] as int,
+            'index': 0,
+            'action': 'delete',
+          }),
+        ),
+        (data) =>
+            reply.complete(data == null ? null : codec.decodeEnvelope(data)),
+      );
+      expect(await reply.future, isNull);
+      return 'closed';
+    });
+    await tester.runAsync(
+      () => NativePhotoZoomPreview.open(
+        context: context,
+        sourceKeys: [key],
+        providers: [provider],
+        urls: ['https://example.org/photo.jpg'],
+        labels: ['Photo'],
+        initialIndex: 0,
+        onSelect: (_) async {},
+        actions: NativePhotoActions(
+          canDelete: () => allowed,
+          perform: (action, url) async {
+            performed.add(action);
+            return null;
+          },
+        ),
+      ),
+    );
+    debugDefaultTargetPlatformOverride = null;
+    expect(allowed, isFalse);
+    expect(performed, isEmpty);
+  }, skip: !NativePhotoZoomPreview.enabled);
 
   testWidgets(
     'large native gallery loads only nearby requests and abandons work on move and close',

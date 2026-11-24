@@ -140,6 +140,7 @@ void main() {
     'relay authority changes discard pages verified under the old key',
     () async {
       final message = _message(_channel, 'message with replies');
+      expect(await store.relayAuthor(_identity), isNull);
       final cached = store.capture(_identity, _channel);
       final other = store.capture(_identity, _otherChannel);
       final summary = NostrEvent.fromJson(
@@ -157,6 +158,16 @@ void main() {
       );
       await store.save(cached, [message, summary], relayAuthor: summary.pubkey);
       expect(await store.read(cached), [message, summary]);
+      // The saved key outlives the app session, for an offline relaunch.
+      final relaunched = SavedMessageStore(
+        root: () async => temp,
+        diagnostics: diagnostics,
+      );
+      expect(await relaunched.relayAuthor(_identity), summary.pubkey);
+      expect(await relaunched.relayAuthor(_otherIdentity), isNull);
+      // A save without a key keeps the one already saved.
+      await store.save(other, [message], relayAuthor: null);
+      expect(await store.relayAuthor(_identity), summary.pubkey);
 
       final newAuthor = derivePublicKeyHex(
         '0000000000000000000000000000000000000000000000000000000000000002',
@@ -165,6 +176,13 @@ void main() {
       await store.save(other, [newMessage], relayAuthor: newAuthor);
       expect(await store.read(cached), isNull);
       expect(await store.read(other), [newMessage]);
+      expect(await store.relayAuthor(_identity), newAuthor);
+
+      // Removing the identity removes its key, including a read in flight.
+      final pending = store.relayAuthor(_identity);
+      await store.removeScope(_identity);
+      expect(await pending, isNull);
+      expect(await store.relayAuthor(_identity), isNull);
     },
   );
 
