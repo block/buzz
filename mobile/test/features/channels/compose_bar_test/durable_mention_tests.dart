@@ -68,7 +68,7 @@ void durableMentionTests() {
       renamed = true;
       await tester.pumpWidget(build());
       await tester.pumpAndSettle();
-      await tester.tap(find.text(draft.trim()));
+      await tester.tap(find.text(draft));
       await tester.pumpAndSettle();
       expect(
         tester.widget<TextField>(find.byType(TextField)).controller!.text,
@@ -88,7 +88,7 @@ void durableMentionTests() {
       sent = null;
       await tester.pumpWidget(build());
       await tester.pumpAndSettle();
-      await tester.tap(find.text(draft.trim()));
+      await tester.tap(find.text(draft));
       await tester.pumpAndSettle();
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
@@ -184,7 +184,7 @@ void durableMentionTests() {
       await tester.pumpAndSettle();
       eligible = false;
       await mount();
-      await tester.tap(find.text('@Helper Bot'));
+      await tester.tap(find.text('@Helper Bot '));
       await tester.pumpAndSettle();
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();

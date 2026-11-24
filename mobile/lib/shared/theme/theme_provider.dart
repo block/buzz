@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -14,6 +16,38 @@ const defaultSchemeName = buzzThemeName;
 final savedPrefsProvider = Provider<SharedPreferences>(
   (_) => throw UnimplementedError('Must be overridden'),
 );
+
+/// SharedPreferences key for this device's Light, Dark, or System choice.
+const appearanceModeKey = 'buzz-appearance-mode.v1';
+
+/// Light, Dark, or System for this device only.
+///
+/// Kept out of the synced community preference: brightness follows the device
+/// (its OS setting, time of day), so one device's choice must not change
+/// another's. Defaults to System.
+class AppearanceModeNotifier extends Notifier<ThemeMode> {
+  @override
+  ThemeMode build() {
+    final saved = ref.watch(savedPrefsProvider).getString(appearanceModeKey);
+    return ThemeMode.values.where((mode) => mode.name == saved).firstOrNull ??
+        ThemeMode.system;
+  }
+
+  /// Saves [mode] on this device only; it is never synced.
+  void setMode(ThemeMode mode) {
+    if (mode == state) return;
+    state = mode;
+    unawaited(
+      ref.read(savedPrefsProvider).setString(appearanceModeKey, mode.name),
+    );
+  }
+}
+
+/// This device's Light, Dark or System choice. See [AppearanceModeNotifier].
+final appearanceModeProvider =
+    NotifierProvider<AppearanceModeNotifier, ThemeMode>(
+      AppearanceModeNotifier.new,
+    );
 
 /// Returns a scheme that can honor [mode] without silently pinning brightness.
 ///

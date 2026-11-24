@@ -543,7 +543,6 @@ void main() {
         expect(captures, 0);
         expect(harness.sourceHidden.value, isFalse);
         for (final label in [
-          'Mark unread',
           'Follow thread',
           'Copy text',
           'Edit message',
@@ -616,7 +615,7 @@ void main() {
     });
 
     testWidgets(
-      'places three quick action tiles between reactions and sections',
+      'places four quick action tiles between reactions and sections',
       (tester) async {
         final prefs = await _mockPrefs();
         await _pumpSheet(
@@ -633,6 +632,9 @@ void main() {
         final reply = tester.getCenter(find.text('Reply'));
         final link = tester.getCenter(find.text('Copy link'));
         final remind = tester.getCenter(find.text('Remind me'));
+        final mark = tester.getCenter(find.text('Mark unread'));
+        expect(mark.dx, lessThan(reply.dx));
+        expect(mark.dy, reply.dy);
         expect(reply.dy, link.dy);
         expect(link.dy, remind.dy);
         expect(reply.dx, lessThan(link.dx));
@@ -647,7 +649,12 @@ void main() {
           remind.dy,
           lessThan(tester.getTopLeft(find.byType(SheetActionSection).first).dy),
         );
-        for (final label in ['Reply', 'Copy link', 'Remind me']) {
+        for (final label in [
+          'Mark unread',
+          'Reply',
+          'Copy link',
+          'Remind me',
+        ]) {
           expect(
             find.ancestor(
               of: find.text(label),

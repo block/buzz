@@ -13,6 +13,28 @@ ThemeData utilitySurfaceThemeData(ThemeData theme) {
   final colors = theme.colorScheme;
   final pageSurface = colors.surfaceContainerHighest;
   final containerSurface = colors.surface;
+  return _surfaceTheme(theme, pageSurface, containerSurface);
+}
+
+/// Dark sheets sit one surface step below their grouped controls.
+ThemeData utilitySheetThemeData(ThemeData theme) {
+  if (theme.brightness == Brightness.light) {
+    return utilitySurfaceThemeData(theme);
+  }
+  final colors = theme.colorScheme;
+  return _surfaceTheme(
+    theme,
+    colors.surfaceContainer,
+    colors.surfaceContainerHigh,
+  );
+}
+
+ThemeData _surfaceTheme(
+  ThemeData theme,
+  Color pageSurface,
+  Color containerSurface,
+) {
+  final colors = theme.colorScheme;
   final containerShape = RoundedRectangleBorder(
     borderRadius: BorderRadius.circular(Radii.container),
   );
