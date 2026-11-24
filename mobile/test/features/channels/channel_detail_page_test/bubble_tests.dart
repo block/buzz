@@ -103,16 +103,69 @@ void bubbleLayoutTests() {
         );
         expect(tester.takeException(), isNull);
 
-        await tester.tap(
-          findRichText('Alice goes off to fix that bug right now'),
+        Future<void> expectActions(String text, {bool own = false}) async {
+          final target = findRichText(text).hitTestable();
+          await tester.longPress(target);
+          await tester.pumpAndSettle();
+          expect(find.text('Copy text'), findsOneWidget);
+          expect(find.text('Reply'), findsOneWidget);
+          if (own) {
+            expect(find.text('Edit message'), findsOneWidget);
+            expect(find.text('Delete message'), findsOneWidget);
+          }
+          Navigator.of(tester.element(find.byType(BottomSheet))).pop();
+          await tester.pumpAndSettle();
+        }
+
+        Future<void> swipeToReply(String text, String expectedRoot) async {
+          final drag = await tester.startGesture(
+            tester.getCenter(findRichText(text).hitTestable()),
+          );
+          await drag.moveBy(const Offset(-25, 0));
+          await drag.moveBy(const Offset(-150, 0));
+          await tester.pump();
+          expect(
+            find.byKey(const ValueKey('swipe-reply-circle')),
+            findsOneWidget,
+          );
+          await drag.up();
+          await tester.pumpAndSettle();
+          expect(
+            tester
+                .widget<ThreadDetailPage>(find.byType(ThreadDetailPage))
+                .threadHead
+                .id,
+            expectedRoot,
+          );
+        }
+
+        // At normal size this short action leaves unused space in its row.
+        if (scale == 1) {
+          final ownText = findRichText('Alex *literal* eats a drumstick');
+          final ownRow = find.byKey(const ValueKey('message-row-own-action'));
+          await tester.longPressAt(
+            Offset(
+              tester.getRect(ownRow).right - 2,
+              tester.getRect(ownText).center.dy,
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(find.text('Copy text'), findsNothing);
+        }
+        await expectActions('Alex *literal* eats a drumstick', own: true);
+        await expectActions('Alice goes off to fix that bug right now');
+        await swipeToReply(
+          'Alice goes off to fix that bug right now',
+          threadIdRoot,
         );
-        await tester.pumpAndSettle();
         expect(findRichText('Alice grabs a blowtorch'), findsOneWidget);
         expectReactionBelowTimestamp('thread-message-row-$threadIdR1');
         expect(
           find.byKey(ValueKey('thread-message-row-$threadIdR1')),
           findsOneWidget,
         );
+        await expectActions('Alice grabs a blowtorch');
+        await swipeToReply('Alice grabs a blowtorch', threadIdR1);
         expect(tester.takeException(), isNull);
       } finally {
         semantics.dispose();

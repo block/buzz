@@ -63,7 +63,11 @@ class ActionMessageBody extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                child,
+                // Keep the gesture target on the narration's painted width.
+                DefaultTextStyle.merge(
+                  textWidthBasis: TextWidthBasis.longestLine,
+                  child: MessageReplyDragTarget(child: child),
+                ),
                 MessageLongPressTarget(
                   child: Text(
                     timestamp,
