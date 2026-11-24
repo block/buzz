@@ -8,6 +8,7 @@ class _ThreadMessage extends HookConsumerWidget {
   final String channelId;
   final String? currentPubkey;
   final bool showAuthor;
+  final bool showActionTimestamp;
   final bool showAvatar;
   final bool startsDay;
   final bool endsDay;
@@ -28,6 +29,7 @@ class _ThreadMessage extends HookConsumerWidget {
     required this.channelId,
     required this.currentPubkey,
     required this.showAuthor,
+    this.showActionTimestamp = true,
     this.showAvatar = true,
     this.startsDay = false,
     this.endsDay = false,
@@ -339,6 +341,7 @@ class _ThreadMessage extends HookConsumerWidget {
                                       child: ActionMessageBody(
                                         key: swipeContentKey,
                                         active: action != null,
+                                        showTimestamp: showActionTimestamp,
                                         pubkey: message.pubkey,
                                         displayName: displayName,
                                         profile: profile,

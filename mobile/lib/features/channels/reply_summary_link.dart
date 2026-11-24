@@ -109,13 +109,13 @@ class ReplySummaryLink extends ConsumerWidget {
                             working: workingKeys.isNotEmpty,
                             label: summary == null ? null : label,
                           )
-                        : Row(
-                            mainAxisSize: MainAxisSize.min,
+                        : Wrap(
+                            spacing: Grid.half,
+                            runSpacing: Grid.half,
+                            crossAxisAlignment: WrapCrossAlignment.center,
                             children: [
-                              if (participants.isNotEmpty) ...[
+                              if (participants.isNotEmpty)
                                 _AvatarStack(participants, userCache),
-                                const SizedBox(width: Grid.half),
-                              ],
                               if (shownWorking.isNotEmpty) ...[
                                 Container(
                                   key: const ValueKey(
@@ -133,22 +133,20 @@ class ReplySummaryLink extends ConsumerWidget {
                                       Grid.twelve,
                                     ),
                                   ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
+                                  child: Wrap(
+                                    spacing: Grid.xxs,
+                                    runSpacing: Grid.half,
+                                    crossAxisAlignment:
+                                        WrapCrossAlignment.center,
                                     children: [
                                       // Working agents sit side by side, as on desktop.
-                                      for (final (i, pubkey)
-                                          in shownWorking.indexed) ...[
-                                        if (i > 0)
-                                          const SizedBox(width: Grid.xxs),
+                                      for (final pubkey in shownWorking)
                                         SmallAvatar(
                                           pubkey: pubkey,
                                           userCache: userCache,
                                           agent: true,
                                         ),
-                                      ],
                                       if (hiddenWorking > 0) ...[
-                                        const SizedBox(width: Grid.xxs),
                                         Text(
                                           '+$hiddenWorking',
                                           style: context.textTheme.labelMedium
@@ -159,7 +157,6 @@ class ReplySummaryLink extends ConsumerWidget {
                                               ),
                                         ),
                                       ],
-                                      const SizedBox(width: Grid.half),
                                       const TypingDots(
                                         key: ValueKey('thread-working-dots'),
                                         dotSize: 5,
@@ -167,21 +164,16 @@ class ReplySummaryLink extends ConsumerWidget {
                                     ],
                                   ),
                                 ),
-                                if (summary != null)
-                                  const SizedBox(width: Grid.half),
                               ],
                               if (summary != null)
-                                Flexible(
-                                  child: Text(
-                                    label,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: context.textTheme.labelMedium
-                                        ?.copyWith(
-                                          color:
-                                              context.colors.onSurfaceVariant,
-                                        ),
-                                  ),
+                                Text(
+                                  label,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: context.textTheme.labelMedium
+                                      ?.copyWith(
+                                        color: context.colors.onSurfaceVariant,
+                                      ),
                                 ),
                             ],
                           ),

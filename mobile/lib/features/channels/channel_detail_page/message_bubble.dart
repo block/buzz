@@ -3,6 +3,7 @@ part of '../channel_detail_page.dart';
 class _MessageBubble extends HookConsumerWidget {
   final TimelineMessage message;
   final bool showAuthor;
+  final bool showActionTimestamp;
   final bool typingHandoff;
   final bool showAvatar;
   final bool startsDay;
@@ -21,6 +22,7 @@ class _MessageBubble extends HookConsumerWidget {
   const _MessageBubble({
     required this.message,
     required this.showAuthor,
+    this.showActionTimestamp = true,
     this.typingHandoff = false,
     this.showAvatar = true,
     this.startsDay = false,
@@ -351,6 +353,7 @@ class _MessageBubble extends HookConsumerWidget {
                                       child: ActionMessageBody(
                                         key: swipeContentKey,
                                         active: action != null,
+                                        showTimestamp: showActionTimestamp,
                                         pubkey: message.pubkey,
                                         displayName: displayName,
                                         profile: profile,

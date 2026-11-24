@@ -1081,6 +1081,11 @@ class _MessageList extends HookConsumerWidget {
                         else ...[
                           _MessageBubble(
                             message: message,
+                            showActionTimestamp:
+                                !(message.action != null &&
+                                    prevMessage?.action != null &&
+                                    message.createdAt ~/ 60 ==
+                                        prevMessage!.createdAt ~/ 60),
                             startsDay: showDayDivider,
                             endsDay: endsDay,
                             showAuthor: showAuthor || isHandoff,

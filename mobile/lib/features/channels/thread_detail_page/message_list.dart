@@ -366,6 +366,11 @@ class _ThreadMessageList extends HookWidget {
                                     ),
                                   _ThreadMessage(
                                     message: reply,
+                                    showActionTimestamp:
+                                        !(reply.action != null &&
+                                            previousReply?.action != null &&
+                                            reply.createdAt ~/ 60 ==
+                                                previousReply!.createdAt ~/ 60),
                                     startsDay: showDayDivider,
                                     endsDay:
                                         nextReply != null &&

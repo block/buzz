@@ -17,6 +17,7 @@ class ActionMessageBody extends StatelessWidget {
     required this.active,
     this.profile,
     this.isAgent = false,
+    this.showTimestamp = true,
   });
 
   final String pubkey;
@@ -28,82 +29,92 @@ class ActionMessageBody extends StatelessWidget {
   final Widget child;
   final bool active;
 
+  /// Consecutive actions in one minute share the first action's visible clock.
+  final bool showTimestamp;
+
   /// Leading width shared by narration and its reply/reaction controls.
   static double contentInset(BuildContext context) =>
-      _timeGutterWidth(context) + Grid.xl;
+      messageAvatarSize + messageAvatarContentGap;
 
   @override
   Widget build(BuildContext context) {
     if (!active) return child;
     final scaler = MediaQuery.textScalerOf(context);
-    double topInset(TextStyle style) =>
-        ((Grid.xl - scaler.scale(style.fontSize!) * style.height!) / 2).clamp(
-          0.0,
-          Grid.xl,
-        );
+    final firstLineHeight =
+        scaler.scale(messageBodyTextStyle.fontSize!) *
+        messageBodyTextStyle.height!;
+    final textInset = ((Grid.xl - firstLineHeight) / 2).clamp(0.0, Grid.xl);
+    final avatarInset = ((firstLineHeight - Grid.xl) / 2).clamp(
+      0.0,
+      double.infinity,
+    );
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: Grid.half),
-      child: Row(
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(
-            width: _timeGutterWidth(context),
-            child: Padding(
+          if (showTimestamp)
+            Padding(
               padding: EdgeInsetsDirectional.only(
-                end: Grid.half,
-                top: topInset(messageTimestampTextStyle),
+                start: contentInset(context),
+                bottom: Grid.half,
               ),
-              child: Align(
-                alignment: AlignmentDirectional.centerEnd,
+              child: MessageLongPressTarget(
+                child: Text(
+                  timestamp,
+                  style: messageTimestampTextStyle.copyWith(
+                    color: context.tertiaryTextColor,
+                  ),
+                ),
+              ),
+            ),
+          if (!showTimestamp) Semantics(label: timestamp),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: EdgeInsets.only(top: avatarInset),
                 child: MessageLongPressTarget(
-                  child: Text(
-                    timestamp,
-                    maxLines: 1,
-                    style: messageTimestampTextStyle.copyWith(
-                      color: context.tertiaryTextColor,
+                  child: Semantics(
+                    container: true,
+                    label: 'Open $displayName profile',
+                    button: true,
+                    child: IconButton(
+                      onPressed: onAuthorTap,
+                      alignment: AlignmentDirectional.centerStart,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(
+                        minWidth: Grid.xl,
+                        minHeight: Grid.xl,
+                      ),
+                      icon: ExcludeSemantics(
+                        child: SmallAvatar(
+                          pubkey: pubkey,
+                          userCache: {pubkey.toLowerCase(): ?profile},
+                          agent: isAgent,
+                          size: Grid.sm,
+                        ),
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-          ),
-          MessageLongPressTarget(
-            child: Semantics(
-              container: true,
-              label: 'Open $displayName profile',
-              button: true,
-              child: IconButton(
-                onPressed: onAuthorTap,
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(
-                  minWidth: Grid.xl,
-                  minHeight: Grid.xl,
-                ),
-                icon: ExcludeSemantics(
-                  child: SmallAvatar(
-                    pubkey: pubkey,
-                    userCache: {pubkey.toLowerCase(): ?profile},
-                    agent: isAgent,
-                    size: Grid.sm,
+              Expanded(
+                child: Padding(
+                  padding: EdgeInsets.only(top: textInset),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Keep the gesture target on the narration's painted width.
+                      DefaultTextStyle.merge(
+                        textWidthBasis: TextWidthBasis.longestLine,
+                        child: MessageReplyDragTarget(child: child),
+                      ),
+                    ],
                   ),
                 ),
               ),
-            ),
-          ),
-          Expanded(
-            child: Padding(
-              padding: EdgeInsets.only(top: topInset(messageBodyTextStyle)),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Keep the gesture target on the narration's painted width.
-                  DefaultTextStyle.merge(
-                    textWidthBasis: TextWidthBasis.longestLine,
-                    child: MessageReplyDragTarget(child: child),
-                  ),
-                ],
-              ),
-            ),
+            ],
           ),
         ],
       ),
@@ -118,10 +129,3 @@ String actionMessageMarkdown(String displayName, String action) {
       .replaceAllMapped(RegExp(r'[!-/:-@\[-`{-~]'), (m) => '\\${m[0]}');
   return '$name $action';
 }
-
-double _timeGutterWidth(BuildContext context) =>
-    Grid.xxl *
-    MediaQuery.textScalerOf(
-      context,
-    ).scale(messageTimestampTextStyle.fontSize!) /
-    messageTimestampTextStyle.fontSize!;

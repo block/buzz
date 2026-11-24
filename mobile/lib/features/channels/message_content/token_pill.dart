@@ -90,7 +90,14 @@ class _TokenPill extends StatelessWidget {
             Icon(icon, size: fontSize * 0.95, color: context.colors.primary),
             const SizedBox(width: Grid.quarter + 1),
           ],
-          Text(text, style: style),
+          Flexible(
+            child: Text(
+              text,
+              style: style,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
         ],
       ),
     );

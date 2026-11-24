@@ -26,9 +26,13 @@ Actions are authored messages, visually distinct from both speech bubbles and
 relay-generated system notices. Show the author's avatar and name on every
 action, including consecutive actions, the viewer's own messages, and DMs.
 Use a small avatar and normal-size italic action text with readable contrast;
-put clock time in a fixed leading gutter, followed by the avatar and narration.
-Wrapped text, reactions, and reply controls align under the narration. Keep edit
+put clock time above the narration. Align the small avatar's leading edge with
+ordinary message avatars and center it vertically on the narration's first line.
+Keep the text to its right, with wrapped lines, reactions, and reply controls
+aligned under the narration. Keep edit
 markers available. Profile labels render literally.
+Consecutive actions within the same minute share one visible timestamp, while
+each action retains its own avatar, name, and accessible time.
 Keep links, mentions, emoji, and attachments usable inside the action body.
 
 Do not group an action with neighboring speech bubbles. Keep the usual message

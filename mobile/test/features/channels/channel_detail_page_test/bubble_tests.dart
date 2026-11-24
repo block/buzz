@@ -10,11 +10,16 @@ void bubbleLayoutTests() {
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
       final semantics = tester.ensureSemantics();
+      final typing = _FakeTypingNotifier(const []);
       try {
         await tester.pumpWidget(
           _buildTestable(
             signingPubkey: 'self',
             textScaler: TextScaler.linear(scale),
+            disableAnimations: true,
+            typingNotifier: typing,
+            inventoryAgents: const {'helper-one', 'helper-two'},
+            channels: [_testChannel.copyWith(name: 'engineering')],
             users: const {
               'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
               'self': UserProfile(
@@ -32,12 +37,17 @@ void bubbleLayoutTests() {
               _reaction(id: 'root-action-reaction', targetId: threadIdRoot),
               _reaction(id: 'own-action-reaction', targetId: 'own-action'),
               _reaction(id: 'reply-action-reaction', targetId: threadIdR1),
-              _textMsg(id: 'after', pubkey: 'alice', content: 'After'),
               _textMsg(
                 id: 'own-action',
                 pubkey: 'self',
                 content: '/me eats a drumstick',
               ),
+              _textMsg(
+                id: 'channel-action',
+                pubkey: 'alice',
+                content: '/me checks #engineering',
+              ),
+              _textMsg(id: 'after', pubkey: 'alice', content: 'After'),
               _textMsg(
                 id: threadIdR1,
                 pubkey: 'alice',
@@ -46,9 +56,47 @@ void bubbleLayoutTests() {
                   ['e', threadIdRoot, '', 'reply'],
                 ],
               ),
+              for (final pubkey in ['bob', 'casey'])
+                _textMsg(
+                  id: 'reply-$pubkey',
+                  pubkey: pubkey,
+                  content: 'Checking in',
+                  extraTags: [
+                    ['e', threadIdRoot, '', 'reply'],
+                  ],
+                ),
             ],
           ),
         );
+        await tester.pumpAndSettle();
+        typing.setEntries([
+          for (final pubkey in ['helper-one', 'helper-two'])
+            TypingEntry(
+              pubkey: pubkey,
+              threadHeadId: threadIdRoot,
+              expiresAtMs: DateTime.now().millisecondsSinceEpoch + 60000,
+            ),
+        ]);
+        await tester.pumpAndSettle();
+        final summary = find.byKey(ValueKey('thread-summary-$threadIdRoot'));
+        final replyLabel = find.descendant(
+          of: summary,
+          matching: find.text('3 replies'),
+        );
+        expect(replyLabel, findsOneWidget);
+        final paragraph = tester.renderObject<RenderParagraph>(replyLabel);
+        expect(paragraph.didExceedMaxLines, isFalse);
+        expect(
+          find.descendant(
+            of: summary,
+            matching: find.byKey(const ValueKey('thread-working-dots')),
+          ),
+          findsOneWidget,
+        );
+        expect(find.text('engineering'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        // Keep the remaining gesture journey focused on narration itself.
+        typing.setEntries(const []);
         await tester.pumpAndSettle();
         Finder within(String id, Finder target) => find.descendant(
           of: find.byKey(ValueKey('message-row-$id')),
@@ -89,10 +137,12 @@ void bubbleLayoutTests() {
             of: row,
             matching: find.byType(ReactionRow),
           );
-          expect(
-            tester.getTopLeft(reactions).dy,
-            greaterThanOrEqualTo(tester.getBottomLeft(timestamp).dy),
-          );
+          if (timestamp.evaluate().isNotEmpty) {
+            expect(
+              tester.getTopLeft(reactions).dy,
+              greaterThanOrEqualTo(tester.getBottomLeft(timestamp).dy),
+            );
+          }
           final content = find.descendant(
             of: row,
             matching: find.byType(MessageContent),
@@ -106,12 +156,22 @@ void bubbleLayoutTests() {
         expectReactionBelowTimestamp('message-row-$threadIdRoot');
         expectReactionBelowTimestamp('message-row-own-action');
         expect(
+          within(threadIdRoot, find.text(formatMessageTime(1000))),
+          findsOneWidget,
+        );
+        expect(
+          within('own-action', find.text(formatMessageTime(1000))),
+          findsNothing,
+        );
+        expect(
           find.bySemanticsLabel('Open Alex *literal* profile'),
           findsOneWidget,
         );
         expect(tester.takeException(), isNull);
 
         Future<void> expectActions(String text, {bool own = false}) async {
+          await tester.ensureVisible(findRichText(text));
+          await tester.pumpAndSettle();
           final target = findRichText(text).hitTestable();
           await tester.longPress(target);
           await tester.pumpAndSettle();
@@ -126,6 +186,8 @@ void bubbleLayoutTests() {
         }
 
         Future<void> swipeToReply(String text, String expectedRoot) async {
+          await tester.ensureVisible(findRichText(text));
+          await tester.pumpAndSettle();
           final drag = await tester.startGesture(
             tester.getCenter(findRichText(text).hitTestable()),
           );
