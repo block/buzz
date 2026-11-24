@@ -137,7 +137,7 @@ pub(super) struct Step {
 
 pub(super) struct Progress {
     pub current: Option<EntityStage>,
-    pub completed_communities: HashSet<Uuid>,
+    pub visited_communities: HashSet<Uuid>,
     pub terminal: bool,
     pub legacy: bool,
 }
@@ -152,7 +152,7 @@ impl Progress {
     ) -> Result<Self> {
         let mut progress = Self {
             current: None,
-            completed_communities: HashSet::new(),
+            visited_communities: HashSet::new(),
             terminal: false,
             legacy: request
                 .inventory_manifest
@@ -207,7 +207,9 @@ impl Progress {
                 progress.current = Some((*row).clone());
                 break;
             }
-            if row.status != "completed" {
+            if row.status != "completed"
+                && !(row.stage == "delete_owned_community" && row.status == "submitted")
+            {
                 return Err(invalid("non-current stage is not completed"));
             }
             let outcome = decision(row, progress.legacy)?;
@@ -244,14 +246,14 @@ impl Progress {
                     let id = row
                         .target_community_id
                         .ok_or_else(|| invalid("community outcome on request stage"))?;
-                    if !self.completed_communities.insert(id) {
-                        return Err(invalid("community completed twice"));
+                    if !self.visited_communities.insert(id) {
+                        return Err(invalid("community visited twice"));
                     }
                 }
                 match inventory
                     .communities
                     .iter()
-                    .find(|(id, _)| !self.completed_communities.contains(id))
+                    .find(|(id, _)| !self.visited_communities.contains(id))
                 {
                     Some((id, attrs)) => Ok(Some(Step {
                         name: if attrs["relationship"] == "owner" {
@@ -269,7 +271,7 @@ impl Progress {
                 }
             }
             Decision::RequestComplete => {
-                if self.completed_communities.len() != inventory.communities.len() {
+                if self.visited_communities.len() != inventory.communities.len() {
                     return Err(invalid("request cannot finish with uncovered communities"));
                 }
                 Ok(None)

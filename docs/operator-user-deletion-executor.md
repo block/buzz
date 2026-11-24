@@ -15,7 +15,10 @@ operator-controlled cleanup. Neither command installs or enforces the account
 gate. Protection against concurrent writes by the target or their agents remains
 unimplemented; neither command proves full account erasure. Use a disposable
 database and versioned storage bucket when testing. For an owned community, read-only mode records the community ID and the proposed
-`would_submit` action. Delete mode submits or reuses a child request for separate approval.
+`would_submit` action. Delete mode submits or reuses a child request for separate approval. Its
+`delete_owned_community` stage stays `submitted` while the child is outstanding.
+The worker continues through the approved inventory so independent cleanup and
+other submissions can finish in the same run.
 
 Follow [Run and verify a read-only user deletion](operator-user-deletion-preview.md)
 for the inventory, approval, full-run, and verification commands.
@@ -209,6 +212,17 @@ the next uncovered community from the frozen inventory. After the last one it
 reaches `global_cleanup`. In both modes the gate and global cleanup record
 that their destructive handlers are unimplemented. In read-only mode the profile stage
 records outstanding prerequisites it observes while previous stages leave rows in place.
+
+The final stage also saves a summary. In delete mode it checks each outstanding
+community request. While a child needs approval, execution or intervention, the
+parent stays `running` and releases its lease. Inspect the final stage's
+`metadata_json.waiting.summary.remaining` for each community, child request ID,
+state and next action. Running the same user request again refreshes those
+observations. Each child reaching logical deletion completes its existing owned
+stage. Once all required stages finish, the final result contains an empty
+`summary.remaining` and lists skipped placeholders under `skipped_unimplemented`.
+Rerunning an older request that completed immediately after delegation restores
+the final review without replaying earlier cleanup.
 
 Older requests keep their saved transition rules. Demo content still branches
 on the recorded `has_agents` result.

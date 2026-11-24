@@ -601,10 +601,14 @@ async fn real_user_requires_gate_then_global_media_before_community_cleanup() {
         .find(|stage| stage.id == global.id)
         .unwrap();
     assert_eq!(stage.status, "completed");
-    assert_eq!(
-        stage.metadata_json["result"],
-        serde_json::json!({
-            "execution_mode": "delete", "implemented": false, "account_erasure_complete": false
-        })
-    );
+    let result = &stage.metadata_json["result"];
+    assert_eq!(result["implemented"], false);
+    assert_eq!(result["account_erasure_complete"], false);
+    assert_eq!(result["summary"]["remaining"], serde_json::json!([]));
+    for name in ["gate_user", "global_cleanup"] {
+        assert!(result["summary"]["skipped_unimplemented"]
+            .as_array()
+            .unwrap()
+            .contains(&name.into()));
+    }
 }

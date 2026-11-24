@@ -7,8 +7,9 @@ use buzz_db::entity_deletion::{EntityDeletionStore, EntityLease, EntityStage, Ne
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::handlers::HandlerProgress;
 use super::{handlers, transition::UserDeletionTransition};
-use crate::{StageOutcome, DEFAULT_LEASE_DURATION, HEARTBEAT_INTERVAL};
+use crate::{DEFAULT_LEASE_DURATION, HEARTBEAT_INTERVAL};
 
 /// Real execution controls and demo-only failure/delay options.
 pub(super) struct RunOptions {
@@ -53,6 +54,12 @@ pub(super) async fn run(
         anyhow::ensure!(options.delete != request.target.starts_with("read-only:"),
             "real workflow execution requires --delete for a deletion request or --read-only for a read-only request");
         anyhow::ensure!(options.db.is_some(), "real workflow requires a database");
+    }
+    if options.delete
+        && !request.target.starts_with("demo:")
+        && matches!(request.status.as_str(), "completed" | "running")
+    {
+        store.resume_delegated_review(id).await?;
     }
     let Some(lease) = store.claim(id, owner, DEFAULT_LEASE_DURATION).await? else {
         if store.get(id).await?.status == "completed" {
@@ -114,11 +121,10 @@ async fn execute_claim(
                     shutdown,
                     HEARTBEAT_INTERVAL,
                 )
-                .await
+                .await?
                 {
-                    StageOutcome::Completed => {}
-                    StageOutcome::Shutdown => return Ok(0),
-                    StageOutcome::Failed(error) => return Err(error),
+                    HandlerProgress::Advance => {}
+                    HandlerProgress::Stop => return Ok(0),
                 }
                 previous_stage_id = Some(row.id);
                 executed += 1;
@@ -134,7 +140,7 @@ async fn run_stage_with_heartbeat(
     options: &RunOptions,
     shutdown: &CancellationToken,
     heartbeat_period: Duration,
-) -> StageOutcome {
+) -> Result<HandlerProgress> {
     let handler = handlers::dispatch(store, lease, stage, options);
     tokio::pin!(handler);
     let mut interval = tokio::time::interval(heartbeat_period);
@@ -154,12 +160,9 @@ async fn run_stage_with_heartbeat(
     };
     tokio::select! {
         biased;
-        _ = shutdown.cancelled() => StageOutcome::Shutdown,
-        result = &mut handler => match result {
-            Ok(()) => StageOutcome::Completed,
-            Err(error) => StageOutcome::Failed(error),
-        },
-        error = renewal => StageOutcome::Failed(error.into()),
+        _ = shutdown.cancelled() => Ok(HandlerProgress::Stop),
+        result = &mut handler => result,
+        error = renewal => Err(error.into()),
     }
 }
 

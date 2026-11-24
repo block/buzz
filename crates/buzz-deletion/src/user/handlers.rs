@@ -10,20 +10,19 @@ use buzz_db::user_deletion::{
 };
 use uuid::Uuid;
 
+pub(super) enum HandlerProgress {
+    Advance,
+    Stop,
+}
+
 pub(super) async fn dispatch(
     store: &EntityDeletionStore,
     lease: &EntityLease,
     row: &EntityStage,
     options: &RunOptions,
-) -> Result<()> {
+) -> Result<HandlerProgress> {
     let row = store.start_stage(lease, row.id).await?;
-    let outcome = match execute(store, lease, &row, options).await {
-        Ok(result) => store
-            .save_stage_success(lease, row.id, result)
-            .await
-            .map_err(anyhow::Error::from),
-        Err(error) => Err(error),
-    };
+    let outcome = execute_and_save(store, lease, &row, options).await;
     if let Err(error) = outcome {
         let reason = format!("{error:#}");
         store
@@ -38,8 +37,36 @@ pub(super) async fn dispatch(
         } else {
             return Err(error);
         }
+        return Ok(HandlerProgress::Advance);
     }
-    Ok(())
+    outcome
+}
+
+async fn execute_and_save(
+    store: &EntityDeletionStore,
+    lease: &EntityLease,
+    row: &EntityStage,
+    options: &RunOptions,
+) -> Result<HandlerProgress> {
+    let mut result = execute(store, lease, row, options).await?;
+    if row.stage == "global_cleanup" {
+        let summary = super::summary::final_review(store, lease, row, options, &result).await?;
+        let waiting = !summary.remaining.is_empty();
+        result["summary"] = serde_json::to_value(summary)?;
+        if waiting {
+            store.save_stage_waiting(lease, row.id, result).await?;
+            return Ok(HandlerProgress::Stop);
+        }
+    }
+    if row.stage == "delete_owned_community" && options.delete {
+        let complete = super::owned_community::observed_complete(&result);
+        store
+            .save_owned_observation(lease, row.id, row.id, result, complete)
+            .await?;
+    } else {
+        store.save_stage_success(lease, row.id, result).await?;
+    }
+    Ok(HandlerProgress::Advance)
 }
 
 async fn execute(
@@ -210,17 +237,9 @@ async fn handle_remaining_stage(
                 }
             };
             let db = options.db.as_ref().context("missing source database")?;
-            let result =
+            let metadata =
                 super::owned_community::run_stage(&request, row, &db.deletion_store(), storage)
-                    .await;
-            if let Err(error) = &result {
-                if let Some(child) = error.downcast_ref::<super::owned_community::BlockedChild>() {
-                    store
-                        .save_stage_waiting(lease, row.id, child.metadata.clone())
-                        .await?;
-                }
-            }
-            let metadata = result?;
+                    .await?;
             if let Some(ids) = options.ids(row) {
                 ids.record(serde_json::json!({"child_request_id":metadata["child_request_id"],"action":"delegate"}))?;
             }

@@ -14,7 +14,7 @@ pub struct EntityStage {
     pub target_community_id: Option<Uuid>,
     /// Action to dispatch.
     pub stage: String,
-    /// `pending`, `running`, `failed`, or `completed`.
+    /// `pending`, `running`, `failed`, `submitted`, or `completed`.
     pub status: String,
     /// Whether this is the workflow's resume position.
     pub is_current: bool,
@@ -179,9 +179,9 @@ pub enum StageTransition {
     Initialize(NewEntityStage),
     /// Return the current stage, or its retry deadline if not yet due.
     Resume(Uuid),
-    /// Retire a completed current stage and create its successor, or finish.
+    /// Retire a completed or submitted stage. Finishing requires every stage to be complete.
     Advance {
-        /// The completed stage whose result was interpreted.
+        /// The current stage whose saved result was interpreted.
         previous: Uuid,
         /// Workflow-specific decision retained for recovery and audit.
         decision: serde_json::Value,
@@ -295,8 +295,17 @@ impl EntityDeletionStore {
                 successor,
             } => {
                 let row = current
-                    .filter(|row| row.id == previous && row.status == "completed")
-                    .ok_or_else(|| invalid("only a completed current stage can advance"))?;
+                    .filter(|row| {
+                        row.id == previous
+                            && (row.status == "completed"
+                                || (row.status == "submitted" && successor.is_some()))
+                    })
+                    .ok_or_else(|| {
+                        invalid("current stage has no result eligible for this transition")
+                    })?;
+                if successor.is_none() && history.iter().any(|stage| stage.status != "completed") {
+                    return Err(invalid("request still has unfinished stages"));
+                }
                 if request.status != "running" {
                     return Err(invalid("completed stage has inconsistent parent status"));
                 }

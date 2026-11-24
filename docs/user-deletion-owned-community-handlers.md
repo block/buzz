@@ -1,11 +1,14 @@
-# Standalone owned-community and request-summary handlers
+# Owned-community deletion and request summaries
 
-This slice adds callable Rust components and PostgreSQL-backed tests. It does
-**not** enable owned communities in user intake, add a CLI command, dispatch the
-new stage from the worker, or change transition rules. Existing user execution
-still rejects owned-community inventories. The existing community CLI now calls
-the shared submission function with the same operator behavior; approval and
-worker execution remain unchanged.
+The user-deletion worker submits one child request per owned community, records
+its observed status and continues through the approved inventory. The final
+review refreshes outstanding children on each explicit run. For the workflow
+and saved summary fields, see [the executor guide](operator-user-deletion-executor.md#starting-branching-and-finishing).
+
+The standalone Rust handler described below can also check one child while
+holding the current stage open. The production worker uses the same lookup,
+submission and completion rules, and marks an outstanding owned stage
+`submitted` so independent stages can advance.
 
 ## Components
 
@@ -125,18 +128,6 @@ may still need to create more stages. The summary also works for other external
 waits recorded under `metadata_json.waiting`; it does not assume every wait is a
 community deletion.
 
-## What remains for workflow integration
-
-The current transition code requires the current stage to complete before
-advancing. Do not dispatch this handler from that loop yet: it would repeatedly
-visit the unfinished row. A separate integration change must permit proceeding
-past external waits, revisit those rows on a later run, and stop with a saved
-unfinished request when only external dependencies remain. Summary reporting
-must remain read-only. Claim/heartbeat/release stays the worker's responsibility.
-Waiting currently clears `next_attempt_at`; integration must define an explicit
-resume or a bounded revisit cadence before enabling automatic scheduling, so a
-released waiting request cannot be claimed repeatedly in a hot loop.
-
 ## Test this slice
 
 Configure a disposable local PostgreSQL administrator connection as described
@@ -159,4 +150,4 @@ mismatch, host/ID mismatch before insertion, CLI preparation retry, and propagat
 of database failures even when a child already exists.
 Replacement coverage saves A, aborts it, submits B through the shared CLI path,
 then verifies the same user stage waits on B and completes only when B does.
-Owned inventory is fixture-seeded because real user intake still rejects it.
+The worker tests also cover submitting two owned communities and refreshing the final summary until both complete.

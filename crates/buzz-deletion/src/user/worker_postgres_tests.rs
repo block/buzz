@@ -5,6 +5,8 @@ use buzz_db::Db;
 mod media_fixture;
 #[path = "worker_postgres_tests/media_retry.rs"]
 mod media_retry_postgres_tests;
+#[path = "worker_postgres_tests/owned_review.rs"]
+mod owned_review_postgres_tests;
 
 async fn fixture() -> (EntityDeletionStore, Uuid, sqlx::PgPool) {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -296,7 +298,7 @@ async fn dummy_handler_is_heartbeated_and_lease_loss_prevents_completion() {
             Duration::from_millis(10)
         )
         .await,
-        StageOutcome::Completed
+        Ok(HandlerProgress::Advance)
     ));
     let after = store.inspect(id).await.unwrap();
     assert!(
@@ -369,7 +371,7 @@ async fn dummy_handler_is_heartbeated_and_lease_loss_prevents_completion() {
     .await
     .unwrap();
     assert_eq!(replacement.generation, lease.generation + 1);
-    assert!(matches!(outcome, StageOutcome::Failed(_)));
+    assert!(outcome.is_err());
     let after = store.inspect(id).await.unwrap();
     assert_eq!(after.stage_history.len(), 2);
     assert_eq!(after.stage_history[1].status, "running");

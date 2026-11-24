@@ -65,13 +65,6 @@ async fn observe(
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("community child {id} needs operator intervention; inspect the saved observation")]
-pub(super) struct BlockedChild {
-    id: uuid::Uuid,
-    pub metadata: Value,
-}
-
 pub(super) async fn run_stage(
     request: &EntityRequest,
     row: &EntityStage,
@@ -79,17 +72,20 @@ pub(super) async fn run_stage(
     storage: &MediaStorage,
 ) -> Result<Value> {
     let (child, completed) = resolve_child(request, row, communities, storage).await?;
-    let mut metadata = observation(&child, completed);
-    if child.stage == DeletionStage::Aborted || child.blocked_reason.is_some() {
-        return Err(BlockedChild {
-            id: child.id,
-            metadata,
-        }
-        .into());
-    }
+    Ok(delegated_observation(&child, completed))
+}
+
+const DELETION_COMPLETE: &str = "logical_deletion_complete";
+
+pub(super) fn observed_complete(result: &Value) -> bool {
+    result["reason"] == DELETION_COMPLETE
+}
+
+fn delegated_observation(child: &DeletionRequest, completed: bool) -> Value {
+    let mut metadata = observation(child, completed);
     metadata["delegated"] = true.into();
     metadata["account_erasure_complete"] = false.into();
-    Ok(metadata)
+    metadata
 }
 
 pub(super) fn approved_community(
@@ -154,10 +150,39 @@ async fn resolve_child(
     // The stage tracks the approved community, not one deletion attempt. A
     // replacement request returned by community-ID lookup becomes its current
     // observation without changing or approving the child.
-    let completed = child.stage == DeletionStage::RetentionPending
-        && child.completed_at.is_some()
-        && child.blocked_reason.is_none();
+    let completed = logically_deleted(&child);
     Ok((child, completed))
+}
+
+fn logically_deleted(child: &DeletionRequest) -> bool {
+    child.stage == DeletionStage::RetentionPending
+        && child.completed_at.is_some()
+        && child.blocked_reason.is_none()
+}
+
+pub(super) async fn refresh(
+    request: &EntityRequest,
+    row: &EntityStage,
+    communities: &DeletionStore,
+) -> Result<(Value, bool)> {
+    let community = approved_community(request, row)?;
+    let Some(child) = communities.find_for_community(community).await? else {
+        let previous = &row.metadata_json["result"];
+        let observation = json!({
+            "kind": "community_deletion",
+            "delegated": true,
+            "community_id": community.as_uuid(),
+            "community_host": previous["community_host"],
+            "child_request_id": previous["child_request_id"],
+            "child_stage": null,
+            "observed_at": chrono::Utc::now(),
+            "reason": "submitted_request_missing",
+            "operator_action": "Investigate the missing community request before resuming user deletion."
+        });
+        return Ok((observation, false));
+    };
+    let complete = logically_deleted(&child);
+    Ok((delegated_observation(&child, complete), complete))
 }
 
 fn observation(child: &DeletionRequest, completed: bool) -> Value {
@@ -165,7 +190,7 @@ fn observation(child: &DeletionRequest, completed: bool) -> Value {
     let inspect = json!(["buzz-admin", "deletions", "inspect", id]);
     let (reason, action, commands) = if completed {
         (
-            "logical_deletion_complete",
+            DELETION_COMPLETE,
             "Community logical deletion is complete. Retained copies remain subject to community retention policy.",
             vec![inspect],
         )
