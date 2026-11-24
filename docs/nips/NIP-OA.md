@@ -86,6 +86,7 @@ A Git authorization check MUST reject a tag without these clauses as a Git grant
 A Git grant is verified against the signed authentication event of the Git request (for example NIP-98), not against a published event.
 Its time clauses are evaluated against that event's `created_at`, and the verifier MUST independently require that event to be fresh, which makes them a wall-clock bound.
 A Git grant never grants more than the owner currently holds.
+A Git grant only adds authority: a verifier MUST NOT use it to reduce what the agent's own key holds, and a tag that fails to verify as a Git grant MUST NOT by itself deny a request the agent's own key is authorized for.
 A verifier that bounds grant lifetimes SHOULD reject a Git grant that lacks either time clause or whose window `t_before - t_after` exceeds the bound.
 
 ```text
