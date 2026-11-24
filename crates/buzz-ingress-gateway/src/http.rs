@@ -1,6 +1,7 @@
 //! HTTP surface: the public webhook listener and the private router that
 //! serves the management API, health probes, and metrics.
-use crate::postgres::PostgresStore;
+use crate::secrets::SecretKeyring;
+use crate::store::Store;
 use axum::{
     extract::State,
     http::StatusCode,
@@ -8,19 +9,28 @@ use axum::{
     routing::get,
     Router,
 };
+use chrono::{DateTime, Utc};
+use nostr::PublicKey;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use tower_http::limit::RequestBodyLimitLayer;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub store: Arc<PostgresStore>,
+    pub store: Arc<dyn Store>,
+    /// Seals provider secrets at rest; only the current key seals.
+    pub secrets: Arc<SecretKeyring>,
+    /// Relays allowed to call the management API.
+    pub relay_pubkeys: Arc<Vec<PublicKey>>,
+    /// Injectable clock so tests can drive secret grace windows.
+    pub now: fn() -> DateTime<Utc>,
     /// Cleared on shutdown so readiness fails before listeners drain.
     pub accepting: Arc<AtomicBool>,
 }
 
-fn error(status: StatusCode, code: &'static str) -> Response {
+pub(crate) fn error(status: StatusCode, code: &'static str) -> Response {
     (status, Json(serde_json::json!({ "error": code }))).into_response()
 }
 
@@ -53,6 +63,10 @@ pub fn router_with_metrics(
 ) -> (Router, Router) {
     let public = Router::new().with_state(state.clone());
     let mut private = Router::new()
+        .merge(crate::management::routes())
+        .layer(RequestBodyLimitLayer::new(
+            crate::management::MAX_MANAGEMENT_BODY_BYTES,
+        ))
         .route("/_liveness", get(live))
         .route("/_readiness", get(ready))
         .with_state(state);

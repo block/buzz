@@ -1,8 +1,13 @@
 //! Postgres-backed store: migrations, runtime-role grants, readiness, and
 //! retention for the gateway's own tables.
+use crate::store::{
+    transition, AppliedOperation, ApplyOutcome, Integration, IntegrationSecret, IntegrationView,
+    Mutation, Operation, Provider, Store, StoreError,
+};
+use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use sqlx::{AssertSqlSafe, PgPool};
-use thiserror::Error;
+use sqlx::{postgres::PgRow, AssertSqlSafe, PgPool, Postgres, Row, Transaction};
+use uuid::Uuid;
 
 static GATEWAY_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -12,16 +17,6 @@ const GATEWAY_TABLES: [&str; 4] = [
     "ingress_gateway_applied_operations",
     "ingress_gateway_deliveries",
 ];
-
-#[derive(Debug, Error)]
-pub enum StoreError {
-    #[error("store unavailable")]
-    Unavailable(#[from] sqlx::Error),
-    #[error("migration failed")]
-    Migrate(#[from] sqlx::migrate::MigrateError),
-    #[error("{0}")]
-    Invalid(&'static str),
-}
 
 pub struct PostgresStore {
     pool: PgPool,
@@ -70,16 +65,6 @@ impl PostgresStore {
         Ok(())
     }
 
-    /// Readiness: every gateway table is reachable with the runtime role.
-    pub async fn ready(&self) -> Result<(), StoreError> {
-        for table in GATEWAY_TABLES {
-            sqlx::raw_sql(AssertSqlSafe(format!("SELECT 1 FROM {table} LIMIT 0")))
-                .execute(&self.pool)
-                .await?;
-        }
-        Ok(())
-    }
-
     /// Delete terminal deliveries and applied operations older than the
     /// retention window. Queued deliveries are never reaped here.
     pub async fn reap_expired(
@@ -103,6 +88,242 @@ impl PostgresStore {
                 .await?
                 .rows_affected();
         Ok(deliveries + operations)
+    }
+}
+
+fn integration_from_row(row: PgRow) -> Result<Integration, StoreError> {
+    let provider: String = row.try_get("provider")?;
+    Ok(Integration {
+        id: row.try_get("id")?,
+        community_host: row.try_get("community_host")?,
+        provider: Provider::parse(&provider).ok_or(StoreError::Invalid(
+            "unknown provider stored for integration",
+        ))?,
+        revision: row.try_get("revision")?,
+        enabled: row.try_get("enabled")?,
+        disabled_at: row.try_get("disabled_at")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn secret_from_row(row: PgRow) -> Result<IntegrationSecret, StoreError> {
+    Ok(IntegrationSecret {
+        id: row.try_get("id")?,
+        integration_id: row.try_get("integration_id")?,
+        key_id: row.try_get("key_id")?,
+        ciphertext: row.try_get("secret_ciphertext")?,
+        created_at: row.try_get("created_at")?,
+        retired_at: row.try_get("retired_at")?,
+        grace_until: row.try_get("grace_until")?,
+    })
+}
+
+fn operation_from_row(row: PgRow) -> Result<AppliedOperation, StoreError> {
+    Ok(AppliedOperation {
+        operation_id: row.try_get("operation_id")?,
+        integration_id: row.try_get("integration_id")?,
+        revision: row.try_get("revision")?,
+        response: row.try_get("response")?,
+        applied_at: row.try_get("applied_at")?,
+    })
+}
+
+async fn load_secrets(
+    tx: &mut Transaction<'_, Postgres>,
+    integration_id: Uuid,
+) -> Result<Vec<IntegrationSecret>, StoreError> {
+    sqlx::query(
+        "SELECT id, integration_id, key_id, secret_ciphertext, created_at, retired_at,
+                    grace_until FROM ingress_gateway_integration_secrets
+         WHERE integration_id = $1 ORDER BY created_at DESC, id DESC",
+    )
+    .bind(integration_id)
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .map(secret_from_row)
+    .collect()
+}
+
+#[async_trait]
+impl Store for PostgresStore {
+    /// Readiness: every gateway table is reachable with the runtime role.
+    async fn ready(&self) -> Result<(), StoreError> {
+        for table in GATEWAY_TABLES {
+            sqlx::raw_sql(AssertSqlSafe(format!("SELECT 1 FROM {table} LIMIT 0")))
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn integration(&self, id: Uuid) -> Result<Option<Integration>, StoreError> {
+        sqlx::query(
+            "SELECT id, community_host, provider, revision, enabled, disabled_at,
+                    created_at, updated_at FROM ingress_gateway_integrations WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(integration_from_row)
+        .transpose()
+    }
+
+    async fn verifying_secrets(
+        &self,
+        integration_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<IntegrationSecret>, StoreError> {
+        sqlx::query(
+            "SELECT id, integration_id, key_id, secret_ciphertext, created_at, retired_at,
+                    grace_until FROM ingress_gateway_integration_secrets
+             WHERE integration_id = $1
+               AND (retired_at IS NULL OR grace_until > $2)
+             ORDER BY created_at DESC, id DESC",
+        )
+        .bind(integration_id)
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(secret_from_row)
+        .collect()
+    }
+
+    async fn applied_operation(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<Option<AppliedOperation>, StoreError> {
+        sqlx::query("SELECT operation_id, integration_id, revision, response, applied_at FROM ingress_gateway_applied_operations
+             WHERE operation_id = $1")
+        .bind(operation_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(operation_from_row)
+        .transpose()
+    }
+
+    async fn apply(
+        &self,
+        operation: Operation,
+        now: DateTime<Utc>,
+    ) -> Result<ApplyOutcome, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        // Serialize concurrent operations on one integration: the row lock (or
+        // the advisory lock when the row does not exist yet) makes the
+        // idempotency check and the revision check a single linearizable step.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
+            .bind(operation.integration_id)
+            .execute(&mut *tx)
+            .await?;
+        if let Some(row) = sqlx::query("SELECT operation_id, integration_id, revision, response, applied_at FROM ingress_gateway_applied_operations
+             WHERE operation_id = $1")
+        .bind(operation.operation_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            tx.commit().await?;
+            return Ok(ApplyOutcome::Replayed(operation_from_row(row)?));
+        }
+        let integration = sqlx::query(
+            "SELECT id, community_host, provider, revision, enabled, disabled_at,
+                    created_at, updated_at FROM ingress_gateway_integrations
+             WHERE id = $1 FOR UPDATE",
+        )
+        .bind(operation.integration_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(integration_from_row)
+        .transpose()?;
+        let mut secrets = load_secrets(&mut tx, operation.integration_id).await?;
+        let before: Vec<Uuid> = secrets.iter().map(|s| s.id).collect();
+        let next = match transition(integration, &mut secrets, &operation, now) {
+            Ok(next) => next,
+            Err(outcome) => {
+                tx.rollback().await?;
+                return Ok(outcome);
+            }
+        };
+        sqlx::query(
+            "INSERT INTO ingress_gateway_integrations
+                 (id, community_host, provider, revision, enabled, disabled_at, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (id) DO UPDATE SET
+                 community_host = EXCLUDED.community_host,
+                 provider = EXCLUDED.provider,
+                 revision = EXCLUDED.revision,
+                 enabled = EXCLUDED.enabled,
+                 disabled_at = EXCLUDED.disabled_at,
+                 updated_at = EXCLUDED.updated_at",
+        )
+        .bind(next.id)
+        .bind(&next.community_host)
+        .bind(next.provider.as_str())
+        .bind(next.revision)
+        .bind(next.enabled)
+        .bind(next.disabled_at)
+        .bind(next.created_at)
+        .bind(next.updated_at)
+        .execute(&mut *tx)
+        .await?;
+        if matches!(operation.mutation, Mutation::PutSecret { .. }) {
+            for secret in &secrets {
+                if before.contains(&secret.id) {
+                    sqlx::query(
+                        "UPDATE ingress_gateway_integration_secrets
+                         SET retired_at = $2, grace_until = $3
+                         WHERE id = $1 AND retired_at IS NULL",
+                    )
+                    .bind(secret.id)
+                    .bind(secret.retired_at)
+                    .bind(secret.grace_until)
+                    .execute(&mut *tx)
+                    .await?;
+                } else {
+                    sqlx::query(
+                        "INSERT INTO ingress_gateway_integration_secrets
+                             (id, integration_id, key_id, secret_ciphertext, created_at)
+                         VALUES ($1, $2, $3, $4, $5)",
+                    )
+                    .bind(secret.id)
+                    .bind(secret.integration_id)
+                    .bind(&secret.key_id)
+                    .bind(&secret.ciphertext)
+                    .bind(secret.created_at)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+        }
+        let verifying: Vec<_> = secrets
+            .iter()
+            .filter(|s| s.verifies_at(now))
+            .cloned()
+            .collect();
+        let response = serde_json::to_value(IntegrationView::new(&next, &verifying, now))
+            .map_err(|_| StoreError::Invalid("integration view is not serializable"))?;
+        let applied = AppliedOperation {
+            operation_id: operation.operation_id,
+            integration_id: operation.integration_id,
+            revision: operation.revision,
+            response,
+            applied_at: now,
+        };
+        sqlx::query(
+            "INSERT INTO ingress_gateway_applied_operations
+                 (operation_id, integration_id, revision, response, applied_at)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(applied.operation_id)
+        .bind(applied.integration_id)
+        .bind(applied.revision)
+        .bind(&applied.response)
+        .bind(applied.applied_at)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(ApplyOutcome::Applied(applied))
     }
 }
 
