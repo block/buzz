@@ -1,8 +1,10 @@
 part of '../thread_detail_page.dart';
 
-/// Where "up one level" leads from a thread, as its title shows it: [icon]
-/// and [label] name the place and [onPressed] goes there. A null [onPressed]
-/// is a parent thread that is still loading.
+/// The thread title's way up one level. [icon] and [label] name the
+/// conversation the thread lives in, the same for a sub-thread as for a
+/// top-level thread; [onPressed] goes up, to the parent thread or to that
+/// conversation, and [semanticLabel] says which. A null [onPressed] is a
+/// parent thread that is still loading.
 typedef _ThreadUpLevel = ({
   IconData? icon,
   String label,
@@ -10,26 +12,9 @@ typedef _ThreadUpLevel = ({
   VoidCallback? onPressed,
 });
 
-/// Marks a thread as the Reply action that opens one does.
-const _threadUpLevelThreadIcon = BuzzIcons.messageSquareReply;
-
 /// The head each open thread page shows, by its route, so a sub-thread can
 /// tell when its parent thread is the page directly beneath it.
 final _openThreadHeads = Expando<String>();
-
-final _markdownLink = RegExp(r'\[([^\]]*)\]\([^)]*\)');
-final _markdownMarks = RegExp(r'[*_`~>#]');
-final _whitespaceRun = RegExp(r'\s+');
-
-/// A thread named by its head's text, as desktop titles a thread tab.
-String _threadSnippet(String content) => content
-    .replaceAllMapped(_markdownLink, (match) => match[1]!)
-    .replaceAll(_markdownMarks, '')
-    .replaceAll(_whitespaceRun, ' ')
-    .trim()
-    .characters
-    .take(80)
-    .toString();
 
 /// Resolves where "up" leads from [page]: the thread whose head is the
 /// direct parent of this page's head, or the conversation for a top-level
@@ -136,23 +121,6 @@ _ThreadUpLevel? _useThreadUpLevel(
     (below) => _openThreadHeads[below] == parent.id,
   );
 
-  if (parent != null) {
-    final snippet = _threadSnippet(parent.content);
-    return (
-      icon: _threadUpLevelThreadIcon,
-      label: snippet.isEmpty ? 'Parent thread' : snippet,
-      semanticLabel: 'Go to parent thread',
-      onPressed: () => openParentThread(parent),
-    );
-  }
-  if (parentId != null && !lookupSettled.value) {
-    return (
-      icon: _threadUpLevelThreadIcon,
-      label: 'Parent thread',
-      semanticLabel: 'Loading parent thread',
-      onPressed: null,
-    );
-  }
   // The Messages list's glyph stands where a "#" would be written. A DM has
   // none there, only its people's avatars, so it is named in words.
   final icon = conversationListIcon(
@@ -160,6 +128,24 @@ _ThreadUpLevel? _useThreadUpLevel(
     legacySoloChannels: legacySoloChannels,
   );
   final label = icon == null ? 'DM · $conversationName' : conversationName;
+  // A sub-thread's title looks the same as its thread's; only what it says
+  // aloud tells where a tap leads.
+  if (parent != null) {
+    return (
+      icon: icon,
+      label: label,
+      semanticLabel: 'Go to parent thread',
+      onPressed: () => openParentThread(parent),
+    );
+  }
+  if (parentId != null && !lookupSettled.value) {
+    return (
+      icon: icon,
+      label: label,
+      semanticLabel: 'Loading parent thread',
+      onPressed: null,
+    );
+  }
   return (
     icon: icon,
     label: label,

@@ -1029,7 +1029,7 @@ class RunnerTests: XCTestCase {
       context.fill(CGRect(x: 4, y: 4, width: 16, height: 16))
     }.pngData()).base64EncodedString()
     var args: [String: Any] = [
-      "title": "Thread", "subtitle": String(repeating: "Release QA plan ", count: 8),
+      "title": "Thread", "subtitle": String(repeating: "customer-escalations-", count: 6),
       "titleEnabled": true, "back": true, "titleMaxWidth": 200.0,
       "subtitleIcon": true, "subtitleIconData": artwork, "titleDisclosure": true,
       "titleAccessibilityLabel": "Go to parent thread"]
@@ -1075,7 +1075,10 @@ class RunnerTests: XCTestCase {
     XCTAssertLessThan(subtitle.bounds.width, subtitle.intrinsicContentSize.width)
     let frames = [icon, subtitle, chevron].map { $0.convert($0.bounds, to: title) }
     for frame in frames { XCTAssertTrue(title.bounds.contains(frame), "\(frame) in \(title.bounds)") }
-    XCTAssertLessThanOrEqual(frames[0].maxX, frames[1].minX)
+    // The icon sits against the name as a typed "#" would, not as a
+    // separate element; the chevron keeps its own small gap.
+    XCTAssertEqual(frames[1].minX - frames[0].maxX, NavigationTitleView.subtitleIconGap, accuracy: 0.01)
+    XCTAssertEqual(NavigationTitleView.subtitleIconGap, 1)
     XCTAssertLessThanOrEqual(frames[1].maxX, frames[2].minX)
     XCTAssertEqual(icon.bounds.size, CGSize(width: 13, height: 13))
     XCTAssertGreaterThan(chevron.bounds.width, 0)
@@ -1084,12 +1087,12 @@ class RunnerTests: XCTestCase {
     XCTAssertTrue(title.accessibilityActivate())
     XCTAssertEqual(messenger.actions, ["title"])
 
-    // While its destination loads it cannot act: dimmed, refreshing, with no
-    // chevron, and the icon's slot held until Flutter has rendered it.
+    // While a sub-thread's parent loads it cannot act: dimmed, refreshing,
+    // with no chevron, under the same conversation name, and the icon's slot
+    // is held until Flutter has rendered it.
     args["titleEnabled"] = false
     args["titleDisclosure"] = false
     args["titleRefreshing"] = true
-    args["subtitle"] = "Parent thread"
     args["subtitleIconData"] = nil
     args["titleAccessibilityLabel"] = "Loading parent thread"
     args["dark"] = true
@@ -1102,6 +1105,10 @@ class RunnerTests: XCTestCase {
     let held = try XCTUnwrap(mark("navigation-subtitle-icon", in: title))
     XCTAssertNil(held.image)
     XCTAssertEqual(held.bounds.size, CGSize(width: 13, height: 13))
+    let name = try XCTUnwrap(descendants(of: title.contentView).compactMap { $0 as? UILabel }.last)
+    XCTAssertEqual(name.text, args["subtitle"] as? String)
+    XCTAssertEqual(name.convert(name.bounds, to: title).minX - held.convert(held.bounds, to: title).maxX,
+                   NavigationTitleView.subtitleIconGap, accuracy: 0.01)
     XCTAssertNil(mark("navigation-title-disclosure", in: title))
     XCTAssertEqual(held.traitCollection.userInterfaceStyle, .dark)
     let refresh = try XCTUnwrap(descendants(of: title.contentView).compactMap { $0 as? NavigationRefreshBar }.first)

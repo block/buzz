@@ -63,7 +63,9 @@ class _ThreadUpLevelTitle extends StatelessWidget {
                             size: iconSize,
                             color: muted,
                           ),
-                          const SizedBox(width: Grid.half),
+                          // A prefix of the name, as a typed "#" would
+                          // be: the glyph's own margin is most of the gap.
+                          const SizedBox(width: Grid.quarter),
                         ],
                         Flexible(
                           child: Text(

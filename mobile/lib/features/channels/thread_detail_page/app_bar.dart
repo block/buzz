@@ -51,15 +51,16 @@ FrostedAppBar _threadAppBar(
     alwaysFrosted: true,
     nativeViewSuppressed: messageActionBackdropActive,
     nativeTitle: 'Thread',
-    // The capsule is the way up: its subtitle names where the thread lives,
-    // and the whole capsule goes there. Unresolved, it only names the thread.
+    // The capsule is the way up: its subtitle names the conversation the
+    // thread lives in, and the whole capsule goes up one level. Unresolved,
+    // it only names the thread.
     nativeSubtitle: up?.label ?? channelDisplayName,
     nativeSubtitleIcon: up?.icon,
     nativeTitleDisclosure: up?.onPressed != null,
     nativeTitleRefreshing: up != null && up.onPressed == null,
     nativeTitleAccessibilityLabel: up?.semanticLabel,
-    // A long parent snippet ends in an ellipsis instead of stretching the
-    // capsule across the bar and off its centre.
+    // A long name ends in an ellipsis instead of stretching the capsule
+    // across the bar and off its centre.
     nativeTitleMaxWidth: up == null
         ? null
         : conversationTitleMaxWidth(MediaQuery.sizeOf(context).width),

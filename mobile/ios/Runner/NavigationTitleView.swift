@@ -137,6 +137,9 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
     invalidateIntrinsicContentSize()
   }
 
+  /// Layout gap between the subtitle's leading artwork and its text.
+  static let subtitleIconGap: CGFloat = 1
+
   /// Leads the subtitle with artwork tinted as its text. A nil image holds
   /// the slot while Flutter renders it, so the label does not shift.
   func setSubtitleIcon(_ image: UIImage?) {
@@ -147,7 +150,9 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
     icon.accessibilityIdentifier = "navigation-subtitle-icon"
     icon.setContentCompressionResistancePriority(.required, for: .horizontal)
     subtitleStack.insertArrangedSubview(icon, at: 0)
-    subtitleStack.setCustomSpacing(4, after: icon)
+    // The glyph reads as the first character of the name, as a typed "#"
+    // would: its artwork's own margin is most of a word space already.
+    subtitleStack.setCustomSpacing(Self.subtitleIconGap, after: icon)
     subtitleIconSize = [icon.widthAnchor.constraint(equalToConstant: 0),
                         icon.heightAnchor.constraint(equalToConstant: 0)]
     NSLayoutConstraint.activate(subtitleIconSize)

@@ -129,10 +129,21 @@ void threadTitleCapsuleTests() {
     });
   }
 
-  testWidgets('iOS thread capsule shows a parent thread loading, then names '
-      'it', (tester) async {
+  testWidgets('iOS sub-thread capsule shows its conversation while the '
+      'parent thread loads, then goes to that thread', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const nativeChannel = MethodChannel('buzz/ios_navigation_bar/44');
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      nativeChannel,
+      (_) async => null,
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        nativeChannel,
+        null,
+      ),
+    );
     final root = _textMsg(
       id: threadIdRoot,
       pubkey: 'alice',
@@ -171,24 +182,42 @@ void threadTitleCapsuleTests() {
     await tester.pump(const Duration(milliseconds: 100));
     Map params() => _threadCapsuleParams(tester);
 
-    // Inert and visibly loading, never a tap that does nothing.
+    // Inert and visibly loading, never a tap that does nothing, and
+    // already showing the conversation as a top-level thread's capsule does.
     expect(session.requested, [threadIdRoot]);
-    expect(params()['subtitle'], 'Parent thread');
-    expect(_threadCapsuleIcon(tester), BuzzIcons.messageSquareReply);
+    expect(params()['subtitle'], 'general');
+    expect(_threadCapsuleIcon(tester), BuzzIcons.hash);
+    expect(params()['subtitleIcon'], true);
     expect(params()['titleEnabled'], false);
     expect(params()['titleRefreshing'], true);
     expect(params()['titleDisclosure'], false);
     expect(params()['titleAccessibilityLabel'], 'Loading parent thread');
 
+    // Loaded, it looks the same and gains its chevron; only the spoken
+    // label tells that it leads to the parent thread.
     session.gate.complete();
     await tester.pumpAndSettle();
-    expect(params()['subtitle'], 'Release plan');
-    expect(_threadCapsuleIcon(tester), BuzzIcons.messageSquareReply);
+    expect(params()['subtitle'], 'general');
+    expect(_threadCapsuleIcon(tester), BuzzIcons.hash);
     expect(params()['subtitleIcon'], true);
     expect(params()['titleEnabled'], true);
     expect(params()['titleRefreshing'], false);
     expect(params()['titleDisclosure'], true);
     expect(params()['titleAccessibilityLabel'], 'Go to parent thread');
+
+    // Tapping the native capsule goes up one level: to the parent thread,
+    // with this sub-thread's head marked.
+    tester.widget<UiKitView>(_threadNativeBar).onPlatformViewCreated!(44);
+    await tester.pump();
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      nativeChannel.name,
+      nativeChannel.codec.encodeMethodCall(const MethodCall('action', 'title')),
+      (_) {},
+    );
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 4));
+    expect(_shownThread(tester).threadHead.id, threadIdRoot);
+    expect(_shownThread(tester).initialMessageId, threadIdParent);
     expect(tester.takeException(), isNull);
     debugDefaultTargetPlatformOverride = null;
   });

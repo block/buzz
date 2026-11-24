@@ -208,25 +208,44 @@ void threadUpLevelTests() {
             1,
           ),
         ]) {
-      testWidgets('names its $kind as the Messages list marks it, and is '
-          'plain when that is unresolved', (tester) async {
+      testWidgets('names its $kind as the Messages list marks it, in a '
+          'sub-thread as in its thread, and is plain when that is '
+          'unresolved', (tester) async {
         final semantics = tester.ensureSemantics();
         final channels = _FakeChannelsNotifier([channel]);
-        final root = _textMsg(id: threadIdRoot, pubkey: 'alice', content: 'Hi');
-        final timeline = formatTimeline([root]);
+        final root = _textMsg(
+          id: threadIdRoot,
+          pubkey: 'alice',
+          content: 'Hi',
+          createdAt: 1000,
+        );
+        final reply = _textMsg(
+          id: threadIdParent,
+          pubkey: 'bob',
+          content: 'Sub-thread head',
+          createdAt: 1100,
+          extraTags: const [
+            ['e', threadIdRoot, '', 'reply'],
+          ],
+        );
+        final timeline = formatTimeline([root, reply]);
         final legacy = legacySolo ? [channel.id] : const <String>[];
         await tester.pumpWidget(
           _buildTestable(
-            messages: [root],
+            messages: [root, reply],
             channel: channel,
             channelsNotifier: channels,
             users: _threadUpUsers,
             darkTheme: dark,
             textScaler: TextScaler.linear(textScale),
             organization: Stream.value(MeGroups(channels: legacy)),
-            threadReplies: const {threadIdRoot: []},
+            threadReplies: {
+              threadIdRoot: [reply],
+            },
             home: ThreadDetailPage(
-              threadHead: timeline.single,
+              threadHead: timeline.firstWhere(
+                (message) => message.id == threadIdParent,
+              ),
               allMessages: timeline,
               channelId: channel.id,
               currentPubkey: 'self',
@@ -237,10 +256,48 @@ void threadUpLevelTests() {
         );
         await tester.pumpAndSettle();
 
-        // The list's glyph stands where a "#" would otherwise be written.
+        // A sub-thread's title is its conversation's, exactly as its thread
+        // shows it. Only what it says aloud tells that a tap leads to the
+        // parent thread, which is where it goes.
+        expect(_shownThread(tester).threadHead.id, threadIdParent);
+        expect(_threadUpLabel(tester), label);
+        expect(_threadUpIcon(tester)?.icon, icon);
+        expect(_threadUpChevron, findsOneWidget);
+        expect(
+          tester.getSemantics(_threadUpRow),
+          matchesSemantics(
+            label: 'Go to parent thread',
+            isButton: true,
+            hasEnabledState: true,
+            isEnabled: true,
+            hasTapAction: true,
+          ),
+        );
+        expect(find.bySemanticsLabel(label), findsNothing);
+        await tester.tap(_threadUpRow);
+        await tester.pumpAndSettle();
+        // Let the parent thread's landing highlight finish.
+        await tester.pump(const Duration(seconds: 4));
+        expect(_shownThread(tester).threadHead.id, threadIdRoot);
+
+        // The list's glyph stands where a "#" would otherwise be written,
+        // as close to the name as one: a prefix, not a separate mark.
         expect(_threadUpLabel(tester), label);
         expect(_threadUpIcon(tester)?.icon, icon);
         expect(icon, conversationListIcon(channel, legacySoloChannels: legacy));
+        if (icon != null) {
+          expect(
+            tester
+                    .getRect(
+                      find.byKey(const ValueKey('thread-up-level-label')),
+                    )
+                    .left -
+                tester
+                    .getRect(find.byKey(const ValueKey('thread-up-level-icon')))
+                    .right,
+            Grid.quarter,
+          );
+        }
         // It reads as "opens something", in the theme's own muted ink.
         final theme = Theme.of(tester.element(_threadUpRow));
         expect(theme.brightness, dark ? Brightness.dark : Brightness.light);
@@ -540,9 +597,10 @@ void threadUpLevelTests() {
       await tester.pump(const Duration(seconds: 4));
 
       expect(_shownThread(tester).threadHead.id, threadIdParent);
-      // A sub-thread names its parent thread, marked as a thread.
-      expect(_threadUpLabel(tester), 'Thread root');
-      expect(_threadUpIcon(tester)?.icon, BuzzIcons.messageSquareReply);
+      // A sub-thread shows its conversation, as its thread does, and says
+      // aloud that it leads to the parent thread.
+      expect(_threadUpLabel(tester), 'general');
+      expect(_threadUpIcon(tester)?.icon, BuzzIcons.hash);
       expect(_threadUpChevron, findsOneWidget);
       expect(
         tester.getSemantics(_threadUpRow),
@@ -621,12 +679,11 @@ void threadUpLevelTests() {
         tester,
       ) async {
         final semantics = tester.ensureSemantics();
+        final channel = _threadUpChannel(name: 'escalations-${'x' * 100}');
         final root = _textMsg(
           id: threadIdRoot,
           pubkey: 'alice',
-          content:
-              'See [the *plan*](https://example.org/plan)\nfor `details` '
-              '${'x' * 100}',
+          content: 'Thread root',
           createdAt: 1000,
         );
         final head = _textMsg(
@@ -645,6 +702,7 @@ void threadUpLevelTests() {
           _buildTestable(
             // The root is older than the channel's loaded window.
             messages: const [],
+            channel: channel,
             messagesNotifier: notifier,
             relaySessionNotifier: session,
             threadReplies: {
@@ -666,10 +724,10 @@ void threadUpLevelTests() {
         await tester.pump(const Duration(milliseconds: 100));
 
         expect(session.requested, [threadIdRoot]);
-        // It shows that it is loading rather than offering a tap that
-        // would do nothing.
-        expect(_threadUpLabel(tester), 'Parent thread');
-        expect(_threadUpIcon(tester)?.icon, BuzzIcons.messageSquareReply);
+        // It already shows its conversation, and that it is loading rather
+        // than offering a tap that would do nothing.
+        expect(_threadUpLabel(tester), channel.name);
+        expect(_threadUpIcon(tester)?.icon, BuzzIcons.hash);
         expect(_threadUpLoading, findsOneWidget);
         expect(_threadUpChevron, findsNothing);
         expect(
@@ -686,16 +744,21 @@ void threadUpLevelTests() {
         session.gate.complete();
         await tester.pumpAndSettle();
         expect(session.requested, [threadIdRoot]);
-        expect(
-          _threadUpLabel(tester),
-          fail ? 'general' : 'See the plan for details ${'x' * 55}',
-        );
-        expect(
-          _threadUpIcon(tester)?.icon,
-          fail ? BuzzIcons.hash : BuzzIcons.messageSquareReply,
-        );
+        // What it shows has not changed; where it leads is said aloud.
+        expect(_threadUpLabel(tester), channel.name);
+        expect(_threadUpIcon(tester)?.icon, BuzzIcons.hash);
         expect(_threadUpLoading, findsNothing);
-        // A long snippet ends in an ellipsis inside the bar, chevron and all.
+        expect(
+          tester.getSemantics(_threadUpRow),
+          matchesSemantics(
+            label: fail ? 'Go to ${channel.name}' : 'Go to parent thread',
+            isButton: true,
+            hasEnabledState: true,
+            isEnabled: true,
+            hasTapAction: true,
+          ),
+        );
+        // A long name ends in an ellipsis inside the bar, chevron and all.
         final barRight =
             tester.view.physicalSize.width / tester.view.devicePixelRatio -
             Grid.gutter;
@@ -713,7 +776,7 @@ void threadUpLevelTests() {
                 ),
               )
               .didExceedMaxLines,
-          !fail,
+          isTrue,
         );
 
         await tester.tap(_threadUpRow);
@@ -777,7 +840,10 @@ void threadUpLevelTests() {
       );
       await tester.pumpAndSettle();
 
-      expect(_threadUpLabel(tester), 'Parent reply');
+      // The way up is ready at once, with nothing fetched or loading.
+      expect(_threadUpLabel(tester), 'general');
+      expect(_threadUpChevron, findsOneWidget);
+      expect(_threadUpLoading, findsNothing);
       expect(session.requested, isEmpty);
       expect(tester.takeException(), isNull);
     });
