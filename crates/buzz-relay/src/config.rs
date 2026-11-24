@@ -291,12 +291,25 @@ pub struct Config {
     /// skipped — a typo must not silently disable an operator.
     pub relay_operator_pubkeys: Vec<String>,
 
+    /// Serve multiple communities (default true). When false, only the
+    /// normalized `relay_url` authority serves ordinary traffic; existing extra
+    /// communities remain available to authenticated management and cleanup.
+    /// Canonical startup bootstrap is preserved. Changes require a restart.
+    /// Set via `BUZZ_MULTI_COMMUNITY_RELAY=true|false`.
+    pub multi_community_relay: bool,
+
     /// Configured operator-listener identities and their HTTP(S) delivery URLs.
     pub operator_listener_delivery_urls: HashMap<String, url::Url>,
 
     /// Endpoint receiving each new per-community storage snapshot
     /// (`BUZZ_STORAGE_USAGE_URL`). Unset disables storage-usage delivery.
     pub storage_usage_delivery_url: Option<url::Url>,
+
+    /// OpenSearch cluster for message search (`BUZZ_OPENSEARCH_URL`, with
+    /// optional `BUZZ_OPENSEARCH_USERNAME` and `BUZZ_OPENSEARCH_PASSWORD`).
+    /// When set, admitted messages are queued in the search outbox and the
+    /// indexer keeps the index up to date; searches still use Postgres.
+    pub opensearch: Option<buzz_search::opensearch::OpenSearchConfig>,
 
     /// Allow NIP-OA owner attestation for relay membership.
     ///
@@ -331,6 +344,15 @@ pub struct Config {
     /// This does not control the separate `moderation_actions` audit trail.
     /// Set `BUZZ_AUDIT_ENABLED=false` for deployments that do not require it.
     pub audit_enabled: bool,
+
+    /// Which workflow runs may direct agents. With `owner` (owner-only agent
+    /// mentions), a workflow message carries `buzz:workflow-mention` tags only
+    /// if its run was started by the workflow's owner or by a timer and every
+    /// step of the definition is `send_message` or `delay`. Use `owner` when
+    /// people other than a workflow's owner can trigger it.
+    ///
+    /// Default: `any`. Set via `BUZZ_WORKFLOW_AGENT_MENTIONS=any|owner`.
+    pub workflow_agent_mentions: buzz_workflow::AgentMentions,
 
     /// Optional override for ephemeral channel TTL (in seconds).
     /// When set, any channel created with a TTL tag will use this value instead
@@ -538,6 +560,10 @@ fn parse_operator_api_origin(raw: &str) -> Result<String, ConfigError> {
     Ok(raw.trim_end_matches('/').to_string())
 }
 
+/// The gateway's platform-neutral delivery route, and its APNs-named alias,
+/// which gateways keep serving until relays have moved to the neutral route.
+const PUSH_GATEWAY_DELIVERY_PATHS: [&str; 2] = ["/v1/deliveries", "/v1/deliveries/apns"];
+
 fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
     let url = url::Url::parse(raw.trim()).map_err(|e| {
         ConfigError::InvalidValue(format!(
@@ -549,12 +575,12 @@ fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
         || (url.scheme() == "https" && url.port().is_some())
         || !url.username().is_empty()
         || url.password().is_some()
-        || url.path() != "/v1/deliveries/apns"
+        || !PUSH_GATEWAY_DELIVERY_PATHS.contains(&url.path())
         || url.query().is_some()
         || url.fragment().is_some()
     {
         return Err(ConfigError::InvalidValue(
-            "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be an exact HTTP(S) /v1/deliveries/apns URL without credentials, query, or fragment; explicit ports are supported only for HTTP"
+            "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be an exact HTTP(S) /v1/deliveries (or the older /v1/deliveries/apns) URL without credentials, query, or fragment; explicit ports are supported only for HTTP"
                 .to_string(),
         ));
     }
@@ -626,6 +652,19 @@ fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
                 "{name} must be true or false"
             ))),
         },
+    }
+}
+
+fn parse_workflow_agent_mentions() -> Result<buzz_workflow::AgentMentions, ConfigError> {
+    const NAME: &str = "BUZZ_WORKFLOW_AGENT_MENTIONS";
+    match std::env::var(NAME) {
+        Err(std::env::VarError::NotPresent) => Ok(buzz_workflow::AgentMentions::Any),
+        Err(error) => Err(ConfigError::InvalidValue(format!(
+            "{NAME} must be valid UTF-8: {error}"
+        ))),
+        Ok(value) => value
+            .parse()
+            .map_err(|error| ConfigError::InvalidValue(format!("{NAME}: {error}"))),
     }
 }
 
@@ -911,6 +950,24 @@ impl Config {
             .map(|raw| parse_operator_api_origin(&raw))
             .transpose()?;
 
+        let multi_community_relay = match std::env::var("BUZZ_MULTI_COMMUNITY_RELAY") {
+            Ok(value) => value.parse::<bool>().map_err(|_| {
+                ConfigError::InvalidValue(
+                    "BUZZ_MULTI_COMMUNITY_RELAY must be true or false".to_string(),
+                )
+            })?,
+            Err(std::env::VarError::NotPresent) => true,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_MULTI_COMMUNITY_RELAY must be true or false".to_string(),
+                ))
+            }
+        };
+        if !multi_community_relay && crate::tenant::relay_url_authority(&relay_url).is_empty() {
+            return Err(ConfigError::InvalidValue(
+                "RELAY_URL must have a host when BUZZ_MULTI_COMMUNITY_RELAY=false".to_owned(),
+            ));
+        }
         let relay_operator_pubkeys = match std::env::var("RELAY_OPERATOR_PUBKEYS") {
             Ok(raw) => {
                 let mut pubkeys = Vec::new();
@@ -972,6 +1029,13 @@ impl Config {
                 )));
             }
         };
+        let opensearch = parse_opensearch_config(
+            optional_utf8_env("BUZZ_OPENSEARCH_URL")?,
+            optional_utf8_env("BUZZ_OPENSEARCH_USERNAME")?,
+            optional_utf8_env("BUZZ_OPENSEARCH_PASSWORD")?,
+            parse_bool("BUZZ_OPENSEARCH_PREVIEW", false)?,
+        )
+        .map_err(ConfigError::InvalidValue)?;
         if !operator_listener_delivery_urls.is_empty() && relay_operator_api_origin.is_none() {
             error!(
                 "BUZZ_OPERATOR_LISTENERS is set but RELAY_OPERATOR_API_ORIGIN is not — operator-listener registration requests will reject every request until RELAY_OPERATOR_API_ORIGIN is set"
@@ -1266,6 +1330,7 @@ impl Config {
         let privacy_markdown = read_policy_markdown("BUZZ_PRIVACY_POLICY_MARKDOWN")?;
         let age_attestation_required = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED")?;
         let audit_enabled = parse_bool("BUZZ_AUDIT_ENABLED", true)?;
+        let workflow_agent_mentions = parse_workflow_agent_mentions()?;
         let join_policy = if terms_markdown.is_none()
             && privacy_markdown.is_none()
             && !age_attestation_required
@@ -1517,8 +1582,10 @@ impl Config {
             relay_owner_pubkey,
             relay_operator_api_origin,
             relay_operator_pubkeys,
+            multi_community_relay,
             operator_listener_delivery_urls,
             storage_usage_delivery_url,
+            opensearch,
             allow_nip_oa_auth,
             klipy,
             media,
@@ -1527,6 +1594,7 @@ impl Config {
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
             audit_enabled,
+            workflow_agent_mentions,
             ephemeral_ttl_override,
             git_repo_path,
             git_pack_cache_path,
@@ -1582,9 +1650,128 @@ impl Config {
     }
 }
 
+/// An environment variable that must be UTF-8 if set.
+fn optional_utf8_env(name: &str) -> Result<Option<String>, ConfigError> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(ConfigError::InvalidValue(format!(
+            "{name} must be valid UTF-8: {error}"
+        ))),
+    }
+}
+
+/// Parse the OpenSearch settings: an HTTP(S) URL without credentials, query,
+/// or fragment, and basic credentials given both or neither. Empty values
+/// count as unset.
+///
+/// Deletes and edits don't reach the index yet, so a URL also needs the
+/// `BUZZ_OPENSEARCH_PREVIEW` opt-in.
+fn parse_opensearch_config(
+    url: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+    preview: bool,
+) -> Result<Option<buzz_search::opensearch::OpenSearchConfig>, String> {
+    let set = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
+    let (username, password) = (set(username), set(password));
+    let Some(raw) = set(url) else {
+        if username.is_some() || password.is_some() {
+            return Err(
+                "BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD need BUZZ_OPENSEARCH_URL"
+                    .into(),
+            );
+        }
+        return Ok(None);
+    };
+    if !preview {
+        return Err("BUZZ_OPENSEARCH_URL needs BUZZ_OPENSEARCH_PREVIEW=true: deleted messages stay in the index, so use it only on a relay without real data".into());
+    }
+    let parsed = url::Url::parse(raw.trim())
+        .map_err(|e| format!("BUZZ_OPENSEARCH_URL is not a valid URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err("BUZZ_OPENSEARCH_URL must be an HTTP(S) URL without credentials, query, or fragment; set BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD for basic auth".into());
+    }
+    let basic_auth = match (username, password) {
+        (Some(username), Some(password)) => Some((username, password)),
+        (None, None) => None,
+        _ => {
+            return Err(
+                "set both BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD, or neither".into(),
+            )
+        }
+    };
+    Ok(Some(buzz_search::opensearch::OpenSearchConfig {
+        url: parsed.to_string(),
+        basic_auth,
+        index_prefix: buzz_search::opensearch::DEFAULT_INDEX_PREFIX.to_string(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opensearch_config_is_optional_and_validated() {
+        let some = |value: &str| Some(value.to_string());
+        assert!(parse_opensearch_config(None, None, None, false)
+            .unwrap()
+            .is_none());
+        assert!(parse_opensearch_config(some(" "), None, None, false)
+            .unwrap()
+            .is_none());
+        assert!(parse_opensearch_config(None, some(""), some(""), false)
+            .unwrap()
+            .is_none());
+        let config =
+            parse_opensearch_config(some("http://localhost:9200"), some(""), some(" "), true)
+                .unwrap()
+                .unwrap();
+        assert!(config.basic_auth.is_none());
+
+        assert!(
+            parse_opensearch_config(some("http://localhost:9200"), None, None, false).is_err(),
+            "a URL without the preview opt-in"
+        );
+        let config = parse_opensearch_config(some("http://localhost:9200"), None, None, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.url, "http://localhost:9200/");
+        assert!(config.basic_auth.is_none());
+        assert_eq!(config.index_prefix, "buzz-");
+
+        let config = parse_opensearch_config(
+            some("https://search.example.org"),
+            some("relay"),
+            some("secret"),
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(config.basic_auth, Some(("relay".into(), "secret".into())));
+        assert!(!format!("{config:?}").contains("secret"));
+
+        for (url, username, password) in [
+            (some("ftp://search.example.org"), None, None),
+            (some("https://user:pw@search.example.org"), None, None),
+            (some("https://search.example.org?x=1"), None, None),
+            (some("not a url"), None, None),
+            (some("https://search.example.org"), some("relay"), None),
+            (None, some("relay"), some("secret")),
+        ] {
+            assert!(
+                parse_opensearch_config(url.clone(), username, password, true).is_err(),
+                "{url:?}"
+            );
+        }
+    }
 
     #[test]
     fn klipy_config_debug_redacts_the_api_key() {
@@ -1774,6 +1961,29 @@ mod tests {
         );
 
         assert!(found.is_empty(), "unrelated vars must not warn: {found:?}");
+    }
+
+    #[test]
+    fn multi_community_relay_is_strict_and_default_enabled() {
+        let _guards = env_guards();
+        std::env::remove_var("BUZZ_MULTI_COMMUNITY_RELAY");
+        assert!(Config::from_env().expect("unset").multi_community_relay);
+        for (value, expected) in [("false", false), ("true", true)] {
+            std::env::set_var("BUZZ_MULTI_COMMUNITY_RELAY", value);
+            let config = Config::from_env();
+            std::env::remove_var("BUZZ_MULTI_COMMUNITY_RELAY");
+            assert_eq!(
+                config.expect("valid policy").multi_community_relay,
+                expected
+            );
+        }
+        for value in ["", "FALSE", "1", "typo"] {
+            std::env::set_var("BUZZ_MULTI_COMMUNITY_RELAY", value);
+            let result = Config::from_env();
+            std::env::remove_var("BUZZ_MULTI_COMMUNITY_RELAY");
+            assert!(matches!(result, Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_MULTI_COMMUNITY_RELAY")));
+        }
     }
 
     #[test]
@@ -2621,6 +2831,32 @@ mod tests {
     }
 
     #[test]
+    fn workflow_agent_mentions_defaults_to_any_and_rejects_other_values() {
+        use buzz_workflow::AgentMentions;
+        const NAME: &str = "BUZZ_WORKFLOW_AGENT_MENTIONS";
+        let _guards = env_guards();
+        let previous = std::env::var_os(NAME);
+        std::env::remove_var(NAME);
+        assert_eq!(parse_workflow_agent_mentions().unwrap(), AgentMentions::Any);
+        std::env::set_var(NAME, "any");
+        assert_eq!(parse_workflow_agent_mentions().unwrap(), AgentMentions::Any);
+        std::env::set_var(NAME, "owner");
+        assert_eq!(
+            parse_workflow_agent_mentions().unwrap(),
+            AgentMentions::Owner
+        );
+        for invalid in ["true", "", "OWNER"] {
+            std::env::set_var(NAME, invalid);
+            assert!(parse_workflow_agent_mentions().is_err(), "{invalid:?}");
+        }
+        if let Some(value) = previous {
+            std::env::set_var(NAME, value);
+        } else {
+            std::env::remove_var(NAME);
+        }
+    }
+
+    #[test]
     fn audit_logging_rejects_invalid_boolean() {
         let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_AUDIT_ENABLED");
@@ -2787,7 +3023,7 @@ mod tests {
 
         std::env::set_var(
             "BUZZ_PUSH_GATEWAY_DELIVERY_URL",
-            "https://push.example/v1/deliveries/apns",
+            "https://push.example/v1/deliveries",
         );
         let config = Config::from_env().expect("enabled push config");
         assert!(config.push_enabled);
@@ -2796,7 +3032,7 @@ mod tests {
                 .push_gateway_delivery_url
                 .as_ref()
                 .map(url::Url::as_str),
-            Some("https://push.example/v1/deliveries/apns")
+            Some("https://push.example/v1/deliveries")
         );
 
         std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", "");
@@ -2843,16 +3079,30 @@ mod tests {
 
     #[test]
     fn push_gateway_url_is_exact_and_fail_closed() {
-        assert!(parse_push_gateway_delivery_url("https://push.example/v1/deliveries/apns").is_ok());
-        let delivery_url = "http://push.example:8080/v1/deliveries/apns";
-        assert_eq!(
-            parse_push_gateway_delivery_url(delivery_url)
-                .unwrap()
-                .as_str(),
-            delivery_url
-        );
-        assert!(parse_push_gateway_delivery_url("http://push-gateway/v1/deliveries/apns").is_ok());
+        for delivery_url in [
+            "https://push.example/v1/deliveries",
+            "https://push.example/v1/deliveries/apns",
+            "http://push.example:8080/v1/deliveries",
+            "http://push.example:8080/v1/deliveries/apns",
+            "http://push-gateway/v1/deliveries",
+            "http://push-gateway/v1/deliveries/apns",
+        ] {
+            assert_eq!(
+                parse_push_gateway_delivery_url(delivery_url)
+                    .unwrap()
+                    .as_str(),
+                delivery_url
+            );
+        }
         for invalid in [
+            "http://push-gateway:8080/v1/deliveries?token=x",
+            "http://user@push-gateway:8080/v1/deliveries",
+            "http://push-gateway:8080/v1/deliveries#fragment",
+            "https://push.example:8443/v1/deliveries",
+            "https://push.example/v1/deliveries/",
+            "https://push.example/v1/deliveries?token=x",
+            "https://user@push.example/v1/deliveries",
+            "https://push.example/v1/deliveries/other",
             "ftp://push.example/v1/deliveries/apns",
             "http://push-gateway:8080/v1/deliveries/apns?token=x",
             "http://user@push-gateway:8080/v1/deliveries/apns",

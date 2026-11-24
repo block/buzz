@@ -1,6 +1,90 @@
 part of 'message_content_test.dart';
 
 void stackJourneyTests() {
+  testWidgets('mixed stacks keep video order and return from the fallback player', (
+    tester,
+  ) async {
+    const clip = 'https://example.com/clip.mp4';
+    const photo = 'https://example.com/photo.png';
+    const poster = 'https://example.com/second-poster.png';
+    final requested = <String>[];
+    final client = MockClient((request) async {
+      requested.add(request.url.toString());
+      return http.Response.bytes(
+        base64Decode(
+          'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEElEQVR4nGNgaPj/H4xhDABS0gn5PEa22gAAAABJRU5ErkJggg==',
+        ),
+        200,
+      );
+    });
+    await tester.pumpWidget(
+      _testable(
+        const MessageContent(
+          bubble: true,
+          content:
+              '![Clip]($clip)\n![Photo]($photo)\n![Second](https://example.com/second.mov)',
+          tags: [
+            [
+              'imeta',
+              'url https://example.com/second.mov',
+              'm video/quicktime',
+              'image $poster',
+            ],
+          ],
+        ),
+        disableAnimations: true,
+        overrides: [mediaHttpClientProvider.overrideWithValue(client)],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(requested, contains(photo));
+    expect(requested, contains(poster));
+    expect(requested, isNot(contains(clip)));
+    expect(requested, isNot(contains('https://example.com/second.mov')));
+    final stack = find.byKey(const ValueKey('message-media-stack'));
+    final spoken = find.byKey(const ValueKey('message-media-stack-semantics'));
+    expect(find.text('3 attachments'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('message-media-stack-video:$clip')),
+      findsOneWidget,
+    );
+    expect(tester.widget<Semantics>(spoken).properties.label, 'Clip');
+    expect(
+      tester.widget<Semantics>(spoken).properties.value,
+      'Attachment 1 of 3',
+    );
+    await tester.tap(stack);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('message-media-video-viewer')),
+      findsOneWidget,
+    );
+    await tester.tap(
+      find.byKey(const ValueKey('message-media-video-viewer-close')),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.widget<Semantics>(spoken).properties.label, 'Clip');
+    await tester.drag(stack, const Offset(160, 0));
+    await tester.pumpAndSettle();
+    expect(tester.widget<Semantics>(spoken).properties.label, 'Photo');
+    await tester.tap(stack);
+    await tester.pumpAndSettle();
+    expect(find.byType(MediaImageViewerPage), findsOneWidget);
+    expect(
+      tester
+          .widget<MediaImageViewerPage>(find.byType(MediaImageViewerPage))
+          .galleryItems!
+          .map((item) => item.url),
+      [photo],
+    );
+    Navigator.of(tester.element(find.byType(MediaImageViewerPage))).pop();
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<Semantics>(spoken).properties.value,
+      'Attachment 2 of 3',
+    );
+  });
+
   testWidgets(
     'sent and received stacks browse whole cards and open the selected gallery photo',
     (tester) async {
@@ -14,6 +98,7 @@ void stackJourneyTests() {
       const second = 'https://example.com/stack-two.png';
       const third = 'https://example.com/stack-three.png';
       for (final own in [false, true]) {
+        final swipeDirection = own ? 1.0 : -1.0;
         await tester.pumpWidget(
           _testable(
             MessageContent(
@@ -85,9 +170,9 @@ void stackJourneyTests() {
         );
         // Sample the complete path, including either side of the layer swap.
         final sweep = await tester.startGesture(tester.getCenter(stack));
-        await sweep.moveBy(const Offset(-20, 0));
+        await sweep.moveBy(Offset(-20 * swipeDirection, 0));
         for (var step = 1; step < 100; step++) {
-          await sweep.moveBy(const Offset(-1.4, 0));
+          await sweep.moveBy(Offset(-1.4 * swipeDirection, 0));
           await tester.pump();
           for (final element
               in find
@@ -112,12 +197,12 @@ void stackJourneyTests() {
             }
           }
         }
-        await sweep.moveBy(const Offset(138.6, 0));
+        await sweep.moveBy(Offset(138.6 * swipeDirection, 0));
         await sweep.up();
         await tester.pumpAndSettle();
         final drag = await tester.startGesture(tester.getCenter(stack));
-        await drag.moveBy(const Offset(-20, 0));
-        await drag.moveBy(const Offset(-42, 0));
+        await drag.moveBy(Offset(-20 * swipeDirection, 0));
+        await drag.moveBy(Offset(-42 * swipeDirection, 0));
         await tester.pump();
         expect(
           tester.getRect(countLabel),
@@ -126,12 +211,17 @@ void stackJourneyTests() {
         );
 
         expect(find.byKey(const ValueKey('stack-layer-blend')), findsNothing);
-        await drag.moveBy(const Offset(-28, 0));
+        await drag.moveBy(Offset(-28 * swipeDirection, 0));
         await tester.pump();
         final arriving = tester.getRect(cardClip(1));
         // The solid cards meet at their edges when their paint order changes.
         expect((arriving.center.dx - resting.center.dx).abs(), greaterThan(12));
         final departing = tester.getRect(cardClip(0));
+        expect(
+          (departing.center.dx - resting.center.dx) * -swipeDirection,
+          greaterThan(0),
+          reason: 'The departing photo follows the finger on either side',
+        );
         // The tuned rotation slightly narrows the projected outgoing card.
         expect(departing.width, greaterThan(resting.width * .45));
         expect(departing.width, lessThan(resting.width * .85));
@@ -170,7 +260,7 @@ void stackJourneyTests() {
             );
           }
         }
-        await drag.moveBy(const Offset(-28, 0));
+        await drag.moveBy(Offset(-28 * swipeDirection, 0));
         await tester.pump();
         expect(find.byKey(const ValueKey('stack-layer-blend')), findsNothing);
         await drag.up();
@@ -255,7 +345,7 @@ void stackJourneyTests() {
           tester.widget<Semantics>(spoken).properties.value,
           'Photo 2 of 3',
         );
-        await tester.drag(stack, const Offset(100, 0));
+        await tester.drag(stack, Offset(100 * swipeDirection, 0));
         await tester.pumpAndSettle();
         expect(
           tester
@@ -267,10 +357,10 @@ void stackJourneyTests() {
           'Photo 1 of 3',
         );
         final reverse = await tester.startGesture(tester.getCenter(stack));
-        await reverse.moveBy(const Offset(-20, 0));
-        await reverse.moveBy(const Offset(-65, 0));
+        await reverse.moveBy(Offset(-20 * swipeDirection, 0));
+        await reverse.moveBy(Offset(-65 * swipeDirection, 0));
         await tester.pump();
-        await reverse.moveBy(const Offset(65, 0));
+        await reverse.moveBy(Offset(65 * swipeDirection, 0));
         await reverse.up();
         await tester.pumpAndSettle();
         expect(
@@ -301,6 +391,7 @@ void stackJourneyTests() {
           ),
         );
         await tester.pumpAndSettle();
+        final swipeDirection = own ? 1.0 : -1.0;
         final largeStack = find.byKey(const ValueKey('message-media-stack'));
         for (final element
             in find
@@ -341,7 +432,7 @@ void stackJourneyTests() {
         final deckDrag = await tester.startGesture(
           tester.getCenter(largeStack),
         );
-        await deckDrag.moveBy(const Offset(-20, 0));
+        await deckDrag.moveBy(Offset(-20 * swipeDirection, 0));
         void checkDeckBounds() {
           final stage = tester.getRect(largeStack);
           for (final element
@@ -364,7 +455,7 @@ void stackJourneyTests() {
         }
 
         for (var step = 0; step < 50; step++) {
-          await deckDrag.moveBy(const Offset(-1.4, 0));
+          await deckDrag.moveBy(Offset(-1.4 * swipeDirection, 0));
           await tester.pump();
           checkDeckBounds();
           expect(
@@ -394,7 +485,7 @@ void stackJourneyTests() {
           );
         }
         for (var step = 0; step < 49; step++) {
-          await deckDrag.moveBy(const Offset(-1.4, 0));
+          await deckDrag.moveBy(Offset(-1.4 * swipeDirection, 0));
           await tester.pump();
           checkDeckBounds();
           expect(
@@ -405,7 +496,7 @@ void stackJourneyTests() {
         }
         // The spring can render arbitrarily close to the next integer. The
         // arriving photo must remain in front until and after that boundary.
-        await deckDrag.moveBy(const Offset(-1.393, 0));
+        await deckDrag.moveBy(Offset(-1.393 * swipeDirection, 0));
         await tester.pump();
         final nearSettledDeck = tester.widget<Stack>(
           find.byKey(const ValueKey('message-media-card-deck')),
@@ -460,7 +551,7 @@ void stackJourneyTests() {
         expect(find.byKey(const ValueKey('stack-card:3')), findsOneWidget);
         // Start each next swipe while the previous spring is still running.
         for (final dx in [-90.0, -90.0, 90.0, -90.0, 90.0, 90.0]) {
-          await tester.fling(largeStack, Offset(dx, 0), 2000);
+          await tester.fling(largeStack, Offset(dx * swipeDirection, 0), 2000);
           for (var frame = 0; frame < 3; frame++) {
             await tester.pump(const Duration(milliseconds: 16));
             final value = tester

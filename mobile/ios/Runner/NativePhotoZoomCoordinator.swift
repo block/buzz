@@ -1,11 +1,13 @@
 import Flutter
 import UIKit
+import AVKit
 
 /// Preview-only presentation. Flutter owns authenticated image loading.
 final class NativePhotoZoomCoordinator {
   private let channel: FlutterMethodChannel
   private weak var parent: UIViewController?
   private var active: UIViewController?
+  private var activeSession: Int?
 
   init(messenger: FlutterBinaryMessenger, parentViewController: UIViewController?) {
     channel = FlutterMethodChannel(name: "buzz/native_photo_zoom", binaryMessenger: messenger)
@@ -14,6 +16,19 @@ final class NativePhotoZoomCoordinator {
       guard let self else { result("unavailable"); return }
       if call.method == "isSupported" {
         if #available(iOS 18.0, *) { result(true) } else { result(false) }
+        return
+      }
+      if call.method == "imageFrame" {
+        if #available(iOS 18.0, *),
+          let args = call.arguments as? [String: Any],
+          let session = args["session"] as? Int, session == self.activeSession,
+          let index = args["index"] as? Int,
+          let bytes = args["bytes"] as? FlutterStandardTypedData,
+          let controller = self.active as? NativePhotoZoomViewController
+        {
+          controller.updateFrame(bytes.data, at: index)
+        }
+        result(nil)
         return
       }
       guard call.method == "present" else { result(FlutterMethodNotImplemented); return }
@@ -50,8 +65,15 @@ final class NativePhotoZoomCoordinator {
         image: image, labels: labels, initialIndex: initial,
         canReply: args["canReply"] as? Bool ?? false,
         canMore: args["canMore"] as? Bool ?? false,
-        canDelete: args["canDelete"] as? Bool ?? false
+        canDelete: args["canDelete"] as? Bool ?? false,
+        videoIndices: Set(args["videoIndices"] as? [Int] ?? [])
       )
+      if let center = args["railCenterX"] as? Double,
+         let width = args["railWindowWidth"] as? Double,
+         let height = args["railWindowHeight"] as? Double,
+         [center, width, height].allSatisfy({ $0.isFinite }), width > 0, height > 0 {
+        controller.sourceRailGeometry = (CGSize(width: width, height: height), CGFloat(center))
+      }
       controller.request = { [weak self] method, index, action, completion in
         var payload: [String: Any] = ["session": session, "index": index]
         if let action { payload["action"] = action }
@@ -94,9 +116,11 @@ final class NativePhotoZoomCoordinator {
         presenter?.view.accessibilityElementsHidden = previousAccessibilityHidden
         anchor?.removeFromSuperview()
         self?.active = nil
+        self?.activeSession = nil
         result(action)
       }
       self.active = controller
+      self.activeSession = session
       presenter.present(controller, animated: animate)
     }
   }
@@ -131,10 +155,13 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   private let indicator = UIPageControl()
   private let close = UIButton(type: .system)
   private let navigationSizingBar = UINavigationBar()
-  private var closeCenterConstraint: NSLayoutConstraint?
+  private let pageContainer = UIView()
   private let reply = UIButton(type: .system)
   private let more = UIButton(type: .system)
   private let labels: [String]
+  private let videoIndices: Set<Int>
+  private var videoPath: (Int, String)?
+  private var appeared = false
   private var previews: [Int: UIImage] = [:]
   private var images: [Int: UIImage] = [:]
   private var pending: [String: UUID] = [:]
@@ -143,15 +170,18 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   private var action = "closed"
   private var finishing = false
   private lazy var downwardDismiss = UIPanGestureRecognizer(target: self, action: #selector(dragToDismiss(_:)))
+  var selectionFeedback = UISelectionFeedbackGenerator()
   private var paging = false
   private var acting = false
+  var sourceRailGeometry: (size: CGSize, centerX: CGFloat)?
   var onClose: ((String) -> Void)?
   var request: ((String, Int, String?, @escaping FlutterResult) -> Void)?
   var onSelection: ((UIImage?, [String: Any]?) -> Void)?
 
-  init(image: UIImage, labels: [String], initialIndex: Int, canReply: Bool, canMore: Bool, canDelete: Bool) {
+  init(image: UIImage, labels: [String], initialIndex: Int, canReply: Bool, canMore: Bool, canDelete: Bool, videoIndices: Set<Int> = []) {
     self.previews[initialIndex] = image
     self.labels = labels; index = initialIndex
+    self.videoIndices = videoIndices
     self.canReply = canReply; self.canMore = canMore; self.canDelete = canDelete
     super.init(nibName: nil, bundle: nil)
   }
@@ -169,10 +199,10 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     addChild(pager); view.addSubview(pager.view); pager.didMove(toParent: self)
     pager.setViewControllers([page(index)], direction: .forward, animated: false)
     loadWindow()
-    configure(close, symbol: "xmark", label: "Close photo", selector: #selector(closePhoto))
+    configure(close, symbol: "xmark", label: videoIndices.isEmpty ? "Close photo" : "Close media", selector: #selector(closePhoto))
     configure(reply, symbol: "arrowshape.turn.up.left", label: "Reply in thread", selector: #selector(replyToMessage))
     configure(more, symbol: "ellipsis", label: "More image actions", selector: nil)
-    reply.isEnabled = canReply; more.isEnabled = canMore
+    reply.isEnabled = canReply; updateMore()
     more.showsMenuAsPrimaryAction = true
     var menu = [UIAction(title: "Save image", image: UIImage(systemName: "square.and.arrow.down")) { [weak self] _ in self?.perform("save") },
       UIAction(title: "Share image", image: UIImage(systemName: "square.and.arrow.up")) { [weak self] _ in self?.perform("share") },
@@ -186,9 +216,8 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     indicator.hidesForSinglePage = true
     indicator.currentPageIndicatorTintColor = .white
     indicator.pageIndicatorTintColor = .gray
-    indicator.accessibilityLabel = "Photo"
+    indicator.accessibilityLabel = videoIndices.isEmpty ? "Photo" : "Attachment"
     indicator.addTarget(self, action: #selector(selectPage), for: .valueChanged)
-    let pageContainer = UIView()
     let pageSurface: UIVisualEffectView
     if #available(iOS 26.0, *) {
       let glass = UIGlassEffect(style: .regular)
@@ -217,36 +246,72 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
       indicator.topAnchor.constraint(equalTo: pageSurface.contentView.topAnchor),
       indicator.bottomAnchor.constraint(equalTo: pageSurface.contentView.bottomAnchor),
     ])
-    let controls = UIStackView(arrangedSubviews: [reply, pageContainer, more])
-    controls.axis = .horizontal; controls.alignment = .center; controls.spacing = 8
-    view.addSubview(close); view.addSubview(controls)
-    pager.view.translatesAutoresizingMaskIntoConstraints = false
+    // Keep all controls in one hierarchy while the window folds or rotates.
+    // The photo surface can extend behind the rail without moving its pages.
+    for control in [close, reply, more, pageContainer] { view.addSubview(control) }
     pager.view.clipsToBounds = true
-    close.translatesAutoresizingMaskIntoConstraints = false
-    controls.translatesAutoresizingMaskIntoConstraints = false
-    let closeCenter = close.centerYAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor)
-    closeCenterConstraint = closeCenter
-    NSLayoutConstraint.activate([
-      // Match the existing gallery: fit photos between the toolbar bands.
-      pager.view.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 56),
-      pager.view.bottomAnchor.constraint(equalTo: controls.topAnchor, constant: -16),
-      pager.view.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
-      pager.view.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
-      closeCenter,
-      close.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
-      close.widthAnchor.constraint(equalToConstant: 44), close.heightAnchor.constraint(equalToConstant: 44),
-      reply.widthAnchor.constraint(equalToConstant: 44), reply.heightAnchor.constraint(equalToConstant: 44),
-      more.widthAnchor.constraint(equalToConstant: 44), more.heightAnchor.constraint(equalToConstant: 44),
-      indicator.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
-      controls.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
-      controls.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
-      controls.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
-    ])
   }
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
-    // Ask UIKit for its compact navigation height, including the current OS metrics.
-    closeCenterConstraint?.constant = navigationSizingBar.sizeThatFits(view.bounds.size).height / 2
+    layoutGallery(insets: view.safeAreaInsets)
+  }
+  func layoutGallery(insets: UIEdgeInsets) {
+    let bounds = view.bounds
+    let right = insets.right > 0 && insets.left == 0
+    let left = insets.left > 0 && insets.right == 0
+    let inRail = insets.top == 0 && (right || left)
+    let safe = bounds.inset(by: insets)
+    let bottom = safe.maxY - 56
+    let indicatorBounds = inRail ? bounds : safe
+    pageContainer.frame = CGRect(x: indicatorBounds.minX + 68, y: bottom,
+                                 width: max(0, indicatorBounds.width - 136), height: 44)
+    if inRail {
+      pager.view.frame = bounds
+      let width = right ? insets.right : insets.left
+      var centerX = right ? bounds.maxX - width / 2 : width / 2
+      var top: CGFloat = min(bounds.width, bounds.height) >= 600 ? 110 : 170
+      var railBottom = bounds.maxY - max(insets.bottom, 12)
+      #if canImport(UIKit, _version: 9127.0.85)
+      if #available(iOS 27.1, *), let window = view.window {
+        let strip = CGRect(x: right ? window.bounds.maxX - width : 0, y: 0,
+                           width: width, height: window.bounds.height)
+        let occlusions = window.reservedRegions(kind: .occlusion)
+          .filter { $0.isActive && $0.frame.intersects(strip) }
+        let regions = occlusions.filter { $0.frame.midY < window.bounds.midY }
+          .sorted { $0.frame.minY < $1.frame.minY }
+        let margins = window.rootViewController?.view.layoutMargins ?? .zero
+        let margin = right ? margins.left : margins.right
+        let axis = regions.first.map { $0.frame.inset(by: $0.margins).midX }
+          ?? (right ? window.bounds.maxX - margin - 28 : margin + 28)
+        centerX = view.convert(CGPoint(x: axis, y: 0), from: window).x
+        if let edge = occlusions.filter({ $0.frame.midY >= window.bounds.midY }).map({ $0.frame.minY }).min() {
+          railBottom = min(railBottom, view.convert(CGPoint(x: 0, y: edge), from: window).y - 12)
+        }
+        if let edge = regions.map({ $0.frame.maxY }).max() {
+          top = view.convert(CGPoint(x: 0, y: edge), from: window).y + 12
+        }
+      }
+      #endif
+      // Reuse the app rail's measured axis while its window/side still match.
+      // Presentation can change UIKit's fallback margins under the modal.
+      if let source = sourceRailGeometry, source.size == bounds.size,
+         (left && (0...width).contains(source.centerX)) ||
+         (right && (bounds.maxX - width...bounds.maxX).contains(source.centerX)) {
+        centerX = source.centerX
+      }
+      // Match IosNavigationMetrics.railCenter's inward optical alignment.
+      centerX += left ? 6 : -6
+      close.frame = CGRect(x: centerX - 24, y: top + 6, width: 48, height: 48)
+      reply.frame = CGRect(x: centerX - 24, y: railBottom - 108, width: 48, height: 48)
+      more.frame = CGRect(x: centerX - 24, y: railBottom - 48, width: 48, height: 48)
+    } else {
+      pager.view.frame = CGRect(x: safe.minX, y: safe.minY + 56,
+                                width: safe.width, height: max(0, bottom - 16 - safe.minY - 56))
+      let centerY = safe.minY + navigationSizingBar.sizeThatFits(bounds.size).height / 2
+      close.frame = CGRect(x: safe.maxX - 60, y: centerY - 22, width: 44, height: 44)
+      reply.frame = CGRect(x: safe.minX + 16, y: bottom, width: 44, height: 44)
+      more.frame = CGRect(x: safe.maxX - 60, y: bottom, width: 44, height: 44)
+    }
   }
   func shouldBeginDismissal(location: CGPoint, velocity: CGVector) -> Bool {
     !paging && !finishing && pager.view.frame.contains(location)
@@ -306,8 +371,9 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
       load("preview", value)
     }
     for page in pager.children.compactMap({ $0 as? NativePhotoPage }) where isNearby(page.index) {
-      load("image", page.index)
+      if !page.isVideo { load("image", page.index) }
     }
+    loadVideo()
   }
   private func load(_ method: String, _ value: Int) {
     guard !finishing, isNearby(value),
@@ -320,7 +386,9 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
       guard let self, !self.finishing, self.isNearby(value), self.pending[key] == token else { return }
       self.pending.removeValue(forKey: key)
       let image = (result as? FlutterStandardTypedData).flatMap { UIImage(data: $0.data) }
-      if let image {
+      // A continuing frame can arrive before this initial reply. Keep the
+      // newer full image authoritative over both delayed image and preview data.
+      if let image, self.images[value] == nil {
         if method == "preview" { self.previews[value] = image }
         else { self.images[value] = image }
       }
@@ -331,10 +399,54 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
       if self.index == value, method == "image" { self.syncSelection() }
     }
   }
+  // Flutter decodes authenticated originals and forwards continuing frames.
+  // Ignore old pages and closed presentations before allocating a UIImage.
+  func updateFrame(_ data: Data, at value: Int) {
+    guard !finishing, value == index, let image = UIImage(data: data) else { return }
+    if videoIndices.contains(value) { previews[value] = image }
+    else { images[value] = image }
+    for page in pager.children.compactMap({ $0 as? NativePhotoPage }) where page.index == value {
+      page.setImage(image)
+    }
+  }
   private func page(_ value: Int) -> NativePhotoPage {
-    let page = NativePhotoPage(index: value, label: labels[value], image: images[value] ?? previews[value])
-    load("image", value)
+    let page = NativePhotoPage(index: value, label: labels[value], image: images[value] ?? previews[value], isVideo: videoIndices.contains(value))
+    page.onRetry = { [weak self] in self?.videoPath = nil; self?.loadVideo() }
+    if page.isVideo {
+      if let (loaded, path) = videoPath, loaded == value { page.setVideo(path, autoplay: appeared) }
+    } else { load("image", value) }
     return page
+  }
+  private func loadVideo() {
+    let value = index
+    guard !finishing, videoIndices.contains(value), videoPath?.0 != value else { return }
+    let key = "video:\(value)"
+    guard pending[key] == nil else { return }
+    let token = UUID(); pending[key] = token
+    for page in pager.children.compactMap({ $0 as? NativePhotoPage }) where page.index == value { page.showVideoLoading() }
+    request?("video", value, nil) { [weak self] result in
+      guard let self, !self.finishing, self.index == value, self.pending[key] == token else { return }
+      self.pending.removeValue(forKey: key)
+      let path = result as? String
+      if let path { self.videoPath = (value, path) }
+      for page in self.pager.children.compactMap({ $0 as? NativePhotoPage }) where page.index == value {
+        page.setVideo(path, autoplay: self.appeared)
+      }
+    }
+  }
+  private func stopVideos() {
+    for page in pager.children.compactMap({ $0 as? NativePhotoPage }) { page.stopVideo() }
+    videoPath = nil
+    pending = pending.filter { !$0.key.hasPrefix("video:") }
+  }
+  override func viewDidAppear(_ animated: Bool) {
+    super.viewDidAppear(animated); appeared = true
+    selectionFeedback.prepare()
+    (pager.viewControllers?.first as? NativePhotoPage)?.playVideo()
+  }
+  override func viewWillDisappear(_ animated: Bool) {
+    super.viewWillDisappear(animated); appeared = false
+    for page in pager.children.compactMap({ $0 as? NativePhotoPage }) { page.pauseVideo() }
   }
   func pageViewController(_ pageViewController: UIPageViewController, viewControllerBefore viewController: UIViewController) -> UIViewController? {
     guard let page = viewController as? NativePhotoPage, page.index > 0 else { return nil }; return self.page(page.index - 1)
@@ -342,13 +454,32 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   func pageViewController(_ pageViewController: UIPageViewController, viewControllerAfter viewController: UIViewController) -> UIViewController? {
     guard let page = viewController as? NativePhotoPage, page.index + 1 < labels.count else { return nil }; return self.page(page.index + 1)
   }
-  func pageViewController(_ pageViewController: UIPageViewController, willTransitionTo pendingViewControllers: [UIViewController]) { paging = true; indicator.isEnabled = false }
+  func pageViewController(_ pageViewController: UIPageViewController, willTransitionTo pendingViewControllers: [UIViewController]) {
+    // Respond when the swipe starts, not after UIKit finishes settling the page.
+    if !paging { selectionFeedback.selectionChanged() }
+    paging = true; indicator.isEnabled = false
+    for page in pager.children.compactMap({ $0 as? NativePhotoPage }) { page.pauseVideo() }
+  }
   func pageViewController(_ pageViewController: UIPageViewController, didFinishAnimating finished: Bool, previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
     paging = false; indicator.isEnabled = true
-    if completed, let page = pager.viewControllers?.first as? NativePhotoPage { selected(page.index) }
+    selectionFeedback.prepare()
+    if completed, let page = pager.viewControllers?.first as? NativePhotoPage {
+      for previous in previousViewControllers.compactMap({ $0 as? NativePhotoPage }) where previous !== page { previous.stopVideo() }
+      selected(page.index)
+    }
+    else if appeared { (pager.viewControllers?.first as? NativePhotoPage)?.playVideo() }
+  }
+  private func updateMore() {
+    let video = videoIndices.contains(index)
+    more.isEnabled = canMore && !video
+    more.alpha = video ? 0 : 1
+    more.accessibilityElementsHidden = video
   }
   private func selected(_ value: Int) {
+    guard value != index else { return }
+    stopVideos()
     index = value; indicator.currentPage = value
+    updateMore()
     trimWindow()
     // Move Dart's request window before asking for newly adjacent images.
     syncSelection { [weak self] in self?.loadWindow() }
@@ -357,6 +488,7 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     guard !paging, !finishing else { return }
     let target = indicator.currentPage
     guard target != index else { return }
+    selectionFeedback.selectionChanged()
     // Scrubbing must not disable its own control or wait for a page animation.
     let direction: UIPageViewController.NavigationDirection = target >= index ? .forward : .reverse
     selected(target)
@@ -376,6 +508,7 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   @objc private func replyToMessage() { if canReply { finish("reply") } }
   private func finish(_ result: String) {
     guard !finishing else { return }; finishing = true; action = result
+    stopVideos()
     syncSelection { [weak self] in self?.dismiss(animated: !UIAccessibility.isReduceMotionEnabled) }
   }
   private func confirmDelete() {
@@ -388,7 +521,7 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     present(alert, animated: true)
   }
   private func perform(_ action: String) {
-    guard canMore, !acting, !finishing else { return }; acting = true; more.isEnabled = false
+    guard canMore, !videoIndices.contains(index), !acting, !finishing else { return }; acting = true; more.isEnabled = false
     request?("action", index, action) { [weak self] result in
       guard let self else { return }; self.acting = false; self.more.isEnabled = self.canMore
       if let error = result as? FlutterError { self.showStatus(error.message ?? "Could not complete action"); return }
@@ -405,6 +538,7 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     super.viewDidDisappear(animated)
     if isBeingDismissed || presentingViewController == nil {
       finishing = true
+      stopVideos()
       pending.removeAll(); previews.removeAll(); images.removeAll()
       request = nil
       onClose?(action); onClose = nil
@@ -416,23 +550,30 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
 @available(iOS 18.0, *)
 private final class NativePhotoPage: UIViewController, UIScrollViewDelegate {
   let index: Int
+  let isVideo: Bool
+  var onRetry: (() -> Void)?
+  private lazy var video = AVPlayerViewController()
+  private let retry = UIButton(type: .system)
+  private var observation: NSKeyValueObservation?
   private let imageView = UIImageView()
   private let scroll = UIScrollView()
   private let status = UILabel()
+  private let loading = NativeGalleryLoadingIndicator()
   private var previousSize = CGSize.zero
   var image: UIImage? { imageView.image }
-  var isAtRestingZoom: Bool { scroll.zoomScale <= scroll.minimumZoomScale + 0.01 }
+  var isAtRestingZoom: Bool { isVideo || scroll.zoomScale <= scroll.minimumZoomScale + 0.01 }
   func photoFrame(in target: UIView) -> CGRect? {
+    if isVideo, video.player != nil, !video.videoBounds.isEmpty { return video.view.convert(video.videoBounds, to: target) }
     guard let image, image.size.width > 0, image.size.height > 0 else { return nil }
     let bounds = imageView.bounds
     let scale = min(bounds.width / image.size.width, bounds.height / image.size.height)
     let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
     return imageView.convert(CGRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2, width: size.width, height: size.height), to: target)
   }
-  init(index: Int, label: String, image: UIImage?) {
-    self.index = index; super.init(nibName: nil, bundle: nil)
-    imageView.image = image; imageView.accessibilityLabel = label; imageView.isAccessibilityElement = true
-    status.text = image == nil ? "Loading photo…" : nil
+  init(index: Int, label: String, image: UIImage?, isVideo: Bool = false) {
+    self.index = index; self.isVideo = isVideo; super.init(nibName: nil, bundle: nil)
+    imageView.image = image; imageView.accessibilityLabel = label; imageView.isAccessibilityElement = !isVideo
+    status.text = !isVideo && image == nil ? "Loading photo…" : nil
   }
   required init?(coder: NSCoder) { nil }
   override func viewDidLoad() {
@@ -445,14 +586,117 @@ private final class NativePhotoPage: UIViewController, UIScrollViewDelegate {
     status.textColor = .white; status.textAlignment = .center; status.numberOfLines = 0
     status.font = .preferredFont(forTextStyle: .body); status.adjustsFontForContentSizeCategory = true
     view.addSubview(status)
-    let tap = UITapGestureRecognizer(target: self, action: #selector(toggleZoom)); tap.numberOfTapsRequired = 2; scroll.addGestureRecognizer(tap)
+    if isVideo {
+      video.allowsPictureInPicturePlayback = false
+      video.view.backgroundColor = .clear
+      video.view.isHidden = true
+      addChild(video); view.insertSubview(video.view, belowSubview: status); video.didMove(toParent: self)
+      retry.setTitle("Retry video", for: .normal)
+      retry.titleLabel?.font = .preferredFont(forTextStyle: .body)
+      retry.titleLabel?.adjustsFontForContentSizeCategory = true
+      retry.addTarget(self, action: #selector(retryVideo), for: .touchUpInside)
+      retry.isHidden = true; view.addSubview(retry)
+      view.addSubview(loading); loading.setLoading(true)
+    }
+    let tap = UITapGestureRecognizer(target: self, action: #selector(toggleZoom)); tap.numberOfTapsRequired = 2; if !isVideo { scroll.addGestureRecognizer(tap) }
   }
-  func setImage(_ image: UIImage?) { imageView.image = image; status.text = image == nil ? "Image unavailable" : nil }
+  func setImage(_ image: UIImage?) {
+    imageView.image = image
+    if !isVideo { status.text = image == nil ? "Image unavailable" : nil }
+  }
+  func showVideoLoading() { guard isVideo else { return }; loadViewIfNeeded(); status.text = nil; loading.setLoading(true); retry.isHidden = true }
+  func setVideo(_ path: String?, autoplay: Bool) {
+    guard isVideo else { return }
+    loadViewIfNeeded()
+    stopVideo()
+    guard let path, FileManager.default.fileExists(atPath: path) else { videoFailed(); return }
+    showVideoLoading()
+    let item = AVPlayerItem(url: URL(fileURLWithPath: path))
+    let player = AVPlayer(playerItem: item)
+    video.player = player
+    observation = item.observe(\.status, options: [.initial, .new]) { [weak self, weak item] _, _ in
+      DispatchQueue.main.async {
+        guard let self, let item, self.video.player?.currentItem === item else { return }
+        if item.status == .failed { self.videoFailed() }
+        else if item.status == .readyToPlay { self.loading.setLoading(false); self.status.text = nil; self.video.view.isHidden = false; self.scroll.isHidden = true }
+      }
+    }
+    if autoplay { player.play() }
+  }
+  func playVideo() { if isVideo { video.player?.play() } }
+  func pauseVideo() { if isVideo { video.player?.pause() } }
+  func stopVideo() {
+    guard isVideo else { return }
+    observation = nil
+    loading.setLoading(false)
+    video.player?.pause(); video.player?.replaceCurrentItem(with: nil); video.player = nil
+    if isViewLoaded { video.view.isHidden = true; scroll.isHidden = false }
+  }
+  private func videoFailed() {
+    stopVideo(); status.text = "Video unavailable"; retry.isHidden = false
+    UIAccessibility.post(notification: .announcement, argument: status.text)
+  }
+  @objc private func retryVideo() { showVideoLoading(); onRetry?() }
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews(); scroll.frame = view.bounds; status.frame = view.bounds.insetBy(dx: 24, dy: 100)
+    if isVideo {
+      video.view.frame = view.bounds
+      loading.frame = CGRect(x: view.bounds.midX - 22, y: view.bounds.midY - 22, width: 44, height: 44)
+      retry.frame = CGRect(x: 24, y: view.bounds.midY + 32, width: max(0, view.bounds.width - 48), height: 48)
+    }
     guard previousSize != scroll.bounds.size else { return }; previousSize = scroll.bounds.size
     scroll.zoomScale = 1; imageView.frame = scroll.bounds; scroll.contentSize = scroll.bounds.size
   }
   func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
   @objc private func toggleZoom() { scroll.setZoomScale(scroll.zoomScale > 1 ? 1 : 2.5, animated: !UIAccessibility.isReduceMotionEnabled) }
+}
+
+// Native counterpart of BuzzLoadingIndicator: 44pt white quarter arc, 4pt
+// stroke, 10% track and a linear 500ms turn, as used by the Flutter video viewer.
+private final class NativeGalleryLoadingIndicator: UIView {
+  private let track = CAShapeLayer()
+  private let arc = CAShapeLayer()
+  private var loading = false
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    isUserInteractionEnabled = false
+    isAccessibilityElement = true
+    accessibilityLabel = "Loading video"
+    accessibilityTraits = .updatesFrequently
+    for shape in [track, arc] {
+      shape.fillColor = UIColor.clear.cgColor
+      shape.lineWidth = 4
+      layer.addSublayer(shape)
+    }
+    track.strokeColor = UIColor.white.withAlphaComponent(0.1).cgColor
+    arc.strokeColor = UIColor.white.cgColor
+    NotificationCenter.default.addObserver(self, selector: #selector(updateAnimation),
+      name: UIAccessibility.reduceMotionStatusDidChangeNotification, object: nil)
+    isHidden = true
+  }
+  required init?(coder: NSCoder) { nil }
+  deinit { NotificationCenter.default.removeObserver(self) }
+  func setLoading(_ value: Bool) {
+    loading = value; isHidden = !value; updateAnimation()
+  }
+  override func didMoveToWindow() { super.didMoveToWindow(); updateAnimation() }
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    let center = CGPoint(x: bounds.midX, y: bounds.midY)
+    let radius = max(0, (min(bounds.width, bounds.height) - 4) / 2)
+    track.path = UIBezierPath(arcCenter: center, radius: radius, startAngle: 0, endAngle: 2 * .pi, clockwise: true).cgPath
+    arc.path = UIBezierPath(arcCenter: center, radius: radius, startAngle: -.pi / 2, endAngle: 0, clockwise: true).cgPath
+  }
+  @objc private func updateAnimation() {
+    guard loading, window != nil, !UIAccessibility.isReduceMotionEnabled else {
+      layer.removeAnimation(forKey: "loading"); return
+    }
+    guard layer.animation(forKey: "loading") == nil else { return }
+    let rotation = CABasicAnimation(keyPath: "transform.rotation.z")
+    rotation.fromValue = 0; rotation.toValue = 2 * Double.pi
+    rotation.duration = 0.5; rotation.repeatCount = .infinity
+    rotation.timingFunction = CAMediaTimingFunction(name: .linear)
+    layer.add(rotation, forKey: "loading")
+  }
 }

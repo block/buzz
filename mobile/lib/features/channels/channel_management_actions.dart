@@ -14,6 +14,45 @@ List<List<String>> buildDeleteChannelTags(String channelId) => [
   ['h', channelId],
 ];
 
+/// Why the relay refuses a history tag from an agent signer.
+const _onlyPeopleShareHistory =
+    "forbidden: only people can share a DM's history";
+
+/// Re-read schedule while confirming a join, matching desktop's.
+const _joinConfirmationDelays = [
+  Duration.zero,
+  Duration(milliseconds: 250),
+  Duration(milliseconds: 750),
+  Duration(milliseconds: 1500),
+];
+
+/// A join the relay accepted but this client could not yet confirm or show.
+///
+/// The membership may already exist. [ChannelActions.recheckJoin] checks
+/// again without a second write.
+class ChannelJoinUnconfirmed implements Exception {
+  const ChannelJoinUnconfirmed();
+
+  @override
+  String toString() => 'Join was sent but is not confirmed yet';
+}
+
+/// An add to a DM the relay accepted into another DM, [channelId], that
+/// this client could not yet confirm or show. [ChannelActions.openAddedDm]
+/// checks again without sending the add again.
+class DmAddUnconfirmed implements Exception {
+  const DmAddUnconfirmed(this.channelId);
+
+  final String channelId;
+
+  @override
+  String toString() => 'Added. Tap Add again to open the DM.';
+}
+
+/// How long a DM agent refusal waits for profiles before naming with what
+/// it has.
+const _refusalNamingDeadline = Duration(milliseconds: 1500);
+
 class ChannelActions {
   final Ref _ref;
   final RelaySessionNotifier _session;
@@ -127,16 +166,50 @@ class ChannelActions {
   /// since a full reload can take many seconds on a large account or slow
   /// connection. Callers that depend on fresh list state, such as hidden-DM
   /// resurfacing, keep the default.
+  ///
+  /// With [includeHistory], as New Message opens, the relay picks the DM
+  /// these people already share, and named agents it lacks join it with its
+  /// history; the returned channel is that DM. A relay from before history
+  /// ignores the tag and opens the DM of exactly these members. The relay
+  /// lets only people share a DM's history, so when it refuses the tag to a
+  /// signed-in agent, the open is resent without it and opens that DM too.
   Future<Channel> openDm({
     required List<String> pubkeys,
     bool waitForChannelList = true,
+    bool includeHistory = false,
   }) async {
     _ensureCommunityValid();
-    final result = await _signedEventRelay.submit(
-      kind: 41010,
-      content: '',
-      tags: pubkeys.map((pk) => ['p', pk]).toList(),
-    );
+    Future<NostrEvent> submit({required bool includeHistory}) =>
+        _signedEventRelay.submit(
+          kind: 41010,
+          content: '',
+          tags: [
+            for (final pk in pubkeys) ['p', pk],
+            if (includeHistory) ['history', 'include'],
+          ],
+        );
+    NostrEvent result;
+    try {
+      try {
+        result = await submit(includeHistory: includeHistory);
+      } catch (error) {
+        if (!includeHistory ||
+            relayErrorText(error) != _onlyPeopleShareHistory) {
+          rethrow;
+        }
+        _ensureCommunityValid();
+        result = await submit(includeHistory: false);
+      }
+    } on StateError {
+      rethrow;
+    } catch (error) {
+      await _throwIfAgentRefused(
+        relayErrorText(error),
+        adding: false,
+        context: pubkeys,
+      );
+      rethrow;
+    }
     _ensureCommunityValid();
     final response = parseCommandResponse(result.content);
     final channelId = response?['channel_id'] as String?;
@@ -199,7 +272,7 @@ class ChannelActions {
           ],
         );
       } catch (error) {
-        failures[pubkey] = _relayErrorMessage(error);
+        failures[pubkey] = relayErrorText(error);
       }
     }
     _ensureCommunityValid();
@@ -210,14 +283,186 @@ class ChannelActions {
     }
   }
 
+  /// Adds [pubkeys] to the DM [channelId] (kind:41011) and returns the DM
+  /// they ended up in. With [DmHistory.include] they join this DM and can read
+  /// it, unless the grown group already has a DM, which is returned instead.
+  /// With [DmHistory.startNew], or when a person joins a DM of at most one
+  /// person, they start a new DM of its people and them. [DmHistory.ask]
+  /// throws [DmNeedsHistoryChoice] when a person would join a DM of two or
+  /// more people. When that other DM cannot be confirmed yet, throws
+  /// [DmAddUnconfirmed] with its id. The relay lets only people share a DM's
+  /// history, so when it refuses the history tag to a signed-in agent, the add
+  /// is resent as [DmHistory.startNew].
+  Future<Channel> addToDm({
+    required String channelId,
+    required List<String> pubkeys,
+    required DmHistory history,
+  }) async {
+    _ensureCommunityValid();
+    Future<NostrEvent> submit(DmHistory history) => _signedEventRelay.submit(
+      kind: 41011,
+      content: '',
+      tags: [
+        ['h', channelId],
+        for (final pubkey in pubkeys) ['p', pubkey],
+        if (history != DmHistory.startNew)
+          ['history', history == DmHistory.ask ? 'ask' : 'include'],
+      ],
+    );
+    NostrEvent result;
+    try {
+      try {
+        result = await submit(history);
+      } catch (error) {
+        if (history == DmHistory.startNew ||
+            relayErrorText(error) != _onlyPeopleShareHistory) {
+          rethrow;
+        }
+        _ensureCommunityValid();
+        result = await submit(DmHistory.startNew);
+      }
+    } on StateError {
+      rethrow;
+    } catch (error) {
+      final reason = relayErrorText(error);
+      // A relay from before "ask" refuses it by name; it needs the choice too.
+      if (history == DmHistory.ask &&
+          (reason == 'needs-choice: history' ||
+              reason == 'invalid: history must be "include", got "ask"')) {
+        throw const DmNeedsHistoryChoice();
+      }
+      await _throwIfAgentRefused(
+        reason,
+        adding: true,
+        // channelById also finds a DM opened ahead of the list.
+        context: [
+          ...?_ref
+              .read(channelsProvider.notifier)
+              .channelById(channelId)
+              ?.participantPubkeys,
+          ...pubkeys,
+        ],
+      );
+      throw Exception(
+        reason.contains('at most 9 people')
+            ? dmAdditionFailedMessage
+            : 'Couldn’t add them. Try again.',
+      );
+    }
+    _ensureCommunityValid();
+    final id = parseCommandResponse(result.content)?['channel_id'] as String?;
+    if (id == null || id.isEmpty) {
+      throw Exception('Relay did not return a DM channel id');
+    }
+    await _refreshChannelState(channelId);
+    if (id == channelId) {
+      return (await _ref.read(channelsProvider.future)).firstWhere(
+        (channel) => channel.id == channelId,
+        orElse: () => throw Exception('DM is not visible yet'),
+      );
+    }
+    return openAddedDm(id);
+  }
+
+  /// Throws [DmAgentRefused] naming the agent when [reason] is an agent's
+  /// add-policy refusal of a DM. The agent and its verified owner are named
+  /// as the app's identity labels do, compared against [context] (the DM's
+  /// people, as its own label compares them) and this account, so namesakes
+  /// stay distinguishable, using whichever of them are cached. A failed name
+  /// read still refuses, without the name.
+  Future<void> _throwIfAgentRefused(
+    String reason, {
+    required bool adding,
+    required Iterable<String> context,
+  }) async {
+    final refusal = dmAgentPolicyRefusal(reason);
+    if (refusal == null) return;
+    final cache = _ref.read(userCacheProvider.notifier);
+    // The relay has already refused: profiles get one short deadline, then
+    // the message uses the best names loaded so far.
+    final deadline = Future<void>.delayed(_refusalNamingDeadline);
+    Future<void> load(Iterable<String> keys) => keys.isEmpty
+        ? Future.value()
+        : Future.any([
+            cache.resolve(keys.toList()).then<void>((_) {}),
+            deadline,
+          ]).catchError((Object _) {});
+    final keys = {
+      refusal.agent,
+      for (final key in [...context, ?_currentPubkey])
+        if (isHexPubkey(key.toLowerCase())) key.toLowerCase(),
+    };
+    // Wait only for names the sentence uses: the agent's, and its owner's
+    // when the refusal names who may add it. Other keys label from cache,
+    // except that a namesake in the context needs both agents' owners, read
+    // together, to tell the two apart.
+    await load([refusal.agent]);
+    var sources = _ref.read(identityNameSourcesProvider);
+    final owner = sources.factFor(refusal.agent)?.ownerPubkey;
+    String? nameOf(String? key) =>
+        key == null ? null : sources.factFor(key)?.name.trim().toLowerCase();
+    final clashing = {nameOf(refusal.agent), ?nameOf(owner)};
+    final namesakes = [
+      for (final key in keys)
+        if (key != refusal.agent && clashing.contains(nameOf(key))) key,
+    ];
+    final owners = {
+      if (refusal.ownerOnly || namesakes.isNotEmpty) ?owner,
+      for (final key in namesakes) ?sources.factFor(key)?.ownerPubkey,
+    };
+    if (owners.isNotEmpty) {
+      await load(owners);
+      sources = _ref.read(identityNameSourcesProvider);
+    }
+    _ensureCommunityValid();
+    final names = sources.scope(
+      {...keys, ...owners},
+      agentPubkeys: {refusal.agent},
+    );
+    throw DmAgentRefused(
+      dmAgentRefusedMessage(
+        adding: adding,
+        ownerOnly: refusal.ownerOnly,
+        agent: names.hasName(refusal.agent)
+            ? names.labelFor(refusal.agent)
+            : null,
+        owner: owner != null && names.hasName(owner)
+            ? names.labelFor(owner)
+            : null,
+      ),
+    );
+  }
+
+  /// Confirms through the writer that the current user is in the DM
+  /// [channelId] an add landed in, and returns it, without sending the add
+  /// again. Throws [DmAddUnconfirmed] when it cannot be confirmed or shown.
+  Future<Channel> openAddedDm(String channelId) async {
+    try {
+      await recheckJoin(channelId);
+    } on ChannelJoinUnconfirmed {
+      throw DmAddUnconfirmed(channelId);
+    }
+    final channels = await _ref.read(channelsProvider.future);
+    _ensureCommunityValid();
+    return channels.firstWhere(
+      (channel) => channel.id == channelId,
+      orElse: () => throw DmAddUnconfirmed(channelId),
+    );
+  }
+
   void _ensureCommunityValid() {
     if (_isCommunityValid?.call() == false) {
-      throw StateError(
+      throw ActiveCommunityChangedError(
         'Channel action cancelled because the active community changed',
       );
     }
   }
 
+  /// Joins [channelId] and returns once the channel list shows the
+  /// membership.
+  ///
+  /// A refused join throws the relay's error. An accepted join that cannot
+  /// be confirmed or shown yet throws [ChannelJoinUnconfirmed].
   Future<void> joinChannel(String channelId) async {
     _ensureCommunityValid();
     await _signedEventRelay.submit(
@@ -227,21 +472,79 @@ class ChannelActions {
         ['h', channelId],
       ],
     );
-    _ensureCommunityValid();
-    await _refreshChannelState(channelId);
+    await recheckJoin(channelId);
   }
 
-  Future<void> leaveChannel(String channelId) async {
+  /// Confirms an accepted join without sending it again, then shows it.
+  ///
+  /// The relay can acknowledge the join before its roster reflects it, and
+  /// replicas can lag the writer for many seconds, so each roster read pins
+  /// the writer pool with `consistency: strong`. Only the relay's HTTP query
+  /// path honors that; a WebSocket REQ reads replicas.
+  Future<void> recheckJoin(String channelId) async {
+    final pubkey = _currentPubkey;
+    if (pubkey == null) {
+      throw StateError('No signing identity available');
+    }
+    var confirmed = false;
+    for (final delay in _joinConfirmationDelays) {
+      if (delay > Duration.zero) await Future<void>.delayed(delay);
+      _ensureCommunityValid();
+      final List<NostrEvent> rosters;
+      try {
+        rosters = await _session.queryRelay([
+          NostrFilter(
+            kinds: const [39002],
+            tags: {
+              '#d': [channelId],
+              '#p': [pubkey],
+            },
+            limit: 1,
+            extensions: const {'consistency': 'strong'},
+          ),
+        ]);
+      } catch (error) {
+        debugPrint('Join confirmation read failed: $error');
+        throw const ChannelJoinUnconfirmed();
+      }
+      confirmed = rosters.any(
+        (event) => event.kind == 39002 && event.getTagValue('d') == channelId,
+      );
+      if (confirmed) break;
+    }
+    if (!confirmed) throw const ChannelJoinUnconfirmed();
     _ensureCommunityValid();
+    final bool shown;
+    try {
+      shown = await _ref
+          .read(channelsProvider.notifier)
+          .installConfirmedJoin(channelId);
+    } catch (error) {
+      _ensureCommunityValid();
+      debugPrint('Showing a confirmed join failed: $error');
+      throw const ChannelJoinUnconfirmed();
+    }
+    _ensureCommunityValid();
+    _invalidateChannelDetails(channelId);
+    if (!shown) throw const ChannelJoinUnconfirmed();
+  }
+
+  Future<void> leaveChannel(
+    String channelId, {
+    Future<bool> Function()? mayPublish,
+  }) async {
+    _ensureCommunityValid();
+    final scope = _ref.read(savedMessageScopeProvider);
     await _signedEventRelay.submit(
       kind: 9022,
       content: '',
       tags: [
         ['h', channelId],
       ],
+      mayPublish: mayPublish,
     );
     _ensureCommunityValid();
-    await _refreshChannelState(channelId);
+    await _finishConfirmedRemoval(channelId, scope);
   }
 
   /// Updates the user-editable channel metadata and refreshes cached details.
@@ -259,6 +562,41 @@ class ChannelActions {
         name: name,
         description: description,
       ),
+    );
+    _ensureCommunityValid();
+    await _refreshChannelState(channelId);
+  }
+
+  Future<void> convertSolo(
+    String channelId, {
+    required bool personalChat,
+  }) async {
+    _ensureCommunityValid();
+    final channel = await findJoinedChannel(channelId);
+    if (channel == null || !channel.isSolo || channel.isArchived) {
+      throw StateError('This Solo is no longer available for conversion.');
+    }
+    // Remove legacy placement first while the relay label still identifies the
+    // conversation as Solo. Retrying after a rejected metadata write is safe.
+    if (personalChat) {
+      final sync = _ref.read(meSyncProvider);
+      final head = await sync.head();
+      if (head != null && sync.decode(head).channels.contains(channelId)) {
+        await sync.update(
+          (groups) => MeGroups(
+            groups: groups.groups,
+            channels: groups.channels.where((id) => id != channelId).toList(),
+            assignments: groups.assignments,
+          ),
+          mayFile: () => _ref.read(channelSectionsProvider).editable,
+        );
+      }
+    }
+    _ensureCommunityValid();
+    await _signedEventRelay.submit(
+      kind: 9002,
+      content: '',
+      tags: buildSoloConversionTags(channelId, channel.labels),
     );
     _ensureCommunityValid();
     await _refreshChannelState(channelId);
@@ -289,12 +627,29 @@ class ChannelActions {
   /// Deletes the channel and refreshes its cached state.
   Future<void> deleteChannel(String channelId) async {
     _ensureCommunityValid();
+    final scope = _ref.read(savedMessageScopeProvider);
     await _signedEventRelay.submit(
       kind: 9008,
       content: '',
       tags: buildDeleteChannelTags(channelId),
     );
     _ensureCommunityValid();
+    await _finishConfirmedRemoval(channelId, scope);
+  }
+
+  Future<void> _finishConfirmedRemoval(
+    String channelId,
+    SavedMessageScope? scope,
+  ) async {
+    if (scope != null) {
+      final recorded = _ref
+          .read(savedMessageStoreProvider)
+          .removeChannel(scope, channelId, deferDisk: true);
+      invalidateSavedMessagePreviews(_ref, channelId);
+      await recorded;
+    }
+    _ensureCommunityValid();
+    _ref.read(channelsProvider.notifier).noteConfirmedRemoval(channelId);
     await _refreshChannelState(channelId);
   }
 
@@ -349,6 +704,10 @@ class ChannelActions {
     _ensureCommunityValid();
     await _ref.read(channelsProvider.notifier).refresh();
     _ensureCommunityValid();
+    _invalidateChannelDetails(channelId);
+  }
+
+  void _invalidateChannelDetails(String channelId) {
     _ref.invalidate(channelDetailsProvider(channelId));
     _ref.invalidate(channelMembersProvider(channelId));
     _ref.invalidate(channelBotPubkeysProvider(channelId));
@@ -406,6 +765,13 @@ class ChannelActions {
     _ensureCommunityValid();
     _ref.invalidate(channelMembersProvider(channelId));
     _ref.invalidate(channelBotPubkeysProvider(channelId));
+    // A DM's title and portraits come from the list's participants, which the
+    // relay republished before accepting the removal. List entries for other
+    // channels don't show members, so they need no re-read.
+    final channels = _ref.read(channelsProvider.notifier);
+    if (channels.channelById(channelId)?.isDm ?? false) {
+      unawaited(channels.refresh());
+    }
   }
 
   /// [targetAuthor] fills the NIP-25 `p` tag, which Activity reads by `#p`.
@@ -488,10 +854,7 @@ final channelActionsProvider = Provider<ChannelActions>((ref) {
       nsec: relayConfig.nsec,
     ),
     currentPubkey: currentPubkey,
-    isCommunityValid: () {
-      final currentConfig = ref.read(relayConfigProvider);
-      return currentConfig.baseUrl == relayConfig.baseUrl &&
-          currentConfig.nsec == relayConfig.nsec;
-    },
+    isCommunityValid: () =>
+        ref.read(relayConfigProvider).isSameCommunity(relayConfig),
   );
 });

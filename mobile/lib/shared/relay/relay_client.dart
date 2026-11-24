@@ -1,4 +1,5 @@
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 
 /// Lightweight HTTP context for talking to the Buzz relay.
 ///
@@ -12,7 +13,7 @@ class RelayClient {
   final http.Client _http;
 
   RelayClient({required this.baseUrl, http.Client? httpClient})
-    : _http = httpClient ?? http.Client();
+    : _http = httpClient ?? newAppHttpClient(HttpTraffic.media);
 
   /// Shared underlying HTTP client (used by [MediaUploader]).
   http.Client get httpClient => _http;

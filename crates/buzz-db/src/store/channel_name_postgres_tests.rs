@@ -75,7 +75,12 @@ impl Fixture {
 
     async fn update(&self, channel: Uuid, update: ChannelUpdate) -> crate::error::Result<()> {
         self.db
-            .update_channel(self.community, channel, update)
+            .update_channel(
+                self.community,
+                channel,
+                update,
+                &self.owner.public_key().to_bytes(),
+            )
             .await
             .map(|_| ())
     }

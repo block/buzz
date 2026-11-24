@@ -558,6 +558,7 @@ mod tests {
             refs: BTreeMap::new(),
             packs: Vec::new(),
             parent: None,
+            published_at: None,
         };
         let cache = GitPackCache::new(scratch.path(), u64::MAX, 2).expect("cache");
 
@@ -666,6 +667,7 @@ mod tests {
             refs,
             packs: vec![pack_key.clone()],
             parent: None,
+            published_at: None,
         };
         let manifest_bytes = manifest.canonical_bytes().expect("serialize");
         let manifest_key = st
@@ -814,6 +816,7 @@ mod tests {
             refs: BTreeMap::new(),
             packs: vec![],
             parent: None,
+            published_at: None,
         };
         let manifest_bytes = manifest.canonical_bytes().expect("serialize");
         let manifest_key = st

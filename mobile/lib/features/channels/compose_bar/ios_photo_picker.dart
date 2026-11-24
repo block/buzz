@@ -129,6 +129,9 @@ class _IOSInlinePhotoPicker extends HookWidget {
         children: [
           UiKitView(
             viewType: _inlinePhotoPickerViewType,
+            gestureRecognizers: {
+              Factory<OneSequenceGestureRecognizer>(EagerGestureRecognizer.new),
+            },
             creationParamsCodec: const StandardMessageCodec(),
             onPlatformViewCreated: (viewId) {
               pickerChannel.value = MethodChannel(
@@ -183,14 +186,14 @@ class _IOSInlinePhotoPicker extends HookWidget {
                         child: BuzzLoadingIndicator(
                           size: 20,
                           color: Colors.white,
-                          semanticLabel: 'Preparing selected photos',
+                          semanticLabel: 'Preparing selected items',
                         ),
                       )
                     : Text(
                         selectedCount.value == 0
                             ? 'All Photos'
                             : 'Add ${selectedCount.value} '
-                                  '${selectedCount.value == 1 ? 'photo' : 'photos'}',
+                                  '${selectedCount.value == 1 ? 'item' : 'items'}',
                       ),
               ),
             ),
@@ -202,7 +205,7 @@ class _IOSInlinePhotoPicker extends HookWidget {
                 child: BuzzLoadingIndicator(
                   size: 44,
                   color: Colors.white,
-                  semanticLabel: 'Preparing selected photos',
+                  semanticLabel: 'Preparing selected items',
                 ),
               ),
             ),

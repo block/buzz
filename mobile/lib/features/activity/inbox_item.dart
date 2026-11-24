@@ -33,13 +33,10 @@ int categoryPriority(String category) {
   List<List<String>> tags,
 ) => parseThreadReference(tags);
 
-/// Broadcast replies surface at the channel top level — desktop's
-/// `isBroadcastReply`.
-bool isBroadcastReply(List<List<String>> tags) {
-  return tags.any(
-    (tag) => tag.length >= 2 && tag[0] == 'broadcast' && tag[1] == '1',
-  );
-}
+/// A thread reply also sent to the channel: it has a parent and the
+/// broadcast tag. [isThreadReply] excludes it.
+bool isChannelSentReply(List<List<String>> tags) =>
+    threadReferenceOf(tags).parentId != null && isBroadcastReply(tags);
 
 /// A thread reply that is not broadcast — desktop's `isThreadReply`.
 bool isThreadReply(List<List<String>> tags) {

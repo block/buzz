@@ -3,7 +3,7 @@
 -- (community_id, token_hash); channel claims reference channels in same community.
 
 CREATE TABLE api_tokens (
-    community_id        UUID NOT NULL REFERENCES communities(id),
+    community_id        UUID NOT NULL,
     id                  UUID NOT NULL DEFAULT gen_random_uuid(),
     token_hash          BYTEA NOT NULL,
     owner_pubkey        BYTEA NOT NULL,
@@ -17,7 +17,6 @@ CREATE TABLE api_tokens (
     revoked_by          BYTEA,
     created_by_self_mint BOOLEAN NOT NULL DEFAULT FALSE,
     PRIMARY KEY (community_id, id),
-    FOREIGN KEY (community_id, owner_pubkey) REFERENCES users (community_id, pubkey),
     CONSTRAINT chk_api_tokens_hash_len CHECK (LENGTH(token_hash) = 32)
 );
 

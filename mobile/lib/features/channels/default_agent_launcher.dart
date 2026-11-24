@@ -1,5 +1,3 @@
-import 'package:buzz/shared/widgets/feedback_snackbar.dart';
-
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -13,19 +11,16 @@ import '../../shared/me/default_agent.dart';
 import '../../shared/animated_avatar.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/profile/user_cache_provider.dart';
-import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/agent_navigation_icon.dart';
+import '../../shared/widgets/navigation_button_surface.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/preset_agent_avatar.dart';
-import '../../shared/widgets/navigation_button_surface.dart';
 import '../../shared/widgets/buzz_callout.dart';
 import 'first_agent_callout.dart';
 import 'empty_bestie_avatar.dart';
-import 'channel.dart';
-import 'channel_detail_page.dart';
-import 'channels_provider.dart';
-import 'channel_management_provider.dart';
+import 'bestie_conversation.dart';
+import 'bestie_transcription_control.dart';
 
 /// Persistent shortcut to the agent chosen in Agents.
 class DefaultAgentLauncher extends HookConsumerWidget {
@@ -33,6 +28,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
   final VoidCallback onChooseAgent;
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final diameter = NavigationGlassGroup.diameterOf(context);
     final preference = ref.watch(defaultAgentProvider);
     final scope = ref.watch(meSyncProvider);
     final pubkey = preference.isLoading ? null : preference.value;
@@ -95,56 +91,25 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       }
       opening.value = true;
       try {
-        final channelState = ref.read(channelsProvider);
-        // AsyncValue may retain the previous community's list during reload.
-        final channels = channelState.isLoading || channelState.hasError
-            ? const <Channel>[]
-            : channelState.value ?? const <Channel>[];
-        final notifier = ref.read(channelsProvider.notifier);
-        final cached = channels
-            .where(
-              (channel) => isActiveDirectConversation(
-                channel,
-                notifier.cachedMembersForChannel(channel.id),
-                ref.read(myPubkeyProvider),
-                pubkey,
-              ),
-            )
-            .firstOrNull;
-        resolving.value = cached == null;
-        final channel =
-            cached ??
-            await ref.read(channelActionsProvider).openDm(pubkeys: [pubkey]);
-        if (context.mounted) resolving.value = false;
-        if (!context.mounted) return;
-        // A community switch invalidates an in-flight destination.
-        if (ref.read(meSyncProvider) != scope ||
-            ref.read(defaultAgentProvider).isLoading ||
-            ref.read(defaultAgentProvider).value != pubkey) {
-          return;
-        }
-        await Navigator.of(context).push<void>(
-          MaterialPageRoute(
-            // Native glass and video layers must track the live route.
-            allowSnapshotting: false,
-            builder: (_) => ChannelDetailPage(channel: channel),
-          ),
+        await openBestieConversation(
+          context,
+          ref,
+          pubkey,
+          onResolving: (value) => resolving.value = value,
         );
-      } catch (error) {
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showFeedbackSnackBar(
-            SnackBar(
-              content: Text('Could not open the agent conversation. $error'),
-            ),
-            kind: ToastKind.error,
-          );
-        }
       } finally {
-        if (context.mounted) {
-          opening.value = false;
-          resolving.value = false;
-        }
+        if (context.mounted) opening.value = false;
       }
+    }
+
+    Widget withTranscription(Widget child) {
+      if (scope.config.nsec?.isNotEmpty != true) return child;
+      return BestieTranscriptionControl(
+        key: ValueKey('transcription:${scope.cacheKey}'),
+        scope: scope.cacheKey,
+        recipient: preference.isLoading || preference.hasError ? null : pubkey,
+        child: child,
+      );
     }
 
     return BuzzCallout(
@@ -163,36 +128,38 @@ class DefaultAgentLauncher extends HookConsumerWidget {
             fallback: const AgentNavigationIcon(size: 24),
           ),
       ],
-      child: NavigationButtonSurface(
-        child: SizedBox.square(
-          dimension: 56,
-          child: IconButton(
-            tooltip: label,
-            padding: EdgeInsets.zero,
-            onPressed: opening.value || preference.isLoading ? null : open,
-            icon: ExcludeSemantics(
-              child: resolving.value
-                  ? const SizedBox.square(
-                      dimension: 22,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : pubkey == null
-                  ? preference.isLoading || preference.hasError
-                        ? const AgentNavigationIcon(size: 24)
-                        : const EmptyBestieAvatar()
-                  : usesInsetAgentArtwork(profile?.avatarUrl)
-                  ? PresetAgentAvatar(
-                      imageUrl: profile!.avatarUrl!,
-                      size: 47.88,
-                      fallback: Center(child: Text(profile.initial)),
-                    )
-                  : AvatarImage(
-                      imageUrl: profile?.avatarUrl,
-                      radius: 18,
-                      isAgent: true,
-                      backgroundColor: context.controlSurface,
-                      fallback: Center(child: Text(profile?.initial ?? 'A')),
-                    ),
+      child: withTranscription(
+        SizedBox(
+          child: SizedBox.square(
+            dimension: diameter,
+            child: IconButton(
+              tooltip: label,
+              padding: EdgeInsets.zero,
+              onPressed: opening.value || preference.isLoading ? null : open,
+              icon: ExcludeSemantics(
+                child: resolving.value
+                    ? const SizedBox.square(
+                        dimension: 22,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : pubkey == null
+                    ? preference.isLoading || preference.hasError
+                          ? const AgentNavigationIcon(size: 24)
+                          : const EmptyBestieAvatar()
+                    : usesInsetAgentArtwork(profile?.avatarUrl)
+                    ? PresetAgentAvatar(
+                        imageUrl: profile!.avatarUrl!,
+                        size: diameter * 0.855,
+                        fallback: Center(child: Text(profile.initial)),
+                      )
+                    : AvatarImage(
+                        imageUrl: profile?.avatarUrl,
+                        radius: 18,
+                        isAgent: true,
+                        backgroundColor: context.controlSurface,
+                        fallback: Center(child: Text(profile?.initial ?? 'A')),
+                      ),
+              ),
             ),
           ),
         ),

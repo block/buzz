@@ -32,7 +32,8 @@ void durableMentionTests() {
         },
       );
       // Same-name members get contextual picker labels (`Scout · <npub
-      // suffix>`); the inserted mention text still uses the plain name.
+      // suffix>`); the inserted text stays the plain name and each chip
+      // keeps its own key by position.
       Finder scoutRows() => find.descendant(
         of: find.byKey(const ValueKey('mention-suggestions-popover')),
         matching: find.textContaining('Scout'),
@@ -51,7 +52,7 @@ void durableMentionTests() {
           .widget<TextField>(find.byType(TextField))
           .controller!
           .text;
-      expect(draft, '@Scout @Scout ($second) ');
+      expect(draft, '@Scout @Scout ');
 
       // Same mounted composer, different thread and back: old listeners may
       // not erase the original persisted bindings while restoring another key.
@@ -67,7 +68,7 @@ void durableMentionTests() {
       renamed = true;
       await tester.pumpWidget(build());
       await tester.pumpAndSettle();
-      await tester.tap(find.text(draft.trim()));
+      await tester.tap(find.text(draft));
       await tester.pumpAndSettle();
       expect(
         tester.widget<TextField>(find.byType(TextField)).controller!.text,
@@ -87,7 +88,7 @@ void durableMentionTests() {
       sent = null;
       await tester.pumpWidget(build());
       await tester.pumpAndSettle();
-      await tester.tap(find.text(draft.trim()));
+      await tester.tap(find.text(draft));
       await tester.pumpAndSettle();
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
@@ -173,7 +174,9 @@ void durableMentionTests() {
       final prefsKey =
           'compose_drafts_v1:https://relay.example:${signer.public}';
       final saved = jsonDecode(_testPrefs.getString(prefsKey)!) as List;
-      expect(saved.single['mention_keys'], {'Helper Bot': agent});
+      expect(saved.single['mentions'], [
+        {'start': 0, 'end': 11, 'pubkey': agent},
+      ]);
       expect(saved.single['text'], '@Helper Bot ');
       // The parent deliberately persists no agent bit to trust after restart.
       expect(saved.single.containsKey('is_agent'), isFalse);
@@ -181,7 +184,7 @@ void durableMentionTests() {
       await tester.pumpAndSettle();
       eligible = false;
       await mount();
-      await tester.tap(find.text('@Helper Bot'));
+      await tester.tap(find.text('@Helper Bot '));
       await tester.pumpAndSettle();
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();

@@ -43,7 +43,7 @@ do not validate or redeem the invite.
 Deploy both the updated relay and its web bundle (the relay Docker image includes
 both). The media host comes from the request's resolved community, matching the
 invite link's host. `RELAY_URL` supplies only the `wss`/`ws` TLS posture, mapped to
-`https`/`http`. Unmapped hosts or lookup failures receive no preview metadata.
+`https`/`http`. Unmapped hosts, lookup failures and slow lookups receive no preview metadata.
 Each community host must serve the web bundle without authentication. Use HTTPS
 in production.
 

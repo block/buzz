@@ -1,7 +1,15 @@
 part of '../channel_messages_provider.dart';
 
+/// Edit authority for thread summaries, read when a summary refreshes.
+mixin _SummaryEditAuthority on Notifier<AsyncValue<List<NostrEvent>>> {
+  EditAuthority _summaryEditAuthority(List<NostrEvent> events) =>
+      readEditAuthority(ref, events);
+}
+
 extension _ThreadSummaryState on ChannelMessagesNotifier {
   void _reconcilePageSummaries(ChannelWindowPage page, int pageVersion) {
+    // Nothing below changes the cached replies, so index them once per page.
+    final cachedReplies = _cachedThreadReplyIdsByRoot();
     for (final row in page.rows) {
       final root = row.event.id;
       if ((_threadEvidenceVersions[root] ?? 0) > pageVersion) continue;
@@ -10,7 +18,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
       _summaryRefreshes.cancel(root);
       _setThreadQueryVersion(root, pageVersion);
       _clearDeletionUncertainty(root, pageVersion);
-      if (cachedThreadReplyIds(root).length >
+      if ((cachedReplies[root]?.length ?? 0) >
           (row.thread?.descendantCount ?? 0)) {
         _queueOverflowSummary(root);
       }
@@ -150,12 +158,18 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
   ) {
     final rows = _visibleNestedRows(root).toList();
     if (rows.isEmpty) return;
+    final events = [
+      ...{
+        for (final event in [...rows, ...replies]) event.id: event,
+      }.values,
+    ];
+    final authority = _summaryEditAuthority(events);
     final entries = buildMainTimelineEntries(
-      formatTimeline([
-        ...{
-          for (final event in [...rows, ...replies]) event.id: event,
-        }.values,
-      ]),
+      formatTimeline(
+        events,
+        agentOwners: authority.owners,
+        relayPubkey: authority.relayKey,
+      ),
     );
     for (final row in rows) {
       if ((_threadQueryVersions[row.id] ?? 0) > version) continue;

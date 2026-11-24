@@ -1,5 +1,27 @@
 part of '../message_content.dart';
 
+/// The "N photos" label above a stack, part of the message but not of its
+/// reply-drag target.
+class _MessageImageStackCount extends StatelessWidget {
+  final List<MessageGalleryItem> items;
+
+  const _MessageImageStackCount({required this.items});
+
+  @override
+  Widget build(BuildContext context) => MessageLongPressTarget(
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+      child: Text(
+        '${items.length} ${items.any((item) => item.isVideo) ? 'attachments' : 'photos'}',
+        key: const ValueKey('message-media-stack-count'),
+        style: context.textTheme.labelSmall?.copyWith(
+          color: context.colors.onSurfaceVariant,
+        ),
+      ),
+    ),
+  );
+}
+
 /// A compact rounded photo fan with continuous perspective and depth overlap.
 class _MessageImageStack extends HookConsumerWidget {
   const _MessageImageStack({
@@ -42,6 +64,8 @@ class _MessageImageStack extends HookConsumerWidget {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final auth = ref.watch(mediaGetAuthServiceProvider);
     final index = value.round() % items.length;
+    final hasVideos = items.any((item) => item.isVideo);
+    final itemName = hasVideos ? 'Attachment' : 'Photo';
 
     void settle(double target, {bool instant = false}) {
       if (reducedMotion || instant) {
@@ -75,18 +99,25 @@ class _MessageImageStack extends HookConsumerWidget {
                   .ceilToDouble();
           final providers = [
             for (final item in items)
-              ResizeImage.resizeIfNeeded(
-                physicalDecodeWidth.toInt(),
-                null,
-                MediaImageProvider(
-                  url: item.url,
-                  auth: auth,
-                  client: ref.watch(mediaHttpClientProvider),
+              if (item.isVideo && item.posterUrl == null)
+                null
+              else
+                ResizeImage.resizeIfNeeded(
+                  physicalDecodeWidth.toInt(),
+                  null,
+                  MediaImageProvider(
+                    url: item.isVideo ? item.posterUrl! : item.url,
+                    auth: auth,
+                    client: ref.watch(mediaHttpClientProvider),
+                  ),
                 ),
-              ),
+          ];
+          final imageIndices = [
+            for (var i = 0; i < items.length; i++)
+              if (!items[i].isVideo) i,
           ];
           final viewerItems = [
-            for (var i = 0; i < items.length; i++)
+            for (final i in imageIndices)
               MediaViewerImage(
                 url: items[i].url,
                 heroTag: tags[i],
@@ -100,15 +131,27 @@ class _MessageImageStack extends HookConsumerWidget {
             if (opening.value) return;
             opening.value = true;
             dragging.value = false;
+            NativeVideoFiles? videoFiles;
             try {
               final selected = position.value.round() % items.length;
               settle(position.value.roundToDouble(), instant: true);
               if (NativePhotoZoomPreview.enabled) {
+                videoFiles = NativeVideoFiles(
+                  auth: auth,
+                  client: ref.read(mediaHttpClientProvider),
+                  index: selected,
+                );
                 await WidgetsBinding.instance.endOfFrame;
                 if (!context.mounted) return;
                 final gallery = await NativePhotoZoomPreview.open(
                   context: context,
                   sourceKeys: sourceKeys,
+                  videoIndices: {
+                    for (var i = 0; i < items.length; i++)
+                      if (items[i].isVideo) i,
+                  },
+                  loadVideo: (index) =>
+                      videoFiles!.load(index, items[index].url),
                   previewProvider: providers[selected],
                   previewProviders: providers,
                   providers: [
@@ -128,6 +171,7 @@ class _MessageImageStack extends HookConsumerWidget {
                   labels: [for (final item in items) item.semanticLabel],
                   initialIndex: selected,
                   onSelect: (index) async {
+                    await videoFiles!.select(index);
                     if (!context.mounted) return;
                     dragging.value = false;
                     start.value = index.toDouble();
@@ -140,6 +184,15 @@ class _MessageImageStack extends HookConsumerWidget {
                 );
                 if (!gallery || !context.mounted) return;
               }
+              if (items[selected].isVideo) {
+                openVideoViewer(
+                  context,
+                  videoUrl: items[selected].url,
+                  posterUrl: items[selected].posterUrl,
+                  onReply: onReply,
+                );
+                return;
+              }
               openImageViewer(
                 context,
                 imageUrl: items[selected].url,
@@ -148,18 +201,20 @@ class _MessageImageStack extends HookConsumerWidget {
                 previewDecodeWidth: decodeWidth,
                 aspectRatio: items[selected].aspectRatio,
                 galleryItems: viewerItems,
-                initialIndex: selected,
+                initialIndex: imageIndices.indexOf(selected),
                 onSelectionChanged: (index) {
                   if (!context.mounted) return;
                   dragging.value = false;
-                  start.value = index.toDouble();
+                  final originalIndex = imageIndices[index];
+                  start.value = originalIndex.toDouble();
                   distance.value = 0;
-                  settle(index.toDouble(), instant: true);
+                  settle(originalIndex.toDouble(), instant: true);
                 },
                 onReply: onReply,
                 onMore: onMore,
               );
             } finally {
+              await videoFiles?.dispose();
               opening.value = false;
             }
           }
@@ -216,20 +271,48 @@ class _MessageImageStack extends HookConsumerWidget {
             );
           }
           Widget card(int i) {
-            final photo = MediaImage(
-              url: items[i].url,
-              decodeWidth: decodeWidth,
-              fit: BoxFit.cover,
-              semanticLabel: items[i].semanticLabel,
-              frameBuilder: (context, child, frame, synchronous) =>
-                  frame != null || synchronous
-                  ? child
-                  : const MediaLoadingPlaceholder(label: 'Loading image'),
-              errorBuilder: (_, _, _) => const _MediaPreviewFallback(
-                icon: BuzzIcons.imageOff,
-                label: 'Image unavailable',
-              ),
-            );
+            final item = items[i];
+            Widget photo = item.isVideo && item.posterUrl == null
+                ? ColoredBox(color: context.colors.surfaceContainerHigh)
+                : MediaImage(
+                    url: item.isVideo ? item.posterUrl! : item.url,
+                    decodeWidth: decodeWidth,
+                    fit: BoxFit.cover,
+                    semanticLabel: items[i].semanticLabel,
+                    frameBuilder: (context, child, frame, synchronous) =>
+                        frame != null || synchronous
+                        ? child
+                        : const MediaLoadingPlaceholder(label: 'Loading image'),
+                    errorBuilder: (_, _, _) => const _MediaPreviewFallback(
+                      icon: BuzzIcons.imageOff,
+                      label: 'Image unavailable',
+                    ),
+                  );
+            if (item.isVideo) {
+              photo = Stack(
+                fit: StackFit.expand,
+                children: [
+                  photo,
+                  const ColoredBox(color: Color.fromRGBO(0, 0, 0, 0.28)),
+                  Center(
+                    child: Container(
+                      width: 52,
+                      height: 52,
+                      decoration: const BoxDecoration(
+                        color: Color.fromRGBO(0, 0, 0, 0.6),
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        Icons.play_arrow,
+                        key: ValueKey('message-media-stack-video:${item.url}'),
+                        color: Colors.white,
+                        size: 24,
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            }
             return _StackPhotoCard(
               key: ValueKey('stack-card:$i'),
               pose: poses[i]!,
@@ -242,9 +325,11 @@ class _MessageImageStack extends HookConsumerWidget {
                   : offsets[i]! < 0
                   ? (1 + offsets[i]!).clamp(0.0, 1.0)
                   : (3 - offsets[i]!).clamp(0.0, 1.0),
-              child: SizedBox(
+              child: RepaintBoundary(
                 key: sourceKeys[i],
-                child: MediaViewerHero(tag: tags[i], child: photo),
+                child: item.isVideo
+                    ? photo
+                    : MediaViewerHero(tag: tags[i], child: photo),
               ),
             );
           }
@@ -255,18 +340,18 @@ class _MessageImageStack extends HookConsumerWidget {
               key: const ValueKey('message-media-stack-semantics'),
               button: true,
               label: items[index].semanticLabel,
-              hint: 'Open photo gallery',
+              hint: hasVideos ? 'Open media gallery' : 'Open photo gallery',
               customSemanticsActions: _stackTuningEnabled && showTuningControl
                   ? {
                       CustomSemanticsAction(label: 'Tune stack'): () =>
                           _openStackTuning(context, items, mirrored),
                     }
                   : null,
-              value: 'Photo ${index + 1} of ${items.length}',
+              value: '$itemName ${index + 1} of ${items.length}',
               increasedValue:
-                  'Photo ${(index + 1) % items.length + 1} of ${items.length}',
+                  '$itemName ${(index + 1) % items.length + 1} of ${items.length}',
               decreasedValue:
-                  'Photo ${(index - 1) % items.length + 1} of ${items.length}',
+                  '$itemName ${(index - 1) % items.length + 1} of ${items.length}',
               onTap: open,
               onIncrease: () => settle(position.value.roundToDouble() + 1),
               onDecrease: () => settle(position.value.roundToDouble() - 1),
@@ -294,66 +379,69 @@ class _MessageImageStack extends HookConsumerWidget {
                   }
                   return KeyEventResult.ignored;
                 },
-                child: GestureDetector(
-                  key: const ValueKey('message-media-stack'),
-                  behavior: HitTestBehavior.opaque,
-                  onTap: open,
-                  onHorizontalDragStart: (_) {
-                    if (opening.value) return;
-                    dragging.value = true;
-                    position.stop();
-                    start.value = position.value;
-                    distance.value = 0;
-                  },
-                  onHorizontalDragUpdate: (details) {
-                    if (!dragging.value || opening.value) return;
-                    distance.value += details.delta.dx;
-                    if (!reducedMotion) {
-                      position.value = start.value - distance.value / 140;
-                    }
-                  },
-                  onHorizontalDragEnd: (details) {
-                    if (!dragging.value || opening.value) return;
-                    dragging.value = false;
-                    final dx = distance.value;
-                    final speed = details.primaryVelocity ?? 0;
-                    final step = dx.abs() > 48 || speed.abs() > 500
-                        ? (dx == 0 ? -speed.sign : -dx.sign) *
-                              math.max(1, (dx.abs() / 140).round())
-                        : 0;
-                    settle(start.value.roundToDouble() + step);
-                  },
-                  onHorizontalDragCancel: () {
-                    if (!dragging.value || opening.value) return;
-                    dragging.value = false;
-                    settle(start.value.roundToDouble());
-                  },
-                  child: SizedBox(
-                    width: width,
-                    height: height,
-                    child: Stack(
-                      key: const ValueKey('message-media-card-deck'),
-                      clipBehavior: Clip.none,
-                      alignment: mirrored
-                          ? Alignment.centerRight
-                          : Alignment.centerLeft,
-                      children: [
-                        for (final i in order) card(i),
-                        if (_stackTuningEnabled && showTuningControl)
-                          Positioned(
-                            left: 0,
-                            top: 0,
-                            child: TextButton(
-                              onPressed: () =>
-                                  _openStackTuning(context, items, mirrored),
-                              child: const Text('Tune stack'),
+                child: MessageLongPressTarget(
+                  child: GestureDetector(
+                    key: const ValueKey('message-media-stack'),
+                    behavior: HitTestBehavior.opaque,
+                    onTap: open,
+                    onHorizontalDragStart: (_) {
+                      if (opening.value) return;
+                      dragging.value = true;
+                      position.stop();
+                      start.value = position.value;
+                      distance.value = 0;
+                    },
+                    onHorizontalDragUpdate: (details) {
+                      if (!dragging.value || opening.value) return;
+                      distance.value += details.delta.dx * (mirrored ? 1 : -1);
+                      if (!reducedMotion) {
+                        position.value = start.value - distance.value / 140;
+                      }
+                    },
+                    onHorizontalDragEnd: (details) {
+                      if (!dragging.value || opening.value) return;
+                      dragging.value = false;
+                      final dx = distance.value;
+                      final speed =
+                          (details.primaryVelocity ?? 0) * (mirrored ? 1 : -1);
+                      final step = dx.abs() > 48 || speed.abs() > 500
+                          ? (dx == 0 ? -speed.sign : -dx.sign) *
+                                math.max(1, (dx.abs() / 140).round())
+                          : 0;
+                      settle(start.value.roundToDouble() + step);
+                    },
+                    onHorizontalDragCancel: () {
+                      if (!dragging.value || opening.value) return;
+                      dragging.value = false;
+                      settle(start.value.roundToDouble());
+                    },
+                    child: SizedBox(
+                      width: width,
+                      height: height,
+                      child: Stack(
+                        key: const ValueKey('message-media-card-deck'),
+                        clipBehavior: Clip.none,
+                        alignment: mirrored
+                            ? Alignment.centerRight
+                            : Alignment.centerLeft,
+                        children: [
+                          for (final i in order) card(i),
+                          if (_stackTuningEnabled && showTuningControl)
+                            Positioned(
+                              left: 0,
+                              top: 0,
+                              child: TextButton(
+                                onPressed: () =>
+                                    _openStackTuning(context, items, mirrored),
+                                child: const Text('Tune stack'),
+                              ),
                             ),
+                          _MessageGalleryPrecache(
+                            providers: providers,
+                            focusedIndex: index,
                           ),
-                        _MessageGalleryPrecache(
-                          providers: providers,
-                          focusedIndex: index,
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),

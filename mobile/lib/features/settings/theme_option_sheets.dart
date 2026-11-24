@@ -3,10 +3,13 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/duo_toolbar.dart';
+import '../../shared/widgets/adaptive_conversation_pane.dart';
 
 const appearanceModeOptions = <({ThemeMode mode, String label, IconData icon})>[
   (mode: ThemeMode.light, label: 'Light', icon: BuzzIcons.sun),
@@ -20,33 +23,45 @@ String appearanceModeLabel(ThemeMode mode) =>
 Future<void> showAccentColorPickerSheet({
   required BuildContext context,
   required ColorScheme colorScheme,
-  required int selectedIndex,
+  required int? pickedIndex,
   required ValueChanged<int> onSelected,
 }) => showBuzzModalBottomSheet<void>(
   context: context,
   title: 'Chat color',
   showDragHandle: true,
   builder: (_) => _AccentColorPicker(
+    compact:
+        DuoToolbarScope.maybeOf(context)?.strip != null &&
+        usesConversationPanes(context),
     colorScheme: colorScheme,
-    initialIndex: selectedIndex,
+    pickedIndex: pickedIndex,
     onSelected: onSelected,
   ),
 );
 
-class _AccentColorPicker extends HookWidget {
+class _AccentColorPicker extends HookConsumerWidget {
   const _AccentColorPicker({
     required this.colorScheme,
-    required this.initialIndex,
+    required this.compact,
+    required this.pickedIndex,
     required this.onSelected,
   });
 
   final ColorScheme colorScheme;
-  final int initialIndex;
+  final bool compact;
+
+  /// The swatch the user already tapped, or null to follow the saved color.
+  final int? pickedIndex;
   final ValueChanged<int> onSelected;
 
   @override
-  Widget build(BuildContext context) {
-    final selected = useState(initialIndex);
+  Widget build(BuildContext context, WidgetRef ref) {
+    final picked = useState(pickedIndex);
+    // Until a tap, the marker follows the saved color, including a sync.
+    final saved = ref.watch(
+      communityThemeProvider.select((t) => chatColorIndex(t.accent)),
+    );
+    final selected = picked.value ?? saved;
     return SafeArea(
       top: false,
       child: Padding(
@@ -56,26 +71,34 @@ class _AccentColorPicker extends HookWidget {
           Grid.gutter,
           Grid.xs,
         ),
-        child: GridView.builder(
-          key: const ValueKey('accent-selection-grid'),
-          shrinkWrap: true,
-          primary: false,
-          padding: EdgeInsets.zero,
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 4,
-            crossAxisSpacing: Grid.xxs,
-            mainAxisSpacing: Grid.xs,
-          ),
-          itemCount: chatColorChoices.length,
-          itemBuilder: (context, index) => _AccentSheetOption(
-            index: index,
-            color: chatColorForScheme(colorScheme, index),
-            selected: selected.value == index,
-            onTap: () {
-              unawaited(HapticFeedback.selectionClick());
-              selected.value = index;
-              onSelected(index);
-            },
+        child: Align(
+          heightFactor: 1,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: compact ? 320 : double.infinity,
+            ),
+            child: GridView.builder(
+              key: const ValueKey('accent-selection-grid'),
+              shrinkWrap: true,
+              primary: false,
+              padding: EdgeInsets.zero,
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 4,
+                crossAxisSpacing: Grid.xxs,
+                mainAxisSpacing: Grid.xs,
+              ),
+              itemCount: chatColorChoices.length,
+              itemBuilder: (context, index) => _AccentSheetOption(
+                index: index,
+                color: chatColorForScheme(colorScheme, index),
+                selected: selected == index,
+                onTap: () {
+                  unawaited(HapticFeedback.selectionClick());
+                  picked.value = index;
+                  onSelected(index);
+                },
+              ),
+            ),
           ),
         ),
       ),

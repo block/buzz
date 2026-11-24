@@ -225,7 +225,33 @@ fn push_tsquery(
         }
     }
 }
-fn normalized_search_text(q: &str) -> Option<String> {
+/// The page a [`SearchQuery`] asks for, clamped the same way by every
+/// backend.
+pub(crate) struct PageBounds {
+    /// 1-indexed page, at most [`PAGE_MAX`].
+    pub(crate) page: u32,
+    /// Hits per page: `per_page` clamped to `1..=PER_PAGE_MAX`, or the
+    /// default when it is 0.
+    pub(crate) per_page: u32,
+    /// Hits before this page.
+    pub(crate) offset: i64,
+}
+
+pub(crate) fn page_bounds(query: &SearchQuery) -> PageBounds {
+    let per_page = if query.per_page == 0 {
+        PER_PAGE_DEFAULT
+    } else {
+        query.per_page.clamp(1, PER_PAGE_MAX)
+    };
+    let page = query.page.clamp(1, PAGE_MAX);
+    PageBounds {
+        page,
+        per_page,
+        offset: i64::from(page - 1) * i64::from(per_page),
+    }
+}
+
+pub(crate) fn normalized_search_text(q: &str) -> Option<String> {
     let trimmed = q.trim();
     if trimmed.is_empty() {
         return None;
@@ -275,14 +301,11 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
         });
     };
 
-    let per_page = query.per_page.clamp(1, PER_PAGE_MAX);
-    let per_page_actual = if query.per_page == 0 {
-        PER_PAGE_DEFAULT
-    } else {
-        per_page
-    };
-    let page = query.page.clamp(1, PAGE_MAX);
-    let offset = ((page - 1) as i64) * (per_page_actual as i64);
+    let PageBounds {
+        page,
+        per_page: per_page_actual,
+        offset,
+    } = page_bounds(query);
     // Profile typeahead uses broad prefix matching. For one- and two-character
     // queries, a busy community can have enough newer prefix matches to push a
     // short exact display name off the bounded first page. Keep the same result
@@ -495,10 +518,8 @@ pub async fn search_profile_names(
     qb.push(TIER_TEXT[1]);
     qb.push(" AS typed), matches AS (SELECT e.pubkey AS person, ");
     push_name_match(&mut qb, &["name", "display_name"], "e.created_at");
-    qb.push(
-        " FROM events e CROSS JOIN search_query \
-         CROSS JOIN LATERAL profile_name_fields(e.content) AS fields",
-    );
+    qb.push(" FROM events e CROSS JOIN search_query");
+    qb.push(PROFILE_NAME_FIELDS);
     push_name_columns(&mut qb, &["name", "display_name"]);
     qb.push(" WHERE e.community_id = ");
     qb.push_bind(*community.as_uuid());
@@ -604,6 +625,33 @@ pub async fn search_profile_names(
     }
     Ok(SearchResult { hits, page })
 }
+
+/// Joins `fields.name` and `fields.display_name` for the kind:0 `e.content`.
+/// A field is NULL unless the content is a JSON object and the field is a
+/// string.
+///
+/// Content is any text the signer chose, and some of it must have no names
+/// rather than fail the whole search:
+/// - Valid JSON that cannot become jsonb, such as `\u0000`, a lone surrogate
+///   or a huge number. `pg_input_is_valid` rejects it.
+/// - Nesting deep enough to exhaust PostgreSQL's recursive JSON parser (about
+///   ten thousand levels at the default `max_stack_depth`). That raises an
+///   error `pg_input_is_valid` does not catch, so content with more than 4096
+///   `[` and `{` is never parsed. The count bounds the depth; ingest already
+///   rejects kind:0 content nested deeper than 128 levels. The bound assumes
+///   the default 2 MB `max_stack_depth`; well below that, content stored
+///   outside ingest with fewer than 4096 levels can still fail the search.
+///
+/// `OFFSET 0` keeps the planner from copying the parse into each use of `doc`.
+const PROFILE_NAME_FIELDS: &str = " CROSS JOIN LATERAL (SELECT CASE \
+     WHEN length(e.content) - length(translate(e.content, '[{', '')) > 4096 THEN NULL \
+     WHEN pg_input_is_valid(e.content, 'jsonb') THEN e.content::jsonb END AS doc \
+     OFFSET 0) AS profile \
+     CROSS JOIN LATERAL (SELECT \
+     CASE WHEN jsonb_typeof(profile.doc -> 'name') = 'string' \
+     THEN profile.doc ->> 'name' END AS name, \
+     CASE WHEN jsonb_typeof(profile.doc -> 'display_name') = 'string' \
+     THEN profile.doc ->> 'display_name' END AS display_name) AS fields";
 
 /// Name tags of a relay-signed kind:30382 verified profile.
 const VERIFIED_NAME_TAGS: [&str; 3] = ["display_name", "username", "full_name"];

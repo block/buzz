@@ -11,6 +11,7 @@ import '../relay/relay_validation.dart';
 import '../hosted/hosted_environment.dart';
 
 part 'agent_creation_link.dart';
+part 'share_link.dart';
 
 /// A parsed deep link supported by the app.
 sealed class BuzzDeepLink {
@@ -304,7 +305,8 @@ BuzzDeepLink? parseBuzzDeepLink(Uri uri) =>
     parseAddCommunityDeepLink(uri) ??
     parseInviteDeepLink(uri) ??
     parseChannelDeepLink(uri) ??
-    parseMessageDeepLink(uri);
+    parseMessageDeepLink(uri) ??
+    parseShareDeepLink(uri);
 
 /// A validated Buzz repository, pull request, or issue permalink.
 class EntityDeepLink extends BuzzDeepLink {

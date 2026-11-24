@@ -50,6 +50,34 @@ String? fullNpub(String identity) {
   }
 }
 
+/// The hex public key that typed text names exactly (portable mention rules,
+/// Terms): 64 hex characters in either case, or a complete all-lowercase or
+/// all-uppercase npub, with or without a `nostr:` prefix in any case. Null
+/// for anything else, including a key still being typed, a mixed-case npub,
+/// or one with a bad checksum or a payload of another length.
+String? typedPublicKey(String text) {
+  final value = text.trim();
+  if (isHexPubkey(value)) return value.toLowerCase();
+  const scheme = 'nostr:';
+  final npub =
+      value.length > scheme.length &&
+          value.substring(0, scheme.length).toLowerCase() == scheme
+      ? value.substring(scheme.length)
+      : value;
+  if (!npub.toLowerCase().startsWith('npub1')) return null;
+  try {
+    // bech32 rejects mixed case itself.
+    final decoded = nostr.Nip19.decode(payload: npub);
+    if (decoded.prefix != nostr.Nip19Prefix.npub ||
+        !isHexPubkey(decoded.data)) {
+      return null;
+    }
+    return decoded.data.toLowerCase();
+  } catch (_) {
+    return null;
+  }
+}
+
 /// Encoded npubs by lowercase hex key. Identity views label every roster
 /// member without a profile name by npub on each rebuild, and bech32 encoding
 /// dominated those rebuilds on large channels. Bounded: once full it keeps

@@ -4,7 +4,7 @@
 -- tombstone carries only action_id + reason_code + sanitized public_reason.
 
 CREATE TABLE moderation_actions (
-    community_id    UUID NOT NULL REFERENCES communities(id),
+    community_id    UUID NOT NULL,
     id              UUID NOT NULL DEFAULT gen_random_uuid(),
     actor_pubkey    BYTEA NOT NULL CHECK (length(actor_pubkey) = 32),
     action          TEXT NOT NULL CHECK (action IN (
@@ -28,8 +28,7 @@ CREATE TABLE moderation_actions (
     actor_authority   TEXT NOT NULL DEFAULT 'community'
                       CHECK (actor_authority IN ('community', 'relay_operator', 'relay_moderator')),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (community_id, id),
-    FOREIGN KEY (community_id, channel_id) REFERENCES channels (community_id, id)
+    PRIMARY KEY (community_id, id)
 );
 
 CREATE INDEX idx_moderation_actions_created

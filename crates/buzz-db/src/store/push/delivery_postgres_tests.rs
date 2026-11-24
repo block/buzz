@@ -295,3 +295,130 @@ async fn concurrent_discovery_preserves_exclusive_claims_and_recovery_fencing() 
             .unwrap()
     );
 }
+
+/// Mirrors the operator listener's admission tests: a ban on the author or
+/// their recorded owner blocks, and membership and the allowlist apply only
+/// when configured.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn author_admission_matches_the_connection_gate() {
+    use crate::operator_listener::DeliveryAdmission;
+
+    let pool = PgPool::connect(&crate::test_support::database_url())
+        .await
+        .expect("isolated database");
+    let community = make_community(&pool).await;
+    let (agent, owner) = ([31u8; 32], [32u8; 32]);
+    let open = DeliveryAdmission {
+        require_membership: false,
+        allow_owner_membership: false,
+        require_allowlist: false,
+    };
+    let closed = DeliveryAdmission {
+        require_membership: true,
+        ..open
+    };
+    let closed_with_owner = DeliveryAdmission {
+        allow_owner_membership: true,
+        ..closed
+    };
+    let allowlisted = DeliveryAdmission {
+        require_allowlist: true,
+        ..open
+    };
+    let admitted = |author: [u8; 32], admission: DeliveryAdmission| {
+        let pool = pool.clone();
+        async move {
+            author_admitted(&pool, community, &author, admission)
+                .await
+                .expect("check admission")
+        }
+    };
+    let run = |sql: &'static str, pubkey: [u8; 32]| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(sql)
+                .bind(community.as_uuid())
+                .bind(pubkey.as_slice())
+                .execute(&pool)
+                .await
+                .expect(sql);
+        }
+    };
+    const BAN: &str = "INSERT INTO community_bans (community_id, pubkey, banned, actor_pubkey) \
+                       VALUES ($1, $2, true, $2)";
+    const UNBAN: &str = "DELETE FROM community_bans WHERE community_id = $1 AND pubkey = $2";
+    const JOIN: &str = "INSERT INTO relay_members (community_id, pubkey, role) \
+                        VALUES ($1, encode($2, 'hex'), 'member')";
+
+    sqlx::query(
+        "INSERT INTO users (community_id, pubkey, agent_owner_pubkey) \
+         VALUES ($1, $3, NULL), ($1, $2, $3)",
+    )
+    .bind(community.as_uuid())
+    .bind(agent.as_slice())
+    .bind(owner.as_slice())
+    .execute(&pool)
+    .await
+    .expect("record agent owner");
+    assert!(admitted(agent, open).await);
+
+    // Bans: an expired ban admits, an active one blocks, and a ban on the
+    // owner cascades to the agent but not the other way round.
+    run(
+        "INSERT INTO community_bans (community_id, pubkey, banned, actor_pubkey, ban_expires_at) \
+         VALUES ($1, $2, true, $2, now() - interval '1 second')",
+        agent,
+    )
+    .await;
+    assert!(admitted(agent, open).await, "an expired ban admits");
+    run(UNBAN, agent).await;
+    run(BAN, agent).await;
+    assert!(!admitted(agent, open).await, "an active ban blocks");
+    assert!(
+        admitted(owner, open).await,
+        "an agent's ban leaves its owner"
+    );
+    run(UNBAN, agent).await;
+    run(BAN, owner).await;
+    assert!(
+        !admitted(agent, open).await,
+        "an owner's ban blocks its agent"
+    );
+    run(UNBAN, owner).await;
+
+    // Closed community: direct membership, or a member owner with NIP-OA.
+    assert!(!admitted(agent, closed).await, "a non-member is blocked");
+    run(JOIN, owner).await;
+    assert!(!admitted(agent, closed).await);
+    assert!(admitted(agent, closed_with_owner).await);
+    run(JOIN, agent).await;
+    assert!(admitted(agent, closed).await, "a member is admitted");
+    run(
+        "DELETE FROM relay_members WHERE community_id = $1 AND pubkey = encode($2, 'hex')",
+        agent,
+    )
+    .await;
+    assert!(
+        !admitted(agent, closed).await,
+        "a removed member is blocked"
+    );
+
+    // Allowlist: only the author's own entry counts.
+    assert!(!admitted(agent, allowlisted).await);
+    run(
+        "INSERT INTO pubkey_allowlist (community_id, pubkey) VALUES ($1, $2)",
+        owner,
+    )
+    .await;
+    assert!(
+        !admitted(agent, allowlisted).await,
+        "an owner's entry is not the agent's"
+    );
+    run(
+        "INSERT INTO pubkey_allowlist (community_id, pubkey) VALUES ($1, $2)",
+        agent,
+    )
+    .await;
+    assert!(admitted(agent, allowlisted).await);
+}

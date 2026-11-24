@@ -40,7 +40,13 @@ class _InboxRow extends HookConsumerWidget {
     final labelHapticFired = useRef(false);
     final senderPubkey = item.item.pubkey.toLowerCase();
     final mentionPubkeys = mentionedPubkeysFromTags(item.item.tags);
-    final relevantPubkeys = {senderPubkey, ...mentionPubkeys};
+    // Identity links name their own keys: resolve those for display only.
+    // Only links in the two-line preview render, so only those resolve.
+    final linkedPubkeys = useMemoized(
+      () => messagePreviewIdentityKeys(item.item.displayContent, maxLines: 2),
+      [item.item.displayContent],
+    );
+    final relevantPubkeys = {senderPubkey, ...mentionPubkeys, ...linkedPubkeys};
     final profiles = <String, UserProfile?>{
       for (final pubkey in relevantPubkeys)
         pubkey: ref.watch(userCacheProvider.select((cache) => cache[pubkey])),
@@ -54,15 +60,16 @@ class _InboxRow extends HookConsumerWidget {
     if (channelId == null) {
       // No channel: the row's own identities are the comparison context.
       final names = watchIdentityNames(ref, relevantPubkeys);
-      contextualLabels = {
-        for (final key in names.candidates) key: names.labelFor(key),
-      };
+      requestLinkedProfiles(ref, linkedPubkeys);
+      contextualLabels = identityLabels(names, {
+        senderPubkey,
+        ...mentionPubkeys,
+      }, linkedPubkeys);
     } else {
-      contextualLabels = watchChannelIdentityLabels(
-        ref,
-        channelId,
-        relevantPubkeys,
-      );
+      contextualLabels = watchChannelIdentityLabels(ref, channelId, {
+        senderPubkey,
+        ...mentionPubkeys,
+      }, linkedPubkeys: linkedPubkeys);
     }
     final senderLabel =
         contextualLabels[senderPubkey] ??
@@ -82,7 +89,7 @@ class _InboxRow extends HookConsumerWidget {
     final agentMentionPubkeys = agentPubkeysWithProfileOwners(
       knownAgentPubkeys: knownAgentPubkeys,
       profileOwnedAgentPubkeys: [
-        for (final pubkey in mentionPubkeys)
+        for (final pubkey in {...mentionPubkeys, ...linkedPubkeys})
           if (profiles[pubkey]?.ownerPubkey != null) pubkey,
       ],
     );
@@ -336,6 +343,17 @@ class _InboxRow extends HookConsumerWidget {
     );
   }
 
+  /// Messages, not other inbox activity, can start a Solo chat.
+  bool get _canStartSoloChat =>
+      item.item.channelId != null &&
+      item.item.content.trim().isNotEmpty &&
+      const {
+        EventKind.streamMessage,
+        EventKind.streamMessageV2,
+        EventKind.forumPost,
+        EventKind.forumComment,
+      }.contains(item.item.kind);
+
   /// Thread root that Follow acts on: the conversation's root for thread
   /// rows, the message itself for top-level rows (matching the message
   /// actions sheet). Solo chats have no threads, and grouped DM conversations
@@ -386,14 +404,23 @@ class _InboxRow extends HookConsumerWidget {
                       title: Text(
                         following ? 'Unfollow thread' : 'Follow thread',
                       ),
-                      onTap: () {
+                      onTap: () async {
+                        final messenger = ScaffoldMessenger.maybeOf(context);
                         Navigator.of(sheetContext).pop();
                         final notifier = ref.read(
                           threadFollowsProvider.notifier,
                         );
-                        following
-                            ? notifier.unfollowThread(followRootId)
-                            : notifier.followThread(followRootId);
+                        final channelId = item.item.channelId;
+                        if (channelId == null) return;
+                        final saved = await (following
+                            ? notifier.unfollowThread(channelId, followRootId)
+                            : notifier.followThread(channelId, followRootId));
+                        if (!saved) {
+                          messenger?.showFeedbackSnackBar(
+                            SnackBar(content: Text(notifier.failureMessage)),
+                            kind: ToastKind.error,
+                          );
+                        }
                       },
                     ),
                   if (canRemind)
@@ -415,6 +442,28 @@ class _InboxRow extends HookConsumerWidget {
                       onTap();
                     },
                   ),
+                  if (_canStartSoloChat)
+                    ListTile(
+                      leading: const Icon(BuzzIcons.messageCircle),
+                      title: const Text('Start Solo chat'),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        final message = item.item;
+                        unawaited(
+                          openSoloChatFromMessage(
+                            context,
+                            ref,
+                            channel: channel,
+                            channelId: message.channelId!,
+                            messageId: message.id,
+                            threadRootId: parseThreadReference(
+                              message.tags,
+                            ).rootId,
+                            content: message.content,
+                          ),
+                        );
+                      },
+                    ),
                 ],
               ),
             ),

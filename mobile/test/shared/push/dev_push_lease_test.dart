@@ -478,22 +478,45 @@ void main() {
       }
     }
 
-    for (final extensions in [
-      null,
-      false,
-      <String>[],
-      ['nip-er'],
+    // NIP-11 makes the list optional, so leaving push out of it, or sending
+    // none, is a relay without push. Only a list of the wrong shape is
+    // malformed.
+    for (final (extensions, advertisedNone) in <(Object?, bool)>[
+      (null, true),
+      (<String>[], true),
+      (['nip-er'], true),
+      (false, false),
+      ([''], false),
     ]) {
-      test('invalid extension advertisement $extensions fails', () {
+      test('extension advertisement $extensions '
+          '${advertisedNone ? 'is no push' : 'is malformed'}', () {
         final information = _descriptorJson(relay.public)
           ..addAll(metadata)
           ..['supported_extensions'] = extensions;
         expect(
           () => BuzzPushLeaseDescriptor.fromRelayInformation(information),
-          throwsA(isA<FormatException>()),
+          throwsA(
+            advertisedNone
+                ? isA<BuzzPushNotAdvertised>()
+                : isA<FormatException>().having(
+                    (error) => error is BuzzPushNotAdvertised,
+                    'is not advertised',
+                    isFalse,
+                  ),
+          ),
         );
       });
     }
+
+    test('an absent extension list is no push', () {
+      final information = _descriptorJson(relay.public)
+        ..addAll(metadata)
+        ..remove('supported_extensions');
+      expect(
+        () => BuzzPushLeaseDescriptor.fromRelayInformation(information),
+        throwsA(isA<BuzzPushNotAdvertised>()),
+      );
+    });
   });
 
   test('descriptor rejects canonical origin with a trailing slash', () {

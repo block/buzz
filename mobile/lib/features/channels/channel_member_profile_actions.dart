@@ -3,6 +3,8 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
+import '../../shared/identity_names/identity_names.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/app_list_card.dart';
@@ -29,6 +31,7 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
     final error = useState<String?>(null);
     final actor = ref.watch(currentPubkeyProvider)?.toLowerCase();
     final roster = ref.watch(channelMembersProvider(channel.id));
+    final names = ref.watch(identityNameSourcesProvider);
     final channels = ref.watch(channelsProvider).asData?.value;
     final currentChannel =
         channels
@@ -36,14 +39,16 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
             .firstOrNull ??
         channel;
     final target = pubkey.toLowerCase();
+    final isDm = currentChannel.isDm;
 
+    // A DM has no admins: its owner may only remove their own agent.
     ChannelMember? manageableMember(
       AsyncValue<List<ChannelMember>> snapshot,
       String? currentActor,
       Channel current,
+      IdentityNameSources sources,
     ) {
-      if (current.isDm ||
-          current.isArchived ||
+      if (current.isArchived ||
           snapshot.isLoading ||
           snapshot.hasError ||
           currentActor == null ||
@@ -57,14 +62,34 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
       final member = members
           .where((m) => m.pubkey.toLowerCase() == target)
           .firstOrNull;
-      if (viewer?.isElevated != true || member == null || member.isOwner) {
-        return null;
+      if (member == null) return null;
+      if (current.isDm) {
+        return sources.factFor(target)?.ownerPubkey == currentActor
+            ? member
+            : null;
       }
+      if (viewer?.isElevated != true || member.isOwner) return null;
       return member;
     }
 
-    final member = manageableMember(roster, actor, currentChannel);
-    if (member == null) return const SizedBox.shrink();
+    final message = error.value;
+    final errorText = message == null
+        ? null
+        : Semantics(
+            liveRegion: true,
+            label: message,
+            child: ExcludeSemantics(
+              child: Text(
+                message,
+                style: context.textTheme.bodyMedium?.copyWith(
+                  color: context.colors.error,
+                ),
+              ),
+            ),
+          );
+    final member = manageableMember(roster, actor, currentChannel, names);
+    // A failure stays visible even while the rows wait on a reload.
+    if (member == null) return errorText ?? const SizedBox.shrink();
 
     bool stillAllowed() {
       final latest =
@@ -80,6 +105,7 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
                 ref.read(channelMembersProvider(channel.id)),
                 actor,
                 latest,
+                ref.read(identityNameSourcesProvider),
               )?.role ==
               member.role;
     }
@@ -95,11 +121,15 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
               .labelFor(target);
           final confirmed = await showDestructiveConfirmation(
             context: context,
-            title: 'Remove from channel?',
-            message: 'Remove $label from ${currentChannel.name}?',
+            title: isDm ? 'Remove from DM?' : 'Remove from channel?',
+            message: isDm
+                ? 'Remove $label from this DM?'
+                : 'Remove $label from ${currentChannel.name}?',
             confirmLabel: 'Remove',
           );
-          if (!context.mounted || confirmed != true || !stillAllowed()) return;
+          if (!context.mounted || confirmed != true) return;
+          // A change or a reload since confirming: say so, don't drop it.
+          if (!stillAllowed()) throw StateError('Removal no longer allowed');
           await ref
               .read(channelActionsProvider)
               .removeMember(channelId: channel.id, pubkey: target);
@@ -116,7 +146,9 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
       } catch (_) {
         if (context.mounted) {
           error.value = role == null
-              ? 'Could not remove this person. Please try again.'
+              ? isDm
+                    ? 'Could not remove this agent. Please try again.'
+                    : 'Could not remove this person. Please try again.'
               : 'Could not change this role. Please try again.';
         }
       } finally {
@@ -130,25 +162,23 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
         AppListCard(
           horizontalPadding: 0,
           children: [
-            if (!member.isBot) ...[
-              if (member.role != 'admin')
-                AppListRow(
-                  icon: BuzzIcons.shieldCheck,
-                  title: 'Make channel admin',
-                  onTap: busy.value ? null : () => perform(role: 'admin'),
-                ),
-              if (member.role == 'admin' || member.role == 'guest')
-                AppListRow(
-                  icon: BuzzIcons.user,
-                  title: member.role == 'guest'
-                      ? 'Make member'
-                      : 'Change to member',
-                  onTap: busy.value ? null : () => perform(role: 'member'),
-                ),
-            ],
+            if (!isDm && member.role != 'admin')
+              AppListRow(
+                icon: BuzzIcons.shieldCheck,
+                title: 'Make channel admin',
+                onTap: busy.value ? null : () => perform(role: 'admin'),
+              ),
+            if (!isDm && (member.role == 'admin' || member.role == 'guest'))
+              AppListRow(
+                icon: BuzzIcons.user,
+                title: member.role == 'guest'
+                    ? 'Make member'
+                    : 'Change to member',
+                onTap: busy.value ? null : () => perform(role: 'member'),
+              ),
             AppListRow(
               icon: BuzzIcons.userMinus,
-              title: 'Remove from channel',
+              title: isDm ? 'Remove from DM' : 'Remove from channel',
               titleColor: context.colors.error,
               onTap: busy.value ? null : () => perform(),
             ),
@@ -162,19 +192,7 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
               child: Center(child: Text('Updating…')),
             ),
           ),
-        if (error.value != null)
-          Semantics(
-            liveRegion: true,
-            label: error.value!,
-            child: ExcludeSemantics(
-              child: Text(
-                error.value!,
-                style: context.textTheme.bodyMedium?.copyWith(
-                  color: context.colors.error,
-                ),
-              ),
-            ),
-          ),
+        ?errorText,
       ],
     );
   }

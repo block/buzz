@@ -1,13 +1,18 @@
 part of '../compose_bar.dart';
 
+/// Height of the conversation fade behind the composer with the keyboard up.
+const _keyboardUpBackdropHeight = 100.0;
+
 class _ComposerDockFrame extends HookWidget {
   final Animation<double> expansionAnimation;
   final bool forceFullWidth;
+  final bool hasDraft;
   final Widget child;
 
   const _ComposerDockFrame({
     required this.expansionAnimation,
     required this.forceFullWidth,
+    required this.hasDraft,
     required this.child,
   });
 
@@ -43,7 +48,32 @@ class _ComposerDockFrame extends HookWidget {
           compactVerticalOffset,
     );
     final recordingGutterDelta = visibleBottomGutter - Grid.twelve;
-    final backdropHeight = mobileTabFooterBackdropHeight(context);
+    final appView = View.of(context);
+    final restingBackdropHeight = mobileTabFooterBackdropHeight(context);
+    // The fade gives up one point per point of keyboard travel until it
+    // reaches its keyboard-up height, so it is continuous while the keyboard
+    // opens, closes or changes height. Clamping here also means the dock only
+    // rebuilds while the fade is actually changing.
+    final fadeTravel = restingBackdropHeight - _keyboardUpBackdropHeight;
+    double fadeInset(double physicalInset) =>
+        math.min(physicalInset / appView.devicePixelRatio, fadeTravel);
+    final keyboardFadeInset = useState(fadeInset(appView.viewInsets.bottom));
+    useEffect(() {
+      final observer = _ComposerKeyboardMetricsObserver(
+        view: appView,
+        onKeyboardShown: () {},
+        onKeyboardHidden: () {},
+        // View insets are physical pixels; the fade is logical.
+        onKeyboardInsetChanged: (inset) =>
+            keyboardFadeInset.value = fadeInset(inset),
+      );
+      WidgetsBinding.instance.addObserver(observer);
+      return () {
+        WidgetsBinding.instance.removeObserver(observer);
+        observer.dispose();
+      };
+    }, [appView, fadeTravel]);
+    final backdropHeight = restingBackdropHeight - keyboardFadeInset.value;
     return Stack(
       clipBehavior: Clip.none,
       children: [
@@ -59,8 +89,8 @@ class _ComposerDockFrame extends HookWidget {
         ),
         Padding(
           padding: EdgeInsets.only(
-            left: Grid.twelve,
-            right: Grid.twelve,
+            left: composerHorizontalGutter,
+            right: composerHorizontalGutter,
             bottom: MediaQuery.viewPaddingOf(context).bottom + Grid.xxs,
           ),
           child: Align(
@@ -96,7 +126,11 @@ class _ComposerDockFrame extends HookWidget {
                     ),
                     child: FractionallySizedBox(
                       key: const ValueKey('composer-width-transition'),
-                      widthFactor: 0.85 + 0.15 * widthProgress,
+                      widthFactor: hasDraft
+                          ? 1
+                          : collapsedComposerWidthFactor +
+                                (1 - collapsedComposerWidthFactor) *
+                                    widthProgress,
                       child: child,
                     ),
                   ),
@@ -111,6 +145,7 @@ class _ComposerDockFrame extends HookWidget {
 }
 
 class _ComposerOverlayPortal extends StatelessWidget {
+  final bool suppressed;
   final OverlayPortalController controller;
   final ValueListenable<_AttachmentSurface> attachmentSurface;
   final bool reducedMotion;
@@ -119,6 +154,7 @@ class _ComposerOverlayPortal extends StatelessWidget {
   final Widget child;
 
   const _ComposerOverlayPortal({
+    this.suppressed = false,
     required this.controller,
     required this.attachmentSurface,
     required this.reducedMotion,
@@ -132,6 +168,7 @@ class _ComposerOverlayPortal extends StatelessWidget {
     return OverlayPortal.overlayChildLayoutBuilder(
       controller: controller,
       overlayChildBuilder: (context, layoutInfo) {
+        if (suppressed) return const SizedBox.shrink();
         final composerOrigin = MatrixUtils.transformPoint(
           layoutInfo.childPaintTransform,
           Offset.zero,

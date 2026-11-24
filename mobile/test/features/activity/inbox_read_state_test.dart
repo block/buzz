@@ -144,7 +144,7 @@ void main() {
       expect(done({'thread-activity:$threadIdInboxRoot1': 50}), isTrue);
     });
 
-    test('a local unread override always wins', () {
+    test('a local unread override wins until a read passes its baseline', () {
       final row = buildInboxItems([
         item(id: threadIdInboxA, createdAt: 50),
       ]).single;
@@ -152,10 +152,20 @@ void main() {
         isInboxItemDone(
           row,
           markerOf: markers({'ch1': 99}),
-          localUnreadOverrides: const {threadIdInboxA},
+          localUnreadOverrides: const {threadIdInboxA: 99},
           localDoneSet: const {},
         ),
         isFalse,
+      );
+      // Another device read past it: the stale force no longer holds.
+      expect(
+        isInboxItemDone(
+          row,
+          markerOf: markers({'ch1': 120}),
+          localUnreadOverrides: const {threadIdInboxA: 99},
+          localDoneSet: const {},
+        ),
+        isTrue,
       );
     });
 
@@ -215,6 +225,38 @@ void main() {
       final result = groupedChannelReadTimestamp(row);
       expect(result?.channelId, 'ch1');
       expect(result?.timestamp, 10);
+    });
+
+    test('skips an unmentioned reply also sent to the channel', () {
+      final sentToChannel = [
+        ...replyTags(threadIdInboxRoot1, threadIdInboxRoot1),
+        ['broadcast', '1'],
+      ];
+      List<FeedItem> group(String category) => [
+        item(
+          id: threadIdInboxA,
+          createdAt: 30,
+          category: category,
+          tags: sentToChannel,
+        ),
+        item(
+          id: threadIdInboxB,
+          createdAt: 10,
+          tags: replyTags(threadIdInboxRoot1, threadIdInboxRoot1),
+        ),
+      ];
+      // Its own mark reads it; the channel marker would read the channel.
+      expect(
+        groupedChannelReadTimestamp(buildInboxItems(group('activity')).single),
+        isNull,
+      );
+      // A mention keeps the channel marker it had before.
+      expect(
+        groupedChannelReadTimestamp(
+          buildInboxItems(group('mention')).single,
+        )?.timestamp,
+        30,
+      );
     });
   });
 }

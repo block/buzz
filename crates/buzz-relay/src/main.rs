@@ -410,26 +410,11 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     info!("Community deletion serving fences verified");
     step.finish();
 
-    // Freshness fence probe: cursor pages route to the replica only for
-    // history the probe has verified as fully replayed. Deliberately AFTER
-    // the migration decision: spawn_fence_probe first verifies the
-    // commit-time floor guard (catalog shape + observed behavior through the
-    // armed pool) against the live schema, so a relay running with
-    // BUZZ_AUTO_MIGRATE off and migration 0021 unapplied can never open the
-    // fence over an unenforced floor. Verification failure is loud but
-    // non-fatal: the fence stays closed and every cursor page routes to the
-    // writer.
-    let mut step = StepTimer::start(StartupStep::ReplicaFenceProbe);
-    match db.spawn_fence_probe().await {
-        Ok(true) => info!("Replica fence probe started (floor guard verified)"),
-        Ok(false) => {}
-        Err(e) => {
-            step.degrade();
-            error!(
-                "Replica fence disabled — floor guard verification failed: {e}. \
-                 All cursor reads stay on the writer."
-            );
-        }
+    // The ordered heartbeat probe opens replica routing only after a
+    // successful sample. Errors keep cursor reads on the writer.
+    let step = StepTimer::start(StartupStep::ReplicaFenceProbe);
+    if db.spawn_fence_probe() {
+        info!("Replica fence probe started");
     }
     step.finish();
 
@@ -666,7 +651,26 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         "Search service ready (Postgres FTS)"
     );
 
-    let workflow_config = buzz_workflow::WorkflowConfig::default();
+    // With an OpenSearch address, admission queues searchable events in the
+    // search outbox and the indexer (spawned below) drains it. Searches stay
+    // on Postgres for now.
+    let search_indexer = match &config.opensearch {
+        Some(opensearch) => {
+            let index = buzz_search::opensearch::SearchIndex::new(opensearch)
+                .map_err(|e| anyhow::anyhow!("OpenSearch client: {}", e.kind()))?;
+            buzz_db::search_outbox::enable(db.pool())
+                .await
+                .map_err(|e| anyhow::anyhow!("search outbox: {e}"))?;
+            info!(url = %opensearch.url, "search outbox enabled");
+            Some(buzz_search::indexer::Indexer::new(db.clone(), index))
+        }
+        None => None,
+    };
+
+    let workflow_config = buzz_workflow::WorkflowConfig {
+        agent_mentions: config.workflow_agent_mentions,
+        ..Default::default()
+    };
     let workflow_engine = Arc::new(WorkflowEngine::new(db.clone(), workflow_config));
 
     config
@@ -1146,6 +1150,11 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             url,
         ));
         info!("storage-usage delivery worker started");
+    }
+
+    if let Some(indexer) = search_indexer {
+        tokio::spawn(indexer.run());
+        info!("search indexer started");
     }
 
     // Admin outbox delivery worker — drives `relay_admin_outbox` rows.
@@ -1701,6 +1710,28 @@ mod env_filter_tests {
             tracing::warn!(target: "buzz_relay::access", "access-warn");
         });
         assert!(access.is_empty(), "{access}");
+    }
+
+    #[test]
+    fn withheld_agent_mentions_log_under_default_filters() {
+        let example =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env.example"))
+                .unwrap();
+        let example = example
+            .lines()
+            .find_map(|line| line.strip_prefix("RUST_LOG="))
+            .unwrap()
+            .to_owned();
+        for filter in [log_filter(None), log_filter(Some(&example))] {
+            let logs = logged(filter, || {
+                tracing::info!(target: buzz_workflow::AGENT_MENTIONS_LOG_TARGET, "withheld");
+                tracing::info!(target: "buzz_workflow::executor", "workflow-noise");
+            });
+            assert!(
+                logs.contains("withheld") && !logs.contains("workflow-noise"),
+                "{logs}"
+            );
+        }
     }
 
     #[test]
@@ -2307,7 +2338,8 @@ fn emit_in_memory_usage_metrics(state: &AppState) {
 }
 
 /// Run one usage-metrics tick. Every pod emits its own in-memory gauges, while
-/// one leader reaps expired invites and publishes the stored storage snapshot.
+/// one leader reaps expired invites and erased pin command records and
+/// publishes the stored storage snapshot.
 async fn run_usage_metrics_tick(
     state: &AppState,
     leader: &mut Option<buzz_db::SessionLeader>,
@@ -2344,6 +2376,15 @@ async fn run_usage_metrics_tick(
             Ok(_) => {}
             Err(error) => {
                 warn!(error = %error, "failed to reap expired relay invites");
+            }
+        }
+        match state.db.reap_expired_pin_command_records().await {
+            Ok(removed) if removed > 0 => {
+                info!(removed, "reaped expired pin command records");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(error = %error, "failed to reap expired pin command records");
             }
         }
         run_storage_sweep_tick(state).await;
@@ -2741,18 +2782,16 @@ mod tests {
         assert_eq!(aggregate_audit_failures(&counters), 1);
         // Each per-table attempt, including the one inside maintenance, still has
         // its own error outcome.
-        for table in ["events", "delivery_log"] {
-            let errors: u64 = counters
-                .iter()
-                .filter(|(name, labels, _)| {
-                    name == "buzz_partition_audit_runs_total"
-                        && labels.contains(&("table".to_string(), table.to_string()))
-                        && labels.contains(&("outcome".to_string(), "error".to_string()))
-                })
-                .map(|(_, _, value)| value)
-                .sum();
-            assert_eq!(errors, 2, "{table}");
-        }
+        let errors: u64 = counters
+            .iter()
+            .filter(|(name, labels, _)| {
+                name == "buzz_partition_audit_runs_total"
+                    && labels.contains(&("table".to_string(), "events".to_string()))
+                    && labels.contains(&("outcome".to_string(), "error".to_string()))
+            })
+            .map(|(_, _, value)| value)
+            .sum();
+        assert_eq!(errors, 2, "events");
     }
 
     #[test]

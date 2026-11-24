@@ -36,6 +36,25 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
 
   /// Lookups whose batch query is on the wire.
   final Set<String> _inFlight = {};
+
+  /// Keys the relay confirmed have no profile this scope, with when it said
+  /// so: [requestLinked] skips them until [_absentFor] passes, so a link to a
+  /// nameless key costs one query, not one per rebuild.
+  final Map<String, DateTime> _absentSince = {};
+  static const _absentFor = Duration(minutes: 5);
+
+  /// Keys [requestLinked] asked for that no batch has answered yet. A failed
+  /// batch leaves them here, and the next reconnect asks once more.
+  final Set<String> _linkedUnanswered = {};
+  ProviderSubscription<SessionStatus>? _reconnects;
+
+  /// A reconnect came while unanswered keys were still in flight, so they
+  /// are asked again once that flight settles.
+  var _retryAfterFlight = false;
+  static const _maxAbsent = 1000;
+
+  /// Completes when the batch query on the wire has finished.
+  Completer<bool>? _flightCompleter;
   void Function()? _snapshotWriter;
   Timer? _snapshotTimer;
   Map<String, UserProfile> _latest = const {};
@@ -47,6 +66,11 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     _profileEventOrders.clear();
     _unrevalidated.clear();
     _inFlight.clear();
+    _absentSince.clear();
+    _linkedUnanswered.clear();
+    _retryAfterFlight = false;
+    // A rebuild closes the subscription, so the next link opens a new one.
+    _reconnects = null;
     ref.onDispose(() {
       _generation++;
       _pending.clear();
@@ -127,6 +151,54 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     return state[key];
   }
 
+  /// Whether [requestLinked] would ask the relay for [pubkey], or enroll it
+  /// for the reconnect retry: it has no profile, or only a restored one not
+  /// yet revalidated, and no recent answer said it has none. A key another
+  /// lookup already has on the way still enrolls once, so a link to it is
+  /// retried if that batch fails. Cheap, so a build can check it.
+  bool needsLinkedLookup(String pubkey) {
+    final key = pubkey.toLowerCase();
+    if (_isCached(key)) return false;
+    if (_pending.contains(key) || _inFlight.contains(key)) {
+      return !_linkedUnanswered.contains(key);
+    }
+    final absent = _absentSince[key];
+    return absent == null || DateTime.now().difference(absent) >= _absentFor;
+  }
+
+  /// Requests profiles for keys named outside any roster, such as by
+  /// identity links or edits. Restored profiles are revalidated, so a
+  /// renamed key's link shows its current name, and a restored owner hint
+  /// gets its signed profile; a key the relay just said has no profile is
+  /// not asked again for [_absentFor]; and a failed batch is retried once
+  /// the relay reconnects. Coalesced with every other lookup.
+  void requestLinked(Iterable<String> pubkeys) {
+    final keys = [
+      for (final pubkey in pubkeys)
+        if (needsLinkedLookup(pubkey)) pubkey.toLowerCase(),
+    ];
+    if (keys.isEmpty) return;
+    _trackVerified(keys);
+    _linkedUnanswered.addAll(keys);
+    // Bounded like the absent answers: the oldest unanswered key goes first.
+    while (_linkedUnanswered.length > _maxAbsent) {
+      _linkedUnanswered.remove(_linkedUnanswered.first);
+    }
+    keys.forEach(_scheduleFetch);
+    _reconnects ??= ref.listen(
+      relaySessionProvider.select((session) => session.status),
+      (previous, next) {
+        if (next == SessionStatus.connected &&
+            previous != SessionStatus.connected) {
+          _linkedUnanswered.forEach(_scheduleFetch);
+          if (_linkedUnanswered.any(_inFlight.contains)) {
+            _retryAfterFlight = true;
+          }
+        }
+      },
+    );
+  }
+
   /// Stores a profile that was fetched or updated outside the batch loader.
   void put(UserProfile profile) {
     state = {...state, profile.pubkey.toLowerCase(): profile};
@@ -175,17 +247,36 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     final alreadyPending = normalized.any(
       (pk) => _pending.contains(pk) && !state.containsKey(pk),
     );
+    // A batch already on the wire answers these; asking again would download
+    // the same profiles twice.
+    final flight = _flightCompleter;
+    final awaitsFlight =
+        flight != null &&
+        normalized.any(
+          (pk) => _inFlight.contains(pk) && !state.containsKey(pk),
+        );
     final uncached = normalized
-        .where((pk) => !state.containsKey(pk) && !_pending.contains(pk))
+        .where(
+          (pk) =>
+              !state.containsKey(pk) &&
+              !_pending.contains(pk) &&
+              !_inFlight.contains(pk),
+        )
         .toList();
     // Restored profiles already render; revalidate them without making the
     // caller wait on the network.
     normalized.where(_unrevalidated.contains).forEach(_scheduleFetch);
-    if (uncached.isEmpty && !alreadyPending) return Future.value(true);
+    if (uncached.isEmpty && !alreadyPending) {
+      return awaitsFlight ? flight.future : Future.value(true);
+    }
     _pending.addAll(uncached);
     final completer = _batchCompleter ??= Completer<bool>();
     _scheduleBatch();
-    return completer.future;
+    if (!awaitsFlight) return completer.future;
+    return Future.wait([
+      flight.future,
+      completer.future,
+    ]).then((results) => results.every((succeeded) => succeeded));
   }
 
   /// Force-refresh profiles for identity-sensitive gates.
@@ -249,8 +340,9 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
 
     final pubkeys = _pending.toList();
     _pending.clear();
-    final completer = _batchCompleter;
+    final completer = _batchCompleter ?? Completer<bool>();
     _batchCompleter = null;
+    _flightCompleter = completer;
 
     _flushInFlight = true;
     _inFlight.addAll(pubkeys);
@@ -268,21 +360,38 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         if (!await _verifyAndMerge(events, generation)) return;
         // Confirmed by the relay, whether or not it still has a profile.
         _unrevalidated.removeAll(batch);
+        _linkedUnanswered.removeAll(batch);
+        final answered = DateTime.now();
+        for (final pubkey in batch) {
+          if (state.containsKey(pubkey)) continue;
+          // Reinserted at the end, so the oldest answer is evicted first.
+          _absentSince
+            ..remove(pubkey)
+            ..[pubkey] = answered;
+          if (_absentSince.length > _maxAbsent) {
+            _absentSince.remove(_absentSince.keys.first);
+          }
+        }
         remaining -= batch.length;
         if (remaining == 0) {
           // All requested pages are ready.
           succeeded = true;
-          completer?.complete(true);
+          completer.complete(true);
         }
       }
     } catch (_) {
       // Silently fail — non-gating callers will just show pubkeys, or the
       // restored profile, which the next lookup revalidates again.
     } finally {
-      if (_isCurrent(generation)) _inFlight.removeAll(pubkeys);
-      if (completer != null && !completer.isCompleted) {
-        completer.complete(succeeded);
+      if (_isCurrent(generation)) {
+        _inFlight.removeAll(pubkeys);
+        if (_retryAfterFlight && ref.mounted) {
+          _retryAfterFlight = false;
+          _linkedUnanswered.forEach(_scheduleFetch);
+        }
       }
+      if (!completer.isCompleted) completer.complete(succeeded);
+      if (identical(_flightCompleter, completer)) _flightCompleter = null;
       _flushInFlight = false;
       if (ref.mounted && _pending.isNotEmpty) _scheduleBatch();
     }
@@ -314,7 +423,12 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
       final pending = [
         for (final event in events)
           if (event.kind == 0 &&
-              _isNewer(event.pubkey.toLowerCase(), event.createdAt, event.id))
+              _admits(
+                event.pubkey.toLowerCase(),
+                event.createdAt,
+                event.id,
+                evidence: carriesOwnerAttestation(event),
+              ))
             event,
       ];
       if (pending.isEmpty) return true;
@@ -340,7 +454,12 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     final updated = Map<String, UserProfile>.from(state);
     var changed = false;
     for (final parsed in profiles) {
-      if (!_isNewer(parsed.profile.pubkey, parsed.createdAt, parsed.eventId)) {
+      if (!_admits(
+        parsed.profile.pubkey,
+        parsed.createdAt,
+        parsed.eventId,
+        evidence: parsed.profile.ownerEvidence != null,
+      )) {
         continue;
       }
       updated[parsed.profile.pubkey] = parsed.profile;
@@ -361,10 +480,31 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
             eventId.compareTo(current.eventId) < 0);
   }
 
+  /// Whether a profile event replaces the stored one: it is newer, or it is
+  /// the stored event itself and brings the owner evidence the stored copy
+  /// lacks (restored from a snapshot written without it).
+  bool _admits(
+    String pubkey,
+    int createdAt,
+    String eventId, {
+    required bool evidence,
+  }) =>
+      _isNewer(pubkey, createdAt, eventId) ||
+      (evidence &&
+          _profileEventOrders[pubkey]?.eventId == eventId &&
+          state[pubkey]?.ownerEvidence == null);
+
   bool _cacheProfileEvent(NostrEvent event, Map<String, UserProfile> profiles) {
     if (event.kind != 0) return false;
     final pubkey = event.pubkey.toLowerCase();
-    if (!_isNewer(pubkey, event.createdAt, event.id)) return false;
+    if (!_admits(
+      pubkey,
+      event.createdAt,
+      event.id,
+      evidence: carriesOwnerAttestation(event),
+    )) {
+      return false;
+    }
     profiles[pubkey] = parseProfileEvent(event).profile;
     _profileEventOrders[pubkey] = (
       createdAt: event.createdAt,

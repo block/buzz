@@ -324,6 +324,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
         query: search,
         historyKey: newDmMentionHistoryKey,
         unsharedAgents: false,
+        channelId: null,
       )),
     );
     final searching = ref.watch(recipientSearchPendingProvider(search));
@@ -339,6 +340,9 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
       query: search,
       opening: opening.value,
       pending: searching,
+      // Agents rank ahead of the known people an empty query lists, even
+      // when they load after them. Typed rows keep their places.
+      restartForNewAgents: search.isEmpty,
     );
     final availableResults = shown.rows;
     // Shown and chosen recipients are named together on every build, so a
@@ -383,6 +387,9 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
             .openDm(
               pubkeys: selectedUsers.value.map((user) => user.pubkey).toList(),
               waitForChannelList: false,
+              // The relay picks the DM of these people, which agents named
+              // here join with its history.
+              includeHistory: true,
             );
         if (context.mounted) {
           if (nativePresentation) {

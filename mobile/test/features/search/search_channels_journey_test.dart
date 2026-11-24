@@ -7,6 +7,8 @@ import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/search/recent_searches_provider.dart';
 import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/features/search/search_provider.dart';
+import 'package:buzz/shared/channels/open_channel_directory_storage.dart';
+import 'package:buzz/shared/identity_archives/identity_archives.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
@@ -51,8 +53,6 @@ void main() {
     await tester.enterText(find.byType(TextField), '4things');
     await tester.pump(const Duration(milliseconds: 300));
     expect(channels.directoryRequests, 1);
-    // Later searches read the directory again once it is this old.
-    expect(channels.maxAge, searchDirectoryMaxAge);
     expect(spinner, findsOneWidget);
     expect(unjoined, findsNothing);
 
@@ -602,6 +602,110 @@ void main() {
       expect(find.text('ops-room'), findsOneWidget);
     },
   );
+
+  testWidgets('a background directory update ranks a renamed channel in', (
+    tester,
+  ) async {
+    final session = _RenamingSession();
+    final actions = _HeldUserSearch();
+    var now = DateTime.utc(2026, 1, 1);
+    final saved = _SavedDirectory(
+      SavedOpenChannelDirectory(
+        metas: [_openMeta('meta-alpha', 'alpha', createdAt: 1)],
+        fullAt: now.millisecondsSinceEpoch ~/ 1000,
+        readAt: now.millisecondsSinceEpoch ~/ 1000,
+      ),
+    );
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          relayConfigProvider.overrideWith(_Community.new),
+          myPubkeyProvider.overrideWith((ref) => 'test'),
+          relaySessionProvider.overrideWith(() => session),
+          channelActionsProvider.overrideWith((ref) => actions),
+          channelsProvider.overrideWith(_NoMemberChannels.new),
+          openChannelDirectoryStorageProvider.overrideWithValue(saved),
+          channelDirectoryClockProvider.overrideWithValue(() => now),
+          recentSearchesProvider.overrideWith(_NoRecentSearches.new),
+          profileProvider.overrideWith(_Profile.new),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    Future<void> search(String query) async {
+      await tester.enterText(find.byType(TextField), query);
+      await tester.pump(const Duration(milliseconds: 300));
+      session.searches.removeAt(0).complete(const []);
+      actions.searches.removeAt(0).complete(const []);
+      await tester.pumpAndSettle();
+    }
+
+    // The saved copy shows at once.
+    await search('#alpha');
+    expect(find.text('alpha'), findsOneWidget);
+
+    // The channel is renamed on the relay. A minute later, searching its new
+    // name checks the relay in the background, and the renamed channel is
+    // ranked in once the change is installed, with no further typing.
+    session.metas = [_openMeta('meta-beta', 'beta', createdAt: 2)];
+    now = now.add(const Duration(minutes: 1));
+    await search('#beta');
+    expect(find.text('beta'), findsOneWidget);
+    expect(find.text('alpha'), findsNothing);
+  });
+
+  testWidgets('archived people do not crowd live people out of People', (
+    tester,
+  ) async {
+    // Tall enough that every row is built.
+    tester.view.physicalSize = const Size(800, 4000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final session = _HeldSession();
+    final actions = _HeldUserSearch();
+    // The relay ranks more archived matches first than the page shows.
+    final archived = [
+      for (var i = 0; i <= searchPeopleShown; i++) i.toRadixString(16) * 64,
+    ];
+    final live = [for (var i = 0; i < searchPeopleShown; i++) 'f$i' * 32];
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          relayConfigProvider.overrideWith(_Community.new),
+          relaySessionProvider.overrideWith(() => session),
+          channelActionsProvider.overrideWith((ref) => actions),
+          channelsProvider.overrideWith(_NoMemberChannels.new),
+          recentSearchesProvider.overrideWith(_NoRecentSearches.new),
+          profileProvider.overrideWith(_Profile.new),
+          identityArchivesProvider.overrideWith((ref) async => {...archived}),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'scout');
+    await tester.pump(const Duration(milliseconds: 300));
+    for (final search in session.searches) {
+      search.complete(const []);
+    }
+    actions.searches.removeAt(0).complete([
+      for (final key in [...archived, ...live])
+        DirectoryUser(pubkey: key, displayName: 'Scout ${key.substring(0, 2)}'),
+    ]);
+    await tester.pumpAndSettle();
+
+    for (final key in archived) {
+      expect(find.byKey(ValueKey('search-person-row-$key')), findsNothing);
+    }
+    for (final key in live) {
+      expect(find.byKey(ValueKey('search-person-row-$key')), findsOneWidget);
+    }
+  });
 }
 
 Channel _channel(String name, {required bool isMember}) => Channel(
@@ -645,11 +749,12 @@ class _HeldSession extends RelaySessionNotifier {
 class _HeldUserSearch implements ChannelActions {
   final searches = <Completer<List<DirectoryUser>>>[];
 
+  /// Answers with at most [limit] people, as the relay does.
   @override
   Future<List<DirectoryUser>> searchUsers(String query, {int limit = 8}) {
     final search = Completer<List<DirectoryUser>>();
     searches.add(search);
-    return search.future;
+    return search.future.then((users) => users.take(limit).toList());
   }
 
   @override
@@ -660,7 +765,6 @@ class _HeldUserSearch implements ChannelActions {
 class _DirectoryChannels extends ChannelsNotifier {
   final _directories = <Completer<_DirectoryOutcome>>[];
   var directoryRequests = 0;
-  Duration? maxAge;
 
   void finishDirectory() =>
       _directories.removeAt(0).complete(_DirectoryOutcome.loaded);
@@ -695,8 +799,7 @@ class _DirectoryChannels extends ChannelsNotifier {
   }
 
   @override
-  Future<void> ensureDirectoryLoaded({Duration? maxAge}) async {
-    this.maxAge = maxAge;
+  Future<void> ensureDirectoryLoaded() async {
     final status = ref.read(channelDirectoryLoadStatusProvider.notifier);
     final scope = channelDirectoryScope(
       ref.read(relayConfigProvider).baseUrl,
@@ -782,6 +885,7 @@ class _ReconnectingSession extends _HeldSession {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
     required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
   }) async {
     onStatusChanged(RelaySubscriptionStatus.ready);
     return () {};
@@ -819,3 +923,74 @@ class _ReconnectingSession extends _HeldSession {
       ),
   ];
 }
+
+/// Serves the directory [metas] as one open channel's history, honoring a
+/// catch-up's `since`.
+class _RenamingSession extends _HeldSession {
+  var metas = [_openMeta('meta-alpha', 'alpha', createdAt: 1)];
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
+  }) async {
+    onStatusChanged(RelaySubscriptionStatus.ready);
+    return () {};
+  }
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) => filter.search == null
+      ? Future.value(const [])
+      : super.fetchHistory(filter, timeout: timeout);
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final filter = filters.single;
+    if (!filter.kinds.contains(39000) || filter.until != null) return const [];
+    return [
+      for (final meta in metas)
+        if (filter.since == null || meta.createdAt >= filter.since!) meta,
+    ];
+  }
+}
+
+/// Holds a saved directory in memory.
+class _SavedDirectory extends OpenChannelDirectoryStorage {
+  _SavedDirectory(this.directory) : super(Future.value(null));
+
+  SavedOpenChannelDirectory? directory;
+
+  @override
+  Future<SavedOpenChannelDirectory?> read() async => directory;
+
+  @override
+  Future<bool> write(SavedOpenChannelDirectory directory) async {
+    this.directory = directory;
+    return true;
+  }
+}
+
+NostrEvent _openMeta(String id, String name, {required int createdAt}) =>
+    NostrEvent(
+      id: id,
+      pubkey: 'relay',
+      createdAt: createdAt,
+      kind: 39000,
+      tags: [
+        const ['d', 'renamed-id'],
+        ['name', name],
+        const ['t', 'stream'],
+        const ['public'],
+      ],
+      content: '',
+      sig: 'sig',
+    );

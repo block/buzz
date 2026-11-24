@@ -526,8 +526,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/operator/communities/invites",
             post(api::operator::mint_community_invite),
         )
-        // Relay invites: mint (owner/admin) + claim (membership-gate exempt)
-        .route("/api/invites", post(api::invites::mint_invite))
+        // Relay invites: mint/list (owner/admin), revoke (admin or creator) + claim (membership-gate exempt)
+        .route(
+            "/api/invites",
+            post(api::invites::mint_invite).get(api::invites::list_invites),
+        )
+        .route("/api/invites/revoke", post(api::invites::revoke_invite))
         .route("/api/join-policy", get(api::invites::join_policy))
         // Policy documents as standalone pages — desktop opens these in the
         // system browser instead of rendering the Markdown in-app.
@@ -643,6 +647,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             state.clone(),
             nip_fi_assertion_guard,
         ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::single_community::admit_request,
+        ))
         .layer(middleware::from_fn(track_metrics))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -720,7 +728,7 @@ pub(crate) fn is_document_request(state: &AppState, req: &Request<Body>) -> bool
         && (path.starts_with("/assets/") || should_serve_spa(path, state.config.serve_git_web_gui))
 }
 
-fn is_admin_spa_path(path: &str) -> bool {
+pub(crate) fn is_admin_spa_path(path: &str) -> bool {
     path == "/"
         || path == "/reports"
         || path.starts_with("/reports/")
@@ -732,7 +740,7 @@ fn is_admin_spa_path(path: &str) -> bool {
 /// hashed Vite output; `/favicon.svg` is the one root-level file the bundle
 /// emits and the document links. Everything else on the admin host is a 404 —
 /// the directory is not browsable.
-fn is_admin_static_path(path: &str) -> bool {
+pub(crate) fn is_admin_static_path(path: &str) -> bool {
     path.starts_with("/assets/") || path == "/favicon.svg"
 }
 
@@ -1286,6 +1294,10 @@ fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
 
 #[cfg(test)]
 mod tests {
+    mod single_community_tests {
+        include!("single_community_tests.rs");
+    }
+
     use std::collections::VecDeque;
     use std::sync::{Mutex, PoisonError};
     use std::time::Duration;
@@ -3932,6 +3944,10 @@ mod tests {
             !is_exempt("/api/new-feature/data"),
             "newly added unclassified path must default to NOT exempt; \
              if this fails, NIP_FI_EXEMPT_PREFIXES has an overly broad entry"
+        );
+        assert!(
+            !is_exempt("/api/invites/revoke"),
+            "POST /api/invites/revoke must be protected"
         );
         assert!(
             !is_exempt("/api/invites/new-endpoint"),

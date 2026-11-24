@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/relay/read_state_snapshot.dart';
+import 'package:buzz/shared/relay/relay_query_response.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:fake_async/fake_async.dart';
@@ -20,8 +21,10 @@ class SidebarRelay {
   }
 
   final keys = nostr.Keys.generate();
+  final rateLimitGate = RelayRateLimitGate();
   late final session = ConnectedRelaySession(
     httpClient: MockClient(_handleHttp),
+    rateLimitGate: rateLimitGate,
   );
   late final signer = SignedEventRelay(session: session, nsec: keys.nsec);
   final _storedByRelay = <String?, List<NostrEvent>>{};
@@ -38,7 +41,13 @@ class SidebarRelay {
   final snapshotHosts = <String>[];
   final _liveSubIds = <String?, String>{};
   int historyFailures = 0;
+  int writerFailures = 0;
+  final writerQueries = <String>[];
+  NostrEvent Function(NostrEvent)? replaceNextPublish;
   Completer<void>? holdHistory;
+  Completer<void>? holdWriter;
+  // Pause the response after the writer has selected its head.
+  Completer<void>? holdWriterResponse;
   Completer<void>? holdOk;
   String? rejectLive;
   bool withholdEose = false;
@@ -91,7 +100,9 @@ class SidebarRelay {
 
   List<List<dynamic>> reqsFor(String dTag, String prefix) => [
     for (final req in reqs)
-      if ((req[1] as String).startsWith(prefix) && _dTagOf(req) == dTag) req,
+      if ((req[1] as String).startsWith(prefix) &&
+          (_dTagsOf(req)?.contains(dTag) ?? false))
+        req,
   ];
 
   /// Delivers [event] on the live subscription for its `d` tag, or else on
@@ -110,8 +121,15 @@ class SidebarRelay {
       final event = NostrEvent.fromJson(message[1] as Map<String, dynamic>);
       published.add(event);
       publishedTo.add(session.relayUrl);
-      stored.add(event);
-      final ok = ['OK', event.id, true, ''];
+      final replace = replaceNextPublish;
+      replaceNextPublish = null;
+      stored.add(replace == null ? event : replace(event));
+      final ok = [
+        'OK',
+        event.id,
+        true,
+        replace == null ? '' : 'duplicate: newer event already stored',
+      ];
       final hold = holdOk;
       hold == null
           ? scheduleMicrotask(() => _reply(ok))
@@ -121,10 +139,14 @@ class SidebarRelay {
     reqs.add(message);
     final subId = message[1] as String;
     if (subId.startsWith('h-')) {
-      unawaited(_answerHistory(subId, _dTagOf(message)));
+      unawaited(_answerHistory(subId, _dTagsOf(message)));
       return;
     }
-    _liveSubIds[_dTagOf(message)] = subId;
+    final dTags = _dTagsOf(message);
+    if (dTags == null) _liveSubIds[null] = subId;
+    for (final dTag in dTags ?? const <String>[]) {
+      _liveSubIds[dTag] = subId;
+    }
     final rejection = rejectLive;
     if (rejection == null && withholdEose) return;
     scheduleMicrotask(
@@ -134,26 +156,29 @@ class SidebarRelay {
     );
   }
 
-  Future<void> _answerHistory(String subId, String? dTag) async {
+  Future<void> _answerHistory(String subId, List<String>? dTags) async {
     await holdHistory?.future;
     if (historyFailures > 0) {
       historyFailures--;
       return _reply(['CLOSED', subId, 'error: overloaded']);
     }
-    // A `#t` filter reaches every slot it tags; a `#d` filter, one head.
-    if (dTag == null) {
+    // A `#t` filter reaches every slot it tags; a `#d` filter, one head per
+    // coordinate it names.
+    if (dTags == null) {
       for (final e in stored.where((e) => e.getTagValue('t') != null)) {
         _reply(['EVENT', subId, e.toJson()]);
       }
       return _reply(['EOSE', subId]);
     }
-    final heads = stored.where((e) => e.getTagValue('d') == dTag).toList()
-      ..sort(
-        (a, b) => a.createdAt != b.createdAt
-            ? b.createdAt.compareTo(a.createdAt)
-            : a.id.compareTo(b.id),
-      );
-    if (heads.isNotEmpty) _reply(['EVENT', subId, heads.first.toJson()]);
+    for (final dTag in dTags) {
+      final heads = stored.where((e) => e.getTagValue('d') == dTag).toList()
+        ..sort(
+          (a, b) => a.createdAt != b.createdAt
+              ? b.createdAt.compareTo(a.createdAt)
+              : a.id.compareTo(b.id),
+        );
+      if (heads.isNotEmpty) _reply(['EVENT', subId, heads.first.toJson()]);
+    }
     _reply(['EOSE', subId]);
   }
 
@@ -174,6 +199,27 @@ class SidebarRelay {
     expect(request.method, 'POST');
     expect(request.url.path, '/query');
     expect(request.headers['Authorization'], isNotNull);
+    final filter = (jsonDecode(request.body) as List).single as Map;
+    if (filter['#d'] case [final String coordinate]) {
+      expect(filter, {
+        'kinds': [30078],
+        'authors': [pubkey],
+        '#d': [coordinate],
+        'limit': 1,
+        'consistency': 'strong',
+      });
+      writerQueries.add(coordinate);
+      await holdWriter?.future;
+      if (writerFailures > 0) {
+        writerFailures--;
+        return http.Response('error: overloaded', 503);
+      }
+      final heads = _heads(_storedByRelay[request.url.origin] ?? const []);
+      final head = heads[coordinate];
+      final hold = holdWriterResponse;
+      if (hold != null) await hold.future;
+      return http.Response(jsonEncode([if (head != null) head.toJson()]), 200);
+    }
     expect(jsonDecode(request.body), [
       {
         'kinds': [30078],
@@ -191,6 +237,20 @@ class SidebarRelay {
       historyFailures--;
       return http.Response('error: overloaded', 503);
     }
+    return http.Response(
+      jsonEncode({
+        'read_state_snapshot': 1,
+        'complete': true,
+        'community_id': community,
+        'pubkey': pubkey,
+        'snapshot_id': 'a' * 64,
+        'events': [for (final e in _heads(source).values) e.toJson()],
+      }),
+      200,
+    );
+  }
+
+  Map<String, NostrEvent> _heads(List<NostrEvent> source) {
     final heads = <String, NostrEvent>{};
     final own =
         source.where((e) => e.kind == 30078 && e.pubkey == pubkey).toList()
@@ -202,29 +262,27 @@ class SidebarRelay {
     for (final event in own) {
       heads.putIfAbsent(event.getTagValue('d') ?? '', () => event);
     }
-    return http.Response(
-      jsonEncode({
-        'read_state_snapshot': 1,
-        'complete': true,
-        'community_id': community,
-        'pubkey': pubkey,
-        'snapshot_id': 'a' * 64,
-        'events': [for (final e in heads.values) e.toJson()],
-      }),
-      200,
-    );
+    return heads;
   }
 
   void _reply(List<dynamic> message) => session.debugHandleMessage(message);
 
   /// Null for a filter by `#t` alone, such as read state's slot discovery.
-  static String? _dTagOf(List<dynamic> req) =>
-      ((req[2] as Map<String, dynamic>)['#d'] as List?)?.single as String?;
+  static List<String>? _dTagsOf(List<dynamic> req) =>
+      ((req[2] as Map<String, dynamic>)['#d'] as List?)?.cast<String>();
 }
 
 class ConnectedRelaySession extends RelaySessionNotifier {
-  ConnectedRelaySession({super.httpClient})
-    : super(snapshotDecoder: (input) async => validateReadStateSnapshot(input));
+  ConnectedRelaySession({super.httpClient, super.rateLimitGate})
+    : super(
+        snapshotDecoder: (input) async => validateReadStateSnapshot(input),
+        queryDecoder: (response) async => parseRelayQueryEvents(
+          response.bodyBytes,
+          response.headers['content-type'],
+        ),
+      );
+
+  void setStatus(SessionStatus status) => state = SessionState(status: status);
 
   @override
   SessionState build() {
@@ -285,3 +343,23 @@ int nowSeconds() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
 void fakeAsyncTest(String name, void Function(FakeAsync clock) body) =>
     test(name, () => fakeAsync(body));
+
+/// An independent preferences cache for a second device using the same relay.
+class SidebarDevicePrefs extends Fake implements SharedPreferences {
+  final _strings = <String, String>{};
+
+  @override
+  String? getString(String key) => _strings[key];
+
+  @override
+  Future<bool> remove(String key) async {
+    _strings.remove(key);
+    return true;
+  }
+
+  @override
+  Future<bool> setString(String key, String value) async {
+    _strings[key] = value;
+    return true;
+  }
+}

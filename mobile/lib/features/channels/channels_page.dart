@@ -1,21 +1,46 @@
+import '../../shared/widgets/section_state_chevron.dart';
+import 'channel_sections/section_show_more.dart';
+import 'channel_sections/pin_shortcuts.dart';
+import '../../shared/widgets/native_conversation_menu.dart';
+import '../../shared/widgets/native_route_controls.dart';
+import '../../shared/emoji/emoji_picker.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'channel_unread.dart';
-import '../../shared/widgets/collapsible_section_body.dart';
+import 'channel_sections/collapsed_section_provider.dart';
+import 'channel_filter/channel_filter_activity.dart';
+import 'channel_filter/channel_filter_provider.dart';
+import 'channel_filter/channel_filter_store.dart';
+import '../../shared/widgets/collapsible_sliver_body.dart';
+import '../../shared/http/app_http_client.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/hosted/hosted_relay_auth.dart';
+import '../../shared/hosted/known_communities_provider.dart';
+import '../../shared/hosted/hosted_community_connection.dart';
+import '../../shared/hosted/hosted_flow_provider.dart';
+import '../../shared/deeplink/deep_link.dart';
+import '../../shared/deeplink/pending_deep_link_provider.dart';
+import '../../shared/hosted/hosted_environment.dart';
+import '../../shared/hosted/known_community_sync.dart';
+import '../../shared/hosted/known_community_sync_provider.dart';
+import '../../shared/hosted/known_community_address.dart';
+import '../../shared/hosted/account_community_sync_status.dart';
 import '../../shared/hosted/organization_environment.dart';
 import '../../shared/hosted/organization_sign_in.dart';
 
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math' show max, min;
+import 'dart:math' show Random, max, min;
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
+import 'package:duo_kit/duo_kit.dart';
+import '../../shared/widgets/duo_toolbar.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show ScrollCacheExtent;
+import 'package:flutter/rendering.dart'
+    show PaintingContext, RenderRepaintBoundary, ScrollCacheExtent;
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -30,19 +55,22 @@ import '../../shared/community/community_grid_add.dart';
 import '../../shared/community/paired_community_landing.dart';
 import '../../shared/community/community_membership_provider.dart';
 import '../../shared/widgets/app_list.dart';
+import 'channels_page/filters.dart';
 import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/app_list_card_item.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
-import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/buzz_toast.dart';
+import '../../shared/widgets/ios_composition_layer.dart';
 import '../../shared/widgets/buzz_setting_menu.dart';
 import '../../shared/widgets/buzz_titled_sheet_layout.dart';
 import '../../shared/widgets/ios_glass_navigation_action.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
+import '../../shared/widgets/buzz_navigation_metrics.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/modal_presentation.dart';
@@ -67,7 +95,15 @@ import 'mentions/stable_mention_rows.dart';
 import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
 import 'channel_mutes/channel_mutes_provider.dart';
+import 'channel_sections/section_options_button.dart';
 import 'channel_sections/channel_sections_provider.dart';
+import 'channel_sections/workspace_layout.dart';
+import 'channel_sections/section_reorder_sheet.dart';
+import '../../shared/custom_emoji/custom_emoji.dart' show normalizeShortcode;
+import '../../shared/custom_emoji/custom_emoji_provider.dart';
+import '../../shared/custom_emoji/custom_emoji_render.dart';
+import 'me/me_page.dart' show SoloChatTile, openConversationListDetails;
+import 'me/me_unread_provider.dart';
 import 'channel_sections/channel_sections_storage.dart';
 import 'channel_sort/channel_sort_provider.dart';
 import 'channel_sort/channel_sort_storage.dart';
@@ -78,7 +114,12 @@ import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 
 part 'channels_page/body.dart';
+part 'channels_page/home_buckets.dart';
+part 'channels_page/activity_recovery.dart';
 part 'channels_page/sections.dart';
+part 'channels_page/section_chats.dart';
+part 'channels_page/rename_section.dart';
+
 part 'channels_page/channel_tile.dart';
 part 'channels_page/sheets.dart';
 part 'channels_page/badges.dart';
@@ -91,14 +132,13 @@ part 'channels_page/header_actions.dart';
 enum _QuickAction { createChannel, newDm }
 
 const double _kChannelSectionInset = Grid.gutter;
-const double _kChannelLeadingWidth = 24.0;
-const double _kChannelIconSize = 20.0;
+const double _kChannelLeadingWidth = _kChannelIconSize;
+const double _kChannelIconSize = Grid.inventoryIconSize;
 const double _kChannelLabelGap = Grid.inventoryLabelGap;
 const double _kChannelRowVerticalPadding = Grid.inventoryRowInset;
 // Keep section controls at a full touch target without adding a second row
 // of vertical padding around their quiet desktop-style label.
 const double _kSectionHeaderVerticalPadding = 0;
-const double _kChannelLabelInset = _kChannelSectionInset;
 
 /// Compact avatars remain on direct-message rows.
 const double _kDmAvatarSize = _kChannelIconSize;
@@ -114,32 +154,24 @@ class ChannelsPage extends HookConsumerWidget {
   const ChannelsPage({
     required this.settingsPageBuilder,
     this.onSearch,
-    this.messagesFilters,
     this.messagesActionsBuilder,
-    this.messagesActionsWidth = 0,
     this.soloSliver,
-    this.showTeam = true,
-    this.showTeamHeading = false,
     this.newChannelAction,
     this.newDmAction,
     this.onInbox,
     this.communityInvitePageBuilder,
     this.communityAppearancePageBuilder,
     required this.onSettingsTransitionProgress,
-    this.tabReselection,
     super.key,
   });
 
   final WidgetBuilder settingsPageBuilder;
-  final Widget Function(bool isCollapsed)? messagesFilters;
+
+  /// Builds Home's Messages header actions. Without it, the page uses the
+  /// standalone Channels header.
   final List<Widget> Function(VoidCallback openSwitcher, GlobalKey avatarKey)?
   messagesActionsBuilder;
-
-  /// Width of the trailing controls that collapsed filters must leave clear.
-  final double messagesActionsWidth;
   final Widget? soloSliver;
-  final bool showTeam;
-  final bool showTeamHeading;
   final ValueNotifier<VoidCallback?>? newChannelAction;
   final ValueNotifier<VoidCallback?>? newDmAction;
 
@@ -159,9 +191,6 @@ class ChannelsPage extends HookConsumerWidget {
   /// render from the same timeline.
   final ValueChanged<double> onSettingsTransitionProgress;
 
-  /// Notifies this page when its already-selected tab is tapped again.
-  final ValueListenable<int>? tabReselection;
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     // Resolve permissions before the community menu is opened.
@@ -174,90 +203,79 @@ class ChannelsPage extends HookConsumerWidget {
         .watch(profileProvider)
         .whenData((value) => value?.pubkey)
         .value;
+    final messages = messagesActionsBuilder != null;
     final headerTitleStyle = context.textTheme.titleMedium?.copyWith(
-      fontSize: 22,
+      fontSize: messages ? 17 : 22,
       fontWeight: FontWeight.w600,
       color: navigationPrimaryForeground(context),
     );
-    final filterContentHeight = messagesFilters == null
-        ? 0.0
-        : max(48.0, MediaQuery.textScalerOf(context).scale(16) * 1.4 + 16) +
-              Grid.xxs;
+    final largeMessagesTitle =
+        messages && defaultTargetPlatform == TargetPlatform.iOS;
+    final strip =
+        DuoToolbarScope.maybeStripOf(context) ?? FoldGeometry.of(context).strip;
+    final coverOptions =
+        largeMessagesTitle && strip != null && isCompactDuoWindow(context);
+    final androidTitle =
+        messages && defaultTargetPlatform == TargetPlatform.android;
+    final expandedTitleStyle = context.textTheme.headlineLarge?.copyWith(
+      fontWeight: FontWeight.w700,
+      color: context.colors.onSurface,
+    );
+    final expandedTitleHeight = androidTitle
+        ? MediaQuery.textScalerOf(
+                    context,
+                  ).scale(expandedTitleStyle?.fontSize ?? 32) *
+                  (expandedTitleStyle?.height ?? 1.25) +
+              Grid.xs
+        : 0.0;
+    final headerBottomPadding =
+        _kTopSectionBottomPadding + (largeMessagesTitle ? 2 * Grid.quarter : 0);
     final topSectionHeight = frostedAppBarHeight(
       context,
       titleStyle: headerTitleStyle,
 
-      bottomHeight: messagesFilters == null
-          ? _kTopSectionBottomPadding
-          : filterContentHeight,
-      useNativeNavigation: messagesFilters == null,
+      bottomHeight: headerBottomPadding + expandedTitleHeight,
+      useNativeNavigation: !messages || largeMessagesTitle,
+      nativeLargeTitle: largeMessagesTitle,
+      alignWithStatusRegion: messages && !largeMessagesTitle,
     );
     // A sheet's dim barrier can't composite over Home's native soft edge, so
     // use the Flutter backdrop while another route covers this page.
-    final route = ModalRoute.of(context);
     final headerNativeSuppressed = useValueNotifier(false);
-    headerNativeSuppressed.value =
-        messagesFilters != null && !(route?.isCurrent ?? true);
+    final routeCurrent = useValueNotifier(true);
     final communityAvatarKey = useMemoized(GlobalKey.new);
     final nativeCommunityAvatarBounds = useRef<Rect?>(null);
+    final optionsKey = useMemoized(GlobalKey.new);
     final headerKey = useMemoized(GlobalKey.new);
     final nativeHeaderReady = useRef(false);
     final bodyReady = useRef(false);
     final communityFlightActive = useState(false);
     final channelsScrollController = useScrollController();
-    final reducedMotion = MediaQuery.disableAnimationsOf(context);
-    final headerFrostProgress = useState(0.0);
-    final headerCollapse = useState(0.0);
-    useEffect(
-      () {
-        void updateHeaderTreatment() {
-          final collapse =
-              messagesFilters == null || !channelsScrollController.hasClients
-              ? 0.0
-              : channelsScrollController.offset
-                    .clamp(0.0, filterContentHeight)
-                    .toDouble();
-          if (headerCollapse.value != collapse) headerCollapse.value = collapse;
-          final nextProgress = !channelsScrollController.hasClients
-              ? 0.0
-              : (channelsScrollController.offset / _kHeaderFrostScrollDistance)
-                    .clamp(0.0, 1.0)
-                    .toDouble();
-          if ((headerFrostProgress.value - nextProgress).abs() > 0.001) {
-            headerFrostProgress.value = nextProgress;
-          }
-        }
-
-        channelsScrollController.addListener(updateHeaderTreatment);
-        return () =>
-            channelsScrollController.removeListener(updateHeaderTreatment);
-      },
-      [channelsScrollController, messagesFilters != null, filterContentHeight],
-    );
+    // Scroll updates belong to the header, not the channel inventory below it.
+    final listDepth = useValueNotifier(0.0);
+    final headerFrost = useValueNotifier(0.0);
     useEffect(() {
-      final tabReselection = this.tabReselection;
-      if (tabReselection == null) return null;
-
-      void scrollToTop() {
-        if (!channelsScrollController.hasClients) return;
-        final position = channelsScrollController.position;
-        if (position.pixels <= position.minScrollExtent + 0.5) return;
-        if (reducedMotion) {
-          channelsScrollController.jumpTo(position.minScrollExtent);
-          return;
+      void updateHeaderFrost() {
+        if (channelsScrollController.hasClients) {
+          listDepth.value = channelsScrollController.offset.clamp(
+            0.0,
+            double.infinity,
+          );
         }
-        unawaited(
-          channelsScrollController.animateTo(
-            position.minScrollExtent,
-            duration: const Duration(milliseconds: 260),
-            curve: Curves.easeOutCubic,
-          ),
-        );
+        final next = !channelsScrollController.hasClients
+            ? 0.0
+            : (channelsScrollController.offset /
+                      (androidTitle
+                          ? expandedTitleHeight
+                          : _kHeaderFrostScrollDistance))
+                  .clamp(0.0, 1.0)
+                  .toDouble();
+        if ((headerFrost.value - next).abs() > 0.001) headerFrost.value = next;
       }
 
-      tabReselection.addListener(scrollToTop);
-      return () => tabReselection.removeListener(scrollToTop);
-    }, [tabReselection, channelsScrollController, reducedMotion]);
+      channelsScrollController.addListener(updateHeaderFrost);
+      return () => channelsScrollController.removeListener(updateHeaderFrost);
+    }, [channelsScrollController, expandedTitleHeight]);
 
     // Cache the last successfully loaded channels so the UI never flashes
     // back to a loading state when the provider rebuilds (e.g. reconnect).
@@ -276,14 +294,23 @@ class ChannelsPage extends HookConsumerWidget {
     if (channelsAsync.asData?.value case final data?) {
       cachedChannels.value = data;
     }
-    final soloViewer = ref.watch(myPubkeyProvider);
-    final personalIds =
-        ref.watch(meGroupsProvider).asData?.value.channels ?? const <String>[];
-    final channels = cachedChannels.value
-        ?.where((channel) => !channel.isPersonalChat(soloViewer, personalIds))
-        .toList();
+    final channels = cachedChannels.value;
     Future<void> openChannel(Channel channel) async {
       if (!context.mounted) return;
+      // A lookup, not a dependency: the page doesn't rebuild with the pane.
+      final pane = context
+          .getInheritedWidgetOfExactType<ConversationPaneScope>()
+          ?.notifier;
+      if (pane != null) {
+        pane.open(
+          channel.id,
+          (_) => ChannelDetailPage(
+            channel: channel,
+            placement: ChannelRoutePlacement.ordinary,
+          ),
+        );
+        return;
+      }
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
           builder: (_) => ChannelDetailPage(
@@ -315,8 +342,7 @@ class ChannelsPage extends HookConsumerWidget {
     }, [canSurfaceError]);
 
     Rect? measureCommunityAvatar() {
-      if (messagesFilters == null &&
-          defaultTargetPlatform == TargetPlatform.iOS) {
+      if (!messages && defaultTargetPlatform == TargetPlatform.iOS) {
         final header = headerKey.currentContext?.findRenderObject();
         final bounds = nativeCommunityAvatarBounds.value;
         return header is RenderBox && bounds != null
@@ -328,7 +354,7 @@ class ChannelsPage extends HookConsumerWidget {
           ? MatrixUtils.transformRect(
               avatar.getTransformTo(null),
               // The menu keeps a larger touch target around its 36dp avatar.
-              messagesFilters != null
+              messages
                   ? Rect.fromCenter(
                       center: avatar.size.center(Offset.zero),
                       width: 36,
@@ -373,7 +399,7 @@ class ChannelsPage extends HookConsumerWidget {
         final ready =
             ref.read(_communityContentReadyProvider).value == true &&
             bodyReady.value &&
-            (messagesFilters != null ||
+            (messages ||
                 defaultTargetPlatform != TargetPlatform.iOS ||
                 nativeHeaderReady.value);
         final bounds = ready ? measureCommunityAvatar() : null;
@@ -394,7 +420,7 @@ class ChannelsPage extends HookConsumerWidget {
         do {
           await WidgetsBinding.instance.endOfFrame;
           if (cancelled || !context.mounted) return;
-        } while (ModalRoute.of(context)?.isCurrent == false);
+        } while (!routeCurrent.value);
         if (ref.read(pairedCommunityLandingProvider)?.id !=
             arrivingCommunity.id) {
           return;
@@ -463,7 +489,7 @@ class ChannelsPage extends HookConsumerWidget {
         do {
           await WidgetsBinding.instance.endOfFrame;
           if (cancelled || !context.mounted) return;
-        } while (ModalRoute.of(context)?.isCurrent == false);
+        } while (!routeCurrent.value);
         if (!ref.read(communityGridLandingProvider)) return;
         ref.read(communityGridLandingProvider.notifier).clear();
         openCommunityGrid();
@@ -479,16 +505,24 @@ class ChannelsPage extends HookConsumerWidget {
       final role = ref.read(currentCommunityRoleProvider).unwrapPrevious();
       final canInvite = role.hasError || canManageCommunityInvites(role.value);
       unawaited(HapticFeedback.selectionClick());
+      Widget menu(BuildContext _) => _CommunityMenuSheet(
+        canInvite: canInvite,
+        onSwitchCommunity: openCommunityGrid,
+        invitePageBuilder: communityInvitePageBuilder,
+        appearancePageBuilder: communityAppearancePageBuilder,
+      );
+      final window = MediaQueryData.fromView(View.of(context));
+      final bounded =
+          defaultTargetPlatform == TargetPlatform.iOS &&
+          window.size.shortestSide >= 600;
       showBuzzModalBottomSheet<void>(
         context: context,
+        useRootNavigator: true,
+        useDuoFullWidth: !bounded,
+        constraints: bounded ? const BoxConstraints(maxWidth: 480) : null,
         showCloseButton: false,
         showDragHandle: true,
-        builder: (_) => _CommunityMenuSheet(
-          canInvite: canInvite,
-          onSwitchCommunity: openCommunityGrid,
-          invitePageBuilder: communityInvitePageBuilder,
-          appearancePageBuilder: communityAppearancePageBuilder,
-        ),
+        builder: menu,
       );
     }
 
@@ -603,174 +637,15 @@ class ChannelsPage extends HookConsumerWidget {
       return () => active = false;
     }, [newChannelAction, newDmAction, currentPubkey]);
 
-    return FrostedScaffold(
-      backgroundColor: usesPinnedGradient
-          ? Colors.transparent
-          : context.colors.surface,
-      backgroundGradient: topSectionGradient,
-      appBar: FrostedAppBar(
-        key: headerKey,
-        onNativeReadyChanged: (ready) => nativeHeaderReady.value = ready,
-        nativeTitle: '',
-        useNativeNavigation: messagesFilters == null,
-        nativeViewSuppressed: headerNativeSuppressed,
-        nativeLeading: messagesFilters != null
-            ? null
-            : IosNavigationAction(
-                label: 'Community settings',
-                onAvatarBoundsChanged: (bounds) {
-                  final header = headerKey.currentContext?.findRenderObject();
-                  if (header is RenderBox) {
-                    // Store native coordinates, then apply the current Home transform
-                    // when measuring the destination immediately before departure.
-                    nativeCommunityAvatarBounds.value =
-                        header.globalToLocal(bounds.topLeft) & bounds.size;
-                  }
-                },
-                avatarHidden: communityFlightActive.value,
-                avatarIdentity: activeCommunity?.id,
-                symbol: 'building.2.crop.circle',
-                imageUrl: communityAvatar,
-                avatarInitial: communityName.isEmpty
-                    ? '?'
-                    : communityName.substring(0, 1).toUpperCase(),
-                onPressed: openCommunitySwitcher,
-              ),
-        nativeActions: messagesFilters != null
-            ? const []
-            : [
-                if (onSearch != null)
-                  IosNavigationAction(
-                    label: 'Search',
-                    symbol: 'magnifyingglass',
-                    sharesBackground: false,
-                    icon: BuzzIcons.search300,
-                    onPressed: onSearch,
-                  ),
-                IosNavigationAction(
-                  label: 'Create',
-                  symbol: 'plus',
-                  sharesBackground: false,
-                  icon: BuzzIcons.plus,
-                  children: [
-                    IosNavigationAction(
-                      label: 'New channel',
-                      symbol: 'number',
-                      onPressed: () =>
-                          openCreateAction(_QuickAction.createChannel),
-                    ),
-                    IosNavigationAction(
-                      label: 'New DM',
-                      symbol: 'bubble.left',
-                      onPressed: () => openCreateAction(_QuickAction.newDm),
-                    ),
-                  ],
-                ),
-              ],
-        horizontalInset: _kTopSectionInset,
-        // Let the full Buzz gradient show at rest. Once the list begins to
-        // move beneath this row, build up blur over the first 64dp of scroll
-        // without adding the usual white frosted wash. The Buzz list is
-        // transparent, so the blurred pixels remain a continuation of the
-        // pinned gradient instead of turning into a white header.
-        frosted:
-            messagesFilters != null ||
-            !usesPinnedGradient ||
-            headerFrostProgress.value > 0,
-        alwaysFrosted: messagesFilters != null,
-        leading: messagesFilters != null
-            ? null
-            : _CommunityIndicator(
-                onTap: openCommunitySwitcher,
-                avatarKey: communityAvatarKey,
-                hidden: communityFlightActive.value,
-              ),
-        centerTitle: false,
-        titleStyle: headerTitleStyle,
-
-        automaticallyImplyLeading: messagesFilters == null,
-        title: messagesFilters == null
-            ? const SizedBox.shrink()
-            : ExcludeSemantics(
-                excluding: headerCollapse.value >= filterContentHeight,
-                child: ShaderMask(
-                  blendMode: BlendMode.dstIn,
-                  shaderCallback: (bounds) => LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      headerCollapse.value == 0
-                          ? Colors.white
-                          : Colors.transparent,
-                      Colors.white,
-                    ],
-                    stops: [
-                      0,
-                      (headerCollapse.value.clamp(0.0, Grid.sm) / bounds.height)
-                          .clamp(0.0, 1.0),
-                    ],
-                  ).createShader(bounds),
-                  // Keep the original upward motion, but fade the glyphs at
-                  // status-area boundary instead of the text’s own tight bounds.
-                  child: ClipRect(
-                    child: Opacity(
-                      opacity: 1 - headerCollapse.value / filterContentHeight,
-                      child: SizedBox.expand(
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: Transform.translate(
-                            offset: Offset(0, -headerCollapse.value),
-                            child: Text('Messages', style: headerTitleStyle),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-        actions: messagesFilters != null
-            ? messagesActionsBuilder?.call(
-                    openCommunityGrid,
-                    communityAvatarKey,
-                  ) ??
-                  const []
-            : [
-                _ChannelHeaderActions(
-                  onSearch: onSearch,
-                  onCreate: openCreateMenu,
-                ),
-              ],
-        bottomHeight: messagesFilters == null
-            ? _kTopSectionBottomPadding
-            : filterContentHeight - headerCollapse.value,
-        bottomOverlap: messagesFilters == null ? 0 : headerCollapse.value,
-        bottom: messagesFilters == null
-            ? const SizedBox.expand()
-            : Padding(
-                padding: EdgeInsets.only(
-                  // As soon as the rows overlap, keep the entire action
-                  // cluster clear. Interpolating this inset blocks the bell
-                  // during partial collapse even when the final layout fits.
-                  right: headerCollapse.value > 0
-                      ? messagesActionsWidth + _kTopSectionInset
-                      : 0,
-                ),
-                child: ClipRect(
-                  // Native glass paints its shadows outside the viewport, but
-                  // scrolled filters must not paint over the header actions.
-                  clipBehavior: headerCollapse.value > 0
-                      ? Clip.hardEdge
-                      : Clip.none,
-                  child: messagesFilters!(
-                    headerCollapse.value >= filterContentHeight,
-                  ),
-                ),
-              ),
-      ),
-      body: _ChannelsBody(
+    void displayOptions() =>
+        showMessagesDisplayOptions(optionsKey.currentContext ?? context);
+    final page = ValueListenableBuilder(
+      valueListenable: headerFrost,
+      // Retain the inventory during header animation. Provider and parent
+      // updates still construct a fresh body with current channel data.
+      child: _ChannelsBody(
+        optionsKey: messages ? optionsKey : null,
         soloSliver: soloSliver,
-        showTeam: showTeam,
-        showTeamHeading: showTeamHeading,
         onInbox: onInbox,
         onReadyChanged: (ready) => bodyReady.value = ready,
         channels: channels,
@@ -778,17 +653,206 @@ class ChannelsPage extends HookConsumerWidget {
         showError: showError.value,
         sessionStatus: sessionState.status,
         currentPubkey: currentPubkey,
-        topSectionHeight: topSectionHeight,
+        // Match the visible glass-button-to-title gap below the native title.
+        topSectionHeight:
+            topSectionHeight +
+            (largeMessagesTitle ? 11.0 : 0) -
+            (coverOptions ? buzzNavigationActionSize : 0),
         usesPinnedGradient: usesPinnedGradient,
         scrollController: channelsScrollController,
-        onRefresh: () {
-          // Solo has no banner, so pulling must also restart its reader.
+        onRefresh: () async {
+          // Restart the reader for Solo chat and project placement.
           if (soloSliver != null) ref.invalidate(meGroupsProvider);
-          return ref.read(channelsProvider.notifier).refresh();
+          ref.invalidate(channelFilterActivityProvider);
+          await Future.wait([
+            ref.read(channelsProvider.notifier).refresh(),
+            if (ref.read(channelFilterProvider) case final manager?)
+              manager.refresh(),
+          ]);
         },
         onSelectChannel: openChannel,
       ),
+      builder: (context, frostProgress, child) => FrostedScaffold(
+        navigationScrollOffset: largeMessagesTitle ? listDepth : null,
+        backgroundColor: usesPinnedGradient
+            ? Colors.transparent
+            : context.colors.surface,
+        backgroundGradient: topSectionGradient,
+        appBar: FrostedAppBar(
+          key: headerKey,
+          onNativeReadyChanged: (ready) => nativeHeaderReady.value = ready,
+          nativeTitle: messages ? 'Messages' : '',
+          nativeLargeTitleWithActions: largeMessagesTitle,
+          useNativeNavigation: !messages || largeMessagesTitle,
+          nativeLargeTitle: largeMessagesTitle,
+          alignWithStatusRegion: messages && !largeMessagesTitle,
+          nativeViewSuppressed: headerNativeSuppressed,
+          alignLargeTitleWithActions: coverOptions,
+          nativeLeading: coverOptions
+              ? IosNavigationAction(
+                  label: 'Messages options',
+                  symbol: 'ellipsis',
+                  onPressed: displayOptions,
+                )
+              : messages
+              ? null
+              : IosNavigationAction(
+                  label: 'Community settings',
+                  onAvatarBoundsChanged: (bounds) {
+                    final header = headerKey.currentContext?.findRenderObject();
+                    if (header is RenderBox) {
+                      // Store native coordinates, then apply the current Home transform
+                      // when measuring the destination immediately before departure.
+                      nativeCommunityAvatarBounds.value =
+                          header.globalToLocal(bounds.topLeft) & bounds.size;
+                    }
+                  },
+                  avatarHidden: communityFlightActive.value,
+                  avatarIdentity: activeCommunity?.id,
+                  symbol: 'building.2.crop.circle',
+                  imageUrl: communityAvatar,
+                  avatarInitial: communityName.isEmpty
+                      ? '?'
+                      : communityName.substring(0, 1).toUpperCase(),
+                  onPressed: openCommunitySwitcher,
+                ),
+          nativeActions: messages
+              ? const []
+              : [
+                  if (onSearch != null)
+                    IosNavigationAction(
+                      label: 'Search',
+                      symbol: 'magnifyingglass',
+                      sharesBackground: false,
+                      icon: BuzzIcons.search300,
+                      onPressed: onSearch,
+                    ),
+                  IosNavigationAction(
+                    label: 'Create',
+                    symbol: 'plus',
+                    sharesBackground: false,
+                    icon: BuzzIcons.plus,
+                    children: [
+                      IosNavigationAction(
+                        label: 'New channel',
+                        symbol: 'number',
+                        onPressed: () =>
+                            openCreateAction(_QuickAction.createChannel),
+                      ),
+                      IosNavigationAction(
+                        label: 'New DM',
+                        symbol: 'bubble.left',
+                        onPressed: () => openCreateAction(_QuickAction.newDm),
+                      ),
+                    ],
+                  ),
+                ],
+          horizontalInset: messages ? Grid.gutter : _kTopSectionInset,
+          // Let the full Buzz gradient show at rest. Once the list begins to
+          // move beneath this row, build up blur over the first 64dp of scroll
+          // without adding the usual white frosted wash. The Buzz list is
+          // transparent, so the blurred pixels remain a continuation of the
+          // pinned gradient instead of turning into a white header.
+          frosted: messages || !usesPinnedGradient || frostProgress > 0,
+          alwaysFrosted: messages,
+          leading: coverOptions
+              ? null
+              : messages
+              ? _MessagesOptionsButton(onPressed: displayOptions)
+              : _CommunityIndicator(
+                  onTap: openCommunitySwitcher,
+                  avatarKey: communityAvatarKey,
+                  hidden: communityFlightActive.value,
+                ),
+          centerTitle: messages,
+          titleStyle: headerTitleStyle,
+
+          automaticallyImplyLeading: !messages,
+          title: messages && (!androidTitle || frostProgress == 1)
+              ? Text('Messages', style: headerTitleStyle)
+              : null,
+          titleOverlay: androidTitle && frostProgress < 1
+              ? (toolbarHeight) => PositionedDirectional(
+                  top: toolbarHeight * (1 - frostProgress),
+                  start: Grid.gutter,
+                  end: Grid.gutter,
+                  height:
+                      expandedTitleHeight * (1 - frostProgress) +
+                      toolbarHeight * frostProgress,
+                  child: IgnorePointer(
+                    child: Align(
+                      alignment: AlignmentDirectional(-1 + frostProgress, 0),
+                      child: Semantics(
+                        header: true,
+                        child: Text(
+                          'Messages',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle.lerp(
+                            expandedTitleStyle,
+                            headerTitleStyle,
+                            frostProgress,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                )
+              : null,
+          actions: messages
+              ? messagesActionsBuilder?.call(
+                      openCommunityGrid,
+                      communityAvatarKey,
+                    ) ??
+                    const []
+              : [
+                  _ChannelHeaderActions(
+                    onSearch: onSearch,
+                    onCreate: openCreateMenu,
+                  ),
+                ],
+          bottomHeight:
+              headerBottomPadding + expandedTitleHeight * (1 - frostProgress),
+          bottom: const SizedBox.expand(),
+        ),
+        body: child!,
+      ),
     );
+    return _RouteCurrencySync(
+      current: routeCurrent,
+      nativeSuppressed: headerNativeSuppressed,
+      suppressesNative: messages,
+      child: page,
+    );
+  }
+}
+
+/// Mirrors whether this page's route is current into [current], and into
+/// [nativeSuppressed] when [suppressesNative] is set.
+///
+/// Only this leaf depends on the route, so a route or sheet opening above Home
+/// rebuilds it and the header listening to [nativeSuppressed], not the channel
+/// inventory. The header is a descendant, so it updates in the same frame.
+class _RouteCurrencySync extends HookWidget {
+  const _RouteCurrencySync({
+    required this.current,
+    required this.nativeSuppressed,
+    required this.suppressesNative,
+    required this.child,
+  });
+
+  final ValueNotifier<bool> current;
+  final ValueNotifier<bool> nativeSuppressed;
+  final bool suppressesNative;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final isCurrent = ModalRoute.isCurrentOf(context) ?? true;
+    current.value = isCurrent;
+    final nativeVisible = useNativeRouteControlsVisible(context);
+    nativeSuppressed.value = suppressesNative && !nativeVisible;
+    return child;
   }
 }
 

@@ -16,4 +16,4 @@ xcrun --sdk iphonesimulator swiftc -parse-as-library \
   -F "$frameworks" -framework Flutter \
   -Xlinker -rpath -Xlinker "$frameworks" \
   "$fixture/test.swift" -o "$fixture/photo-zoom-tests"
-xcrun simctl spawn "$device" "$fixture/photo-zoom-tests"
+xcrun simctl spawn "$device" "$fixture/photo-zoom-tests" "$repo_root/mobile/ios/NativeControlTests/Fixtures/gallery-video.mp4"

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'ios_navigation_bar.dart';
+import 'duo_toolbar.dart';
 import 'ios_scroll_to_top.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
@@ -46,6 +47,12 @@ class FrostedScaffold extends HookWidget {
   /// Reserves the native large title above fixed controls.
   final bool nativePinnedBody;
 
+  /// Authoritative depth when the page owns its primary scroll controller.
+  final ValueListenable<double>? navigationScrollOffset;
+
+  /// Lets a conversation header span the rail while its body stays inset.
+  final bool extendHeaderUnderRail;
+
   const FrostedScaffold({
     super.key,
     required this.appBar,
@@ -57,10 +64,15 @@ class FrostedScaffold extends HookWidget {
     this.backgroundGradient,
     this.useUtilitySurfaceTheme = false,
     this.nativePinnedBody = false,
+    this.navigationScrollOffset,
+    this.extendHeaderUnderRail = false,
   });
 
   @override
   Widget build(BuildContext context) {
+    final contentInsets = duoContentInsetsOf(context);
+    final fullWidthHeader =
+        extendHeaderUnderRail || contentInsets != EdgeInsets.zero;
     final scrollOffset = useValueNotifier(0.0);
     final pinnedController = useScrollController(keepScrollOffset: false);
     // A keyed page/tab owns both coordinated positions and their restoration
@@ -210,19 +222,23 @@ class FrostedScaffold extends HookWidget {
             }
           : null,
       child: IosNavigationScrollScope(
-        offset: scrollOffset,
+        offset: navigationScrollOffset ?? scrollOffset,
         child: Scaffold(
           backgroundColor: backgroundColor,
           resizeToAvoidBottomInset: resizeToAvoidBottomInset,
           floatingActionButton: floatingActionButton,
           body: FrostedScrollUnderScope(
             isScrolledUnder: isScrolledUnder.value,
-            child: Stack(
-              children: _stackChildren(
-                observedBody,
-                pinnedController,
-                pinnedStorage,
-                pinnedKey,
+            child: Padding(
+              padding: fullWidthHeader ? EdgeInsets.zero : contentInsets,
+              child: Stack(
+                children: _stackChildren(
+                  observedBody,
+                  pinnedController,
+                  pinnedStorage,
+                  pinnedKey,
+                  fullWidthHeader ? contentInsets : EdgeInsets.zero,
+                ),
               ),
             ),
           ),
@@ -241,6 +257,7 @@ class FrostedScaffold extends HookWidget {
     ScrollController pinnedController,
     PageStorageBucket pinnedStorage,
     GlobalKey<NestedScrollViewState> pinnedKey,
+    EdgeInsets bodyInsets,
   ) {
     final backdrop = backgroundGradient == null
         ? const <Widget>[]
@@ -280,10 +297,15 @@ class FrostedScaffold extends HookWidget {
     // content rather than only the fixed gradient.
     return [
       ...backdrop,
-      bodyMotion,
+      Padding(padding: bodyInsets, child: bodyMotion),
       appBar,
       if (foreground != null)
-        Positioned.fill(child: DirectionalTransitionMotion(child: foreground!)),
+        Positioned.fill(
+          child: Padding(
+            padding: bodyInsets,
+            child: DirectionalTransitionMotion(child: foreground!),
+          ),
+        ),
     ];
   }
 }

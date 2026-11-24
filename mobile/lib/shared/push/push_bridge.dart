@@ -6,15 +6,38 @@ import 'package:flutter/services.dart';
 
 import '../community/community.dart';
 import '../deeplink/deep_link.dart';
+import '../diagnostics/diagnostic_reporter.dart';
 import '../relay/relay_provider.dart';
+import 'android_push_authority.dart';
+import 'android_push_gateway.dart';
+import 'android_push_keystore.dart';
 import 'push_snapshot.dart';
 
 const _channel = MethodChannel('buzz/push');
+
+/// Android's FCM token registration. It has its own channel because Android's
+/// notification-open handler already owns `buzz/push`, and a channel has one
+/// native handler.
+const _registrationChannel = MethodChannel('buzz/push_registration');
+
+/// The code native enrollment fails with when the push gateway's reply does
+/// not match its protocol.
+const _gatewayResponseInvalid = 'gateway_response_invalid';
 
 /// Latest APNs registration state, including callbacks replayed by iOS after
 /// the Flutter method channel attaches.
 final apnsDeviceToken = ValueNotifier<String?>(null);
 final apnsRegistrationError = ValueNotifier<String?>(null);
+
+/// Latest FCM registration token and failure on Android. They play the role
+/// of the two APNs notifiers above; a phone only ever sets one pair.
+final fcmDeviceToken = ValueNotifier<String?>(null);
+final fcmRegistrationError = ValueNotifier<String?>(null);
+
+/// Why push cannot work on this phone (no hardware key attestation, no
+/// Firebase, no FCM token), or null. The app works without push; settings
+/// shows the reason.
+final pushUnavailableReason = ValueNotifier<String?>(null);
 
 final pushEndpointGrants = ValueNotifier<List<BuzzPushEndpointGrant>>([]);
 final pushEndpointGrantError = ValueNotifier<String?>(null);
@@ -49,10 +72,194 @@ MessageDeepLink? _pushNotificationLink(Object? arguments) {
   );
 }
 
+/// A reply typed into an iOS notification, waiting to be sent.
+@immutable
+class BuzzNotificationReply {
+  const BuzzNotificationReply({
+    required this.id,
+    required this.text,
+    required this.link,
+    required this.senderPubkey,
+    required this.messageCreatedAt,
+    required this.deadline,
+    this.replyRootId,
+    this.recipientPubkey,
+    this.inSolo = false,
+    this.recovered = false,
+    this.mayHavePublished = false,
+  });
+
+  final String id;
+  final String text;
+
+  /// The notified message, and where tapping its notification opens.
+  final MessageDeepLink link;
+
+  /// Author of the notified message, whom the reply mentions.
+  final String senderPubkey;
+
+  /// NIP-10 thread root of the notified message; null when it is top-level.
+  final String? replyRootId;
+
+  /// The account the notification was for, which the reply must go out as,
+  /// guarding against a community's credentials being replaced in place. Null
+  /// for a notification an earlier build posted.
+  final String? recipientPubkey;
+
+  /// When the notified message was created, in Unix seconds.
+  final int messageCreatedAt;
+
+  /// When iOS stops waiting for the reply and reports it as not sent.
+  final DateTime deadline;
+
+  /// Whether the notification knew the message is in a Solo chat, which
+  /// takes no thread replies.
+  final bool inSolo;
+
+  /// Whether an earlier launch was given this reply and never finished it.
+  /// It is never sent again.
+  final bool recovered;
+
+  /// Whether that earlier launch may have published it.
+  final bool mayHavePublished;
+
+  static BuzzNotificationReply? fromArguments(Object? arguments) {
+    if (arguments is! Map) return null;
+    final link = _pushNotificationLink({
+      for (final key in const [
+        'eventId',
+        'communityId',
+        'channelId',
+        'threadRootId',
+      ])
+        if (arguments.containsKey(key)) key: arguments[key],
+    });
+    final id = arguments['id'];
+    final text = arguments['text'];
+    final sender = arguments['senderPubkey'];
+    final root = arguments['replyRootId'];
+    final recipient = arguments['recipientPubkey'];
+    final createdAt = switch (arguments['messageCreatedAt']) {
+      final String value => int.tryParse(value),
+      _ => null,
+    };
+    final deadline = switch (arguments['deadline']) {
+      final String value => int.tryParse(value),
+      _ => null,
+    };
+    if (link == null ||
+        id is! String ||
+        id.isEmpty ||
+        text is! String ||
+        text.trim().isEmpty ||
+        sender is! String ||
+        sender.isEmpty ||
+        createdAt == null ||
+        createdAt <= 0 ||
+        deadline == null ||
+        (root != null && (root is! String || root.isEmpty)) ||
+        (recipient != null && (recipient is! String || recipient.isEmpty))) {
+      return null;
+    }
+    return BuzzNotificationReply(
+      id: id,
+      text: text,
+      link: link,
+      senderPubkey: sender,
+      messageCreatedAt: createdAt,
+      deadline: DateTime.fromMillisecondsSinceEpoch(deadline),
+      replyRootId: root as String?,
+      recipientPubkey: recipient as String?,
+      inSolo: arguments['inSolo'] == 'true',
+      recovered: arguments['recovered'] == 'true',
+      mayHavePublished: arguments['publishing'] == 'true',
+    );
+  }
+}
+
+/// Bumped when iOS hands the app a notification reply to send.
+final notificationReplyAvailable = ValueNotifier<int>(0);
+
+/// Takes notification replies native iOS is holding for the app.
+Future<List<BuzzNotificationReply>> takePendingBuzzNotificationReplies() async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return const [];
+  try {
+    final raw = await _channel.invokeListMethod<dynamic>(
+      'takePendingNotificationReplies',
+    );
+    return [
+      for (final value in raw ?? const [])
+        ?BuzzNotificationReply.fromArguments(value),
+    ];
+  } on MissingPluginException {
+    return const [];
+  }
+}
+
+/// Tells iOS that a notification reply may be published from now on, so a
+/// relaunch never drafts or resends it. Returns once that is saved, false
+/// when iOS has already ended the reply, which then must not be published.
+Future<bool> markBuzzNotificationReplyPublishing(String id) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return true;
+  try {
+    return await _channel.invokeMethod<bool>(
+          'markNotificationReplyPublishing',
+          id,
+        ) ??
+        true;
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+    return true;
+  }
+}
+
+/// Reports whether a notification reply was sent, so iOS clears the
+/// conversation's notifications or shows that it wasn't. [unknown] means it
+/// may have gone out; [draftThreadRootId] is the thread holding its draft,
+/// which the "Reply not sent" notification opens. Without [draftKept], iOS
+/// shows the unsent text in a notification even for a reply an earlier
+/// launch was given.
+Future<void> completeBuzzNotificationReply(
+  String id, {
+  required bool sent,
+  bool unknown = false,
+  String? draftThreadRootId,
+  bool draftKept = true,
+}) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    await _channel.invokeMethod<void>('completeNotificationReply', {
+      'id': id,
+      'sent': sent,
+      if (unknown) 'unknown': true,
+      'draftThreadRootId': ?draftThreadRootId,
+      if (!draftKept) 'noDraft': true,
+    });
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}
+
+/// Tells the iOS notification extension which community is selected; only
+/// its notifications offer Reply.
+Future<void> shareSelectedCommunityWithNotifications(
+  String? communityId,
+) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    await _channel.invokeMethod<void>('setSelectedCommunity', communityId);
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}
+
 /// Pulls a notification response that arrived before the Flutter method
 /// handler was installed.
 Future<void> syncPendingBuzzPushNotificationResponse() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  if (defaultTargetPlatform != TargetPlatform.iOS &&
+      defaultTargetPlatform != TargetPlatform.android) {
+    return;
+  }
   try {
     final arguments = await _channel.invokeMapMethod<dynamic, dynamic>(
       'takePendingNotificationResponse',
@@ -69,14 +276,75 @@ Future<void> syncPendingBuzzPushNotificationResponse() async {
 /// APNs registration and enrollment remain valid while display is denied.
 Future<void> startBuzzPushRegistration() async {
   if (!Env.pushGatewayConfigured ||
-      defaultTargetPlatform != TargetPlatform.iOS) {
+      (defaultTargetPlatform != TargetPlatform.iOS &&
+          defaultTargetPlatform != TargetPlatform.android)) {
     return;
   }
   try {
-    await _channel.invokeMethod<void>('startRegistration');
+    await (defaultTargetPlatform == TargetPlatform.android
+            ? _registrationChannel
+            : _channel)
+        .invokeMethod<void>('startRegistration');
   } on MissingPluginException {
     // Flutter tests and non-Runner embeddings do not install the native bridge.
   }
+}
+
+/// Asks Android for the current FCM token. FCM rotates it on its own, and the
+/// app learns of that when it next runs. A changed token arrives through
+/// [fcmDeviceToken] like the first one.
+Future<void> refreshBuzzPushToken() async {
+  if (!Env.pushGatewayConfigured ||
+      defaultTargetPlatform != TargetPlatform.android) {
+    return;
+  }
+  try {
+    await _registrationChannel.invokeMethod<void>('refreshToken');
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}
+
+AndroidPushAuthority? _androidAuthority;
+
+AndroidPushAuthority get _androidPushAuthority =>
+    _androidAuthority ??= AndroidPushAuthority(
+      keystore: const MethodChannelAndroidPushKeystore(),
+      gateway: AndroidPushGatewayClient(baseUrl: Uri.parse(Env.pushGatewayUrl)),
+      store: SecureAndroidPushStateStore(),
+    );
+
+@visibleForTesting
+set debugAndroidPushAuthority(AndroidPushAuthority? authority) =>
+    _androidAuthority = authority;
+
+BuzzPushEndpointGrant _grantOf(AndroidPushGrant grant) => BuzzPushEndpointGrant(
+  relayOrigin: grant.relayOrigin,
+  relayPubkey: grant.relayPubkey,
+  installationId: grant.installationId,
+  endpointGrant: grant.endpointGrant,
+  endpointHash: grant.endpointHash,
+  endpointEpoch: grant.endpointEpoch,
+  generation: grant.generation,
+  expiresAt: grant.expiresAt,
+);
+
+/// Revokes what the phone's push installation holds for relays no community
+/// uses any more, and the installation itself once no community remains.
+/// Android only; iOS revokes only relay leases. [desiredRelays] and
+/// [noCommunities] are read when the work runs.
+Future<void> reconcileBuzzPushAuthority({
+  required Set<String> Function() desiredRelays,
+  required bool Function() noCommunities,
+}) async {
+  if (!Env.pushGatewayConfigured ||
+      defaultTargetPlatform != TargetPlatform.android) {
+    return;
+  }
+  await _androidPushAuthority.reconcile(
+    desiredRelays: desiredRelays,
+    revokeInstallation: noCommunities,
+  );
 }
 
 class BuzzPushEndpointGrant {
@@ -117,17 +385,26 @@ class BuzzPushEndpointGrant {
 
 Future<List<BuzzPushEndpointGrant>> readBuzzPushEndpointGrants() async {
   if (!Env.pushGatewayConfigured ||
-      defaultTargetPlatform != TargetPlatform.iOS) {
+      (defaultTargetPlatform != TargetPlatform.iOS &&
+          defaultTargetPlatform != TargetPlatform.android)) {
     return const [];
   }
   try {
-    final raw = await _channel.invokeListMethod<dynamic>('endpointGrants', {
-      'gatewayUrl': Env.pushGatewayUrl,
-    });
-    final grants = [
-      for (final value in raw ?? const [])
-        BuzzPushEndpointGrant.fromMap(value as Map<dynamic, dynamic>),
-    ];
+    final List<BuzzPushEndpointGrant> grants;
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      grants = [
+        for (final grant in await _androidPushAuthority.grants())
+          _grantOf(grant),
+      ];
+    } else {
+      final raw = await _channel.invokeListMethod<dynamic>('endpointGrants', {
+        'gatewayUrl': Env.pushGatewayUrl,
+      });
+      grants = [
+        for (final value in raw ?? const [])
+          BuzzPushEndpointGrant.fromMap(value as Map<dynamic, dynamic>),
+      ];
+    }
     pushEndpointGrants.value = grants;
     pushEndpointGrantError.value = null;
     return grants;
@@ -137,23 +414,92 @@ Future<List<BuzzPushEndpointGrant>> readBuzzPushEndpointGrants() async {
   }
 }
 
+bool _wanted() => true;
+
 /// Enrolls the endpoint and optionally rewrites the NSE snapshot afterward.
 ///
 /// The rewrite propagates NIP-11 `self` rotations even when the opaque grant
 /// and accepted relay lease remain reusable and their generations do not move.
-Future<BuzzPushEndpointGrant> enrollBuzzPush(
+///
+/// On Android the grant comes from the Dart-side [AndroidPushAuthority], which
+/// needs the relay's [relayOrigin] and push key [relayPubkey] from its
+/// descriptor, where iOS native code fetches them itself.
+///
+/// [desiredRelays] (Android) are the relay origins whose push is on, which
+/// enrollment uses to revoke delegations no relay points at any more.
+///
+/// [stillWanted] says whether the community still wants push. It is read before
+/// each call that creates authority, and the result is null once it said no.
+Future<BuzzPushEndpointGrant?> enrollBuzzPush(
   String relayUrl,
   String gatewayUrl, {
   List<Community>? communitiesForSnapshotRefresh,
+  String? relayOrigin,
+  String? relayPubkey,
+  Set<String> Function()? desiredRelays,
+  bool Function() stillWanted = _wanted,
+  DiagnosticReporter diagnostics = const NoopDiagnosticReporter(),
 }) async {
-  final raw = await _channel.invokeMapMethod<dynamic, dynamic>('enrollPush', {
-    'relayUrl': relayUrl,
-    'gatewayUrl': gatewayUrl,
-  });
-  if (raw == null) {
-    throw StateError('Native push enrollment returned no grant.');
+  final BuzzPushEndpointGrant grant;
+  if (defaultTargetPlatform == TargetPlatform.android) {
+    final token = fcmDeviceToken.value;
+    if (token == null ||
+        relayOrigin == null ||
+        relayPubkey == null ||
+        desiredRelays == null) {
+      throw StateError('Android push enrollment needs a token and a relay.');
+    }
+    final AndroidPushGrant? enrolled;
+    try {
+      enrolled = await _androidPushAuthority.enroll(
+        relayOrigin: relayOrigin,
+        relayPubkey: relayPubkey,
+        endpoint: token,
+        stillWanted: stillWanted,
+        desiredRelays: desiredRelays,
+      );
+    } on AndroidPushAttestationUnavailable catch (error) {
+      pushUnavailableReason.value = error.reason;
+      rethrow;
+    } on AndroidPushGatewayResponseInvalid catch (error, stackTrace) {
+      // As on iOS, only a reply the app cannot read is reported; refusals and
+      // transport failures are routine.
+      diagnostics.reportError(
+        error,
+        stackTrace,
+        operation: DiagnosticOperation.pushGatewayResponse,
+      );
+      rethrow;
+    }
+    if (enrolled == null) return null;
+    grant = _grantOf(enrolled);
+    pushUnavailableReason.value = null;
+  } else {
+    if (!stillWanted()) return null;
+    final Map<dynamic, dynamic>? raw;
+    try {
+      raw = await _channel.invokeMapMethod<dynamic, dynamic>('enrollPush', {
+        'relayUrl': relayUrl,
+        'gatewayUrl': gatewayUrl,
+      });
+    } on PlatformException catch (error, stackTrace) {
+      // The gateway is called from native code. It has its own code for a
+      // reply the app cannot read; every other failure (offline, refused,
+      // expired, server errors) is routine and not reported.
+      if (error.code == _gatewayResponseInvalid) {
+        diagnostics.reportError(
+          error,
+          stackTrace,
+          operation: DiagnosticOperation.pushGatewayResponse,
+        );
+      }
+      rethrow;
+    }
+    if (raw == null) {
+      throw StateError('Native push enrollment returned no grant.');
+    }
+    grant = BuzzPushEndpointGrant.fromMap(raw);
   }
-  final grant = BuzzPushEndpointGrant.fromMap(raw);
   await readBuzzPushEndpointGrants();
   if (communitiesForSnapshotRefresh != null) {
     try {
@@ -287,6 +633,44 @@ Future<void> shareHostedSessionWithNotifications({
 }
 
 void installBuzzPushMethodHandler() {
+  _registrationChannel.setMethodCallHandler((call) async {
+    switch (call.method) {
+      case 'fcmTokenChanged':
+        final args = call.arguments;
+        if (args is Map) {
+          final token = args['token'];
+          if (token is String && token.isNotEmpty) {
+            fcmDeviceToken.value = token;
+            // A token ends an earlier failure to get one, but not an
+            // attestation failure, which enrollment owns.
+            if (pushUnavailableReason.value == fcmRegistrationError.value) {
+              pushUnavailableReason.value = null;
+            }
+            fcmRegistrationError.value = null;
+          }
+        }
+        return null;
+      case 'fcmRegistrationFailed':
+        final args = call.arguments;
+        final message = args is Map ? args['message'] : null;
+        final reason = message is String && message.isNotEmpty
+            ? message
+            : 'FCM registration failed';
+        final previous = fcmRegistrationError.value;
+        fcmRegistrationError.value = reason;
+        // A held token still delivers, so a failed refresh is transient. Never
+        // overwrite another reason, such as attestation, which enrollment owns.
+        final shown = pushUnavailableReason.value;
+        if (fcmDeviceToken.value == null &&
+            (shown == null || shown == previous)) {
+          pushUnavailableReason.value = reason;
+        }
+        debugPrint('FCM registration failed: $reason');
+        return null;
+      default:
+        throw MissingPluginException('Unexpected ${call.method}');
+    }
+  });
   _channel.setMethodCallHandler((call) async {
     switch (call.method) {
       case 'apnsTokenChanged':
@@ -306,6 +690,9 @@ void installBuzzPushMethodHandler() {
             ? message
             : 'APNs registration failed';
         debugPrint('APNs registration failed: ${apnsRegistrationError.value}');
+        return null;
+      case 'notificationReplyAvailable':
+        notificationReplyAvailable.value++;
         return null;
       case 'notificationOpened':
         final link = _pushNotificationLink(call.arguments);

@@ -3,7 +3,7 @@ import 'package:buzz/features/channels/dm_voice_agent_provider.dart';
 import 'dart:typed_data';
 import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
-import 'package:buzz/shared/me/me_archived_agents.dart';
+import 'package:buzz/shared/identity_archives/identity_archives.dart';
 import 'package:buzz/shared/me/me_agent_inventory.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -139,7 +139,7 @@ void main() {
       overrides: [
         relaySessionProvider.overrideWith(() => relay),
         meSyncProvider.overrideWithValue(sync),
-        meArchivedAgentsProvider.overrideWith((ref) async => archived),
+        identityArchivesProvider.overrideWith((ref) async => archived),
         if (viewer != null) myPubkeyProvider.overrideWithValue(viewer),
       ],
     );

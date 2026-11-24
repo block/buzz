@@ -37,7 +37,7 @@ jobs:
   # artifact into target/ci as before.
   desktop-e2e-relay:
     name: Desktop E2E Relay (${{ matrix.artifact }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     if: inputs.lane == 'artifacts' && (github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust)
     strategy:
@@ -121,6 +121,7 @@ jobs:
           cargo nextest archive \
             --cargo-profile ci \
             -p buzz-db \
+            -p buzz-pubsub \
             -p buzz-relay \
             -p buzz-relay-mesh \
             -p buzz-test-client \
@@ -128,6 +129,7 @@ jobs:
             --test e2e_event_reminder \
             --test e2e_author_only_deletion \
             --test e2e_existence_oracle \
+            --test e2e_channel_pins \
             --archive-file target/ci/backend-integration-tests.tar.zst
       - name: Build PostgreSQL test archive
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true' && matrix.artifact == 'postgres-tests'
@@ -166,7 +168,7 @@ jobs:
 
   postgres-tests:
     name: PostgreSQL Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: inputs.lane == 'postgres' && (github.event_name == 'push' || inputs.rust)
     permissions:
@@ -204,7 +206,18 @@ jobs:
       PGSCHEMA_PLAN_PORT: "5432"
       PGSCHEMA_PLAN_USER: buzz
       PGSCHEMA_PLAN_PASSWORD: buzz_dev
+      BUZZ_TEST_OPENSEARCH_URL: http://localhost:9200
     steps:
+      # Started without waiting, so its boot overlaps the setup steps below.
+      # Not a service container: those block the job until they are healthy.
+      - name: Start OpenSearch
+        run: |
+          docker run --detach --name opensearch --publish 9200:9200 \
+            --env discovery.type=single-node \
+            --env DISABLE_SECURITY_PLUGIN=true \
+            --env DISABLE_INSTALL_DEMO_CONFIG=true \
+            --env OPENSEARCH_JAVA_OPTS="-Xms512m -Xmx512m" \
+            opensearchproject/opensearch:2.19.3@sha256:e96cc6ae1500a073d973c0906f30f7cf4d9c461f32f855f9242a2da933660cdd
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       # pgschema has no --version; --help exits 0 once Hermit has fetched it.
@@ -237,6 +250,16 @@ jobs:
           path: target/ci
       - name: Restore relay executable permission
         run: chmod +x ./target/ci/buzz-relay
+      - name: Wait for OpenSearch
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -fsS "$BUZZ_TEST_OPENSEARCH_URL/_cluster/health?wait_for_status=yellow&timeout=1s" >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs opensearch | tail -50
+          exit 1
       - name: PostgreSQL-backed tests
         env:
           BUZZ_POSTGRES_ADMIN_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/postgres
@@ -247,7 +270,7 @@ jobs:
 
   desktop-e2e-integration-shard:
     name: Desktop E2E Integration (${{ matrix.shard }}/${{ strategy.job-total }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # A shard needs ~10m; Playwright install-deps is bounded by
     # ci-apt-retry.sh (~25m worst case), so a degraded mirror fails with its
     # own error instead of the job timeout.
@@ -430,7 +453,7 @@ jobs:
 
   desktop-e2e-integration:
     name: Desktop E2E Integration
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     needs: [desktop-e2e-integration-shard]
     if: always() && inputs.lane == 'required' && (github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust)
@@ -447,7 +470,7 @@ jobs:
 
   backend-integration:
     name: Backend Integration (relay e2e)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.rust)
     permissions:
@@ -559,6 +582,19 @@ jobs:
             --archive-file target/ci/backend-integration-tests.tar.zst \
             -E 'package(buzz-relay) and test(/api::admin::postgres_tests::external_infra_minio_tests::/)' \
             --run-ignored ignored-only
+      - name: Media thumbnail regeneration regressions
+        # The tests share one fixture image's storage keys, and nextest gives
+        # each its own process, so their in-process lock can't order them.
+        env:
+          BUZZ_TEST_DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+          BUZZ_S3_ENDPOINT: http://localhost:9000
+          BUZZ_S3_BUCKET: buzz-media
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay) and test(/^api::media::tests::postgres_tests::external_infra_minio_tests::/)' \
+            --run-ignored ignored-only \
+            --test-threads 1
       - name: Relay quota accounting and rejection regressions
         env:
           BUZZ_TEST_REDIS_URL: redis://localhost:6379
@@ -582,6 +618,13 @@ jobs:
           cargo nextest run \
             --archive-file target/ci/backend-integration-tests.tar.zst \
             -E 'package(buzz-relay-mesh) and test(/^registry::tests::external_infra_redis::/)' \
+            --run-ignored ignored-only
+      - name: Pubsub subscriber reconciliation regression
+        # Runs the live Redis subscriber; the test dials redis://127.0.0.1:6379.
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-pubsub) and test(=tests::live_subscriber_recovers_a_dropped_subscribe_hint)' \
             --run-ignored ignored-only
       - name: Workflow message provenance unit tests
         # The relay's workflow_sink suite is not selected by the infra-free
@@ -627,7 +670,7 @@ jobs:
         run: |
           cargo nextest run \
             --archive-file target/ci/backend-integration-tests.tar.zst \
-            -E 'binary(e2e_event_reminder) | binary(e2e_author_only_deletion) | binary(e2e_existence_oracle)' \
+            -E 'binary(e2e_event_reminder) | binary(e2e_author_only_deletion) | binary(e2e_existence_oracle) | binary(e2e_channel_pins)' \
             --run-ignored ignored-only
         env:
           RELAY_URL: ws://localhost:3000
@@ -643,7 +686,7 @@ jobs:
 
   relay-e2e:
     name: Relay E2E
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.rust)
     permissions:
@@ -670,9 +713,10 @@ jobs:
           ./scripts/start-relay-for-tests.sh --no-build
       - name: Relay E2E tests
         run: |
-          cargo test -p buzz-test-client --test e2e_persona --test e2e_team_catalog --test e2e_nostr_interop --test e2e_thread_roots --test e2e_project -- --ignored --nocapture
+          cargo test -p buzz-test-client --test e2e_persona --test e2e_team_catalog --test e2e_nostr_interop --test e2e_thread_roots --test e2e_project --test e2e_acceptance -- --ignored --nocapture
           cargo test -p buzz-test-client --test e2e_relay invite -- --ignored --nocapture
           cargo test -p buzz-test-client --test e2e_relay nip43_membership_snapshots_are_rejected -- --ignored --nocapture
+          cargo test -p buzz-test-client --test e2e_relay nip_ia_archive_snapshots_are_rejected -- --ignored --nocapture
           cargo test -p buzz-test-client --test e2e_relay nip29_departure_wire -- --ignored --nocapture
           cargo test -p buzz-test-client --test e2e_relay nip29_batch_put_user_wire -- --ignored --nocapture
           cargo test -p buzz-test-client --test e2e_relay nip29_announce_channel_wire -- --ignored --nocapture
@@ -710,7 +754,7 @@ jobs:
     name: Results
     if: ${{ always() }}
     needs: [desktop-e2e-relay, postgres-tests, desktop-e2e-integration, backend-integration, relay-e2e]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     outputs:

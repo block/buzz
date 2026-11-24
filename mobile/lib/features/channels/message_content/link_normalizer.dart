@@ -17,14 +17,88 @@ final _backtickRunPattern = RegExp(r'`+');
 final _codeRunPattern = RegExp(r'`+|~{3,}');
 
 /// Converts supported Buzz and HTTP(S) autolinks and bare links into Markdown
-/// links while leaving inline and fenced code untouched. Punctuation peeling
-/// is limited to Buzz URLs so existing HTTP(S) destinations stay unchanged.
-String normalizeBareLinks(String content) =>
-    mapMarkdownProse(content, _normalizeLinkSegment);
+/// links while leaving inline and fenced code and link reference definitions
+/// untouched. Punctuation peeling is limited to Buzz URLs so existing HTTP(S)
+/// destinations stay unchanged.
+String normalizeBareLinks(String content) {
+  final definitions = _DefinitionScan(content);
+  return _mapMarkdownProseAt(content, definitions.normalize);
+}
+
+// A link reference definition line, `[label]: destination`. Wrapping its
+// destination in a Markdown link would make the wrapped text the destination.
+// A definition cannot interrupt a paragraph, so it counts only at a block
+// start: the first line, after a blank line, or after another definition.
+final _definitionLine = RegExp(
+  r'^ {0,3}\[[^\]\n]+\]:[ \t]*\S.*$',
+  multiLine: true,
+);
+
+/// Finds the link reference definitions in one message, in order, in time
+/// linear in its length. A definition cannot interrupt a paragraph, so a
+/// definition line counts only when the line above it is absent, blank, or
+/// itself a counted definition. That last answer is remembered, so a run of
+/// definitions is never rescanned.
+class _DefinitionScan {
+  _DefinitionScan(this.content);
+
+  final String content;
+  // Content offset where the last definition-shaped source line ended, and
+  // whether it counted.
+  int _lastEnd = -2;
+  bool _lastCounted = false;
+
+  /// [prose], the run of [content] at [start], with bare links normalized
+  /// outside the definitions that count.
+  String normalize(String prose, int start) {
+    final result = StringBuffer();
+    var offset = 0;
+    for (final line in _definitionLine.allMatches(prose)) {
+      if (!_counts(start + line.start)) continue;
+      result
+        ..write(_normalizeLinkSegment(prose.substring(offset, line.start)))
+        ..write(line[0]);
+      offset = line.end;
+    }
+    result.write(_normalizeLinkSegment(prose.substring(offset)));
+    return result.toString();
+  }
+
+  bool _counts(int index) {
+    // A candidate mid-line, after code, is not a definition and leaves the
+    // memo for the line it sits on alone.
+    if (index > 0 && content[index - 1] != '\n') return false;
+    final bool counted;
+    if (index == _lastEnd + 1) {
+      counted = _lastCounted;
+    } else {
+      final previousEnd = index - 1;
+      final previousStart = previousEnd <= 0
+          ? 0
+          : content.lastIndexOf('\n', previousEnd - 1) + 1;
+      counted =
+          index == 0 ||
+          content.substring(previousStart, previousEnd).trim().isEmpty;
+    }
+    // The source line's end: a definition's title may hold code, which ends
+    // this prose run early.
+    final lineEnd = content.indexOf('\n', index);
+    _lastEnd = lineEnd < 0 ? content.length : lineEnd;
+    _lastCounted = counted;
+    return counted;
+  }
+}
 
 /// Applies [transform] to each run of [content] outside inline and fenced
 /// code, leaving code untouched. Fences may use backticks or tildes.
-String mapMarkdownProse(String content, String Function(String) transform) {
+String mapMarkdownProse(String content, String Function(String) transform) =>
+    _mapMarkdownProseAt(content, (prose, _) => transform(prose));
+
+/// [mapMarkdownProse], with each run's start offset in [content].
+String _mapMarkdownProseAt(
+  String content,
+  String Function(String prose, int start) transform,
+) {
   final buffer = StringBuffer();
   var offset = 0;
   var proseStart = 0;
@@ -33,6 +107,11 @@ String mapMarkdownProse(String content, String Function(String) transform) {
   var fenceDelimiterLength = 0;
   var fenceChar = '';
   var fenceQuoteDepth = 0;
+  // The paragraph end found for the last unpaired opener, reused while later
+  // openers at the same quote depth sit before it, so a long paragraph is
+  // walked once rather than once per opener.
+  var paragraphEnd = -1;
+  var paragraphDepth = -1;
 
   while (offset < content.length) {
     // A fence opened inside a quote ends with that quote, closed or not.
@@ -74,7 +153,9 @@ String mapMarkdownProse(String content, String Function(String) transform) {
     } else if (runChar == '~') {
       // Tildes only fence code; shorter runs are strikethrough.
       if (_isOpeningFence(content, run.start, runLength)) {
-        buffer.write(transform(content.substring(proseStart, run.start)));
+        buffer.write(
+          transform(content.substring(proseStart, run.start), proseStart),
+        );
         codeStart = run.start;
         fenceDelimiterLength = runLength;
         fenceChar = runChar;
@@ -86,12 +167,26 @@ String mapMarkdownProse(String content, String Function(String) transform) {
       continue;
     } else if (_hasInlineCloserOnLine(content, run.end, runLength) ||
         (!_isOpeningFence(content, run.start, runLength) &&
-            _hasInlineCloser(content, run.end, runLength))) {
-      buffer.write(transform(content.substring(proseStart, run.start)));
+            _hasInlineCloser(content, run.end, runLength, () {
+              final depth = _lineQuoteDepth(
+                content,
+                content.lastIndexOf('\n', run.start) + 1,
+              );
+              if (run.end >= paragraphEnd || depth != paragraphDepth) {
+                paragraphEnd = _paragraphEnd(content, run.end, depth);
+                paragraphDepth = depth;
+              }
+              return paragraphEnd;
+            }))) {
+      buffer.write(
+        transform(content.substring(proseStart, run.start), proseStart),
+      );
       codeStart = run.start;
       inlineDelimiterLength = runLength;
     } else if (_isOpeningFence(content, run.start, runLength)) {
-      buffer.write(transform(content.substring(proseStart, run.start)));
+      buffer.write(
+        transform(content.substring(proseStart, run.start), proseStart),
+      );
       codeStart = run.start;
       fenceDelimiterLength = runLength;
       fenceChar = runChar;
@@ -104,7 +199,7 @@ String mapMarkdownProse(String content, String Function(String) transform) {
   if (inlineDelimiterLength > 0 || fenceDelimiterLength > 0) {
     buffer.write(content.substring(codeStart));
   } else {
-    buffer.write(transform(content.substring(proseStart)));
+    buffer.write(transform(content.substring(proseStart), proseStart));
   }
   return buffer.toString();
 }
@@ -186,15 +281,47 @@ bool _hasInlineCloserOnLine(String content, int start, int delimiterLength) {
   return false;
 }
 
-bool _hasInlineCloser(String content, int start, int delimiterLength) {
+/// Whether a closing run follows before the paragraph ends: a code span
+/// cannot continue past a blank line, a list item, heading, fence or a deeper
+/// block quote. [paragraphEnd] is asked only when no closer is near.
+bool _hasInlineCloser(
+  String content,
+  int start,
+  int delimiterLength,
+  int Function() paragraphEnd,
+) {
+  int? end;
   for (final run in _backtickRunPattern.allMatches(content, start)) {
+    if (run.start >= (end ??= paragraphEnd())) return false;
     if (run.end - run.start == delimiterLength) return true;
   }
   return false;
 }
 
-// Numeric entities shield literal label punctuation from gpt_markdown's
-// bracket-blind image/link matchers and its earlier \[...\] math pass.
+/// Where the paragraph containing [start] ends, for a line at quote depth
+/// [openerDepth]. A block quote can interrupt a paragraph, so a line opening a
+/// deeper quote ends it. Equal or shallower markers continue it, as in a
+/// multi-line code span inside a quote.
+int _paragraphEnd(String content, int start, int openerDepth) {
+  var newline = content.indexOf('\n', start);
+  while (newline >= 0) {
+    if (_lineQuoteDepth(content, newline + 1) > openerDepth ||
+        _paragraphBreak.matchAsPrefix(content, newline + 1) != null) {
+      return newline;
+    }
+    newline = content.indexOf('\n', newline + 1);
+  }
+  return content.length;
+}
+
+final _paragraphBreak = RegExp(
+  r'[ \t]*(?:$|[-*+][ \t]|\d{1,9}[.)][ \t]|#{1,6}(?:[ \t]|$)|`{3}|~{3})',
+  multiLine: true,
+);
+
+// Numeric entities keep literal label punctuation out of the line-based
+// attachment, gallery and preview matchers, which do not balance brackets.
+// The renderer decodes them.
 String _normalizeMarkdownLabel(String label) => label.replaceAllMapped(
   RegExp(r'\\([\\\[\]])|[\[\]]'),
   (match) => '&#${(match[1] ?? match[0]!).codeUnitAt(0)};',
@@ -349,10 +476,11 @@ String _normalizeProseLinks(String segment) {
   return normalized;
 }
 
-// An autolink keeps its backslashes literally. Encode them so none is read
-// as an escape of the synthesized `]` or `)`.
+// An autolink keeps its backslashes literally. Escape them so none is read
+// as an escape of the synthesized `]` or `)`. A numeric entity would show
+// verbatim: gpt_markdown leaves a URL-shaped label undecoded.
 String _autolink(String url) =>
-    '[${url.replaceAll(r'\', '&#92;')}](${url.replaceAll(r'\', '%5C')})';
+    '[${url.replaceAll(r'\', r'\\')}](${url.replaceAll(r'\', '%5C')})';
 
 String _normalizeBareLink(String segment, Match match) {
   final matched = match[0]!;
