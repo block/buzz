@@ -325,9 +325,7 @@ class _SectionChatsPage extends HookConsumerWidget {
                                                 context,
                                               ),
                                           placeholderColor:
-                                              navigationSecondaryForeground(
-                                                context,
-                                              ),
+                                              context.colors.onSurfaceVariant,
                                           surfaceColor: navigationSearchSurface(
                                             context,
                                           ),

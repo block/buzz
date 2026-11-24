@@ -351,7 +351,19 @@ void main() {
     await tester.pumpAndSettle();
     final editable = tester.state<EditableTextState>(find.byType(EditableText));
     final idleTop = tester.getTopLeft(find.byType(TextField)).dy;
-    await tester.tap(find.byType(TextField));
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      final capsule = tester.getRect(
+        find
+            .ancestor(
+              of: find.byType(TextField),
+              matching: find.byType(DecoratedBox),
+            )
+            .first,
+      );
+      await tester.tapAt(capsule.topCenter + const Offset(0, 2));
+    } else {
+      await tester.tap(find.byType(TextField));
+    }
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 80));
     final movingTop = tester.getTopLeft(find.byType(TextField)).dy;
