@@ -4892,6 +4892,20 @@ pub(crate) mod postgres_tests {
         assert_eq!(retired, (false, false, false));
     }
 
+    // Keep the old guard objects for these compatibility tests, but include the
+    // additive columns required by current serving writers.
+    async fn expand_media_lease_fixture(pool: &PgPool) {
+        let mut tx = pool.begin().await.expect("begin additive lease schema");
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/0106_media_upload_lease_attribution.sql"
+        )))
+        .execute(&mut *tx)
+        .await
+        .expect("add current upload lease fields");
+        tx.commit().await.expect("commit additive lease schema");
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn migration_schema_fence_objects_are_optional_for_serving_and_deletion() {
@@ -4908,6 +4922,7 @@ pub(crate) mod postgres_tests {
         crate::migration::run_migrations_through(&db.pool, 89)
             .await
             .expect("migrate with fence objects present");
+        expand_media_lease_fixture(&db.pool).await;
         let store = db.deletion_store();
         let community = db
             .ensure_configured_community("optional-fences.example")
@@ -5053,6 +5068,7 @@ DROP FUNCTION community_deletion_lock_key(UUID);
         crate::migration::run_migrations_through(&db.pool, 86)
             .await
             .expect("phase-one schema");
+        expand_media_lease_fixture(&db.pool).await;
         let community = db
             .ensure_configured_community("optional-guards.example")
             .await
