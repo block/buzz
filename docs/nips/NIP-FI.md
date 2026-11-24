@@ -577,7 +577,7 @@ stopped before step 2 committed, the retry is a first delivery.  If it stopped
 after, the durable work stands, and the process that receives the retry ends in
 step 4: it holds the deny entry, closes the matching connections and propagates
 both as for any accepted command.  That retry does not move `recorded_at` and
-cancels nothing.  A deferred action accepted since the first delivery, from an
+cancels nothing.  A deferred action accepted since that commit, from an
 admission the record does not fence, is cancelled only by a new signed command.
 
 The relay MUST bound the disconnect records and the completed commands it keeps
