@@ -49,7 +49,10 @@ class ActionMessageBody extends StatelessWidget {
       double.infinity,
     );
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: Grid.half),
+      padding: EdgeInsets.only(
+        top: showTimestamp ? Grid.half : Grid.quarter,
+        bottom: Grid.half,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
