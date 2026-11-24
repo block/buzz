@@ -48,14 +48,17 @@ class CommunityStorage {
 
   /// Load all communities this build shows. On first call, migrates legacy
   /// single-community credentials if present.
-  Future<List<Community>> loadAll() async => (await _loadStored())
-      .where((c) => _visible(c) && !c.accountSyncRemoved)
-      .toList();
+  Future<List<Community>> loadAll() async =>
+      (await loadPersistedMemberships()).where(_visible).toList();
+
+  /// Saved memberships, including ones hidden by this build.
+  Future<List<Community>> loadPersistedMemberships() async =>
+      (await _loadStored()).where((c) => !c.accountSyncRemoved).toList();
 
   /// Whether the community [id] is still saved on this device, whether or not
   /// this build shows it.
   Future<bool> keeps(String id) async =>
-      (await _loadStored()).any((c) => c.id == id && !c.accountSyncRemoved);
+      (await loadPersistedMemberships()).any((c) => c.id == id);
 
   /// Device records and credential-free removal intents for account sync.
   Future<List<Community>> loadForAccountSync() async =>

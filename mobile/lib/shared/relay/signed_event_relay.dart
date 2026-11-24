@@ -41,6 +41,28 @@ class SignedEventRelay {
     FutureOr<void> Function(NostrEvent event)? onSigned,
     Future<bool> Function()? mayPublish,
   }) async {
+    final nostrEvent = sign(
+      kind: kind,
+      content: content,
+      tags: tags,
+      createdAt: createdAt,
+    );
+    // Durable callers must finish journaling the exact signed bytes before
+    // the relay can accept an event whose acknowledgement might be lost.
+    await onSigned?.call(nostrEvent);
+    return _session.publish(nostrEvent, mayPublish: mayPublish);
+  }
+}
+
+/// Signs events that must be saved before a separate publish.
+extension QueuedEventSigning on SignedEventRelay {
+  /// Signs an event without initiating a publish.
+  NostrEvent sign({
+    required int kind,
+    required String content,
+    required List<List<String>> tags,
+    int? createdAt,
+  }) {
     final nsec = _nsec;
     if (nsec == null || nsec.isEmpty) {
       throw Exception('Cannot submit event: no signing key available');
@@ -59,11 +81,7 @@ class SignedEventRelay {
       createdAt: createdAt,
     );
 
-    final nostrEvent = NostrEvent.fromJson(event.toMap());
-    // Durable callers must finish journaling the exact signed bytes before
-    // the relay can accept an event whose acknowledgement might be lost.
-    await onSigned?.call(nostrEvent);
-    return _session.publish(nostrEvent, mayPublish: mayPublish);
+    return NostrEvent.fromJson(event.toMap());
   }
 }
 

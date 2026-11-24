@@ -3,6 +3,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../community/community_provider.dart';
+import '../outbox/text_outbox_store.dart';
 import '../widgets/confirmation_dialog.dart';
 import '../widgets/feedback_snackbar.dart';
 import 'builderlab_account.dart';
@@ -75,11 +76,26 @@ class AccountCommunitySyncStatus extends HookConsumerWidget {
                   if (subject == null || account.account?.subject != subject) {
                     return;
                   }
+                  final retiring = local
+                      .where(
+                        (community) =>
+                            knownCommunityAddress(community.relayUrl) == url,
+                      )
+                      .toList();
+                  final outbox = ref.read(textOutboxStoreProvider);
+                  final warnings = await Future.wait([
+                    for (final community in retiring)
+                      outbox.shouldWarnBeforeRemoval(communityId: community.id),
+                  ]);
+                  if (!context.mounted || account.account?.subject != subject) {
+                    return;
+                  }
                   final confirmed = await showDestructiveConfirmation(
                     context: context,
                     title: 'Finish removal?',
                     message:
-                        'Remove the remaining identities for ${Uri.parse(url).authority} from this device and sync account removal?',
+                        'Remove the remaining identities for ${Uri.parse(url).authority} from this device and sync account removal?'
+                        '${warnings.contains(true) ? ' Any saved unsent messages here will be discarded.' : ''}',
                     confirmLabel: 'Remove',
                   );
                   if (!confirmed ||
@@ -88,9 +104,7 @@ class AccountCommunitySyncStatus extends HookConsumerWidget {
                     return;
                   }
                   try {
-                    for (final item in local.where(
-                      (c) => knownCommunityAddress(c.relayUrl) == url,
-                    )) {
+                    for (final item in retiring) {
                       await ref
                           .read(communityListProvider.notifier)
                           .removeCommunity(

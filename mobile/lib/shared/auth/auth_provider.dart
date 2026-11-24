@@ -1,3 +1,6 @@
+import 'dart:developer' as developer;
+
+import '../outbox/text_outbox_store.dart';
 import '../hosted/known_community_sync_provider.dart';
 import '../hosted/hosted_relay_auth.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -5,6 +8,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../community/community.dart';
 import '../community/community_provider.dart';
+import '../community/community_storage.dart';
 import '../diagnostics/diagnostic_reporter.dart';
 import '../hosted/community_entry_requirements.dart';
 import '../relay/relay_provider.dart' show pubkeyFromNsec;
@@ -29,6 +33,7 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     final storage = ref.read(communityStorageProvider);
     final communities = await storage.loadAll();
     if (communities.isEmpty) {
+      await _removeOutboxOrphans(storage);
       await syncCommunitySnapshot(ref, communities);
       return const AuthState(status: AuthStatus.unauthenticated);
     }
@@ -42,6 +47,7 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
       await storage.saveActiveId(active.id);
 
       if (_hasValidNsec(active.nsec)) {
+        await _removeOutboxOrphans(storage);
         await syncCommunitySnapshot(ref, communities);
         return AuthState(status: AuthStatus.authenticated, community: active);
       }
@@ -54,8 +60,34 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     }
 
     await storage.clearActiveId();
+    await _removeOutboxOrphans(storage);
     await syncCommunitySnapshot(ref, communities);
     return const AuthState(status: AuthStatus.unauthenticated);
+  }
+
+  Future<void> _removeOutboxOrphans(CommunityStorage storage) async {
+    try {
+      final outbox = ref.read(textOutboxStoreProvider);
+      final retained = <TextOutboxScope>{};
+      final unknownSigners = <String>{};
+      for (final membership in await storage.loadPersistedMemberships()) {
+        final pubkey = pubkeyFromNsec(membership.nsec) ?? membership.pubkey;
+        if (pubkey == null || pubkey.isEmpty) {
+          unknownSigners.add(membership.id);
+        } else {
+          retained.add((
+            communityId: membership.id,
+            pubkey: pubkey.toLowerCase(),
+          ));
+        }
+      }
+      await outbox.removeOrphans(retained, unknownSigners: unknownSigners);
+    } catch (error) {
+      developer.log(
+        'Message outbox could not be reconciled: ${error.runtimeType}',
+        name: 'buzz.auth',
+      );
+    }
   }
 
   /// Authenticate with a community. Saves it and switches to it.

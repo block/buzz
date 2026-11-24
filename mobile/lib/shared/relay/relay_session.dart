@@ -458,41 +458,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
     Future<bool> Function()? mayPublish,
-  }) async {
-    final generation = _connectionGeneration;
-    if (_rateLimitGate.isActive) await _rateLimitGate.wait();
-    bool connected() => _isActiveConnection(generation) && _socketConnected;
-    if (!connected()) throw RelayNotConnectedError();
-    if ((mayPublish != null && !await mayPublish()) || !connected()) {
-      throw StateError('Event no longer wanted');
-    }
-
-    final completer = Completer<NostrEvent>();
-    final timer = Timer(timeout, () {
-      final pending = _pendingEvents.remove(event.id);
-      if (pending != null && !pending.completer.isCompleted) {
-        _noteNetwork(
-          NetworkEndpoint.relayPublish,
-          failure: NetworkFailure.timeout,
-          since: pending.startedAt,
-        );
-        pending.completer.completeError(
-          RelayAckTimeoutError(
-            'Event ${event.id} not acknowledged within $timeout',
-          ),
-        );
-      }
-    });
-
-    _pendingEvents[event.id] = _PendingEvent(
-      completer: completer,
-      timeout: timer,
-      startedAt: _now(),
-    );
-
-    _socket?.send(['EVENT', event.toJson()]);
-    return completer.future;
-  }
+  }) => _publish(event, timeout: timeout, mayPublish: mayPublish);
 
   void sendRaw(List<dynamic> payload) {
     _socket?.send(payload);
@@ -845,6 +811,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     // History subscriptions accumulate immediately.
     final historySub = _historySubscriptions[subId];
     if (historySub != null) {
+      _confirmQueuedEcho(event);
       historySub.events.add(event);
       return;
     }
@@ -853,6 +820,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     // but not that a retry replay is complete; only EOSE is that boundary.
     final liveSub = _liveSubscriptions[subId];
     if (liveSub != null) {
+      _confirmQueuedEcho(event);
       _resetClosedRetry(liveSub);
       // Track last seen timestamp for reconnect replay.
       if (liveSub.lastSeenCreatedAt == null ||

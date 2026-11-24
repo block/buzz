@@ -1,3 +1,4 @@
+import 'features/channels/text_outbox_provider.dart';
 import 'features/activity/activity_provider.dart';
 import 'features/channels/bestie_conversation.dart';
 import 'features/channels/default_agent_launcher.dart';
@@ -397,6 +398,9 @@ class App extends HookConsumerWidget {
     if (ageSignalState != AgeSignalState.restricted &&
         authState.value?.status == AuthStatus.authenticated) {
       ref.watch(relaySessionProvider);
+      if (ref.watch(textOutboxSupportedProvider)) {
+        ref.listen(textOutboxRunnerProvider, (_, _) {});
+      }
       // Listen, not watch: these publish often, and an App rebuild rebuilds
       // every route, including an open chat.
       ref.listen(observerRelayProvider, (_, _) {});

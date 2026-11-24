@@ -98,14 +98,21 @@ Future<void> _confirmRemoveCommunity(
               knownCommunityAddress(item.relayUrl) ==
                   knownCommunityAddress(community.relayUrl),
         );
+    final warn = await ref
+        .read(textOutboxStoreProvider)
+        .shouldWarnBeforeRemoval(communityId: community.id);
+    if (!context.mounted) return;
+    final message = subject == null
+        ? 'Are you sure you want to remove “${community.pickerName}”? You can pair with it again later.'
+        : retainsDestination
+        ? 'Remove this identity for “${community.pickerName}” from this device? Another saved identity still uses this community, so it stays in your account list.'
+        : 'Remove “${community.pickerName}” from this device and request removal from your Builder Lab community list? Account removal syncs when connected.';
     final confirmed = await showDestructiveConfirmation(
       context: context,
       title: 'Remove community?',
-      message: subject == null
-          ? 'Are you sure you want to remove “${community.pickerName}”? You can pair with it again later.'
-          : retainsDestination
-          ? 'Remove this identity for “${community.pickerName}” from this device? Another saved identity still uses this community, so it stays in your account list.'
-          : 'Remove “${community.pickerName}” from this device and request removal from your Builder Lab community list? Account removal syncs when connected.',
+      message:
+          message +
+          (warn ? ' Any saved unsent messages here will be discarded.' : ''),
       confirmLabel: 'Remove',
     );
     if (!confirmed ||

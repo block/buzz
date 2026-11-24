@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:uuid/uuid.dart';
 
 import '../mentions/bound_mentions.dart';
 import '../mentions/mention_bindings.dart';
@@ -110,6 +111,9 @@ class ComposeDraft {
   /// Recording whose transcript is included in this same persisted snapshot.
   final String? transcriptionId;
 
+  /// A stable send ID claimed before handing this draft to the outbox.
+  final String? outboxId;
+
   final int updatedAt; // unix seconds
 
   const ComposeDraft({
@@ -121,6 +125,7 @@ class ComposeDraft {
     this.mentions = const [],
     this.mentionsInvalid = false,
     this.transcriptionId,
+    this.outboxId,
   });
 
   Map<String, dynamic> toJson() => {
@@ -134,6 +139,7 @@ class ComposeDraft {
         : [for (final mention in mentions) mention.toJson()],
     if (transcriptionId != null) 'transcription_id': transcriptionId,
     'updated_at': updatedAt,
+    if (outboxId != null) 'outbox_id': outboxId,
   };
 
   static ComposeDraft? fromJson(Object? raw) {
@@ -158,6 +164,7 @@ class ComposeDraft {
           ? raw['transcription_id'] as String
           : null,
       updatedAt: updatedAt is int ? updatedAt : 0,
+      outboxId: raw['outbox_id'] is String ? raw['outbox_id'] as String : null,
     );
   }
 
@@ -382,6 +389,43 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
       state.where((d) => d.key == key).firstOrNull;
 
   String? textFor(String key) => draftFor(key)?.text;
+
+  /// Gives the current draft a durable send ID that survives a restart.
+  Future<String?> claimOutboxSend(String key, String text) async {
+    final draft = draftFor(key);
+    if (draft == null || draft.text != text) return null;
+    final id = draft.outboxId ?? const Uuid().v4();
+    if (draft.outboxId == null) {
+      _persist([
+        for (final item in state)
+          if (item.key == key)
+            ComposeDraft(
+              key: item.key,
+              channelId: item.channelId,
+              threadHeadId: item.threadHeadId,
+              text: item.text,
+              mentions: item.mentions,
+              mentionsInvalid: item.mentionsInvalid,
+              transcriptionId: item.transcriptionId,
+              updatedAt: item.updatedAt,
+              outboxId: id,
+            )
+          else
+            item,
+      ]);
+    }
+    return await ensurePersisted() && draftFor(key)?.outboxId == id ? id : null;
+  }
+
+  /// Clears a draft only if the outbox already holds that exact snapshot.
+  Future<bool> releaseOutboxDraft(String key, String id) async {
+    final scope = _prefsKey;
+    if (draftFor(key)?.outboxId == id) remove(key);
+    final saved = await _pendingWrite;
+    if (_prefsKey != scope) return false;
+    // A previous composer clear may have failed at the platform boundary.
+    return saved || await ensurePersisted();
+  }
 
   /// Confirms the draft snapshot reached storage before dropping its source.
   Future<bool> ensurePersisted() async {

@@ -5,6 +5,7 @@ class ComposeBar extends HookConsumerWidget {
   final String channelName;
   final String? hintText;
   final ComposeBarOnSend onSend;
+  final ComposeBarOnQueueText? onQueueText;
 
   /// Temporarily freezes composition while its destination is being changed.
   final bool interactionLocked;
@@ -47,6 +48,7 @@ class ComposeBar extends HookConsumerWidget {
     this.onFocusRequested,
     this.prefillScopeMessages,
     required this.onSend,
+    this.onQueueText,
   });
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -141,7 +143,7 @@ class ComposeBar extends HookConsumerWidget {
       () => controller.mentions,
     );
     final prefillText = useRef<String?>(null);
-    _useComposeDraftLifecycle(
+    final claimOutboxSend = _useComposeDraftLifecycle(
       context: context,
       voiceNote: voiceNoteRef,
       prefillText: prefillText,
@@ -525,15 +527,7 @@ class ComposeBar extends HookConsumerWidget {
       final draft = controller.text;
       final mentions = controller.mentions;
       final code = controller._styledCodeRanges(draft);
-      final submittedOrigin = ComposerSendOrigin.capture(sendSurfaceKey);
-      Future<void> sendWithOrigin(
-        String content,
-        List<String> mentionPubkeys, {
-        List<List<String>> mediaTags = const [],
-      }) => ComposerSendOrigin.run(
-        submittedOrigin,
-        () => onSend(content, mentionPubkeys, mediaTags: mediaTags),
-      );
+      final sendWithOrigin = _captureSendOrigin(sendSurfaceKey, onSend);
       final submittedDraftRevision = draftRevision.value;
       final cleanupStoredDraft = ref
           .read(composeDraftsProvider.notifier)
@@ -668,6 +662,7 @@ class ComposeBar extends HookConsumerWidget {
             controller: controller,
             draftRevision: draftRevision,
             submittedDraftRevision: submittedDraftRevision,
+            submittedText: draft,
             cleanupStoredDraft: cleanupStoredDraft,
             focusNode: focusNode,
             clearComposer: clearComposer,
@@ -679,6 +674,9 @@ class ComposeBar extends HookConsumerWidget {
             ),
             outgoing: outgoing,
             onSend: sendWithOrigin,
+            onQueueText: onQueueText,
+            shouldQueueText: () => _shouldQueueText(ref, draftKey, draft),
+            claimOutboxSend: claimOutboxSend,
             messenger: messenger,
           );
           return;

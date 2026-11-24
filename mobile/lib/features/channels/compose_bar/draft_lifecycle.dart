@@ -1,10 +1,30 @@
 part of '../compose_bar.dart';
 
+ComposeBarOnSend _captureSendOrigin(GlobalKey key, ComposeBarOnSend send) {
+  final origin = ComposerSendOrigin.capture(key);
+  return (content, mentionPubkeys, {mediaTags = const []}) =>
+      ComposerSendOrigin.run(
+        origin,
+        () => send(content, mentionPubkeys, mediaTags: mediaTags),
+      );
+}
+
+bool _shouldQueueText(WidgetRef ref, String draftKey, String text) {
+  if (ref.read(relaySessionProvider).status != SessionStatus.connected) {
+    return true;
+  }
+  // A restart can show an offline draft before the outbox releases its claim.
+  // Resubmitting it must reuse the saved ID even if the relay is now connected.
+  final draft = ref.read(composeDraftsProvider.notifier).draftFor(draftKey);
+  return draft?.outboxId != null && draft?.text == text;
+}
+
 Future<void> _sendTextOnlyDraft({
   required BuildContext context,
   required _MarkdownEditingController controller,
   required ObjectRef<int> draftRevision,
   required int submittedDraftRevision,
+  required String submittedText,
   required VoidCallback cleanupStoredDraft,
   required FocusNode focusNode,
   required VoidCallback clearComposer,
@@ -12,12 +32,19 @@ Future<void> _sendTextOnlyDraft({
   required _ComposeDraftPayload payload,
   required _OutgoingMentions outgoing,
   required ComposeBarOnSend onSend,
+  required ComposeBarOnQueueText? onQueueText,
+  required bool Function() shouldQueueText,
+  required Future<String?> Function(String text) claimOutboxSend,
   required ScaffoldMessengerState? messenger,
 }) async {
   TextEditingValue? clearedDraftText;
   List<_ComposerMention>? clearedDraftMentions;
   var clearedDraftMentionsInvalid = false;
   int? clearedDraftRevision;
+
+  bool draftChanged() =>
+      draftRevision.value != submittedDraftRevision ||
+      (onQueueText != null && controller.text != submittedText);
 
   void restoreClearedDraft() {
     final text = clearedDraftText;
@@ -39,19 +66,39 @@ Future<void> _sendTextOnlyDraft({
 
   try {
     await addMentionedNonMembers();
+    if (onQueueText != null && !context.mounted) return;
     // A draft that changed while adding ran is not the draft the user sent.
     // Keep it and send nothing.
-    if (context.mounted && draftRevision.value != submittedDraftRevision) {
+    if (context.mounted && draftChanged()) {
       messenger?.showFeedbackSnackBar(
         const SnackBar(content: Text('Not sent. Message changed.')),
         kind: ToastKind.error,
       );
       return;
     }
-    void clearSubmittedDraft() {
-      if (!context.mounted || draftRevision.value != submittedDraftRevision) {
+    final tags = [...payload.mediaTags, ...outgoing.referenceTags];
+    if (onQueueText != null && shouldQueueText()) {
+      final id = await claimOutboxSend(submittedText);
+      if (!context.mounted || draftChanged()) {
         return;
       }
+      if (id == null) {
+        throw StateError('Couldn’t save the draft to this device.');
+      }
+      await onQueueText(
+        id,
+        submittedText,
+        payload.content,
+        outgoing.pubkeys,
+        tags,
+      );
+      if (context.mounted && !draftChanged()) {
+        clearComposer();
+      }
+      return;
+    }
+    void clearSubmittedDraft() {
+      if (!context.mounted || draftChanged()) return;
       clearedDraftText = controller.value;
       clearedDraftMentions = controller.bindings;
       clearedDraftMentionsInvalid = controller.mentionsInvalid;
@@ -59,13 +106,29 @@ Future<void> _sendTextOnlyDraft({
       clearedDraftRevision = draftRevision.value;
     }
 
+    Future<void> queueAfterConnectionLoss(NostrEvent? possiblySent) =>
+        onQueueText!(
+          const Uuid().v4(),
+          submittedText,
+          payload.content,
+          outgoing.pubkeys,
+          tags,
+          possiblySent: possiblySent,
+        );
+
     await ComposerSendOrigin.uponLocalInsertion(
       clearSubmittedDraft,
-      () => onSend(
-        payload.content,
-        outgoing.pubkeys,
-        mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
-      ),
+      () async {
+        try {
+          await onSend(payload.content, outgoing.pubkeys, mediaTags: tags);
+        } on RelayNotConnectedError {
+          // A destination can also lose connectivity during send preparation,
+          // before it reaches the signed publish and its own fallback.
+          if (onQueueText == null) rethrow;
+          await queueAfterConnectionLoss(null);
+        }
+      },
+      connectionFallback: onQueueText == null ? null : queueAfterConnectionLoss,
     );
     // A send destination without an optimistic timeline clears on success.
     if (clearedDraftRevision == null) {
@@ -86,7 +149,7 @@ Future<void> _sendTextOnlyDraft({
   }
 }
 
-void _useComposeDraftLifecycle({
+Future<String?> Function(String) _useComposeDraftLifecycle({
   required BuildContext context,
   required ObjectRef<_ComposerVoiceNote> voiceNote,
   required WidgetRef ref,
@@ -112,6 +175,9 @@ void _useComposeDraftLifecycle({
   final owner = useMemoized(Object.new, [draftKey, draftIdentity]);
   final currentOwner = useRef(owner)..value = owner;
   final lastDraftIdentity = useRef<String?>(null);
+  final claimOutboxSend = useRef<Future<String?> Function(String)>(
+    (_) async => null,
+  );
   useEffect(() {
     final identity = '$draftIdentity\u0000$draftKey';
     final shouldHydrate = lastDraftIdentity.value != identity;
@@ -151,16 +217,17 @@ void _useComposeDraftLifecycle({
     var lastPersistedText = controller.text;
     var lastBindings = [for (final m in controller.bindings) m.toDraft()];
     var lastInvalid = controller.mentionsInvalid;
-    void persistDraft() {
+    void persistDraft({bool claiming = false}) {
       if (!identical(currentOwner.value, owner)) return;
       final text = controller.text;
-      // An untouched agent prefill is not a draft.
-      if (text == prefillText.value) return;
+      // A suggestion becomes a draft when edited or explicitly queued.
+      if (!claiming && text == prefillText.value) return;
       // The editor already carried the bindings across the edit, so text and
       // bindings are one snapshot here.
       final bindings = [for (final m in controller.bindings) m.toDraft()];
       final invalid = controller.mentionsInvalid;
-      if (text == lastPersistedText &&
+      if (!claiming &&
+          text == lastPersistedText &&
           invalid == lastInvalid &&
           listEquals(bindings, lastBindings)) {
         return;
@@ -168,7 +235,7 @@ void _useComposeDraftLifecycle({
       lastBindings = bindings;
       lastInvalid = invalid;
       lastPersistedText = text;
-      draftRevision.value += 1;
+      if (!claiming) draftRevision.value += 1;
       ref
           .read(composeDraftsProvider.notifier)
           .save(
@@ -182,6 +249,15 @@ void _useComposeDraftLifecycle({
           );
     }
 
+    claimOutboxSend.value = (text) async {
+      if (!identical(currentOwner.value, owner) || controller.text != text) {
+        return null;
+      }
+      if (text == prefillText.value) persistDraft(claiming: true);
+      return ref
+          .read(composeDraftsProvider.notifier)
+          .claimOutboxSend(draftKey, text);
+    };
     controller.addListener(persistDraft);
     // Another writer, such as a failed quick send from Siri, can save this
     // draft while the composer is open; show its text rather than overwrite
@@ -190,8 +266,20 @@ void _useComposeDraftLifecycle({
       composeDraftsProvider.select(
         (drafts) => drafts.where((d) => d.key == draftKey).firstOrNull,
       ),
-      (_, saved) {
+      (previous, saved) {
         if (!identical(currentOwner.value, owner)) return;
+        // A queued send owns this exact draft after a restart. The runner can
+        // remove it while the editor is already showing the recovered text.
+        if (saved == null &&
+            previous?.outboxId != null &&
+            controller.text == previous?.text) {
+          lastPersistedText = '';
+          lastBindings = const [];
+          lastInvalid = false;
+          draftRevision.value += 1;
+          controller.replaceDraft(TextEditingValue.empty, mentions: const []);
+          return;
+        }
         if (saved == null ||
             ((saved.text == lastPersistedText ||
                     saved.text == controller.text) &&
@@ -227,6 +315,7 @@ void _useComposeDraftLifecycle({
     voiceNote: voiceNote,
     uploadError: uploadError,
   );
+  return (text) => claimOutboxSend.value(text);
 }
 
 // Report aggregate work independently of rebuilds, including sub-frame failures.

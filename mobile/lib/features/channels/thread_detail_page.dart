@@ -1,3 +1,5 @@
+import 'text_outbox_provider.dart';
+import 'text_outbox_rows.dart';
 import 'message_author_visibility.dart';
 
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
@@ -82,6 +84,7 @@ part 'thread_detail_page/tail_alignment.dart';
 part 'thread_detail_page/thread_message.dart';
 part 'thread_detail_page/avatar.dart';
 part 'thread_detail_page/app_bar.dart';
+part 'thread_detail_page/composer.dart';
 
 const _landingHighlightDuration = Duration(seconds: 3);
 const _landingHighlightDelay = Duration(milliseconds: 50);
@@ -143,7 +146,6 @@ class ThreadDetailPage extends HookConsumerWidget {
       final session = ref.read(relaySessionProvider.notifier);
       return session.registerVisibleChannel(channelId);
     }, [channelId]);
-    final sendMessage = ref.read(sendMessageProvider);
     final localSendAnimations = ref.watch(
       localMessageSendAnimationProvider(channelId),
     );
@@ -1125,6 +1127,12 @@ class ThreadDetailPage extends HookConsumerWidget {
                   ),
                 ),
               ),
+              if (!canReply || accessDenied)
+                _ThreadOutbox(
+                  channelId: channelId,
+                  parentId: threadHead.id,
+                  visibleEventIds: replies.map((reply) => reply.id),
+                ),
             ],
           ),
           if (canReply && !accessDenied)
@@ -1137,36 +1145,20 @@ class ThreadDetailPage extends HookConsumerWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      ComposeBar(
+                      _ThreadComposer(
                         channelId: channelId,
+                        channel: channel,
+                        head: threadHead,
+                        effectiveRootId: effectiveRootId,
                         focusNode: composerFocusNode,
                         onFocusRestorerChanged: (restoreFocus) =>
                             restoreComposerFocus.value = restoreFocus,
-                        hintText: 'Reply in thread\u2026',
-                        threadHeadId: threadHead.id,
-                        rootId: effectiveRootId,
-                        prefillScopeMessages: channel?.isDm ?? true
-                            ? null
-                            : [
-                                if (!liveDeletionHidesHead && liveHead != null)
-                                  liveHead,
-                                ...replies,
-                              ],
                         onFocusRequested: followThreadTailFromComposer,
-                        onSend:
-                            (
-                              content,
-                              mentionPubkeys, {
-                              mediaTags = const <List<String>>[],
-                            }) => sendMessage.call(
-                              channelId: channelId,
-                              content: content,
-                              mentionPubkeys: mentionPubkeys,
-                              channel: channel,
-                              parentEventId: threadHead.id,
-                              rootEventId: effectiveRootId,
-                              mediaTags: mediaTags,
-                            ),
+                        prefillScopeMessages: [
+                          if (!liveDeletionHidesHead && liveHead != null)
+                            liveHead,
+                          ...replies,
+                        ],
                       ),
                     ],
                   ),
