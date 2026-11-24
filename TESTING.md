@@ -268,10 +268,9 @@ owner restrictions, noncanonical issuers, community/deletion fences, and the
 marker-clearing lock-serialization tests in the full PostgreSQL lane.
 
 Legacy owner attribution uses the agent's currently recorded
-`agent_owner_pubkey`; deleting an owner user row out of band clears that link
-through its foreign key, so a later repair cannot recover the former
-relationship. Reconcile before any external user-row cleanup that could erase
-this provenance.
+`agent_owner_pubkey`; a later repair cannot recover a former relationship
+once cleanup clears that link. Reconcile before any external user-row or
+owner-link cleanup that could erase this provenance.
 
 ### 4. Smoke test the CLI against the relay
 

@@ -472,18 +472,9 @@ async fn assert_repaired_and_fenced(pool: &PgPool, cases: &[LegacyInviteCase]) {
         assert_eq!(revoked, case.revoke, "tenant {}", case.community);
         assert_eq!(legacy, !case.active, "legacy marker for {}", case.community);
     }
-    let unfenced_error =
-        sqlx::query("UPDATE relay_invites SET use_count = use_count + 1 WHERE community_id = $1")
-            .bind(cases[1].community)
-            .execute(pool)
-            .await
-            .unwrap_err();
-    assert!(
-        unfenced_error
-            .to_string()
-            .contains("community write fenced"),
-        "{unfenced_error}"
-    );
+    // The database fence was retired in 0090. Maintenance must enforce the
+    // deletion boundary itself; the unchanged markers/revocations above and
+    // the batch journey's fenced-row snapshot verify the script's own guard.
     let invitation_triggers: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal \
          AND tgname IN ('invite_restriction_lock', 'invite_issuer_revocation', \
@@ -494,8 +485,8 @@ async fn assert_repaired_and_fenced(pool: &PgPool, cases: &[LegacyInviteCase]) {
     .await
     .unwrap();
     assert_eq!(
-        invitation_triggers, 1,
-        "only the community deletion fence remains"
+        invitation_triggers, 0,
+        "invitation triggers and the community deletion fence are retired"
     );
 }
 
