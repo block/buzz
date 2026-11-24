@@ -1,8 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import 'channel.dart';
+
+/// Text for a failed channel create, for both creation sheets.
+///
+/// Failures after the EVENT went out say "Not confirmed": the relay may have
+/// created the channel.
+String createChannelErrorMessage(Object error) => switch (error) {
+  RelayNotConnectedError() => 'Couldn’t create channel. No connection.',
+  RelayAckTimeoutError() => "Not confirmed. The relay didn't respond.",
+  RelayAckLostError() => 'Not confirmed. Connection lost.',
+  _ => relayErrorMessage(error),
+};
 
 /// Presents an entirely UIKit channel form; relay writes stay in Dart.
 class IosCreateChannelSheet {
@@ -36,7 +48,7 @@ class IosCreateChannelSheet {
         );
         return {'success': true};
       } catch (error) {
-        return {'error': error.toString()};
+        return {'error': createChannelErrorMessage(error)};
       }
     });
     try {

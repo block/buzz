@@ -2,11 +2,33 @@ import 'dart:async';
 
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/ios_create_channel_sheet.dart';
+import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('a failed channel create is described without internal error text', () {
+    final cases = <Object, String>{
+      const RelayEventRejectedException(
+        'invalid: an open channel named "general" already exists',
+      ): 'An open channel named "general" already exists',
+      RelayNotConnectedError(): 'Couldn’t create channel. No connection.',
+      RelayAckTimeoutError(
+        'Event 371d27aa not acknowledged within 0:00:08.000000',
+        const Duration(seconds: 8),
+      ): "Not confirmed. The relay didn't respond.",
+      RelayAckLostError(StateError('socket closed')):
+          'Not confirmed. Connection lost.',
+      // Anything else keeps its own text, minus the relay's machine prefix.
+      Exception('restricted: not allowed to create channels'):
+          'Not allowed to create channels',
+    };
+    for (final MapEntry(key: error, value: message) in cases.entries) {
+      expect(createChannelErrorMessage(error), message, reason: '$error');
+    }
+  });
+
   testWidgets(
     'native channel creation retains its session through failure and retry',
     (tester) async {
@@ -54,7 +76,11 @@ void main() {
                             'ttl': ttlSeconds,
                           });
                           if (payloads.length == 1) {
-                            throw StateError('Try again');
+                            // What relay_session throws for a taken name.
+                            throw const RelayEventRejectedException(
+                              'invalid: an open channel named "Test" '
+                              'already exists',
+                            );
                           }
                           return created;
                         },
@@ -89,10 +115,9 @@ void main() {
         return response.future;
       }
 
-      expect(
-        await create('open', null),
-        containsPair('error', contains('Try again')),
-      );
+      expect(await create('open', null), {
+        'error': 'An open channel named "Test" already exists',
+      });
       expect(result, isNull);
       expect(configuration!['session'], session);
       expect(await create('private', 3600), {'success': true});
