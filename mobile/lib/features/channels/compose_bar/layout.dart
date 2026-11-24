@@ -146,24 +146,17 @@ class _ComposeBarLayout extends HookWidget {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                Expanded(child: _buildTextField(context)),
+                Expanded(
+                  child: defaultTargetPlatform == TargetPlatform.android
+                      ? _withHeightMotion(_buildTextField(context))
+                      : _buildTextField(context),
+                ),
                 _IosEmptyComposerActions(onEmoji: onEmoji, enabled: !readOnly),
               ],
             ),
           )
         else if (isExpanded)
-          resizeDuration == Duration.zero
-              ? KeyedSubtree(
-                  key: const ValueKey('composer-text-height-motion'),
-                  child: _buildTextField(context),
-                )
-              : AnimatedSize(
-                  key: const ValueKey('composer-text-height-motion'),
-                  alignment: Alignment.topCenter,
-                  duration: resizeDuration,
-                  curve: Curves.easeOutCubic,
-                  child: _buildTextField(context),
-                )
+          _withHeightMotion(_buildTextField(context))
         else
           ConstrainedBox(
             constraints: BoxConstraints(minHeight: keyboardToolbar ? 28 : 0),
@@ -335,8 +328,7 @@ class _ComposeBarLayout extends HookWidget {
         final progress = expansionAnimation.value.clamp(0.0, 1.0).toDouble();
         final usesCapsule =
             !hasDraft && attachments.isEmpty && uploadError == null;
-        final composerRadius =
-            defaultTargetPlatform == TargetPlatform.iOS && usesCapsule
+        final composerRadius = _usesMobileComposer && usesCapsule
             ? Radii.full
             : Radii.dialog + Grid.quarter * (1 - progress);
         final radius = BorderRadius.lerp(
@@ -344,8 +336,7 @@ class _ComposeBarLayout extends HookWidget {
           BorderRadius.circular(Radii.full),
           Curves.easeInOutCubic.transform(recordingTransition.value),
         )!;
-        final usesIosConcentricSurface =
-            defaultTargetPlatform == TargetPlatform.iOS;
+        final usesIosConcentricSurface = _usesMobileComposer;
         final voiceNoteInsetProgress = hasVoiceNoteAttachment
             ? 1.0
             : recordingTransition.value;
@@ -359,7 +350,7 @@ class _ComposeBarLayout extends HookWidget {
           child: Container(
             key: const ValueKey('composer-surface'),
             decoration: BoxDecoration(
-              color: usesIosConcentricSurface
+              color: defaultTargetPlatform == TargetPlatform.iOS
                   ? Colors.transparent
                   : context.colors.surfaceContainerHighest,
               borderRadius: radius,
@@ -420,6 +411,19 @@ class _ComposeBarLayout extends HookWidget {
       },
     );
   }
+
+  Widget _withHeightMotion(Widget field) => resizeDuration == Duration.zero
+      ? KeyedSubtree(
+          key: const ValueKey('composer-text-height-motion'),
+          child: field,
+        )
+      : AnimatedSize(
+          key: const ValueKey('composer-text-height-motion'),
+          alignment: Alignment.topCenter,
+          duration: resizeDuration,
+          curve: Curves.easeOutCubic,
+          child: field,
+        );
 
   Widget _buildTextField(BuildContext context) {
     return Actions(

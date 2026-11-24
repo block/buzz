@@ -134,6 +134,7 @@ class MainActivity : FlutterFragmentActivity() {
     private var pushRegistrationPlugin: PushRegistrationPlugin? = null
     private var pushKeystorePlugin: PushKeystorePlugin? = null
     private var deviceTranscriptionPlugin: DeviceTranscriptionPlugin? = null
+    private var composerTranscriptionPlugin: ComposerTranscriptionPlugin? = null
     private var huddleMediaPlugin: HuddleMediaPlugin? = null
     private var hapticsPlugin: HapticsPlugin? = null
     private var hostedHpkePlugin: HostedHpkePlugin? = null
@@ -145,6 +146,7 @@ class MainActivity : FlutterFragmentActivity() {
         super.configureFlutterEngine(flutterEngine)
         conversationPopup = ConversationPopup(this, flutterEngine.dartExecutor.binaryMessenger)
         deviceTranscriptionPlugin = DeviceTranscriptionPlugin(flutterEngine.dartExecutor.binaryMessenger)
+        composerTranscriptionPlugin = ComposerTranscriptionPlugin(this, flutterEngine.dartExecutor.binaryMessenger)
         pushRegistrationPlugin = PushRegistrationPlugin(this, flutterEngine.dartExecutor.binaryMessenger)
         pushKeystorePlugin = PushKeystorePlugin(flutterEngine.dartExecutor.binaryMessenger)
         flutterEngine.platformViewsController.registry.registerViewFactory(
@@ -250,7 +252,9 @@ class MainActivity : FlutterFragmentActivity() {
     override fun onDestroy() {
         conversationPopup?.dispose()
         deviceTranscriptionPlugin?.dispose()
+        composerTranscriptionPlugin?.dispose()
         deviceTranscriptionPlugin = null
+        composerTranscriptionPlugin = null
         browserAuthPlugin?.dispose()
         browserAuthPlugin = null
         pushNotificationOpenPlugin?.dispose()

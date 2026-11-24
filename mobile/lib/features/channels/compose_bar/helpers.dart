@@ -259,6 +259,7 @@ void _chooseComposerAttachment(
   ValueNotifier<_InputTool?>? inputTool,
   String? errorMessage,
 }) {
+  if (defaultTargetPlatform == TargetPlatform.android) inputTool?.value = null;
   attachmentSurface.value = _AttachmentSurface.closed;
   unawaited(() async {
     try {

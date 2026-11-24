@@ -27,12 +27,16 @@ class _ComposerInputTray extends HookWidget {
     final portal = useMemoized(OverlayPortalController.new);
     useListenable(focusNode);
     useListenable(tool);
+    useListenable(attachmentSurface);
+    final attachmentOpen =
+        tool.value == _InputTool.attachments &&
+        (defaultTargetPlatform != TargetPlatform.android ||
+            attachmentSurface.value != _AttachmentSurface.closed);
     final visible =
         enabled &&
-        (tool.value == _InputTool.attachments || suggestions != null) &&
+        (attachmentOpen || suggestions != null) &&
         (ModalRoute.of(context)?.isCurrent ?? true);
-    final expanded =
-        tool.value == _InputTool.attachments || suggestions != null;
+    final expanded = attachmentOpen || suggestions != null;
     void type() {
       tool.value = null;
       attachmentSurface.value = _AttachmentSurface.closed;
@@ -61,7 +65,6 @@ class _ComposerInputTray extends HookWidget {
           Offset.zero,
         );
         final availableWidth = math.max(0.0, info.childSize.width);
-        final attachmentOpen = tool.value == _InputTool.attachments;
         final content = attachmentOpen
             ? attachments(attachmentSurface.value)
             : suggestions?.key == const ValueKey('no-suggestions')
@@ -74,6 +77,9 @@ class _ComposerInputTray extends HookWidget {
           availableWidth,
           attachmentOpen && attachmentSurface.value == _AttachmentSurface.menu
               ? 280.0
+              : attachmentOpen &&
+                    defaultTargetPlatform == TargetPlatform.android
+              ? availableWidth
               : expanded
               ? 440.0
               : 560.0,
@@ -157,6 +163,16 @@ class _ComposerToolStripGlass extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      return Material(
+        key: const ValueKey('attachment-surface-popover'),
+        color: context.colors.surfaceContainerHighest,
+        elevation: 4,
+        borderRadius: BorderRadius.circular(24),
+        clipBehavior: Clip.antiAlias,
+        child: child,
+      );
+    }
     final channel = useRef<MethodChannel?>(null);
     final measured = useRef<Size?>(null);
     final reducedMotion = MediaQuery.disableAnimationsOf(context);

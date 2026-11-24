@@ -41,7 +41,12 @@ class _IosComposerControls extends StatelessWidget {
             icon: showSend
                 ? IosGlassNavigationIcon.send
                 : IosGlassNavigationIcon.microphone,
-            semanticLabel: showSend ? 'Send' : 'Dictate',
+            semanticLabel:
+                defaultTargetPlatform == TargetPlatform.android && isSending
+                ? 'Sending message'
+                : showSend
+                ? 'Send'
+                : 'Dictate',
             width: 40,
             height: 40,
             controlSize: 40,

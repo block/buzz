@@ -131,8 +131,17 @@ class IosGlassNavigationButton extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
-    assert(defaultTargetPlatform == TargetPlatform.iOS);
-    final native = HookBuilder(builder: _buildNative);
+    final native = defaultTargetPlatform == TargetPlatform.android
+        ? IconButton(
+            padding: EdgeInsets.zero,
+            onPressed: onPressed,
+            icon: Semantics(
+              label: semanticLabel,
+              selected: isSelected,
+              child: ExcludeSemantics(child: _buildFallback(context)),
+            ),
+          )
+        : HookBuilder(builder: _buildNative);
     return Tooltip(
       message: semanticLabel,
       excludeFromSemantics: true,
@@ -298,7 +307,9 @@ class IosGlassNavigationButton extends HookWidget {
                 decoration: BoxDecoration(
                   color:
                       backgroundColor ??
-                      context.colors.surface.withValues(alpha: 0.72),
+                      (defaultTargetPlatform == TargetPlatform.android
+                          ? context.colors.surfaceContainerHighest
+                          : context.colors.surface.withValues(alpha: 0.72)),
                   shape: BoxShape.circle,
                   border: Border.all(
                     color: context.colors.inverseSurface.withValues(

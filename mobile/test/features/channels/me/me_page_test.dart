@@ -609,6 +609,7 @@ void main() {
       await tester.tap(find.text('Message Choose an agent'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'Hello');
+      await tester.pump();
       await tester.tap(find.byIcon(BuzzIcons.arrowUp).hitTestable().last);
       await tester.pumpAndSettle();
       expect(

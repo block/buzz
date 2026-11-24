@@ -401,15 +401,6 @@ void mentionChipTests() {
       await tester.pump();
     }
 
-    Future<void> format(IconData icon) async {
-      await tester.tap(find.byIcon(BuzzIcons.aLargeSmall));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(icon));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Close formatting'));
-      await tester.pumpAndSettle();
-    }
-
     Future<void> send() async {
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
@@ -420,7 +411,7 @@ void mentionChipTests() {
     await pickRow('@quinn', row('Quinn'));
     expect(controller.text, '@Quinn ');
     await select(0, 6);
-    await format(BuzzIcons.bold);
+    await _formatAndroidSelection(tester, 'Bold');
     expect(controller.text, '**@Quinn** ');
     expect(personChip, findsOneWidget);
     expect(saved(), [
@@ -444,14 +435,11 @@ void mentionChipTests() {
     // The other wrapping formats keep a member's chip bound too: the saved
     // binding moves inside the delimiters. Italic writes `_`, which closes
     // emphasis after the chip rather than continuing its name.
-    for (final (icon, mark) in [
-      (BuzzIcons.italic, '_'),
-      (BuzzIcons.strikethrough, '~~'),
-    ]) {
+    for (final (style, mark) in [('Italic', '_'), ('Strikethrough', '~~')]) {
       sent = null;
       await pickRow('@bo', row('Bob'));
       await select(0, 4);
-      await format(icon);
+      await _formatAndroidSelection(tester, style);
       expect(controller.text, '$mark@Bob$mark ');
       expect(saved(), [
         ComposeDraftMention(
@@ -469,15 +457,15 @@ void mentionChipTests() {
     // goes dormant, so the composer shows what the send does: nobody is
     // notified, and a person outside the channel raises no prompt. The
     // saved draft keeps the dormant binding.
-    for (final (icon, open, close) in [
-      (BuzzIcons.code, '`', '`'),
-      (BuzzIcons.squareCode, '```\n', '\n```'),
+    for (final (style, open, close) in [
+      ('Code', '`', '`'),
+      ('Code block', '```\n', '\n```'),
     ]) {
       sent = sentTags = null;
       await pickRow('@bo', row('Bob'));
       expect(personChip, findsOneWidget);
       await select(0, 4);
-      await format(icon);
+      await _formatAndroidSelection(tester, style);
       expect(controller.text, '$open@Bob$close ');
       expect(personChip, findsNothing, reason: open);
       expect(saved(), [
@@ -495,7 +483,7 @@ void mentionChipTests() {
       sent = sentTags = null;
       await pickRow('@quinn', row('Quinn'));
       await select(0, 6);
-      await format(icon);
+      await _formatAndroidSelection(tester, style);
       expect(controller.text, '$open@Quinn$close ');
       expect(personChip, findsNothing, reason: open);
       await send();
@@ -559,7 +547,7 @@ void mentionChipTests() {
         ComposeDraftMention(start: 0, end: end, pubkey: key),
       ], reason: name);
       await select(0, end);
-      await format(BuzzIcons.code);
+      await _formatAndroidSelection(tester, 'Code');
       expect(controller.text, '`@$name` ', reason: name);
       expect(personChip, findsNothing, reason: name);
       expect(saved(), [
@@ -702,7 +690,7 @@ void mentionChipTests() {
     expect(sentText, '@Bob ($bob)-bot');
     expect(sent, [bob]);
 
-    // An emoji and the at-sign button go in at the caret end of a
+    // An emoji goes in at the caret end of a
     // selection; the selected chip is not replaced.
     sent = null;
     await pickRow('@bo', row('Bob'));
@@ -718,8 +706,7 @@ void mentionChipTests() {
     await send();
     expect(sent, [bob]);
     await pickRow('@bo', row('Bob'));
-    await select(5, 0);
-    await tester.tap(find.byIcon(BuzzIcons.atSign));
+    await tester.enterText(field, '@Bob @');
     await tester.pumpAndSettle();
     expect(controller.text, '@Bob @');
     expect(personChip, findsOneWidget);

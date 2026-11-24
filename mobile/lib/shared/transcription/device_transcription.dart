@@ -16,7 +16,10 @@ final deviceTranscriptionProvider = Provider<DeviceTranscription Function()>(
 );
 
 class NativeDeviceTranscription implements DeviceTranscription {
-  static const _channel = MethodChannel('buzz/transcription');
+  NativeDeviceTranscription([
+    this._channel = const MethodChannel('buzz/transcription'),
+  ]);
+  final MethodChannel _channel;
   final _id = const Uuid().v4();
   @override
   Future<bool> isAvailable() async =>

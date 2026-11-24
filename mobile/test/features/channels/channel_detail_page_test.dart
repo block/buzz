@@ -8043,12 +8043,7 @@ void main() {
         }
         await tester.pumpAndSettle();
 
-        expect(
-          tester.getSize(composerDock).height,
-          defaultTargetPlatform == TargetPlatform.iOS
-              ? equals(compactDockHeight)
-              : greaterThan(compactDockHeight),
-        );
+        expect(tester.getSize(composerDock).height, equals(compactDockHeight));
         expect(
           tester.getBottomLeft(latestMessage).dy,
           closeTo(tester.getTopLeft(composerDock).dy, 1),
@@ -16515,13 +16510,13 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byType(TextField), findsNothing);
-      expect(find.byIcon(BuzzIcons.arrowUp).hitTestable(), findsOneWidget);
+      expect(find.byTooltip('Dictate').hitTestable(), findsOneWidget);
 
       await tester.tap(find.text('Message'));
       await tester.pumpAndSettle();
 
       expect(find.byType(TextField), findsOneWidget);
-      expect(find.byIcon(BuzzIcons.arrowUp).hitTestable(), findsOneWidget);
+      expect(find.byTooltip('Dictate').hitTestable(), findsOneWidget);
     });
 
     testWidgets('shows hint text', (tester) async {
@@ -19493,6 +19488,8 @@ void main() {
       await tester.tap(find.text('Reply in thread…').hitTestable());
       await tester.pumpAndSettle();
 
+      await tester.enterText(find.byType(TextField), 'one\ntwo\nthree');
+      await tester.pumpAndSettle();
       expect(tester.getSize(dock).height, greaterThan(compactDockHeight));
       expect(latestReply, findsOneWidget);
       expect(

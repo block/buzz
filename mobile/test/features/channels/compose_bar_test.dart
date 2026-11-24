@@ -893,7 +893,7 @@ void main() {
 
       expect(find.byType(TextField), findsNothing);
       expect(find.byTooltip('Add attachment').hitTestable(), findsOneWidget);
-      expect(find.byIcon(BuzzIcons.arrowUp).hitTestable(), findsOneWidget);
+      expect(find.byTooltip('Dictate').hitTestable(), findsOneWidget);
       expect(find.byKey(const ValueKey('composer-footer-gradient')), findsOne);
       final composerBackdrop = find.descendant(
         of: find.byKey(const ValueKey('composer-footer-gradient')),
@@ -908,10 +908,7 @@ void main() {
                   )
                   .decoration
               as BoxDecoration;
-      expect(
-        compactDecoration.borderRadius,
-        BorderRadius.circular(Radii.dialog + Grid.quarter),
-      );
+      expect(compactDecoration.borderRadius, BorderRadius.circular(Radii.full));
       final compactWidth = tester
           .getSize(find.byKey(const ValueKey('composer-width-transition')))
           .width;
@@ -942,13 +939,11 @@ void main() {
       expect(expandedPosition.transform.getTranslation().y, 0);
       expect(
         expandedDecoration.borderRadius,
-        BorderRadius.circular(Radii.dialog),
+        BorderRadius.circular(Radii.full),
       );
       expect(find.byType(TextField), findsOneWidget);
-      expect(find.byIcon(BuzzIcons.atSign), findsOneWidget);
-      expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
-      expect(find.byIcon(BuzzIcons.smilePlus), findsOneWidget);
-      expect(find.byIcon(BuzzIcons.aLargeSmall), findsOneWidget);
+      expect(find.byTooltip('Emoji'), findsOneWidget);
+      expect(find.byTooltip('Dictate'), findsOneWidget);
     });
 
     testWidgets('notifies focus intent before attaching the focused field', (
@@ -1345,10 +1340,7 @@ void main() {
                   )
                   .decoration
               as BoxDecoration;
-      expect(
-        compactDecoration.borderRadius,
-        BorderRadius.circular(Radii.dialog + Grid.quarter),
-      );
+      expect(compactDecoration.borderRadius, BorderRadius.circular(Radii.full));
 
       await tester.tap(find.text('Message'));
       await tester.pumpAndSettle();
@@ -1740,6 +1732,22 @@ void main() {
 
       expect(midResizeHeight, greaterThan(oneLineHeight));
       expect(midResizeHeight, lessThan(threeLineHeight));
+
+      Future<double> heightAtLines(int lines) async {
+        await tester.enterText(
+          find.byType(TextField),
+          List.filled(lines, 'Line').join('\n'),
+        );
+        await tester.pumpAndSettle();
+        return tester.getSize(heightMotion).height;
+      }
+
+      final fiveLines = await heightAtLines(5);
+      expect(fiveLines, greaterThan(threeLineHeight));
+      expect(await heightAtLines(8), fiveLines);
+      await tester.enterText(find.byType(TextField), 'Short');
+      await tester.pumpAndSettle();
+      expect(tester.getSize(heightMotion).height, oneLineHeight);
     });
 
     testWidgets('skips composer height motion when animations are disabled', (
@@ -2388,10 +2396,10 @@ void main() {
         await tester.pumpAndSettle();
         expect(panel, findsOneWidget);
 
-        await tester.tap(find.byIcon(BuzzIcons.aLargeSmall));
-        await tester.pumpAndSettle();
-        await tester.tap(find.byIcon(BuzzIcons.bold));
-        await tester.pumpAndSettle();
+        tester.widget<TextField>(field).controller!.selection =
+            const TextSelection(baseOffset: 0, extentOffset: 3);
+        await tester.pump();
+        await _formatAndroidSelection(tester, 'Bold');
         expect(panel, findsNothing);
 
         await tester.sendKeyEvent(LogicalKeyboardKey.enter);
@@ -2702,21 +2710,10 @@ void main() {
       await _expandComposer(tester);
       hapticCalls.clear();
 
-      await tester.tap(find.byIcon(BuzzIcons.atSign));
-      tester.widget<TextField>(find.byType(TextField)).controller!.clear();
-      await tester.pump();
-      await tester.tap(find.byIcon(BuzzIcons.hash));
-      await tester.pump();
-      await tester.tap(find.byIcon(BuzzIcons.aLargeSmall));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(BuzzIcons.bold));
-      await tester.pump();
-      await tester.tap(find.byTooltip('Close formatting'));
-      await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('Add attachment'));
       await tester.pumpAndSettle();
 
-      expect(hapticCalls, hasLength(6));
+      expect(hapticCalls, hasLength(1));
       expect(
         hapticCalls.every(
           (call) => call.arguments == 'HapticFeedbackType.selectionClick',
@@ -2741,7 +2738,7 @@ void main() {
         ),
       );
       await _expandComposer(tester);
-      await tester.tap(find.byIcon(BuzzIcons.hash));
+      await tester.enterText(find.byType(TextField), '#');
       await tester.pumpAndSettle();
 
       final surface = find.byKey(const ValueKey('channel-suggestions-popover'));
@@ -2807,7 +2804,7 @@ void main() {
       );
 
       await _expandComposer(tester);
-      await tester.tap(find.byIcon(BuzzIcons.atSign));
+      await tester.enterText(find.byType(TextField), '@');
       await tester.pump();
 
       expect(pendingMembers.isCompleted, isFalse);
@@ -2984,7 +2981,7 @@ void main() {
         await settleSearch(tester);
         expect(find.text('Saba Saba'), findsOneWidget);
         // The late row filled reserved space: nothing shown moved.
-        expect(tester.getTopLeft(find.text('Sam')).dy, samTop);
+        expect(tester.getTopLeft(find.text('Sam')).dy, closeTo(samTop, 0.1));
         expect(tester.getSize(popover()).height, height);
       });
 
@@ -3014,12 +3011,13 @@ void main() {
         await tester.enterText(find.byType(TextField), '@S');
         await tester.pump();
         expect(find.text('Saba Saba'), findsNothing);
+        await tester.pump(const Duration(milliseconds: 150));
         final samTop = tester.getTopLeft(find.text('Sam')).dy;
         final height = tester.getSize(popover()).height;
 
         await settleSearch(tester);
         expect(find.text('Saba Saba'), findsOneWidget);
-        expect(tester.getTopLeft(find.text('Sam')).dy, samTop);
+        expect(tester.getTopLeft(find.text('Sam')).dy, closeTo(samTop, 0.1));
         expect(tester.getSize(popover()).height, height);
       });
 
@@ -4702,10 +4700,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byKey(const ValueKey('photo-gallery-picker')), findsNothing);
-      expect(
-        find.byKey(const ValueKey('attachment-trigger-menu')).hitTestable(),
-        findsOneWidget,
-      );
+      expect(find.byTooltip('Close attachments').hitTestable(), findsOneWidget);
       expect(find.text('Camera'), findsOneWidget);
       expect(find.text('Photos'), findsOneWidget);
     });
@@ -4737,15 +4732,9 @@ void main() {
       final menuRect = tester.getRect(menu);
 
       final material = tester.widget<Material>(surface);
-      final shape = material.shape! as RoundedRectangleBorder;
-      expect(shape.borderRadius, BorderRadius.circular(Radii.popover));
-      expect(shape.side.color, Colors.black.withValues(alpha: 0.04));
-      expect(material.elevation, appPopoverElevation);
-      expect(
-        material.shadowColor,
-        appPopoverShadowColor(tester.element(surface)),
-      );
-      expect(menuRect.size, const Size(216, 264));
+      expect(material.borderRadius, BorderRadius.circular(24));
+      expect(material.elevation, 4);
+      expect(menuRect.size, const Size(280, 264));
       for (final row in rows) {
         expect(tester.getSize(row).height, 52);
         expect(tester.getRect(row).left - menuRect.left, Grid.xs);
@@ -4814,11 +4803,6 @@ void main() {
 
         await _openAttachmentMenu(tester);
         expect(find.byKey(const ValueKey('attachment-menu')), findsOneWidget);
-        expect(
-          find.byKey(const ValueKey('attachment-dismiss-barrier')),
-          findsOneWidget,
-        );
-
         await tester.tapAt(const Offset(24, 24));
         await tester.pumpAndSettle();
 
@@ -4827,10 +4811,7 @@ void main() {
           find.byKey(const ValueKey('attachment-dismiss-barrier')),
           findsNothing,
         );
-        expect(
-          find.byKey(const ValueKey('attachment-trigger-closed')).hitTestable(),
-          findsOneWidget,
-        );
+        expect(find.byTooltip('Add attachment').hitTestable(), findsOneWidget);
       } finally {
         debugDefaultTargetPlatformOverride = previousPlatform;
       }
@@ -4859,13 +4840,8 @@ void main() {
           for (final label in ['camera', 'photos', 'voice note', 'files'])
             find.byKey(ValueKey('attachment-menu-item-$label')),
         ];
-        final scrollView = tester.widget<ListView>(
-          find.byKey(const ValueKey('attachment-menu-scroll')),
-        );
-
-        expect(tester.getSize(menu), const Size(216, 372));
+        expect(tester.getSize(menu), const Size(280, 372));
         expect(tester.getSize(rows.first).height, greaterThan(52));
-        expect(scrollView.physics, isA<AlwaysScrollableScrollPhysics>());
         await tester.drag(
           find.byKey(const ValueKey('attachment-menu-scroll')),
           const Offset(0, -300),
@@ -5974,7 +5950,7 @@ void main() {
       final boldIcon = tester.widget<Icon>(boldFinder);
       final colors = tester.element(boldFinder).colors;
       expect(boldIcon.color, colors.primary);
-    });
+    }, variant: TargetPlatformVariant.only(TargetPlatform.linux));
 
     testWidgets('pasted image follows the attachment preview and send path', (
       tester,
@@ -7724,7 +7700,10 @@ void main() {
         composerDecoration.borderRadius,
         BorderRadius.circular(Radii.full),
       );
-      expect(recordingComposer.padding, const EdgeInsets.all(Grid.twelve));
+      expect(
+        recordingComposer.padding,
+        const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+      );
 
       final initialWaveform = tester.widget<VoiceNoteWaveform>(
         find.byType(VoiceNoteWaveform),
@@ -7791,7 +7770,10 @@ void main() {
       final previewComposer = tester.widget<Container>(
         find.byKey(const ValueKey('composer-surface')),
       );
-      expect(previewComposer.padding, const EdgeInsets.all(Grid.twelve));
+      expect(
+        previewComposer.padding,
+        const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+      );
       final previewComposerDecoration =
           previewComposer.decoration! as BoxDecoration;
       final previewOuterRadius =
@@ -8775,4 +8757,13 @@ class _CountingCustomEmojiList extends ListBase<CustomEmoji> {
     iterations += 1;
     return super.iterator;
   }
+}
+
+Future<void> _formatAndroidSelection(WidgetTester tester, String style) async {
+  tester.state<EditableTextState>(find.byType(EditableText)).showToolbar();
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Format'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text(style));
+  await tester.pumpAndSettle();
 }

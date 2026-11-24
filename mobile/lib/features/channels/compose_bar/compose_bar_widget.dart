@@ -881,14 +881,6 @@ class ComposeBar extends HookConsumerWidget {
     void toggleAttachments() =>
         _toggleComposerAttachments(attachmentSurface, inputTool);
 
-    void openCamera() {
-      if (defaultTargetPlatform == TargetPlatform.iOS) {
-        inputTool.value = _InputTool.attachments;
-      }
-      focusNode.unfocus();
-      attachmentSurface.value = _AttachmentSurface.camera;
-    }
-
     final motionDuration = _composerMotionDuration(
       reducedMotion,
       attachmentSurface.value,
@@ -993,17 +985,21 @@ class ComposeBar extends HookConsumerWidget {
             onChannelSelect: insertChannel,
             onMentionSelect: insertMention,
           );
+    void openMedia(_AttachmentSurface surface) => _openComposerMedia(
+      surface,
+      inputTool,
+      isComposerExpanded,
+      focusNode,
+      attachmentSurface,
+    );
     _AttachmentSurfacePanel buildOverlayPanel(_AttachmentSurface surface) {
       return _composerAttachmentPanel(
         preparePhotos: prepare,
         surface: surface,
         suggestionPanel: suggestionPanel,
         onBack: () => attachmentSurface.value = _AttachmentSurface.menu,
-        onCamera: openCamera,
-        onPhotos: () {
-          focusNode.unfocus();
-          attachmentSurface.value = _AttachmentSurface.photos;
-        },
+        onCamera: () => openMedia(_AttachmentSurface.camera),
+        onPhotos: () => openMedia(_AttachmentSurface.photos),
         onVideo: () => chooseAttachment(() {
           final service = ref.read(mediaUploadServiceProvider);
           return pickThenQueue(
@@ -1089,6 +1085,10 @@ class ComposeBar extends HookConsumerWidget {
     return _ComposerDockFrame(
       expansionAnimation: composerExpansionController,
       hasDraft: draftText.isNotEmpty,
+      mediaPickerOpen:
+          (defaultTargetPlatform == TargetPlatform.android &&
+          (attachmentSurface.value == _AttachmentSurface.camera ||
+              attachmentSurface.value == _AttachmentSurface.photos)),
       forceFullWidth: _voiceNoteFullWidth(voiceNote, attachments.value),
       child: _ComposerInputTray(
         tool: inputTool,
@@ -1096,13 +1096,12 @@ class ComposeBar extends HookConsumerWidget {
         attachmentSurface: attachmentSurface,
         focusNode: focusNode,
         enabled:
-            defaultTargetPlatform == TargetPlatform.iOS &&
-            !interactionLocked &&
-            !voiceNote.isRecording,
+            _usesMobileComposer && !interactionLocked && !voiceNote.isRecording,
         suggestions:
-            (chooserOpen && emojiSuggestions.isNotEmpty) ||
-                mentionChooser.query != null ||
-                channelQuery.value != null
+            defaultTargetPlatform == TargetPlatform.iOS &&
+                ((chooserOpen && emojiSuggestions.isNotEmpty) ||
+                    mentionChooser.query != null ||
+                    channelQuery.value != null)
             ? suggestionPanel
             : null,
         onDismissSuggestions: () {
@@ -1142,7 +1141,7 @@ class ComposeBar extends HookConsumerWidget {
                 child: _ComposeBarLayout(
                   surfaceKey: sendSurfaceKey,
                   voiceNoteRecorder: voiceNote.recorder,
-                  keyboardToolbar: defaultTargetPlatform == TargetPlatform.iOS,
+                  keyboardToolbar: _usesMobileComposer,
                   onTextTap: () {
                     inputTool.value = null;
                     attachmentSurface.value = _AttachmentSurface.closed;

@@ -7,39 +7,42 @@ class _ComposerDockFrame extends HookWidget {
   final Animation<double> expansionAnimation;
   final bool forceFullWidth;
   final bool hasDraft;
+  final bool mediaPickerOpen;
   final Widget child;
 
   const _ComposerDockFrame({
     required this.expansionAnimation,
     required this.forceFullWidth,
     required this.hasDraft,
+    required this.mediaPickerOpen,
     required this.child,
   });
 
   @override
   Widget build(BuildContext context) {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
-    final recordingTransition = useAnimationController(
+    final expandDock = forceFullWidth || mediaPickerOpen;
+    final widthTransition = useAnimationController(
       duration: reducedMotion
           ? Duration.zero
           : const Duration(milliseconds: 200),
       reverseDuration: reducedMotion
           ? Duration.zero
           : const Duration(milliseconds: 140),
-      initialValue: forceFullWidth ? 1 : 0,
+      initialValue: expandDock ? 1 : 0,
     );
     useEffect(() {
-      if (forceFullWidth) {
-        recordingTransition.value = math.max(
-          recordingTransition.value,
+      if (expandDock) {
+        widthTransition.value = math.max(
+          widthTransition.value,
           expansionAnimation.value.clamp(0.0, 1.0),
         );
-        recordingTransition.forward();
+        widthTransition.forward();
       } else {
-        recordingTransition.reverse();
+        widthTransition.reverse();
       }
       return null;
-    }, [forceFullWidth, reducedMotion]);
+    }, [expandDock, reducedMotion]);
     const compactVerticalOffset = Grid.twelve + Grid.quarter;
     final visibleBottomGutter = math.max(
       Grid.twelve,
@@ -98,13 +101,13 @@ class _ComposerDockFrame extends HookWidget {
             child: AnimatedBuilder(
               animation: Listenable.merge([
                 expansionAnimation,
-                recordingTransition,
+                widthTransition,
               ]),
               child: child,
               builder: (context, child) {
                 final widthProgress = math.max(
                   expansionAnimation.value.clamp(0.0, 1.0),
-                  recordingTransition.value,
+                  widthTransition.value,
                 );
                 final expansionProgress = expansionAnimation.value.clamp(
                   0.0,

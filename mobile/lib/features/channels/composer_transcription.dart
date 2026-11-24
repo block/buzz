@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/transcription/private_transcript_storage.dart';
@@ -25,7 +26,10 @@ class ComposerTranscriptionFiles {
     );
     final root = Directory('${support.path}/composer-transcripts');
     await root.create(recursive: true);
-    final path = '${root.path}/composer-${const Uuid().v4()}.m4a';
+    final extension = Platform.isAndroid && source.endsWith('.wav')
+        ? 'wav'
+        : 'm4a';
+    final path = '${root.path}/composer-${const Uuid().v4()}.$extension';
     await reserve(path);
     await File(source).copy(path);
     return path;
@@ -104,7 +108,11 @@ ComposerTranscription useComposerTranscription({
   final owner = useRef(scope)..value = scope;
   final insert = useRef(onText)..value = onText;
   final files = ref.read(composerTranscriptionFilesProvider);
-  final factory = ref.read(deviceTranscriptionProvider);
+  final factory = Platform.isAndroid
+      ? () => NativeDeviceTranscription(
+          const MethodChannel('buzz/composer_transcription'),
+        )
+      : ref.read(deviceTranscriptionProvider);
 
   Future<void> cancelNative() async {
     final active = speech.value;

@@ -95,7 +95,7 @@ class _ComposerSelectionMenu extends HookWidget {
               ),
           ]
         : [
-            if (defaultTargetPlatform == TargetPlatform.iOS && canFormat)
+            if (_usesMobileComposer && canFormat)
               ContextMenuButtonItem(
                 label: 'Format',
                 onPressed: () => formatting.value = true,

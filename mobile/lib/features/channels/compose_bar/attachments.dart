@@ -88,6 +88,25 @@ bool _queueComposerImages(
 
 enum _AttachmentSurface { closed, menu, camera, photos }
 
+void _openComposerMedia(
+  _AttachmentSurface surface,
+  ValueNotifier<_InputTool?> inputTool,
+  ValueNotifier<bool> isComposerExpanded,
+  FocusNode focusNode,
+  ValueNotifier<_AttachmentSurface> attachmentSurface,
+) {
+  if (_usesMobileComposer &&
+      (surface == _AttachmentSurface.camera ||
+          defaultTargetPlatform == TargetPlatform.android)) {
+    inputTool.value = _InputTool.attachments;
+  }
+  if (defaultTargetPlatform == TargetPlatform.android) {
+    isComposerExpanded.value = false;
+  }
+  focusNode.unfocus();
+  attachmentSurface.value = surface;
+}
+
 void _toggleComposerAttachments(
   ValueNotifier<_AttachmentSurface> surface,
   ValueNotifier<_InputTool?> tool,
@@ -98,12 +117,14 @@ void _toggleComposerAttachments(
     _AttachmentSurface.camera ||
     _AttachmentSurface.photos => _AttachmentSurface.menu,
   };
-  if (defaultTargetPlatform == TargetPlatform.iOS) {
+  if (_usesMobileComposer) {
     tool.value = surface.value == _AttachmentSurface.closed
         ? null
         : _InputTool.attachments;
   }
 }
+
+bool get _usesMobileComposer => _hasCombinedMediaPicker;
 
 bool get _hasCombinedMediaPicker =>
     defaultTargetPlatform == TargetPlatform.iOS ||
@@ -199,7 +220,8 @@ class _AttachmentSurfacePanel extends HookWidget {
         surface == _AttachmentSurface.camera ||
         surface == _AttachmentSurface.photos;
     final morphController = useAnimationController(
-      initialValue: isExpanded ? 1 : 0,
+      initialValue:
+          isExpanded && defaultTargetPlatform != TargetPlatform.android ? 1 : 0,
       duration: reducedMotion
           ? Duration.zero
           : const Duration(milliseconds: 320),
@@ -283,7 +305,8 @@ class _AttachmentSurfacePanel extends HookWidget {
         ? const Cubic(0.22, 1, 0.36, 1).transform(rawProgress)
         : Curves.easeInOutCubic.transform(rawProgress);
 
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
+    if (defaultTargetPlatform == TargetPlatform.iOS ||
+        _ComposerGlassScope.of(context)) {
       if (surface != _AttachmentSurface.menu) {
         return SizedBox.expand(child: expandedContent);
       }
@@ -519,7 +542,7 @@ class _AttachmentTrigger extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
+    if (_usesMobileComposer) {
       return IosGlassNavigationButton(
         icon: switch (surface) {
           _AttachmentSurface.closed =>

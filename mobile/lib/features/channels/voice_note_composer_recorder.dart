@@ -11,6 +11,7 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 import '../../shared/relay/app_lifecycle_provider.dart';
 import '../../shared/theme/theme.dart';
 import 'voice_note_recording.dart';
+import 'bestie_transcription_control.dart';
 import 'voice_note_waveform.dart';
 
 class _VoiceNoteRouteAware extends RouteAware {
@@ -41,7 +42,13 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final recorder = useMemoized(ref.read(voiceNoteRecorderFactoryProvider));
+    final recorder = useMemoized(
+      ref.read(
+        isDictation && Platform.isAndroid
+            ? bestieTranscriptionRecorderProvider
+            : voiceNoteRecorderFactoryProvider,
+      ),
+    );
     final samples = useState<List<double>>(const []);
     final sampleSequence = useState(0);
     final elapsed = useState(Duration.zero);
