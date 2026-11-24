@@ -73,6 +73,7 @@ struct NativePhotoZoomTests {
       print("PASS: native photo window, stale responses, eviction and teardown")
       railJourney(data: data)
       videoJourney(data: data)
+      textSizeJourney()
       loaderJourney()
 
     }
@@ -164,69 +165,11 @@ struct NativePhotoZoomTests {
     let videoButtons = ["Close media", "Share video", "Reply in thread"].map { label in
       descendants(viewer.view).compactMap { $0 as? UIButton }.first { $0.accessibilityLabel == label }!
     }
-    precondition(!playerController.showsPlaybackControls, "AVKit's self-toggling controls stay off so they can't fall out of step")
-    let transport = descendants(first.view).compactMap { $0 as? NativeVideoTransport }.first!
-    let slider = descendants(transport).compactMap { $0 as? UISlider }.first!
-    precondition(!transport.isHidden && slider.accessibilityLabel == "Video position", "A playable video shows the gallery's own transport")
-    precondition(["Play", "Pause"].contains(transport.playPause.accessibilityLabel ?? "") && transport.mute.accessibilityLabel == "Mute", "Transport buttons are labelled")
-    for (size, insets) in [(CGSize(width: 390, height: 844), UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0)),
-                           (CGSize(width: 844, height: 390), UIEdgeInsets(top: 0, left: 59, bottom: 21, right: 59))] {
-      viewer.view.frame = CGRect(origin: .zero, size: size)
-      viewer.layoutGallery(insets: insets)
-      precondition(pager.view.frame == viewer.view.bounds, "Video fills the screen in portrait and landscape")
-      for button in videoButtons {
-        precondition(viewer.view.bounds.inset(by: insets).contains(button.frame), "Overlaid video actions stay in the safe area")
-        precondition(button.frame.maxY < viewer.view.bounds.midY, "Video actions sit in the top row, clear of the transport")
-      }
-      pager.view.layoutIfNeeded(); first.view.layoutIfNeeded()
-      let bar = transport.convert(transport.bounds, to: viewer.view)
-      precondition(viewer.view.bounds.inset(by: insets).contains(bar) && bar.minY > viewer.view.bounds.midY, "The transport sits at the bottom of the safe area")
-      precondition(bar.height >= 44 && transport.playPause.bounds.width >= 44 && transport.mute.bounds.width >= 44, "Transport keeps 44pt targets")
-      precondition(slider.frame.width > 100, "The scrubber has room in portrait and landscape")
-      for (slot, button) in videoButtons.enumerated() where slot > 0 {
-        precondition(!button.frame.intersects(videoButtons[slot - 1].frame), "Video actions must not overlap")
-      }
-    }
-    viewer.view.frame = CGRect(x: 0, y: 0, width: 951, height: 669)
-    viewer.layoutGallery(insets: UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 76))
-    precondition(pager.view.frame == viewer.view.bounds, "Video spans the full Duo window beside the rail")
-    precondition(videoButtons.allSatisfy { $0.center.x >= 875 }, "Duo video actions stay in the rail")
-    first.view.layoutIfNeeded()
-    precondition(transport.convert(transport.bounds, to: viewer.view).maxX <= 875, "The Duo transport stays clear of the rail")
-    viewer.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
-    viewer.layoutGallery(insets: .zero)
-    precondition(videoButtons[1].isEnabled && videoButtons[1].alpha == 1, "A downloaded video can be shared")
-    viewer.setChrome(hidden: true)
-    precondition(videoButtons.allSatisfy { $0.alpha == 0 && !$0.isUserInteractionEnabled && $0.accessibilityElementsHidden }, "Tapping the video hides its actions")
-    precondition(transport.alpha == 0 && !transport.isUserInteractionEnabled && transport.accessibilityElementsHidden, "The transport hides with the actions")
-    viewer.setChrome(hidden: false)
-    precondition(videoButtons.allSatisfy { $0.alpha == 1 && $0.isUserInteractionEnabled }, "Tapping again restores them")
-    precondition(transport.alpha == 1 && transport.isUserInteractionEnabled && !transport.accessibilityElementsHidden, "The transport comes back with the actions")
-    viewer.setChrome(hidden: true)
-    viewer.revealForVoiceOver(running: false)
-    precondition(transport.alpha == 0, "Turning VoiceOver off leaves the chrome alone")
-    viewer.revealForVoiceOver(running: true)
-    precondition(videoButtons.allSatisfy { $0.alpha == 1 && !$0.accessibilityElementsHidden } && transport.alpha == 1,
-                 "Turning VoiceOver on after the fade reveals the actions and transport")
-    let menu = transport.options.menu!
-    precondition(menu.title == "Playback Speed" && menu.children.count == 6, "The options menu offers AVKit's playback speeds")
-    precondition(transport.options.accessibilityLabel == "Playback options" && transport.options.title(for: .normal) == "1×", "Speed shows like the Flutter viewer")
-    (first as! NativePhotoPage).setSpeed(1.5)
-    precondition(player.defaultRate == 1.5 && transport.options.title(for: .normal) == "1.5×", "Choosing a speed sets the player's rate")
-    (first as! NativePhotoPage).setSpeed(1)
-    precondition(NativeVideoTransport.speed(0.75) == "0.75×" && NativeVideoTransport.speed(2) == "2×", "Speed labels drop trailing zeros")
-    precondition(transport.airPlay.superview === transport && transport.airPlay.bounds.width >= 44, "AirPlay stays available")
-    func settle() { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
-    player.pause(); settle()
-    precondition(transport.playPause.accessibilityLabel == "Play", "A paused video offers Play")
-    send(.touchUpInside, to: transport.playPause); settle()
-    precondition(player.rate > 0 && transport.playPause.accessibilityLabel == "Pause", "Play starts the video")
-    send(.touchUpInside, to: transport.playPause); settle()
-    precondition(player.rate == 0 && transport.playPause.accessibilityLabel == "Play", "Pause stops it")
-    send(.touchUpInside, to: transport.mute)
-    precondition(player.isMuted && transport.mute.accessibilityLabel == "Unmute", "Mute toggles the player")
-    send(.touchUpInside, to: transport.mute)
-    precondition(NativeVideoTransport.format(65) == "1:05" && NativeVideoTransport.format(3725) == "1:02:05", "Times read like the Flutter viewer")
+    checkVideoLayout(viewer: viewer, pager: pager, page: first, buttons: videoButtons)
+    checkVideoChrome(viewer: viewer, page: first as! NativePhotoPage, buttons: videoButtons)
+    checkMenuHoldsFade(viewer: viewer, page: first as! NativePhotoPage)
+    checkSpeedAndRoutes(page: first as! NativePhotoPage, player: player)
+    checkPlayback(page: first as! NativePhotoPage, player: player)
     precondition(feedback.clicks == 0, "Opening must not trigger selection haptics")
     viewer.pageViewController(pager, willTransitionTo: [first])
     precondition(feedback.clicks == 1, "Swipe feedback fires before the page changes")
@@ -266,20 +209,144 @@ struct NativePhotoZoomTests {
     let next = viewer.pageViewController(pager, viewControllerAfter: current)!
     viewer.pageViewController(pager, willTransitionTo: [next])
     next.view.frame = pager.view.bounds; next.view.layoutIfNeeded()
-    let photoWhileSwiping = descendants(next.view).compactMap { $0 as? UIScrollView }.first!.frame
+    let photoWhileSwiping = photoFrame(next)
     precondition(feedback.clicks == 4, "Next swipe fires before the new photo is selected")
     pager.setViewControllers([next], direction: .forward, animated: false)
     viewer.pageViewController(pager, didFinishAnimating: true, previousViewControllers: [current], transitionCompleted: true)
     precondition(feedback.clicks == 4, "Completed swipe does not add a delayed haptic")
     viewer.layoutGallery(insets: phone); pager.view.setNeedsLayout(); pager.view.layoutIfNeeded(); next.view.layoutIfNeeded()
     precondition(pager.view.frame == pagerWhileVideo, "Settling on a photo keeps the pager frame it had on the video")
-    precondition(descendants(next.view).compactMap { $0 as? UIScrollView }.first!.frame == photoWhileSwiping && photoWhileSwiping.minY == 59 + 56,
-                 "A photo keeps its inset frame from mid-swipe to settled")
+    precondition(photoFrame(next) == photoWhileSwiping && photoWhileSwiping.minY == 59 + 56, "A photo keeps its inset frame from mid-swipe to settled")
     viewer.pageViewController(pager, didFinishAnimating: true, previousViewControllers: [current], transitionCompleted: true)
     precondition(feedback.clicks == 4, "Repeated callbacks for the same page do not duplicate haptics")
     viewer.viewDidDisappear(false)
     precondition(active.player == nil, "Closing releases the player before returning to Flutter")
     print("PASS: native video decoding, selected-only loading, paging and teardown")
+  }
+  @available(iOS 18.0, *)
+  @MainActor fileprivate static func checkVideoLayout(viewer: NativePhotoZoomViewController, pager: UIPageViewController,
+                                                      page first: UIViewController, buttons videoButtons: [UIButton]) {
+    let transport = descendants(first.view).compactMap { $0 as? NativeVideoTransport }.first!
+    let slider = transport.slider
+    for (size, insets) in [(CGSize(width: 390, height: 844), UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0)),
+                           (CGSize(width: 844, height: 390), UIEdgeInsets(top: 0, left: 59, bottom: 21, right: 59))] {
+      viewer.view.frame = CGRect(origin: .zero, size: size)
+      viewer.layoutGallery(insets: insets)
+      precondition(pager.view.frame == viewer.view.bounds, "Video fills the screen in portrait and landscape")
+      for button in videoButtons {
+        precondition(viewer.view.bounds.inset(by: insets).contains(button.frame), "Overlaid video actions stay in the safe area")
+        precondition(button.frame.maxY < viewer.view.bounds.midY, "Video actions sit in the top row, clear of the transport")
+      }
+      pager.view.layoutIfNeeded(); first.view.layoutIfNeeded()
+      let bar = transport.convert(transport.bounds, to: viewer.view)
+      precondition(viewer.view.bounds.inset(by: insets).contains(bar) && bar.minY > viewer.view.bounds.midY, "The transport sits at the bottom of the safe area")
+      precondition(bar.height >= 44 && transport.playPause.bounds.width >= 44 && transport.mute.bounds.width >= 44, "Transport keeps 44pt targets")
+      precondition(slider.frame.width > 100, "The scrubber has room in portrait and landscape")
+      for (slot, button) in videoButtons.enumerated() where slot > 0 {
+        precondition(!button.frame.intersects(videoButtons[slot - 1].frame), "Video actions must not overlap")
+      }
+    }
+    viewer.view.frame = CGRect(x: 0, y: 0, width: 951, height: 669)
+    viewer.layoutGallery(insets: UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 76))
+    precondition(pager.view.frame == viewer.view.bounds, "Video spans the full Duo window beside the rail")
+    precondition(videoButtons.allSatisfy { $0.center.x >= 875 }, "Duo video actions stay in the rail")
+    first.view.layoutIfNeeded()
+    precondition(transport.convert(transport.bounds, to: viewer.view).maxX <= 875, "The Duo transport stays clear of the rail")
+    viewer.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+    viewer.layoutGallery(insets: .zero)
+    precondition(videoButtons[1].isEnabled && videoButtons[1].alpha == 1, "A downloaded video can be shared")
+  }
+  @available(iOS 18.0, *)
+  @MainActor fileprivate static func checkVideoChrome(viewer: NativePhotoZoomViewController, page: NativePhotoPage, buttons videoButtons: [UIButton]) {
+    let transport = descendants(page.view).compactMap { $0 as? NativeVideoTransport }.first!
+    let chrome: [UIView] = videoButtons + [transport]
+    viewer.setChrome(hidden: true)
+    precondition(chrome.allSatisfy { !isShown($0) && $0.alpha == 0 }, "Tapping the video hides its actions and transport together")
+    viewer.setChrome(hidden: false)
+    precondition(chrome.allSatisfy(isShown), "Tapping again restores them")
+    viewer.setChrome(hidden: true)
+    viewer.revealForVoiceOver(running: false)
+    precondition(!isShown(transport), "Turning VoiceOver off leaves the chrome alone")
+    viewer.revealForVoiceOver(running: true)
+    precondition(chrome.allSatisfy(isShown), "Turning VoiceOver on after the fade reveals the actions and transport")
+  }
+  @available(iOS 18.0, *)
+  @MainActor fileprivate static func checkMenuHoldsFade(viewer: NativePhotoZoomViewController, page: NativePhotoPage) {
+    let transport = descendants(page.view).compactMap { $0 as? NativeVideoTransport }.first!
+    // An open speed menu or AirPlay picker holds the 3s fade until it closes.
+    let player = page.children.compactMap { $0 as? AVPlayerViewController }.first!.player!
+    page.menuChanged(open: true)
+    player.seek(to: .zero); player.play(); waitFor(transport.playPause, label: "Pause")
+    precondition(page.isPlaying, "The fixture video plays")
+    viewer.setChrome(hidden: false)
+    precondition(!viewer.isChromeFadeScheduled, "The transport stays up under an open menu")
+    page.menuChanged(open: false)
+    precondition(viewer.isChromeFadeScheduled, "The fade resumes once the menu closes")
+    player.pause(); waitFor(transport.playPause, label: "Play")
+    precondition(transport.alpha == 1, "Pausing brings the transport back")
+  }
+  @available(iOS 18.0, *)
+  @MainActor fileprivate static func checkSpeedAndRoutes(page: NativePhotoPage, player: AVPlayer) {
+    let transport = descendants(page.view).compactMap { $0 as? NativeVideoTransport }.first!
+    let menu = transport.options.menu!
+    precondition(menu.title == "Playback Speed" && menu.children.count == 6, "The options menu offers AVKit's playback speeds")
+    precondition(transport.options.accessibilityLabel == "Playback options" && transport.options.title(for: .normal) == "1×", "Speed shows like the Flutter viewer")
+    page.setSpeed(1.5)
+    precondition(player.defaultRate == 1.5 && transport.options.title(for: .normal) == "1.5×", "Choosing a speed sets the player's rate")
+    page.setSpeed(1)
+    precondition(NativeVideoTransport.speed(0.75) == "0.75×" && NativeVideoTransport.speed(2) == "2×", "Speed labels drop trailing zeros")
+    precondition(transport.airPlay.superview === transport && transport.airPlay.bounds.width >= 44, "AirPlay stays available")
+  }
+  @available(iOS 18.0, *)
+  @MainActor fileprivate static func checkPlayback(page: NativePhotoPage, player: AVPlayer) {
+    let transport = descendants(page.view).compactMap { $0 as? NativeVideoTransport }.first!
+    precondition(!page.children.compactMap { $0 as? AVPlayerViewController }.first!.showsPlaybackControls,
+                 "AVKit's self-toggling controls stay off so they can't fall out of step")
+    precondition(!transport.isHidden && transport.slider.accessibilityLabel == "Video position", "A playable video shows the gallery's own transport")
+    player.pause(); waitFor(transport.playPause, label: "Play")
+    precondition(transport.playPause.accessibilityLabel == "Play", "A paused video offers Play")
+    send(.touchUpInside, to: transport.playPause); waitFor(transport.playPause, label: "Pause")
+    precondition(player.rate > 0 && transport.playPause.accessibilityLabel == "Pause", "Play starts the video")
+    send(.touchUpInside, to: transport.playPause); waitFor(transport.playPause, label: "Play")
+    precondition(player.rate == 0 && transport.playPause.accessibilityLabel == "Play", "Pause stops it")
+    send(.touchUpInside, to: transport.mute)
+    precondition(player.isMuted && transport.mute.accessibilityLabel == "Unmute", "Mute toggles the player")
+    send(.touchUpInside, to: transport.mute)
+    precondition(NativeVideoTransport.format(65) == "1:05" && NativeVideoTransport.format(3725) == "1:02:05", "Times read like the Flutter viewer")
+  }
+  // At the largest text sizes the timeline moves to its own row instead of losing the scrubber.
+  @MainActor static func textSizeJourney() {
+    let host = UIView(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+    let transport = NativeVideoTransport()
+    host.addSubview(transport)
+    for (category, duration, rows) in [(UIContentSizeCategory.large, 30.0, 1), (.large, 4000, 2),
+                                       (.accessibilityExtraExtraExtraLarge, 30, 2), (.accessibilityExtraExtraExtraLarge, 4000, 2)] {
+      host.traitOverrides.preferredContentSizeCategory = category
+      host.updateTraitsIfNeeded(); transport.updateTraitsIfNeeded()
+      transport.setSpeed(1.25); transport.update(time: duration - 1, duration: duration)
+      let size = transport.sizeThatFits(CGSize(width: 358, height: 0))
+      transport.frame = CGRect(origin: .zero, size: size); transport.layoutIfNeeded()
+      precondition(transport.traitCollection.preferredContentSizeCategory <= .accessibilityMedium, "Transport text is capped")
+      precondition(size.height == NativeVideoTransport.rowHeight * CGFloat(rows), "\(category) \(duration)s uses \(rows) row(s)")
+      precondition(transport.slider.frame.width >= NativeVideoTransport.minimumScrubber, "The scrubber keeps room to seek")
+      let parts = [transport.playPause, transport.options, transport.airPlay, transport.mute, transport.slider]
+        + descendants(transport).compactMap { $0 as? UILabel }.filter { $0.superview === transport }
+      for (slot, part) in parts.enumerated() {
+        precondition(transport.bounds.contains(part.frame), "Transport parts stay inside it")
+        precondition(parts[..<slot].allSatisfy { !$0.frame.intersects(part.frame) }, "Transport parts never overlap")
+      }
+    }
+    print("PASS: native video transport fits every text size")
+  }
+  @MainActor static func isShown(_ view: UIView) -> Bool {
+    view.alpha == 1 && view.isUserInteractionEnabled && !view.accessibilityElementsHidden
+  }
+  @MainActor static func photoFrame(_ page: UIViewController) -> CGRect {
+    descendants(page.view).compactMap { $0 as? UIScrollView }.first!.frame
+  }
+  @MainActor static func waitFor(_ button: UIButton, label: String) {
+    let deadline = Date().addingTimeInterval(2)
+    while button.accessibilityLabel != label && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
   }
   @MainActor static func loaderJourney() {
     let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 100, height: 100))

@@ -287,60 +287,73 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     for page in pager.children.compactMap({ $0 as? NativePhotoPage }) { page.photoInsets = photoInsets }
     pageContainer.frame = CGRect(x: indicatorBounds.minX + 68, y: bottom,
                                  width: max(0, indicatorBounds.width - 136), height: 44)
-    if inRail {
-      let width = right ? insets.right : insets.left
-      var centerX = right ? bounds.maxX - width / 2 : width / 2
-      var top: CGFloat = min(bounds.width, bounds.height) >= 600 ? 110 : 170
-      var railBottom = bounds.maxY - max(insets.bottom, 12)
-      #if canImport(UIKit, _version: 9127.0.85)
-      if #available(iOS 27.1, *), let window = view.window {
-        let strip = CGRect(x: right ? window.bounds.maxX - width : 0, y: 0,
-                           width: width, height: window.bounds.height)
-        let occlusions = window.reservedRegions(kind: .occlusion)
-          .filter { $0.isActive && $0.frame.intersects(strip) }
-        let regions = occlusions.filter { $0.frame.midY < window.bounds.midY }
-          .sorted { $0.frame.minY < $1.frame.minY }
-        let margins = window.rootViewController?.view.layoutMargins ?? .zero
-        let margin = right ? margins.left : margins.right
-        let axis = regions.first.map { $0.frame.inset(by: $0.margins).midX }
-          ?? (right ? window.bounds.maxX - margin - 28 : margin + 28)
-        centerX = view.convert(CGPoint(x: axis, y: 0), from: window).x
-        if let edge = occlusions.filter({ $0.frame.midY >= window.bounds.midY }).map({ $0.frame.minY }).min() {
-          railBottom = min(railBottom, view.convert(CGPoint(x: 0, y: edge), from: window).y - 12)
-        }
-        if let edge = regions.map({ $0.frame.maxY }).max() {
-          top = view.convert(CGPoint(x: 0, y: edge), from: window).y + 12
-        }
-      }
-      #endif
-      // Reuse the app rail's measured axis while its window/side still match.
-      // Presentation can change UIKit's fallback margins under the modal.
-      if let source = sourceRailGeometry, source.size == bounds.size,
-         (left && (0...width).contains(source.centerX)) ||
-         (right && (bounds.maxX - width...bounds.maxX).contains(source.centerX)) {
-        centerX = source.centerX
-      }
-      // Match IosNavigationMetrics.railCenter's inward optical alignment.
-      centerX += left ? 6 : -6
-      close.frame = CGRect(x: centerX - 24, y: top + 6, width: 48, height: 48)
-      reply.frame = CGRect(x: centerX - 24, y: railBottom - 108, width: 48, height: 48)
-      more.frame = CGRect(x: centerX - 24, y: railBottom - 48, width: 48, height: 48)
+    if inRail { layoutRail(insets: insets, onRight: right) } else { layoutRows(safe: safe, bottom: bottom) }
+  }
+  // Duo rail: Close at the top of the hinge-side strip, Reply and More at its bottom.
+  private func layoutRail(insets: UIEdgeInsets, onRight right: Bool) {
+    let bounds = view.bounds
+    let left = !right
+    let width = right ? insets.right : insets.left
+    var centerX = right ? bounds.maxX - width / 2 : width / 2
+    var top: CGFloat = min(bounds.width, bounds.height) >= 600 ? 110 : 170
+    var railBottom = bounds.maxY - max(insets.bottom, 12)
+    if let measured = measuredRail(width: width, onRight: right) {
+      centerX = measured.centerX
+      railBottom = min(railBottom, measured.bottom ?? railBottom)
+      top = measured.top ?? top
     }
+    centerX = sourceRailCenter(width: width, onRight: right) ?? centerX
+    // Match IosNavigationMetrics.railCenter's inward optical alignment.
+    centerX += left ? 6 : -6
+    close.frame = CGRect(x: centerX - 24, y: top + 6, width: 48, height: 48)
+    reply.frame = CGRect(x: centerX - 24, y: railBottom - 108, width: 48, height: 48)
+    more.frame = CGRect(x: centerX - 24, y: railBottom - 48, width: 48, height: 48)
     share.frame = more.frame
-    if !inRail {
-      let centerY = safe.minY + navigationSizingBar.sizeThatFits(bounds.size).height / 2
-      close.frame = CGRect(x: safe.maxX - 60, y: centerY - 22, width: 44, height: 44)
-      if videoIndices.contains(index) {
-        // The video transport owns the bottom of the screen, so every action moves to the top row.
-        reply.frame = CGRect(x: safe.minX + 16, y: centerY - 22, width: 44, height: 44)
-        share.frame = CGRect(x: safe.maxX - 112, y: centerY - 22, width: 44, height: 44)
-        pageContainer.frame = CGRect(x: safe.minX + 68, y: centerY - 22,
-                                     width: max(0, safe.width - 188), height: 44)
-      } else {
-        reply.frame = CGRect(x: safe.minX + 16, y: bottom, width: 44, height: 44)
-      }
-      more.frame = CGRect(x: safe.maxX - 60, y: bottom, width: 44, height: 44)
+  }
+  // iOS 27.1 reports the hinge and camera housing, so the rail can center on and clear them.
+  private func measuredRail(width: CGFloat, onRight right: Bool) -> (centerX: CGFloat, top: CGFloat?, bottom: CGFloat?)? {
+    #if canImport(UIKit, _version: 9127.0.85)
+    guard #available(iOS 27.1, *), let window = view.window else { return nil }
+    let strip = CGRect(x: right ? window.bounds.maxX - width : 0, y: 0,
+                       width: width, height: window.bounds.height)
+    let occlusions = window.reservedRegions(kind: .occlusion)
+      .filter { $0.isActive && $0.frame.intersects(strip) }
+    let regions = occlusions.filter { $0.frame.midY < window.bounds.midY }
+      .sorted { $0.frame.minY < $1.frame.minY }
+    let margins = window.rootViewController?.view.layoutMargins ?? .zero
+    let margin = right ? margins.left : margins.right
+    let axis = regions.first.map { $0.frame.inset(by: $0.margins).midX }
+      ?? (right ? window.bounds.maxX - margin - 28 : margin + 28)
+    let bottom = occlusions.filter { $0.frame.midY >= window.bounds.midY }.map { $0.frame.minY }.min()
+    let top = regions.map { $0.frame.maxY }.max()
+    return (view.convert(CGPoint(x: axis, y: 0), from: window).x,
+            top.map { view.convert(CGPoint(x: 0, y: $0), from: window).y + 12 },
+            bottom.map { view.convert(CGPoint(x: 0, y: $0), from: window).y - 12 })
+    #else
+    return nil
+    #endif
+  }
+  // Reuse the app rail's measured axis while its window/side still match.
+  // Presentation can change UIKit's fallback margins under the modal.
+  private func sourceRailCenter(width: CGFloat, onRight right: Bool) -> CGFloat? {
+    guard let source = sourceRailGeometry, source.size == view.bounds.size else { return nil }
+    let side = right ? view.bounds.maxX - width...view.bounds.maxX : 0...width
+    return side.contains(source.centerX) ? source.centerX : nil
+  }
+  // Phones and tablets: Close on the top row; other actions on the bottom row, or the top row for video.
+  private func layoutRows(safe: CGRect, bottom: CGFloat) {
+    let centerY = safe.minY + navigationSizingBar.sizeThatFits(view.bounds.size).height / 2
+    close.frame = CGRect(x: safe.maxX - 60, y: centerY - 22, width: 44, height: 44)
+    if videoIndices.contains(index) {
+      // The video transport owns the bottom of the screen, so every action moves to the top row.
+      reply.frame = CGRect(x: safe.minX + 16, y: centerY - 22, width: 44, height: 44)
+      share.frame = CGRect(x: safe.maxX - 112, y: centerY - 22, width: 44, height: 44)
+      pageContainer.frame = CGRect(x: safe.minX + 68, y: centerY - 22,
+                                   width: max(0, safe.width - 188), height: 44)
+    } else {
+      reply.frame = CGRect(x: safe.minX + 16, y: bottom, width: 44, height: 44)
     }
+    more.frame = CGRect(x: safe.maxX - 60, y: bottom, width: 44, height: 44)
   }
   func shouldBeginDismissal(location: CGPoint, velocity: CGVector) -> Bool {
     !paging && !finishing && pager.view.frame.contains(location)
@@ -363,10 +376,13 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     // Only the bare video toggles the actions: never our buttons, Retry or the video transport.
     var touched = touch.view
     while let current = touched, current !== view {
-      if current is UIControl || current is NativeVideoTransport || current === pageContainer { return false }
+      if isOwnControl(current) { return false }
       touched = current.superview
     }
     return true
+  }
+  private func isOwnControl(_ view: UIView) -> Bool {
+    view is UIControl || view is NativeVideoTransport || view === pageContainer
   }
   @objc private func toggleChrome() { setChrome(hidden: !chromeHidden) }
   // VoiceOver can't tap the bare video to reveal faded actions, so bring them back
@@ -385,15 +401,20 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     if !hidden { scheduleChromeHide() }
   }
   // Fade the actions and transport 3s into playback, as AVKit does with its own controls.
+  // Not while a speed menu or AirPlay picker is open over the transport, nor under VoiceOver.
   private func scheduleChromeHide() {
     chromeTimer?.invalidate(); chromeTimer = nil
-    guard !chromeHidden, !finishing, videoIndices.contains(index), !UIAccessibility.isVoiceOverRunning,
-      (pager.viewControllers?.first as? NativePhotoPage)?.isPlaying == true else { return }
+    guard canFadeChrome else { return }
     chromeTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in
-      guard let self, self.presentedViewController == nil,
-        (self.pager.viewControllers?.first as? NativePhotoPage)?.isPlaying == true else { return }
+      guard let self, self.presentedViewController == nil, self.canFadeChrome else { return }
       self.setChrome(hidden: true)
     }
+  }
+  var isChromeFadeScheduled: Bool { chromeTimer != nil }
+  private var canFadeChrome: Bool {
+    guard !chromeHidden, !finishing, videoIndices.contains(index), !UIAccessibility.isVoiceOverRunning,
+      let page = pager.viewControllers?.first as? NativePhotoPage else { return false }
+    return page.isPlaying && !page.isShowingMenu
   }
   @objc private func shareVideo() {
     guard !finishing, presentedViewController == nil, let (value, path) = videoPath, value == index else { return }
@@ -560,21 +581,19 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     let video = videoIndices.contains(index)
     let hidden = video && chromeHidden
     more.isEnabled = canMore && !video && !acting
-    more.alpha = video ? 0 : 1
-    more.accessibilityElementsHidden = video
     share.isEnabled = video && videoPath?.0 == index
-    share.alpha = video && !hidden ? 1 : 0
-    share.accessibilityElementsHidden = !video || hidden
-    for control in [close, reply, pageContainer] {
-      control.alpha = hidden ? 0 : 1
-      control.isUserInteractionEnabled = !hidden
-      control.accessibilityElementsHidden = hidden
-    }
+    setVisible(more, !video)
+    setVisible(share, video && !hidden)
+    for control in [close, reply, pageContainer] { setVisible(control, !hidden) }
     // A single page has no indicator, so its strip must not swallow touches.
     pageContainer.isUserInteractionEnabled = !hidden && labels.count > 1
-    share.isUserInteractionEnabled = video && !hidden
     // The video transport is part of the same chrome, so a tap shows or hides everything together.
     (pager.viewControllers?.first as? NativePhotoPage)?.setTransport(visible: !hidden)
+  }
+  private func setVisible(_ control: UIView, _ visible: Bool) {
+    control.alpha = visible ? 1 : 0
+    control.isUserInteractionEnabled = visible
+    control.accessibilityElementsHidden = !visible
   }
   private func selected(_ value: Int) {
     guard value != index else { return }
@@ -655,8 +674,9 @@ private final class NativePhotoPage: UIViewController, UIScrollViewDelegate, AVR
   let isVideo: Bool
   var onRetry: (() -> Void)?
   var onPlayback: ((Bool) -> Void)?
-  // Opening a menu or the AirPlay picker restarts the fade, like any other use of the controls.
+  // Opening a menu or the AirPlay picker holds the fade until it closes.
   var onActivity: (() -> Void)?
+  private(set) var isShowingMenu = false
   var chromeInsets = UIEdgeInsets.zero { didSet { if chromeInsets != oldValue { viewIfLoaded?.setNeedsLayout() } } }
   var photoInsets = UIEdgeInsets.zero { didSet { if photoInsets != oldValue && !isVideo { viewIfLoaded?.setNeedsLayout() } } }
   private lazy var video = AVPlayerViewController()
@@ -716,7 +736,7 @@ private final class NativePhotoPage: UIViewController, UIScrollViewDelegate, AVR
       transport.isHidden = true; view.addSubview(transport)
       transport.playPause.addTarget(self, action: #selector(togglePlayback), for: .touchUpInside)
       transport.mute.addTarget(self, action: #selector(toggleMute), for: .touchUpInside)
-      transport.options.addAction(UIAction { [weak self] _ in self?.onActivity?() }, for: .menuActionTriggered)
+      transport.options.onMenu = { [weak self] open in self?.menuChanged(open: open) }
       transport.airPlay.delegate = self
       transport.slider.addTarget(self, action: #selector(beginScrub), for: .touchDown)
       transport.slider.addTarget(self, action: #selector(scrub), for: .valueChanged)
@@ -773,8 +793,9 @@ private final class NativePhotoPage: UIViewController, UIScrollViewDelegate, AVR
     transport.isUserInteractionEnabled = visible
     transport.accessibilityElementsHidden = !visible
   }
-  func routePickerViewWillBeginPresentingRoutes(_ routePickerView: AVRoutePickerView) { onActivity?() }
-  func routePickerViewDidEndPresentingRoutes(_ routePickerView: AVRoutePickerView) { onActivity?() }
+  func routePickerViewWillBeginPresentingRoutes(_ routePickerView: AVRoutePickerView) { menuChanged(open: true) }
+  func routePickerViewDidEndPresentingRoutes(_ routePickerView: AVRoutePickerView) { menuChanged(open: false) }
+  func menuChanged(open: Bool) { isShowingMenu = open; onActivity?() }
   private func rebuildOptions() {
     guard let player = video.player else { return }
     let rate = player.defaultRate
@@ -790,7 +811,7 @@ private final class NativePhotoPage: UIViewController, UIScrollViewDelegate, AVR
     guard let player = video.player else { return }
     player.defaultRate = rate
     if player.timeControlStatus != .paused { player.rate = rate }
-    rebuildOptions(); onActivity?()
+    rebuildOptions()
   }
   private func updateTransport() {
     guard let item = video.player?.currentItem, !transport.slider.isTracking else { return }
@@ -849,7 +870,8 @@ private final class NativePhotoPage: UIViewController, UIScrollViewDelegate, AVR
       retry.frame = CGRect(x: 24, y: view.bounds.midY + 32, width: max(0, view.bounds.width - 48), height: 48)
       let safe = view.bounds.inset(by: chromeInsets)
       let width = max(0, min(safe.width - 32, 640))
-      transport.frame = CGRect(x: safe.midX - width / 2, y: safe.maxY - 52, width: width, height: 44)
+      let height = transport.sizeThatFits(CGSize(width: width, height: 0)).height
+      transport.frame = CGRect(x: safe.midX - width / 2, y: safe.maxY - 8 - height, width: width, height: height)
     }
     guard previousSize != scroll.bounds.size else { return }; previousSize = scroll.bounds.size
     scroll.zoomScale = 1; imageView.frame = scroll.bounds; scroll.contentSize = scroll.bounds.size
@@ -865,7 +887,7 @@ private final class NativeVideoTransport: UIView {
   let mute = UIButton(type: .system)
   // Playback speed, as AVKit offered. The relay only accepts one video and one audio
   // track, so there are never subtitles or alternate audio to choose.
-  let options = UIButton(type: .system)
+  let options = MenuButton(type: .system)
   let airPlay = AVRoutePickerView()
   let slider = UISlider()
   private let elapsed = UILabel()
@@ -875,6 +897,8 @@ private final class NativeVideoTransport: UIView {
     super.init(frame: frame)
     backgroundColor = UIColor(white: 0, alpha: 0.5)
     layer.cornerRadius = 22; layer.cornerCurve = .continuous
+    // Larger text would squeeze out the scrubber; past this size the timeline gets its own row.
+    maximumContentSizeCategory = .accessibilityMedium
     for button in [playPause, mute] {
       button.tintColor = .white
       button.setPreferredSymbolConfiguration(UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold), forImageIn: .normal)
@@ -936,18 +960,51 @@ private final class NativeVideoTransport: UIView {
       ? String(format: "%d:%02d:%02d", value / 3600, value / 60 % 60, value % 60)
       : String(format: "%d:%02d", value / 60, value % 60)
   }
+  static let rowHeight: CGFloat = 44
+  static let minimumScrubber: CGFloat = 88
+  private var labelWidth: CGFloat { max(elapsed.intrinsicContentSize.width, total.intrinsicContentSize.width) }
+  private var optionsWidth: CGFloat { max(44, options.intrinsicContentSize.width + 8) }
+  // Play, options, AirPlay and mute; the timeline shares their row while the scrubber still fits.
+  private func fitsOneRow(width: CGFloat) -> Bool {
+    width - 44 * 3 - optionsWidth - labelWidth * 2 - 20 >= Self.minimumScrubber
+  }
+  override func sizeThatFits(_ size: CGSize) -> CGSize {
+    CGSize(width: size.width, height: fitsOneRow(width: size.width) ? Self.rowHeight : Self.rowHeight * 2)
+  }
   override func layoutSubviews() {
     super.layoutSubviews()
-    let height = bounds.height
-    playPause.frame = CGRect(x: 0, y: 0, width: 44, height: height)
-    mute.frame = CGRect(x: bounds.width - 44, y: 0, width: 44, height: height)
-    airPlay.frame = CGRect(x: mute.frame.minX - 44, y: 0, width: 44, height: height)
-    let optionsWidth = max(44, options.sizeThatFits(bounds.size).width + 8)
-    options.frame = CGRect(x: airPlay.frame.minX - optionsWidth, y: 0, width: optionsWidth, height: height)
-    let label = max(elapsed.sizeThatFits(bounds.size).width, total.sizeThatFits(bounds.size).width)
-    elapsed.frame = CGRect(x: playPause.frame.maxX, y: 0, width: label, height: height)
-    total.frame = CGRect(x: options.frame.minX - label, y: 0, width: label, height: height)
-    slider.frame = CGRect(x: elapsed.frame.maxX + 10, y: 0, width: max(0, total.frame.minX - elapsed.frame.maxX - 20), height: height)
+    let oneRow = bounds.height < Self.rowHeight * 2
+    let buttons = CGRect(x: 0, y: oneRow ? 0 : Self.rowHeight, width: bounds.width, height: Self.rowHeight)
+    playPause.frame = CGRect(x: 0, y: buttons.minY, width: 44, height: buttons.height)
+    mute.frame = CGRect(x: buttons.maxX - 44, y: buttons.minY, width: 44, height: buttons.height)
+    airPlay.frame = mute.frame.offsetBy(dx: -44, dy: 0)
+    options.frame = CGRect(x: airPlay.frame.minX - optionsWidth, y: buttons.minY, width: optionsWidth, height: buttons.height)
+    let timeline = oneRow
+      ? CGRect(x: playPause.frame.maxX, y: 0, width: options.frame.minX - playPause.frame.maxX, height: Self.rowHeight)
+      : CGRect(x: 16, y: 0, width: bounds.width - 32, height: Self.rowHeight)
+    layoutTimeline(in: timeline)
+  }
+  private func layoutTimeline(in row: CGRect) {
+    let label = labelWidth
+    elapsed.frame = CGRect(x: row.minX, y: row.minY, width: label, height: row.height)
+    total.frame = CGRect(x: row.maxX - label, y: row.minY, width: label, height: row.height)
+    slider.frame = CGRect(x: elapsed.frame.maxX + 10, y: row.minY,
+                          width: max(0, total.frame.minX - elapsed.frame.maxX - 20), height: row.height)
+  }
+}
+
+// Reports when its menu opens and closes, so the transport can stay up underneath it.
+private final class MenuButton: UIButton {
+  var onMenu: ((Bool) -> Void)?
+  override func contextMenuInteraction(_ interaction: UIContextMenuInteraction, willDisplayMenuFor configuration: UIContextMenuConfiguration,
+                                       animator: UIContextMenuInteractionAnimating?) {
+    super.contextMenuInteraction(interaction, willDisplayMenuFor: configuration, animator: animator)
+    onMenu?(true)
+  }
+  override func contextMenuInteraction(_ interaction: UIContextMenuInteraction, willEndFor configuration: UIContextMenuConfiguration,
+                                       animator: UIContextMenuInteractionAnimating?) {
+    super.contextMenuInteraction(interaction, willEndFor: configuration, animator: animator)
+    onMenu?(false)
   }
 }
 
