@@ -461,6 +461,15 @@ Future<BuzzPushEndpointGrant?> enrollBuzzPush(
     } on AndroidPushAttestationUnavailable catch (error) {
       pushUnavailableReason.value = error.reason;
       rethrow;
+    } on AndroidPushGatewayResponseInvalid catch (error, stackTrace) {
+      // As on iOS, only a reply the app cannot read is reported; refusals and
+      // transport failures are routine.
+      diagnostics.reportError(
+        error,
+        stackTrace,
+        operation: DiagnosticOperation.pushGatewayResponse,
+      );
+      rethrow;
     }
     if (enrolled == null) return null;
     grant = _grantOf(enrolled);
