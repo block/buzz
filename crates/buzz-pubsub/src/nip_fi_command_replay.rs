@@ -183,7 +183,7 @@ impl CommandReplayGuard for RedisCommandReplayGuard {
         Box::pin(async move {
             let (_, exact) = deny_store_keys(&self.deny_prefix, issuer);
             let mut conn = self.pool.clone();
-            let entries: Vec<(String, String)> = redis::cmd("HGETALL")
+            let entries: Vec<(Vec<u8>, Vec<u8>)> = redis::cmd("HGETALL")
                 .arg(exact)
                 .query_async(&mut conn)
                 .await
@@ -192,6 +192,10 @@ impl CommandReplayGuard for RedisCommandReplayGuard {
             // admission without that revocation.
             let mut denies = Vec::with_capacity(entries.len());
             for (key, until) in entries {
+                let (Ok(key), Ok(until)) = (String::from_utf8(key), String::from_utf8(until))
+                else {
+                    return Err(unreadable("deny record that is not UTF-8".into()));
+                };
                 let key =
                     PublicKey::from_hex(&key).map_err(|_| unreadable(format!("deny key {key}")))?;
                 let until = parse_until(&until)

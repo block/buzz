@@ -4853,17 +4853,32 @@ mod route_integration_tests {
             let now = chrono::Utc::now();
             let live = (key(), exact(now + chrono::Duration::seconds(120)));
             let expired = (key(), exact(now - chrono::Duration::seconds(1)));
+            let bytes = |(k, v): (String, String)| (k.into_bytes(), v.into_bytes());
             let cases = [
                 ("valid and expired", None, true),
                 (
                     "invalid key",
-                    Some(("not-a-key".to_owned(), live.1.clone())),
+                    Some(bytes(("not-a-key".to_owned(), live.1.clone()))),
                     false,
                 ),
-                ("invalid until", Some((key(), "garbage".to_owned())), false),
+                (
+                    "invalid until",
+                    Some(bytes((key(), "garbage".to_owned()))),
+                    false,
+                ),
                 (
                     "until with extra field",
-                    Some((key(), format!("{}:x", live.1))),
+                    Some(bytes((key(), format!("{}:x", live.1)))),
+                    false,
+                ),
+                (
+                    "until not UTF-8",
+                    Some((key().into_bytes(), vec![0xff, b':', b'0'])),
+                    false,
+                ),
+                (
+                    "key not UTF-8",
+                    Some((vec![0xff; 64], live.1.clone().into_bytes())),
                     false,
                 ),
             ];
@@ -4875,7 +4890,7 @@ mod route_integration_tests {
                     &format!("{namespace}:deny"),
                     &issuer,
                 );
-                let mut fields = vec![live.clone(), expired.clone()];
+                let mut fields = vec![bytes(live.clone()), bytes(expired.clone())];
                 fields.extend(extra);
                 // One transaction, so the fixture always expires.
                 let _: () = redis::pipe()
@@ -4901,8 +4916,8 @@ mod route_integration_tests {
                     assert_eq!(keys, vec![live.0.clone()], "{case}: expired entry filtered");
                 } else {
                     assert!(
-                        loaded.is_err(),
-                        "{case}: an unreadable record must fail the load"
+                        matches!(loaded, Err(buzz_auth::LoadDeniesError::Unreadable(_))),
+                        "{case}: an unreadable record must fail the load as unreadable"
                     );
                 }
             }
