@@ -22,29 +22,21 @@ pub enum Command {
         #[arg(long, value_parser = inventory::parse_subject)]
         pubkey: String,
     },
-    /// Print communities with cleanup candidates as JSON; does not save or execute a request.
+    /// Print affected communities as JSON; does not save or execute a request.
     Inventory {
+        /// Trusted signer for relay-authored content.
+        #[arg(long, value_parser = content_batches::parse_pubkey)]
+        relay_pubkey: Option<String>,
         /// Demo fixture (default), hex public key, or npub.
         #[arg(long, default_value = "demo", value_parser = inventory::parse_subject)]
         pubkey: String,
-        /// Trusted relay public key for historical content attribution in the inventory.
-        #[arg(long, value_parser = content_batches::parse_pubkey)]
-        relay_pubkey: Option<String>,
     },
-    /// Save a request; read-only submissions start independent rehearsals.
+    /// Save a request. An identical resubmission returns the existing row.
     Submit {
-        /// Start a fresh rehearsal with independent approval and saved progress.
-        #[arg(
-            long,
-            alias = "rehearse",
-            requires = "pubkey",
-            conflicts_with = "target"
-        )]
+        /// Keep read-only progress separate from deletion of this subject.
+        #[arg(long, requires = "pubkey")]
         read_only: bool,
-        /// Reuse this UUID when retrying submission; otherwise generate a fresh one.
-        #[arg(long, requires = "read_only")]
-        run_id: Option<Uuid>,
-        /// Trusted relay public key for historical content attribution in the inventory.
+        /// Trusted signer for relay-authored content.
         #[arg(long, value_parser = content_batches::parse_pubkey)]
         relay_pubkey: Option<String>,
         /// Optional demo request label, for example demo:alice. Conflicts with --pubkey.
@@ -71,25 +63,19 @@ pub enum Command {
         #[arg(long)]
         inventory_digest: String,
     },
-    /// Preview without writes by default; --read-only advances an approved rehearsal.
+    /// Run an approved workflow; real handlers require explicit --delete.
     Run {
         /// Approved request UUID.
         id: Uuid,
         /// Execute implemented real handlers; stop relay and external writers first.
         #[arg(long)]
         delete: bool,
-        /// Persist real previews; only journal and community handoff records may change.
-        #[arg(long, alias="rehearse", conflicts_with_all=["delete", "print_only", "stage", "community"])]
-        read_only: bool,
-        /// Print proposals without saving progress or submitting community children.
+        /// Run the same workflow and record progress without applying source deletions.
         #[arg(long, conflicts_with = "delete")]
-        print_only: bool,
-        /// Inspect one handler without advancing; implies stateless preview.
-        #[arg(long, value_parser=workflow::parse_stage, conflicts_with="delete")]
-        stage: Option<String>,
-        /// Inspect one community from the saved inventory.
-        #[arg(long, requires = "stage", conflicts_with = "delete")]
-        community: Option<Uuid>,
+        read_only: bool,
+        /// Write selected row keys and media identifiers as JSON lines to a new file.
+        #[arg(long, value_name = "PATH")]
+        write_row_ids: Option<std::path::PathBuf>,
         /// Trusted relay signer for historical content attribution.
         #[arg(long, value_parser=content_batches::parse_pubkey)]
         relay_pubkey: Option<String>,
@@ -115,7 +101,7 @@ pub enum Command {
         #[arg(long)]
         demo_no_agents_in: Vec<Uuid>,
     },
-    /// List requests, newest first.
+    /// List synthetic requests, newest first.
     List {
         /// Maximum number of rows.
         #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
@@ -163,14 +149,8 @@ pub async fn run(command: Command) -> Result<i32> {
         });
     }
     let db = if matches!(
-        &command,
-        Command::Inventory { .. }
-            | Command::AccountScope { .. }
-            | Command::Run {
-                print_only: true,
-                ..
-            }
-            | Command::Run { stage: Some(_), .. }
+        command,
+        Command::Inventory { .. } | Command::AccountScope { .. }
     ) {
         buzz_db::Db::connect_cold_start(
             buzz_db::DbConfig {
@@ -203,11 +183,14 @@ pub async fn run(command: Command) -> Result<i32> {
             pubkey,
             relay_pubkey,
         } => {
-            crate::print_json(&inventory::generate(&db, &pubkey, relay_pubkey.as_deref()).await?)?;
+            crate::print_json(
+                &db.user_deletion_store()
+                    .generate_inventory_with_relay(&pubkey, relay_pubkey.as_deref())
+                    .await?,
+            )?;
         }
         Command::Submit {
             read_only,
-            run_id,
             relay_pubkey,
             target,
             pubkey,
@@ -218,31 +201,17 @@ pub async fn run(command: Command) -> Result<i32> {
                 None | Some("demo") => "demo:default".to_owned(),
                 Some(key) => key.to_owned(),
             });
-            let users = db.user_deletion_store();
-            let request = if read_only {
-                let run_id = run_id.unwrap_or_else(Uuid::new_v4);
-                // Print before the first write so a lost response can be retried.
-                eprintln!("rehearsal run ID: {run_id}");
-                users
-                    .submit_rehearsal_with_relay(
+            crate::print_json(
+                &db.user_deletion_store()
+                    .submit_for_mode(
                         &target,
                         &requested_by,
                         reason.as_deref(),
-                        run_id,
+                        read_only,
                         relay_pubkey.as_deref(),
                     )
-                    .await?
-            } else {
-                users
-                    .submit_with_relay(
-                        &target,
-                        &requested_by,
-                        reason.as_deref(),
-                        relay_pubkey.as_deref(),
-                    )
-                    .await?
-            };
-            crate::print_json(&request)?;
+                    .await?,
+            )?;
         }
         Command::Approve {
             id,
@@ -258,9 +227,7 @@ pub async fn run(command: Command) -> Result<i32> {
             id,
             delete,
             read_only,
-            print_only,
-            stage,
-            community,
+            write_row_ids,
             relay_pubkey,
             batch_size,
             max_items,
@@ -271,54 +238,42 @@ pub async fn run(command: Command) -> Result<i32> {
             demo_no_agents_in,
         } => {
             let request = store.get(id).await?;
-            let relay_pubkey = inventory::saved_relay_key(
-                request.inventory_manifest.as_ref(),
-                relay_pubkey.as_deref(),
-            )?;
             let real = !request.target.starts_with("demo:");
             if real {
+                anyhow::ensure!(
+                    delete || read_only,
+                    "real workflow execution requires --delete or --read-only"
+                );
                 anyhow::ensure!(
                     fail_stage.is_none() && stage_delay_ms == 0 && demo_no_agents_in.is_empty(),
                     "dummy controls cannot be used for real deletion"
                 );
             }
-            let source = if !delete {
-                buzz_db::Db::connect_cold_start(
-                    buzz_db::DbConfig {
-                        database_url: crate::required_env("DATABASE_URL")?,
-                        max_connections: 1,
-                        min_connections: 0,
-                        default_transaction_read_only: true,
-                        ..buzz_db::DbConfig::default()
-                    },
-                    "user_rehearsal_source",
-                )
-                .await?
-            } else {
-                buzz_db::Db::from_pool(db.pool().clone())
-            };
-            let options = worker::RunOptions {
-                db: real.then_some(source),
-                media: None,
-                delete,
-                read_only,
-                community_store: (read_only || delete).then(|| db.deletion_store()),
-                relay_pubkey,
-                batch_size,
-                max_items,
-                next_step,
-                fail_stage,
-                stage_delay: std::time::Duration::from_millis(stage_delay_ms),
-                no_agents_in: demo_no_agents_in,
-            };
-            if (real && !delete && !read_only) || print_only || stage.is_some() {
-                return preview::run(&db, &request, &options, stage.as_deref(), community).await;
-            }
+            anyhow::ensure!(
+                real || (!read_only && write_row_ids.is_none()),
+                "row output and read-only execution require a real subject"
+            );
+            let relay_pubkey = buzz_db::user_deletion::UserDeletionInventory::resolve_relay_pubkey(
+                request.inventory_manifest.as_ref(),
+                relay_pubkey.as_deref(),
+            )?;
             let code = worker::run(
                 &store,
                 id,
                 &executor_id.unwrap_or_else(crate::default_executor_id),
-                &options,
+                &worker::RunOptions {
+                    db: real.then(|| buzz_db::Db::from_pool(db.pool().clone())),
+                    media: None,
+                    row_ids: write_row_ids.as_deref().map(row_ids::create).transpose()?,
+                    delete,
+                    relay_pubkey,
+                    batch_size,
+                    max_items,
+                    next_step,
+                    fail_stage,
+                    stage_delay: std::time::Duration::from_millis(stage_delay_ms),
+                    no_agents_in: demo_no_agents_in,
+                },
                 &crate::shutdown_token(),
             )
             .await?;
@@ -339,70 +294,10 @@ mod inventory;
 pub mod media;
 /// Standalone delegation of an owned community to community deletion.
 pub mod owned_community;
-mod preview;
 mod profile_batches;
+mod row_ids;
 /// Read-only summaries of locally saved request progress and external waits.
 pub mod summary;
 mod transition;
 mod worker;
 mod workflow;
-
-#[cfg(test)]
-mod rehearsal_cli_tests {
-    use super::*;
-    use clap::Parser;
-    #[derive(Parser)]
-    struct Cli {
-        #[command(subcommand)]
-        command: Command,
-    }
-    #[test]
-    fn rehearsal_submission_and_execution_modes_are_explicit() {
-        let key = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
-        let id = "00000000-0000-0000-0000-000000000001";
-        let submit = [
-            "user-deletions",
-            "submit",
-            "--pubkey",
-            key,
-            "--requested-by",
-            "operator",
-        ];
-        assert!(
-            Cli::try_parse_from(submit.into_iter().chain(["--read-only", "--run-id", id])).is_ok()
-        );
-        assert!(Cli::try_parse_from(submit.into_iter().chain(["--run-id", id])).is_err());
-        assert!(Cli::try_parse_from(submit.into_iter().chain([
-            "--read-only",
-            "--relay-pubkey",
-            key
-        ]))
-        .is_ok());
-        assert!(Cli::try_parse_from(submit.into_iter().chain(["--relay-pubkey", key])).is_ok());
-        let run = ["user-deletions", "run", id];
-        for mode in ["--read-only", "--print-only", "--delete"] {
-            assert!(Cli::try_parse_from(run.into_iter().chain([mode, "--next-step"])).is_ok());
-        }
-        for modes in [
-            ["--read-only", "--delete"],
-            ["--read-only", "--print-only"],
-            ["--delete", "--print-only"],
-        ] {
-            assert!(Cli::try_parse_from(run.into_iter().chain(modes)).is_err());
-        }
-        assert!(Cli::try_parse_from(run.into_iter().chain([
-            "--read-only",
-            "--stage",
-            "purge_profile"
-        ]))
-        .is_err());
-        assert!(Cli::try_parse_from(run.into_iter().chain([
-            "--print-only",
-            "--stage",
-            "purge_profile",
-            "--community",
-            id
-        ]))
-        .is_ok());
-    }
-}

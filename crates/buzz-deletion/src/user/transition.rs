@@ -26,7 +26,7 @@ impl<'a> UserDeletionTransition<'a> {
         previous: Option<Uuid>,
     ) -> Result<NextStage> {
         self.store
-            .transition_stage_omitting_result(lease, previous, Some("purge_media"), decide_next)
+            .transition_stage(lease, previous, decide_next)
             .await
     }
 }
@@ -59,7 +59,7 @@ fn decide_next(request: &EntityRequest, history: &[EntityStage]) -> Result<Stage
         "pending" | "running" | "failed" => Ok(StageTransition::Resume(current.id)),
         "completed" => {
             let outcome = decision(&current, progress.legacy)?;
-            let successor = progress.apply(&inventory, current.target_community_id, outcome)?;
+            let successor = progress.apply(&inventory, &current, outcome)?;
             if successor.is_none()
                 && progress.completed_communities.len() != inventory.communities.len()
             {
@@ -92,7 +92,3 @@ fn saved_stage(
 #[cfg(test)]
 #[path = "transition_postgres_tests.rs"]
 mod postgres_tests;
-
-#[cfg(test)]
-#[path = "rehearsal_transition_tests.rs"]
-mod rehearsal_tests;

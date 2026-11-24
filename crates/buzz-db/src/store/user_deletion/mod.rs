@@ -15,7 +15,6 @@ pub use agent_ownership::UserDeletionTargets;
 mod requests;
 pub use discovery::normalize_user_deletion_pubkey;
 pub use inventory::UserDeletionInventory;
-pub use media::MediaUploadEvidence;
 
 /// Select whether a cleanup handler reports or applies its operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,9 +49,6 @@ mod postgres_tests;
 
 #[cfg(test)]
 mod discovery_postgres_tests;
-
-#[cfg(test)]
-mod inventory_discovery_postgres_tests;
 
 impl UserDeletionStore {
     /// Configure the deployment's existing relay key for atomic account roster repair.

@@ -196,18 +196,6 @@ async fn scrub_keeps_multiple_ancestors_and_matches_manual_delete_counters() {
         .await
         .unwrap();
     assert_eq!(preview.scrubbed_events, 2);
-    assert_eq!(
-        json!(preview.redact_content),
-        json!({
-            "rows": 2, "by_table": {"events": 2}, "events_by_kind": {"9": 2}
-        })
-    );
-    assert_eq!(preview.delete.by_table["events"], 1);
-    assert_eq!(json!(preview.delete.events_by_kind), json!({"9": 1}));
-    assert_eq!(
-        preview.items,
-        preview.delete.rows + preview.redact_content.rows
-    );
     assert_eq!(row(&db, c, &survivor).await, before);
     let deleted = store
         .run_message_batches(&opts, ExecutionMode::Delete, None, &mut Vec::new())

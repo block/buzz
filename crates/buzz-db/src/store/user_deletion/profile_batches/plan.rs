@@ -1,6 +1,5 @@
 use super::*;
 use sqlx::Row;
-use std::collections::HashMap;
 
 pub(super) async fn build(conn: &mut PgConnection, options: &ProfileBatchOptions) -> Result<Plan> {
     let human = normalize_user_deletion_pubkey(&options.pubkey)?;
@@ -45,19 +44,7 @@ pub(super) async fn inspect(conn: &mut PgConnection, scope: Scope, max_items: u3
         blockers,
     };
     let selected = events::select(conn, &plan.scope, max_items).await?;
-    let mut event_subjects = HashMap::with_capacity(selected.len());
-    for event in &selected {
-        let subject = event.subject;
-        event_subjects
-            .entry(event.id.clone())
-            .and_modify(|saved| {
-                if *saved != subject {
-                    *saved = None;
-                }
-            })
-            .or_insert(subject);
-    }
-    let ids: Vec<Vec<u8>> = event_subjects.keys().cloned().collect();
+    let ids: Vec<Vec<u8>> = selected.iter().map(|e| e.id.clone()).collect();
     // Threaded/channel-bearing data belongs to content cleanup; never break a surviving discussion.
     let threaded: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM thread_metadata WHERE community_id=$1 AND (event_id=ANY($2::bytea[]) OR parent_event_id=ANY($2::bytea[]) OR root_event_id=ANY($2::bytea[])))")
         .bind(plan.scope.community).bind(&ids).fetch_one(&mut *conn).await?;
@@ -66,14 +53,12 @@ pub(super) async fn inspect(conn: &mut PgConnection, scope: Scope, max_items: u3
             .push("selected profiles have thread dependencies; content cleanup required".into());
     }
     for table in rows::CHILDREN {
-        rows::collect(conn, &mut plan, table, &ids, &event_subjects, max_items).await?;
+        rows::collect(conn, &mut plan, table, &ids, max_items).await?;
     }
     let mut snapshots = Vec::new();
     for event in selected {
         let op = rows::Operation {
             table: &rows::EVENTS,
-            event_kind: Some(event.kind),
-            subject: event.subject,
             key: event.key,
             fingerprint: event.fingerprint,
             snapshot: event.snapshot,
@@ -84,38 +69,14 @@ pub(super) async fn inspect(conn: &mut PgConnection, scope: Scope, max_items: u3
             rows::push(&mut plan, op, max_items)?;
         }
     }
-    rows::collect(
-        conn,
-        &mut plan,
-        &rows::HEADS,
-        &[],
-        &event_subjects,
-        max_items,
-    )
-    .await?;
-    rows::collect(
-        conn,
-        &mut plan,
-        &rows::ARCHIVES,
-        &[],
-        &event_subjects,
-        max_items,
-    )
-    .await?;
+    rows::collect(conn, &mut plan, &rows::HEADS, &[], max_items).await?;
+    rows::collect(conn, &mut plan, &rows::ARCHIVES, &[], max_items).await?;
     // Archive rows go first, then snapshots; retries can find stale snapshots while identities remain.
     for op in snapshots {
         rows::push(&mut plan, op, max_items)?;
     }
     let before_users = plan.ops.len();
-    rows::collect(
-        conn,
-        &mut plan,
-        &rows::USERS,
-        &[],
-        &event_subjects,
-        max_items,
-    )
-    .await?;
+    rows::collect(conn, &mut plan, &rows::USERS, &[], max_items).await?;
     let human_bytea = format!("\\x{}", plan.scope.human);
     plan.ops[before_users..].sort_by_key(|op| op.key["pubkey"].as_str() == Some(&human_bytea));
     Ok(plan)

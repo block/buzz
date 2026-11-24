@@ -37,8 +37,6 @@ impl UserDeletionStore {
         )?;
         let mut total = AccountBatchSummary {
             record: "account_handler_summary",
-            account: (mode == ExecutionMode::ReadOnly)
-                .then(|| AccountPreview::new(&current.target, &keys)),
             read_only: mode == ExecutionMode::ReadOnly,
             items: 0,
             batches: 0,
@@ -53,14 +51,7 @@ impl UserDeletionStore {
             current.pubkey = key;
             current.max_items = options.max_items - total.items;
             let result = self
-                .run_batches(
-                    &current,
-                    OPERATIONS,
-                    mode,
-                    writer,
-                    stage,
-                    total.account.as_mut(),
-                )
+                .run_batches(&current, OPERATIONS, mode, writer, stage)
                 .await?;
             total.items += result.items;
             total.batches += result.batches;
@@ -72,14 +63,7 @@ impl UserDeletionStore {
         timeouts(&mut tx).await?;
         recheck(&mut tx, &current, false).await?;
         tx.rollback().await?;
-        // Each of up to 10,001 targets has a bounded breakdown, including
-        // targets with zero matches. Keep the existing smaller batch cap.
-        write_line(
-            writer,
-            &total,
-            16 * 1024 * 1024,
-            "account summary exceeds 16 MiB",
-        )?;
+        line(writer, &total)?;
         Ok(total)
     }
 }

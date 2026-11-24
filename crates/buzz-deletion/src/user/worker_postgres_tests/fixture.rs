@@ -6,7 +6,6 @@ use std::sync::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub(super) struct Fixture {
-    pub human: nostr::Keys,
     pub store: EntityDeletionStore,
     pub id: Uuid,
     pub pool: sqlx::PgPool,
@@ -26,9 +25,8 @@ impl Fixture {
         RunOptions {
             db: Some(Db::from_pool(self.pool.clone())),
             media: Some(self.storage.clone()),
+            row_ids: None,
             delete: true,
-            read_only: false,
-            community_store: None,
             relay_pubkey: None,
             batch_size: 100,
             max_items: 100_000,
@@ -56,8 +54,7 @@ pub(super) async fn fixture() -> Fixture {
     if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
         db.migrate().await.unwrap();
     }
-    let human = nostr::Keys::generate();
-    let target = human.public_key().to_hex();
+    let target = nostr::Keys::generate().public_key().to_hex();
     for id in [11, 12] {
         let community = Uuid::from_u128(id);
         sqlx::query("INSERT INTO communities(id, host) VALUES ($1, $2)")
@@ -197,7 +194,6 @@ pub(super) async fn fixture() -> Fixture {
         }
     });
     Fixture {
-        human,
         store,
         id: request.id,
         pool,

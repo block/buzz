@@ -18,10 +18,6 @@ struct Fixture {
 }
 
 async fn fixture() -> Fixture {
-    fixture_mode(false).await
-}
-
-async fn fixture_mode(rehearsal: bool) -> Fixture {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
         .unwrap();
@@ -32,22 +28,13 @@ async fn fixture_mode(rehearsal: bool) -> Fixture {
         .unwrap()
         .id;
     let store = db.entity_deletion_store();
-    // Exercise the standalone handler at an explicit approved owner stage.
-    // The worker journey separately covers real rehearsal intake and routing.
-    let run_id = Uuid::new_v4();
-    let target = if rehearsal {
-        format!("rehearsal:{run_id}:{}", "11".repeat(32))
-    } else {
-        "11".repeat(32)
-    };
+    // Owned intake/routing intentionally remain disabled. Seed that future
+    // approved input, then use the real claim, stage and handler operations.
+    let target = "11".repeat(32);
     let item = json!({"community_id": community.as_uuid(), "relationship": "owner", "label": "owned.example"});
-    let mut inventory = json!({"workflow_version": 2, "communities": [item, {
+    let inventory = json!({"communities": [item, {
         "community_id": Uuid::new_v4(), "relationship": "participant", "label": "not-reached"
     }]});
-    if rehearsal {
-        inventory["execution_mode"] = "rehearsal".into();
-        inventory["run_id"] = run_id.to_string().into();
-    }
     let digest = inventory_digest(&inventory).unwrap();
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO entity_deletion_requests (target, requested_by, status, inventory_manifest, inventory_digest)
@@ -810,6 +797,3 @@ async fn database_failure_is_not_hidden_by_an_existing_child() {
     ));
     lock.rollback().await.unwrap();
 }
-
-#[path = "rehearsal_postgres_tests.rs"]
-mod rehearsal_postgres_tests;

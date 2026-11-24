@@ -1,9 +1,7 @@
 # Run and recover a user-deletion workflow
 
-For persisted read-only execution, see [Rehearse a user-deletion workflow](operator-user-deletion-rehearsal.md). Each rehearsal has independent approval and history, real handler previews, explicit dummy gate/global stages and a final report. Owned communities are handed off without executing child deletion.
-
-The destructive workflow orders account gating, media cleanup, and per-community content
-cleanup. Real requests stop at the unimplemented account gate; they cannot
+The workflow orders account gating, media cleanup, and per-community content
+cleanup. Destructive runs stop at the unimplemented account gate; they cannot
 complete through placeholder handlers. Demo requests simulate all stages and
 never delete media or content.
 
@@ -11,8 +9,21 @@ Direct `media-batches` and `content-batches` commands remain available for
 operator-controlled cleanup. Neither command installs or enforces the account
 gate. Protection against concurrent writes by the target or their agents remains
 unimplemented; neither command proves full account erasure. Use a disposable
-database and versioned storage bucket when testing. Both modes delegate an owned
-community to its own deletion request when the parent reaches that stage.
+database and versioned storage bucket when testing. For owned communities both modes submit or reuse a child request. The child requires separate approval.
+
+For a saved read-only run, submit with `--read-only`, approve its digest, then run:
+
+```sh
+buzz-admin user-deletions run "$REQUEST_ID" --read-only --write-row-ids rows.ndjson
+```
+
+Both modes accept `--write-row-ids PATH`. Each invocation creates a new file.
+It records proposals from the stages that actually run, including compound row
+keys, file hashes and storage versions. A proposal can precede a failed batch.
+Media identifies target uploader cleanup by file hash. The file contains
+sensitive identifiers. Use a fresh path when resuming or stepping. The regular
+`inspect` command reads the saved stage summaries. An ordinary deletion and a
+read-only run keep independent progress for the same subject.
 
 ## Content batches
 
@@ -191,22 +202,17 @@ parent to `running` in one transaction. A previously started request with no
 current row and no terminal outcome is an error, not permission to create a
 second gate.
 
-Newly approved inventories use the same workflow rules in both modes.
+New real requests start at `gate_user`, then inspect media across communities.
+For each participant the order is `purge_content`, `purge_account`, then
+`purge_profile`. For an owner it is `delete_owned_community`. The worker picks
+the next uncovered community from the frozen inventory. After the last one it
+reaches `global_cleanup`. In read-only mode the gate and global cleanup record
+that their destructive handlers are unimplemented. The profile stage records
+outstanding prerequisites it observes while previous stages leave rows in place.
 
-| Completed stage | Next stage |
-| --- | --- |
-| `gate_user` | `purge_media` |
-| `purge_media` | First uncovered community, or `global_cleanup` for an empty inventory |
-| `purge_content` | `purge_account` in the same community |
-| `purge_account` | `purge_profile` in the same community |
-| `purge_profile` or `delete_owned_community` | Next uncovered community, or `global_cleanup` |
-| `global_cleanup` | `remaining_cleanup` |
-| `remaining_cleanup` | Complete the request |
-
-The approved inventory sets the community order. An owner enters
-`delete_owned_community`; other communities enter `purge_content`. A failed
-handler stays at its current stage. Older requests replay their saved workflow
-rules, including the legacy `purge_agents` branch.
+Older requests keep their saved transition rules. Demo content still branches
+on the recorded `has_agents` result.
+No full execution plan is created upfront.
 
 If the real `purge_db` keeps any of the user's messages in a channel, it must
 also keep the user's `channel_members` row for that channel, marked removed. The
@@ -282,10 +288,8 @@ media stage is transitioned without running media again.
 
 `--next-step` executes one handler, transitions, and releases the lease. Without
 it, an invocation executes up to 100 handlers. The worker prints an inspection
-JSON document. For persisted read-only media, the per-file report appears in
-the stage result on stdout and in subsequent `inspect` output. For actual
-deletion the file report streams to stderr. The direct media command prints
-the file report on stdout. Each file has its hash, filename when present,
+JSON document; media's file report goes to stderr. The direct command prints the
+file report on stdout. Each file has its hash, filename when present,
 keep/delete decision, versions, and outcome counts; uploader lists are omitted.
 
 `--fail-stage purge_content`, `--stage-delay-ms`, and `--demo-no-agents-in` exercise

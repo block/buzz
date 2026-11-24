@@ -184,13 +184,7 @@ async fn personal_events_revisions_copies_and_community_feedback_are_removed() {
     ];
     let before = snapshot(&f.pool, &tables).await;
     let mut output = Vec::new();
-    let summary = f.run(ExecutionMode::ReadOnly, &mut output).await.unwrap();
-    let counts = &json!(summary)["account"]["delete"];
-    assert_eq!(counts["by_table"]["events"], 20);
-    assert_eq!(
-        counts["events_by_kind"],
-        json!({"3":2,"10000":2,"10001":2,"10002":2,"10003":2,"10030":2,"30000":2,"30003":2,"30315":2,"30078":2})
-    );
+    f.run(ExecutionMode::ReadOnly, &mut output).await.unwrap();
     assert_eq!(snapshot(&f.pool, &tables).await, before);
     let selected: BTreeSet<_> = before["events"]
         .as_array()

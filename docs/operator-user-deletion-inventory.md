@@ -6,13 +6,12 @@ Both demo and real-key submissions run through the existing workflow:
 inventory preview → submit → inspect → approve → run → inspect completed
 ```
 
-Request, inventory, approval, lease and stage records are real. All execution
-handlers still print dummy messages: `gate_user`, then `purge_db` and
-`purge_agents` for each community. They do not fence users or delete data.
-There is no background worker to start; `user-deletions run` is the worker process.
+The demo uses synthetic handlers. For real subjects, `run --read-only` records
+the existing handlers’ observations. A new destructive run stops at the
+unimplemented account gate. See [the executor guide](operator-user-deletion-executor.md)
+for the optional row-identifier file and owned-community handoff.
 
-While execution uses dummy handlers, submit and execute requests only in an
-isolated, disposable development database. Production inventory preview may use
+Run this example in an isolated development database. Production inventory preview may use
 read-only access. A completed dummy request permanently occupies that target's
 request row in the database where it ran.
 
@@ -23,8 +22,7 @@ request row in the database where it ran.
 cargo build -p buzz-admin
 ```
 
-Set `DATABASE_URL` explicitly. Preview needs SELECT on the community, content, account, media and profile
-source tables read by `crates/buzz-db/src/store/user_deletion/inventory_discovery.sql`. The complete workflow also needs write
+Set `DATABASE_URL` explicitly. Preview needs SELECT on the source tables used by community discovery. The complete workflow also needs write
 access to the `entity_deletion_*` tables. A production read-only account cannot
 submit, approve, or checkpoint a run.
 
@@ -42,8 +40,7 @@ docker exec buzz-user-inventory pg_isready -U buzz -d buzz
 ./target/debug/buzz-admin migrate
 ```
 
-Use a different container name and port if those are occupied. No relay, Redis,
-or object storage is required. These commands use `jq` to extract JSON fields.
+Use a different container name and port if those are occupied. The demo needs only PostgreSQL. A real read-only workflow also needs access to the configured versioned storage. These commands use `jq` to extract JSON fields.
 
 ## 1. Choose demo or a public key
 
@@ -51,17 +48,19 @@ For demo, no membership fixtures are needed:
 
 ```bash
 SUBJECT=demo
+MODE=()
 ```
 
 For real discovery, set your hex public key or npub:
 
 ```bash
-SUBJECT=<your-hex-key-or-npub>
+SUBJECT="$SUBJECT_PUBKEY"
+MODE=(--read-only)
 ```
 
 Hex and npub are two encodings of the same public key. They normalize to the
 same lowercase hex target and therefore the same request. No private key is
-needed. Discovery only sees cleanup candidates in the database selected by
+needed. Discovery looks for locally attributable records in the database selected by
 `DATABASE_URL`; a fresh local database will return no communities for your key.
 The optional local fixture below exercises discovery using that key without
 connecting to production.
@@ -98,7 +97,7 @@ There are no actions, subjects or request targets inside this inventory.
 
 ```bash
 ./target/debug/buzz-admin user-deletions submit \
-  --pubkey "$SUBJECT" --requested-by operator-a > /tmp/user-deletion-request.json
+  --pubkey "$SUBJECT" "${MODE[@]}" --requested-by operator-a > /tmp/user-deletion-request.json
 REQUEST_ID=$(jq -r '.id' /tmp/user-deletion-request.json)
 ./target/debug/buzz-admin user-deletions inspect "$REQUEST_ID" > /tmp/user-deletion-inspection.json
 jq '{id, target, status, inventory_manifest, inventory_digest}' /tmp/user-deletion-inspection.json
@@ -108,7 +107,7 @@ DIGEST=$(jq -r '.inventory_digest' /tmp/user-deletion-inspection.json)
 Submit runs the same inventory generator as preview, then atomically saves one
 `entity_deletion_requests` row with `status = inventoried`, the manifest and
 its digest. Preview is optional; approval always refers to the saved inventory.
-Real targets are canonical public keys. The default demo target is `demo:default`.
+Deletion targets are canonical public keys. Read-only requests use the same key with a `read-only:` prefix for independent progress. The default demo target is `demo:default`.
 
 The same target, operator and reason return the existing request. Resubmission
 does not refresh its inventory or restart a completed run. For another demo run,
@@ -129,10 +128,10 @@ approval is rejected. Operator identities remain self-asserted demo inputs.
 ## 4. Step once, then resume to completion
 
 ```bash
-./target/debug/buzz-admin user-deletions run "$REQUEST_ID" --next-step
+./target/debug/buzz-admin user-deletions run "$REQUEST_ID" "${MODE[@]}" --next-step
 ./target/debug/buzz-admin user-deletions inspect "$REQUEST_ID" \
   | jq '{status, execution, stage_history}'
-./target/debug/buzz-admin user-deletions run "$REQUEST_ID"
+./target/debug/buzz-admin user-deletions run "$REQUEST_ID" "${MODE[@]}"
 ./target/debug/buzz-admin user-deletions inspect "$REQUEST_ID" \
   | jq '{status, stages: [.stage_history[] | {stage, target_community_id, status, is_current}]}'
 ```
@@ -143,20 +142,17 @@ that saved stage and processes communities in inventory order. Each completion
 updates `entity_deletion_stage_history` and advances the current marker under
 the parent lease. On completion the parent is `completed` and no stage is current.
 
-Expected counts: demo has five completed stages; one discovered community has
-three. An empty inventory has only the request-wide dummy gate, so an empty
-result does not test community processing. Runs are bounded to 100 handlers;
-for larger inventories, repeat `run` until inspection shows `completed`.
+Runs are bounded to 100 handlers per invocation. For larger inventories, repeat `run` until inspection shows `completed`.
 
 To test a failure, use a fresh request and, after approval, run:
 
 ```bash
-./target/debug/buzz-admin user-deletions run "$REQUEST_ID" --fail-stage purge_db
+./target/debug/buzz-admin user-deletions run "$REQUEST_ID" "${MODE[@]}" --fail-stage purge_db
 # Expected nonzero exit: inspect the saved error and retry deadline.
 ./target/debug/buzz-admin user-deletions inspect "$REQUEST_ID" \
   | jq '{status, execution, stage_history}'
 # Once execution.next_attempt_at has passed (normally 30 seconds):
-./target/debug/buzz-admin user-deletions run "$REQUEST_ID"
+./target/debug/buzz-admin user-deletions run "$REQUEST_ID" "${MODE[@]}"
 ```
 
 The failed stage stays current; its retry updates the same row. No new approval
@@ -193,37 +189,22 @@ inventory is not regenerated on resubmission.
 
 ## Discovery and limits
 
-`inventory`, ordinary `submit`, and `submit --read-only` call one inventory
-method. For the same public key, trusted relay key and database snapshot, all
-three select the same communities and relationships. Rehearsals add their
-execution mode, run ID and workflow version after selection.
-
-Selection includes current community/channel membership, owned agents (including
-inactive ones), and remaining content, account, media or profile records.
-Agent ownership is community-local. Unrelated communities and ordinary messages
-mentioning the subject do not enter the inventory. A current non-owner membership
-is `participant`; remaining data without current membership is `past_participant`.
-That label also covers agent-only data and does not imply the human previously joined.
-Owners retain `owner`.
-
-Supply the same optional `--relay-pubkey <trusted-relay-key>` to preview and
-submission to include historical relay-attributed content. The inventory freezes
-this key; execution reuses it and rejects a conflicting override. Without it,
-only direct records and profile candidates are selected. Inclusion identifies
-work to inspect; handlers still validate authority over individual rows.
+1. Normalize the hex key or npub.
+2. Select communities with relay or channel membership, a locally owned agent,
+   or remaining account, content, profile or uploader records for the subject.
+3. With `--relay-pubkey`, include historical content attributed by that signer.
+   Supply the same key on submission to freeze that scope.
+4. Include archived and deleting communities when such evidence exists.
+5. Record current owners and participants. Mark remaining matches as past participants.
+6. Return communities once each, ordered by UUID.
 
 Discovery uses one statement snapshot, a 30-second timeout, and a 1,000-community
-cap applied after filtering. Errors and oversized results fail rather than return
-partial inventories; failed submission rolls back the request too. Preview uses
-a read-only transaction and needs no deletion-workflow tables. It cannot find
-communities in other databases. Saved requests keep their inventories and digests
-on retry, even after source data changes.
+cap. Errors and oversized results fail rather than return partial inventories.
+A failed discovery during submission rolls back the request too.
+Preview uses a read-only transaction and needs no workflow tables or migrations.
 
-New inventories include owned communities in both modes. When the workflow reaches
-one, it submits or adopts the community deletion request and advances to the
-next community. The child has its own approval and execution.
-See [the rehearsal guide](operator-user-deletion-rehearsal.md) for the current
-read-only workflow and its limits.
+Preview and submission use the same selector. Each owned community goes to
+its own independently approved community-deletion request.
 
 ## Schema and compatibility
 

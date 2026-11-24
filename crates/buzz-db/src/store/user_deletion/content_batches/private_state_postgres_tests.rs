@@ -162,12 +162,6 @@ async fn private_dm_snapshot_cleanup_checks_subject_signer_and_resumes_without_s
     assert!(preview
         .excluded_event_kinds
         .contains(&json!({"kind":30622,"count":1})));
-    let attribution = preview.attribution.as_ref().unwrap();
-    assert_eq!(attribution.targets.len(), 2);
-    for target in &attribution.targets {
-        assert_eq!(target.counts.delete.events_by_kind.get(&30622), Some(&1));
-    }
-    assert_eq!(attribution.shared.delete.rows, 0);
     let records: Vec<Value> = std::str::from_utf8(&output)
         .unwrap()
         .lines()

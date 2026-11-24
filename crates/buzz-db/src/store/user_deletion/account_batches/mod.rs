@@ -13,10 +13,8 @@ mod community_memberships;
 mod memberships;
 mod operations;
 mod ownership;
-mod preview;
 mod scope;
 use operations::{Operation, GLOBAL_OPERATIONS, OPERATIONS};
-use preview::AccountPreview;
 pub use scope::{AccountCommunityScope, AccountScope};
 
 #[cfg(test)]
@@ -70,9 +68,6 @@ impl Options {
 #[derive(Debug, Serialize)]
 pub struct AccountBatchSummary {
     record: &'static str,
-    /// Table, event-kind and ownership counts for a community preview.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    account: Option<AccountPreview>,
     /// True only in print-only mode.
     pub read_only: bool,
     /// Proposed row operations in preview; committed operations in delete mode.
@@ -105,7 +100,7 @@ impl UserDeletionStore {
             max_items: options.max_items,
         };
         bounds(options.batch_size, options.max_items)?;
-        self.run_batches(&options, GLOBAL_OPERATIONS, mode, writer, None, None)
+        self.run_batches(&options, GLOBAL_OPERATIONS, mode, writer, None)
             .await
     }
 
@@ -116,12 +111,10 @@ impl UserDeletionStore {
         mode: ExecutionMode,
         writer: &mut impl Write,
         stage: Option<(&crate::entity_deletion::EntityLease, Uuid)>,
-        mut preview: Option<&mut AccountPreview>,
     ) -> Result<AccountBatchSummary> {
         let delete = mode == ExecutionMode::Delete;
         let mut summary = AccountBatchSummary {
             record: "account_batches_summary",
-            account: None,
             read_only: !delete,
             items: 0,
             batches: 0,
@@ -223,9 +216,6 @@ impl UserDeletionStore {
                         break;
                     }
                     batch(writer, options, op, &keys, &summary)?;
-                    if let Some(counts) = preview.as_deref_mut() {
-                        counts.record(options, op, &keys)?;
-                    }
                     cursor = keys.last().cloned();
                     summary.items += keys.len() as u32;
                     summary.batches += 1;
@@ -404,23 +394,9 @@ fn invalid(message: impl Into<String>) -> DbError {
 }
 
 fn line(writer: &mut impl Write, value: &impl Serialize) -> Result<()> {
-    write_line(
-        writer,
-        value,
-        256 * 1024,
-        "batch output exceeds 256 KiB; reduce batch-size",
-    )
-}
-
-fn write_line(
-    writer: &mut impl Write,
-    value: &impl Serialize,
-    max_bytes: usize,
-    over_budget: &'static str,
-) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
-    if bytes.len() > max_bytes {
-        return Err(invalid(over_budget));
+    if bytes.len() > 256 * 1024 {
+        return Err(invalid("batch output exceeds 256 KiB; reduce batch-size"));
     }
     writer
         .write_all(&bytes)

@@ -28,12 +28,28 @@ async fn owner_is_frozen_in_ordinary_and_read_only_submissions() {
     assert_eq!(preview["communities"][0]["relationship"], "owner");
     let saved = store.submit(PUBKEY, "operator", None).await.unwrap();
     assert_eq!(saved.inventory_manifest.as_ref().unwrap(), &preview);
-    let rehearsal = store
-        .submit_rehearsal(PUBKEY, "operator", None, Uuid::new_v4())
+    let agent_only = Uuid::new_v4();
+    sqlx::query("INSERT INTO communities(id, host) VALUES ($1, 'former.example')")
+        .bind(agent_only)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let agent = nostr::Keys::generate().public_key().to_hex();
+    sqlx::query("INSERT INTO users(community_id,pubkey,agent_owner_pubkey,deactivated_at) VALUES($1,decode($2,'hex'),decode($3,'hex'),now())")
+        .bind(agent_only).bind(&agent).bind(PUBKEY).execute(&pool).await.unwrap();
+    let preview = store.generate_inventory(PUBKEY).await.unwrap();
+    assert!(preview["communities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["community_id"] == agent_only.to_string()
+            && c["relationship"] == "past_participant"));
+    let read_only = store
+        .submit_for_mode(PUBKEY, "operator", None, true, None)
         .await
         .unwrap();
     assert_eq!(
-        rehearsal.inventory_manifest.unwrap()["communities"],
+        read_only.inventory_manifest.unwrap()["communities"],
         preview["communities"]
     );
     store

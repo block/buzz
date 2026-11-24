@@ -1,16 +1,10 @@
 use super::*;
-use crate::entity_deletion::{
-    EntityLease, EntityRequest, NewEntityStage, NextStage, StageTransition,
-};
+use crate::entity_deletion::{EntityLease, NewEntityStage, NextStage, StageTransition};
 use std::time::Duration;
 
 async fn prepare(f: &Fixture) -> (EntityLease, Uuid) {
-    let request = f.store().submit(TARGET, "submitter", None).await.unwrap();
-    start_account_stage(f, &request).await
-}
-
-async fn start_account_stage(f: &Fixture, request: &EntityRequest) -> (EntityLease, Uuid) {
     let db = Db::from_pool(f.pool.clone());
+    let request = f.store().submit(TARGET, "submitter", None).await.unwrap();
     f.store()
         .approve(
             request.id,
@@ -25,7 +19,7 @@ async fn start_account_stage(f: &Fixture, request: &EntityRequest) -> (EntityLea
         .await
         .unwrap()
         .unwrap();
-    let inputs = crate::user_deletion::UserDeletionInventory::read(request)
+    let inputs = crate::user_deletion::UserDeletionInventory::read(&request)
         .unwrap()
         .inputs(TARGET, Some(f.options.community))
         .unwrap();
@@ -82,50 +76,6 @@ async fn approved_account_stage_runs_same_operations_without_advancing_workflow(
     assert_eq!(summary.items, 35);
     assert!(summary.supported_scope_exhausted && !summary.account_erasure_complete);
     f.assert_cleaned(&before, &[f.options.community]).await;
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn leased_account_cleanup_refuses_an_approved_owner_scope_after_transfer() {
-    let f = Fixture::new().await;
-    let update_role = "UPDATE relay_members SET role=$3 WHERE community_id=$1 AND pubkey=$2";
-    sqlx::query(update_role)
-        .bind(f.options.community)
-        .bind(TARGET)
-        .bind("owner")
-        .execute(&f.pool)
-        .await
-        .unwrap();
-    let request = f.store().submit(TARGET, "submitter", None).await.unwrap();
-    let (lease, id) = start_account_stage(&f, &request).await;
-    sqlx::query(update_role)
-        .bind(f.options.community)
-        .bind(TARGET)
-        .bind("member")
-        .execute(&f.pool)
-        .await
-        .unwrap();
-
-    // The live roster would allow per-account work. The approved inventory
-    // still delegates this scope, even if a caller supplies the wrong stage.
-    let before = f.snapshot().await;
-    let error = f
-        .store()
-        .run_account_batches(
-            &f.options,
-            ExecutionMode::Delete,
-            &mut Vec::new(),
-            Some((&lease, id)),
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("owner inventory requires the community deletion handoff"),
-        "{error}"
-    );
-    assert_eq!(f.snapshot().await, before);
 }
 
 #[tokio::test]

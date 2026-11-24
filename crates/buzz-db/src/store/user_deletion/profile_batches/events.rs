@@ -11,8 +11,6 @@ pub(super) struct Snapshot {
     survivors: Arc<Vec<String>>,
 }
 pub(super) struct Selected {
-    pub kind: i32,
-    pub subject: Option<usize>,
     pub id: Vec<u8>,
     pub key: Value,
     pub fingerprint: String,
@@ -99,45 +97,46 @@ pub(super) async fn select(
         let tags: Value = row
             .try_get::<Option<Value>, _>("tags")?
             .ok_or_else(|| invalid("profile tags exceed 64 KiB"))?;
-        let author_index = scope.target_index(&author);
+        let authored = scope.targets.contains(&author);
         let mut snapshot = None;
         let selected = match kind {
-            0 | 10100 => author_index.map(Some),
+            0 | 10100 => authored,
             30177 | 30179 => {
                 let agent = subject(&tags, "d")?;
-                let agent_index = scope.target_index(&agent);
-                if author_index.is_some() && agent_index.is_none() {
+                if authored && !scope.targets.contains(&agent) {
                     return Err(invalid(
                         "managed definition names an agent not currently owned in this community",
                     ));
                 }
-                if agent_index.is_some() && author != scope.human {
+                if scope.targets.contains(&agent) && author != scope.human {
                     return Err(invalid("managed agent definition belongs to another owner"));
                 }
-                author_index.and(agent_index).map(Some)
+                authored && scope.targets.contains(&agent)
             }
             30382 => {
                 let target = subject(&tags, "p")?;
                 if target != subject(&tags, "d")? {
                     return Err(invalid("verified profile d/p subjects disagree"));
                 }
-                if let Some(target) = scope.target_index(&target) {
+                if scope.targets.contains(&target) {
                     trusted(scope, &author)?;
-                    Some(Some(target))
+                    true
                 } else {
-                    None
+                    false
                 }
             }
             9035 | 9036 => {
                 let target = subject(&tags, "p")?;
-                let index = scope.target_index(&target).ok_or_else(|| invalid("archive request concerns a surviving identity; shared-history disposition required"))?;
-                Some(Some(index))
+                if !scope.targets.contains(&target) {
+                    return Err(invalid("archive request concerns a surviving identity; shared-history disposition required"));
+                }
+                scope.targets.contains(&target)
             }
             8002 | 8003 => {
                 let target = subject(&tags, "p")?;
-                if let Some(target) = scope.target_index(&target) {
+                if scope.targets.contains(&target) {
                     trusted(scope, &author)?;
-                    Some(Some(target))
+                    true
                 } else {
                     return Err(invalid("archive delta references a target actor or replacement on a surviving identity; shared-history disposition required"));
                 }
@@ -167,13 +166,11 @@ pub(super) async fn select(
                     time,
                     survivors: survivors.clone(),
                 });
-                // Archive snapshots represent a community-wide list, even
-                // when only one of its subjects is selected for erasure.
-                Some(None)
+                true
             }
-            _ => None,
+            _ => false,
         };
-        if let Some(subject) = selected {
+        if selected {
             if row.try_get::<Option<Uuid>, _>("channel_id")?.is_some() {
                 return Err(invalid("channel-bearing profile requires content cleanup"));
             }
@@ -185,8 +182,6 @@ pub(super) async fn select(
                 }
             }
             out.push(Selected {
-                kind,
-                subject,
                 id: row.try_get("id")?,
                 key: row.try_get("key")?,
                 fingerprint: row.try_get("fingerprint")?,

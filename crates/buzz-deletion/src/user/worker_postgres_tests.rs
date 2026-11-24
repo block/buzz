@@ -5,8 +5,6 @@ use buzz_db::Db;
 mod media_fixture;
 #[path = "worker_postgres_tests/media_retry.rs"]
 mod media_retry_postgres_tests;
-#[path = "worker_postgres_tests/rehearsal_postgres_tests.rs"]
-mod rehearsal_postgres_tests;
 
 async fn fixture() -> (EntityDeletionStore, Uuid, sqlx::PgPool) {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -43,9 +41,8 @@ fn options() -> RunOptions {
         next_step: false,
         db: None,
         media: None,
+        row_ids: None,
         delete: false,
-        read_only: false,
-        community_store: None,
         relay_pubkey: None,
         batch_size: 100,
         max_items: 1_000_000,
@@ -461,6 +458,82 @@ async fn execute_without_transition(store: &EntityDeletionStore, id: Uuid, optio
     else {
         panic!("expected an executable stage");
     };
-    execute_stage(store, &lease, &row, options).await.unwrap();
+    handlers::dispatch(store, &lease, &row, options)
+        .await
+        .unwrap();
     store.release(&lease).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn read_only_run_writes_selected_keys_and_preserves_source_rows() {
+    let f = media_fixture::fixture().await;
+    let ordinary = f.store.get(f.id).await.unwrap();
+    let db = Db::from_pool(f.pool.clone());
+    let preview = db
+        .user_deletion_store()
+        .submit_for_mode(&ordinary.target, "reader", None, true, None)
+        .await
+        .unwrap();
+    assert_ne!(preview.id, ordinary.id);
+    assert_eq!(preview.inventory_manifest, ordinary.inventory_manifest);
+    f.store
+        .approve(
+            preview.id,
+            "reviewer",
+            preview.inventory_digest.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+    let path = std::env::temp_dir().join(format!("buzz-rows-{}.ndjson", Uuid::new_v4()));
+    let mut options = f.options();
+    options.delete = false;
+    options.row_ids = Some(super::super::row_ids::create(&path).unwrap());
+    run(
+        &f.store,
+        preview.id,
+        "reader",
+        &options,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let done = f.store.inspect(preview.id).await.unwrap();
+    assert_eq!(done.request.status, "completed");
+    let rows = std::fs::read_to_string(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let rows: Vec<serde_json::Value> = rows
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(rows
+        .iter()
+        .all(|r| r["request_id"] == preview.id.to_string() && r["mode"] == "read-only"));
+    assert!(rows
+        .iter()
+        .any(|r| r["stage"] == "purge_media" && r["version"]["version_id"] == "v1"));
+    assert!(rows.iter().any(|r| r["stage"] == "purge_account"
+        && r["table"] == "relay_members"
+        && r["key"]["pubkey"] == ordinary.target));
+    let accounts: Vec<_> = done
+        .stage_history
+        .iter()
+        .filter(|s| s.stage == "purge_account")
+        .collect();
+    assert_eq!(accounts.len(), 2);
+    assert!(accounts
+        .iter()
+        .all(|s| s.metadata_json["result"]["items"].as_u64().unwrap() > 0));
+    assert_eq!(f.uploader_count().await, 1);
+    assert!(!f.deleted.load(std::sync::atomic::Ordering::SeqCst));
+    options.delete = true;
+    assert!(run(
+        &f.store,
+        preview.id,
+        "reader",
+        &options,
+        &CancellationToken::new()
+    )
+    .await
+    .is_err());
 }

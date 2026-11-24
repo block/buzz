@@ -120,9 +120,8 @@ impl Fixture {
         RunOptions {
             db: Some(Db::from_pool(self.pool.clone())),
             media: None,
+            row_ids: None,
             delete: true,
-            read_only: false,
-            community_store: None,
             relay_pubkey: None,
             batch_size: 2,
             max_items,
@@ -205,13 +204,16 @@ impl Fixture {
 #[ignore = "requires Postgres"]
 async fn real_account_cap_saves_failure_then_retry_saves_success() {
     let f = Fixture::new().await;
+    let path = std::env::temp_dir().join(format!("buzz-rows-{}.ndjson", Uuid::new_v4()));
+    let mut options = f.options(1);
+    options.row_ids = Some(crate::user::row_ids::create(&path).unwrap());
     let error = tokio::time::timeout(
         Duration::from_secs(10),
         run(
             &f.store,
             f.request,
             "capped-worker",
-            &f.options(1),
+            &options,
             &CancellationToken::new(),
         ),
     )
@@ -223,6 +225,13 @@ async fn real_account_cap_saves_failure_then_retry_saves_success() {
         f.tokens().await,
         vec![Uuid::from_u128(2), Uuid::from_u128(3)]
     );
+    let entries = std::fs::read_to_string(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    let row: serde_json::Value = serde_json::from_str(entries.trim()).unwrap();
+    assert_eq!(row["stage_id"], f.stage.to_string());
+    assert_eq!(row["mode"], "delete");
+    assert_eq!(row["table"], "api_tokens");
+    assert_eq!(row["key"]["id"], Uuid::from_u128(1).to_string());
     let failed = f.inspect_released().await;
     assert_eq!(failed.request.status, "retry_wait");
     assert_eq!(failed.execution.retry_count, 1);

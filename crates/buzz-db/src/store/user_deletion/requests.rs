@@ -18,66 +18,28 @@ impl UserDeletionStore {
         requested_by: &str,
         reason: Option<&str>,
     ) -> Result<EntityRequest> {
-        self.submit_with_relay(target, requested_by, reason, None)
+        self.submit_for_mode(target, requested_by, reason, false, None)
             .await
     }
 
-    /// Save an ordinary request using the shared inventory and trusted relay input.
-    /// Attribution is frozen with the inventory and must match on resubmission.
-    pub async fn submit_with_relay(
-        &self,
-        target: &str,
-        requested_by: &str,
-        reason: Option<&str>,
-        relay_pubkey: Option<&str>,
-    ) -> Result<EntityRequest> {
-        self.submit_mode(target, requested_by, reason, None, relay_pubkey)
-            .await
-    }
-
-    /// Start an independent rehearsal, or retry submission with the same run ID.
-    /// The ID is generated once by the caller, never by a worker invocation.
-    /// Without a trusted relay key, discover directly attributed records only.
-    pub async fn submit_rehearsal(
-        &self,
-        target: &str,
-        requested_by: &str,
-        reason: Option<&str>,
-        run_id: uuid::Uuid,
-    ) -> Result<EntityRequest> {
-        self.submit_rehearsal_with_relay(target, requested_by, reason, run_id, None)
-            .await
-    }
-
-    /// Include historical content attributed by this explicitly trusted relay.
-    /// The attribution key is frozen with the inventory and must match on retry.
-    pub async fn submit_rehearsal_with_relay(
-        &self,
-        target: &str,
-        requested_by: &str,
-        reason: Option<&str>,
-        run_id: uuid::Uuid,
-        relay_pubkey: Option<&str>,
-    ) -> Result<EntityRequest> {
-        super::normalize_user_deletion_pubkey(target)?;
-        self.submit_mode(target, requested_by, reason, Some(run_id), relay_pubkey)
-            .await
-    }
-
-    async fn submit_mode(
+    /// Freeze one inventory per subject and mode. Separate progress prevents a
+    /// read-only stage from satisfying a later deletion of the same subject.
+    pub async fn submit_for_mode(
         &self,
         subject: &str,
         requested_by: &str,
         reason: Option<&str>,
-        run_id: Option<uuid::Uuid>,
+        read_only: bool,
         relay_pubkey: Option<&str>,
     ) -> Result<EntityRequest> {
         let subject = normalize_target(subject)?;
         let relay_pubkey = super::discovery::normalize_relay(&subject, relay_pubkey)?;
         let relay_pubkey = relay_pubkey.as_deref();
-        let target = match run_id {
-            Some(id) => format!("rehearsal:{id}:{subject}"),
-            None => subject.clone(),
+        let target = if read_only {
+            super::normalize_user_deletion_pubkey(&subject)?;
+            format!("read-only:{subject}")
+        } else {
+            subject.clone()
         };
         validate_operator(requested_by)?;
         if reason.is_some_and(|r| r.len() > 4096) {
@@ -107,12 +69,8 @@ impl UserDeletionStore {
             )));
         }
         if request.status == "submitted" {
-            let mut inventory =
+            let inventory =
                 super::discovery::generate_inventory_on(&mut tx, &subject, relay_pubkey).await?;
-            if let Some(id) = run_id {
-                inventory["execution_mode"] = "rehearsal".into();
-                inventory["run_id"] = id.to_string().into();
-            }
             let digest = inventory_digest(&inventory)?;
             request = sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "UPDATE entity_deletion_requests

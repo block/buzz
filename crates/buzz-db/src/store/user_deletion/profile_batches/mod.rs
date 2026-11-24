@@ -1,6 +1,6 @@
 //! Offline profile erasure. Preview and deletion share the exact immutable plan.
 //! Writers must remain stopped until the caller's full deletion verification ends.
-use super::{content_batches::ContentRowCounts, normalize_user_deletion_pubkey, UserDeletionStore};
+use super::{normalize_user_deletion_pubkey, UserDeletionStore};
 use crate::{DbError, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -32,10 +32,7 @@ pub struct ProfileBatchOptions {
 /// Result for this profile scope, never a claim of complete account erasure.
 #[derive(Debug, Serialize)]
 pub struct ProfileBatchSummary {
-    /// Action counts returned by the workflow profile preview.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    profile: Option<ProfileCounts>,
-    /// preview_complete, preview_with_prerequisites, or delete_complete.
+    /// preview_complete or delete_complete, emitted only on success.
     pub record: &'static str,
     /// Proposed or committed row mutations.
     pub items: usize,
@@ -43,82 +40,11 @@ pub struct ProfileBatchSummary {
     pub batches: usize,
     /// Human and current community agents discovered for this invocation.
     pub target_pubkeys: Vec<String>,
+    /// Outstanding prerequisites observed before preceding stages have applied changes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub prerequisites: Vec<String>,
     /// Always false; the independent final verifier owns that claim.
     pub account_erasure_complete: bool,
-    /// Observed prerequisites, still present because prior previews do not mutate data.
-    pub prerequisites: Vec<String>,
-}
-
-#[derive(Debug, Default, Serialize)]
-struct ProfileCounts {
-    targets: Vec<ProfileTarget>,
-    #[serde(flatten)]
-    actions: ProfileActions,
-    shared: ProfileActions,
-}
-
-#[derive(Debug, Default, Serialize)]
-struct ProfileActions {
-    delete: ContentRowCounts,
-    replace_archive_snapshot: ContentRowCounts,
-}
-
-#[derive(Debug, Serialize)]
-struct ProfileTarget {
-    pubkey: String,
-    role: &'static str,
-    delete_users_row: bool,
-    #[serde(flatten)]
-    actions: ProfileActions,
-}
-
-impl ProfileCounts {
-    fn from_plan(plan: &Plan) -> Self {
-        let mut counts = Self {
-            targets: plan
-                .scope
-                .targets
-                .iter()
-                .map(|key| ProfileTarget {
-                    pubkey: key.clone(),
-                    role: if key == &plan.scope.human {
-                        "human"
-                    } else {
-                        "owned_agent"
-                    },
-                    delete_users_row: false,
-                    actions: ProfileActions::default(),
-                })
-                .collect(),
-            ..Self::default()
-        };
-        for op in &plan.ops {
-            counts.actions.record(op);
-            if let Some(index) = op.subject {
-                let target = &mut counts.targets[index];
-                target.delete_users_row |= op.table.name == "users";
-                target.actions.record(op);
-            } else {
-                counts.shared.record(op);
-            }
-        }
-        counts
-    }
-}
-
-impl ProfileActions {
-    fn record(&mut self, op: &rows::Operation) {
-        let group = if op.snapshot.is_some() {
-            &mut self.replace_archive_snapshot
-        } else {
-            &mut self.delete
-        };
-        group.rows += 1;
-        *group.by_table.entry(op.table.name.to_owned()).or_default() += 1;
-        if let Some(kind) = op.event_kind {
-            *group.events_by_kind.entry(i64::from(kind)).or_default() += 1;
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -128,14 +54,6 @@ struct Scope {
     targets: Vec<String>,
     bytes: Vec<Vec<u8>>,
     relays: Vec<String>,
-}
-
-impl Scope {
-    fn target_index(&self, key: &str) -> Option<usize> {
-        self.targets
-            .binary_search_by(|target| target.as_str().cmp(key))
-            .ok()
-    }
 }
 
 struct Plan {
@@ -324,30 +242,20 @@ impl UserDeletionStore {
             tx.commit().await?;
         }
         let summary = ProfileBatchSummary {
-            profile: report_prerequisites.then(|| ProfileCounts::from_plan(&plan)),
             record: if delete {
                 "delete_complete"
-            } else if plan.blockers.is_empty() {
-                "preview_complete"
-            } else {
+            } else if !plan.blockers.is_empty() {
                 "preview_with_prerequisites"
+            } else {
+                "preview_complete"
             },
             items,
             batches,
             target_pubkeys: plan.scope.targets,
-            account_erasure_complete: false,
             prerequisites: plan.blockers,
+            account_erasure_complete: false,
         };
-        if report_prerequisites {
-            write_line(
-                writer,
-                &summary,
-                16 * 1024 * 1024,
-                "profile summary exceeds 16 MiB",
-            )?;
-        } else {
-            line(writer, &summary)?;
-        }
+        line(writer, &summary)?;
         conn.close().await?;
         Ok(summary)
     }
@@ -378,23 +286,9 @@ fn invalid(message: impl Into<String>) -> DbError {
     DbError::DeletionSafety(message.into())
 }
 fn line(writer: &mut impl Write, value: &impl Serialize) -> Result<()> {
-    write_line(
-        writer,
-        value,
-        2 * 1024 * 1024,
-        "output exceeds 2 MiB; reduce batch-size",
-    )
-}
-
-fn write_line(
-    writer: &mut impl Write,
-    value: &impl Serialize,
-    max_bytes: usize,
-    over_budget: &'static str,
-) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
-    if bytes.len() > max_bytes {
-        return Err(invalid(over_budget));
+    if bytes.len() > 2 * 1024 * 1024 {
+        return Err(invalid("output exceeds 2 MiB; reduce batch-size"));
     }
     writer
         .write_all(&bytes)

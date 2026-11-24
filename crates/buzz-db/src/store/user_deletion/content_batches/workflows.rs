@@ -21,9 +21,9 @@ fn unused(alias: &str) -> String {
 fn selections() -> Vec<(&'static str, String, &'static str)> {
     let empty = unused("f");
     vec![
-        ("workflow_runs", format!("SELECT jsonb_build_object('id',id) AS row_key, NULL::text AS warning, ARRAY[cause_pubkey] AS subject_keys
+        ("workflow_runs", format!("SELECT jsonb_build_object('id',id) AS row_key, NULL::text AS warning
             FROM workflow_runs WHERE community_id=$1 AND {RUN_INPUT}"), "would_scrub"),
-        ("workflow_approvals", format!("SELECT jsonb_build_object('token',encode(token,'hex')) AS row_key, NULL::text AS warning, ARRAY[approver_pubkey] AS subject_keys
+        ("workflow_approvals", format!("SELECT jsonb_build_object('token',encode(token,'hex')) AS row_key, NULL::text AS warning
             FROM workflow_approvals WHERE community_id=$1 AND {APPROVAL_NOTE}"), "would_scrub"),
         ("workflows", format!("SELECT jsonb_build_object('id',f.id) AS row_key, NULL::text AS warning
             FROM workflows f WHERE f.community_id=$1 AND f.owner_pubkey=ANY($2::bytea[]) AND {empty}"), "would_delete"),
@@ -44,7 +44,7 @@ pub(super) async fn plan(
             output,
             table,
             &select,
-            rows::Selection::Targets(targets),
+            targets,
             &json!({"type":"personal_workflow_data"}),
             action,
         )
@@ -53,23 +53,23 @@ pub(super) async fn plan(
     // A claim and its unused parent must commit together: a partial prefix
     // must never leave enabled automation without its at-most-once claim.
     let query = format!(
-        "SELECT f.id,f.owner_pubkey FROM workflows f WHERE f.community_id=$1
+        "SELECT f.id FROM workflows f WHERE f.community_id=$1
         AND f.owner_pubkey=ANY($2::bytea[]) AND {} AND ($3::uuid IS NULL OR f.id>$3)
         ORDER BY f.id LIMIT 100",
         unused("f")
     );
     let mut cursor: Option<Uuid> = None;
     loop {
-        let definitions: Vec<(Uuid, Vec<u8>)> = sqlx::query_as(sqlx::AssertSqlSafe(query.clone()))
+        let ids: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(query.clone()))
             .bind(output.community)
             .bind(targets)
             .bind(cursor)
             .fetch_all(&mut *conn)
             .await?;
-        if definitions.is_empty() {
+        if ids.is_empty() {
             break;
         }
-        for (id, owner) in definitions {
+        for id in ids {
             cursor = Some(id);
             let claims: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('workflow_id',workflow_id,'scheduled_for',scheduled_for)
                 FROM scheduled_workflow_fires WHERE community_id=$1 AND workflow_id=$2 ORDER BY scheduled_for LIMIT $3")
@@ -86,17 +86,9 @@ pub(super) async fn plan(
                     "would_delete",
                     &reason,
                     None,
-                    std::slice::from_ref(&owner),
                 )?;
             }
-            output.add(
-                "workflows",
-                json!({"id":id}),
-                "would_delete",
-                &reason,
-                None,
-                std::slice::from_ref(&owner),
-            )?;
+            output.add("workflows", json!({"id":id}), "would_delete", &reason, None)?;
             output.flush()?;
         }
     }

@@ -189,29 +189,6 @@ async fn all_operations_preview_paginate_delete_and_preserve_other_scopes() {
     assert!(!summary.account_erasure_complete);
     // 24 owned rows plus 11 nullable attribution operations.
     assert_eq!(summary.items, 35);
-    let counts = json!(summary)["account"].clone();
-    assert_eq!(counts["delete"]["rows"], 24);
-    assert_eq!(
-        counts["delete"]["by_subject"],
-        json!({"user":24,"owned_agents":0})
-    );
-    assert_eq!(counts["clear_attribution"]["fields"], 11);
-    assert_eq!(
-        counts["clear_attribution"]["by_table"]["channel_members"],
-        json!({"invited_by":3,"removed_by":2})
-    );
-    let targets = counts["targets"].as_array().unwrap();
-    assert_eq!(targets.len(), 1);
-    assert_eq!(targets[0]["pubkey"], TARGET);
-    assert_eq!(
-        targets[0]["delete"]["by_table"],
-        counts["delete"]["by_table"]
-    );
-    assert_eq!(targets[0]["clear_attribution"]["fields"], 11);
-    assert_eq!(
-        targets[0]["clear_attribution"]["by_table"],
-        counts["clear_attribution"]["by_table"]
-    );
     let mut keys = BTreeSet::new();
     let mut actions = BTreeSet::new();
     for record in records(&output)

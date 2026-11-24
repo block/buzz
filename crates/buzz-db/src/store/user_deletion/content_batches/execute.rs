@@ -52,14 +52,6 @@ async fn execute_session(
     writer: &mut impl Write,
     stage: Option<(&EntityLease, Uuid)>,
 ) -> Result<ContentBatchSummary> {
-    if let Some((lease, stage_id)) = stage {
-        let mut tx = session.begin().await?;
-        sqlx::query("SET LOCAL lock_timeout='3s'")
-            .execute(&mut *tx)
-            .await?;
-        validate_stage(&mut tx, options, lease, stage_id).await?;
-        tx.commit().await?;
-    }
     let mut planning = session.begin().await?;
     sqlx::query("SET LOCAL statement_timeout='30s'")
         .execute(&mut *planning)
@@ -156,7 +148,17 @@ pub(super) async fn execute_owned_batch(
         .await?;
     ownership::recheck(&mut tx, options, start).await?;
     if let Some((lease, stage_id)) = stage {
-        validate_stage(&mut tx, options, lease, stage_id).await?;
+        let request = crate::store::entity_deletion::lock_owned(&mut tx, lease).await?;
+        crate::store::entity_deletion::validate_approved_inventory(&mut tx, &request).await?;
+        let expected = crate::user_deletion::UserDeletionInventory::read(&request)?
+            .non_owner_inputs(&request.target, Some(community))?;
+        let inputs: Option<Value> = sqlx::query_scalar("SELECT metadata_json->'inputs' FROM entity_deletion_stage_history WHERE id=$1 AND request_id=$2 AND stage='purge_content' AND target_community_id=$3 AND is_current AND status='running' FOR UPDATE")
+            .bind(stage_id).bind(lease.request_id).bind(community).fetch_optional(&mut *tx).await?;
+        if request.target != normalize_user_deletion_pubkey(&options.pubkey)?
+            || inputs.as_ref() != Some(&expected)
+        {
+            return Err(invalid("content stage differs from approved scope"));
+        }
     }
     let mut tx = crate::AdmittedTx::admit(
         tx,
@@ -173,45 +175,5 @@ pub(super) async fn execute_owned_batch(
         writer,
         &json!({"record":"batch_committed", "number":batch["number"], "items":items(batch)?.len()}),
     )?;
-    Ok(())
-}
-
-// Validate before planning even when no batch exists, and again inside each write.
-async fn validate_stage(
-    tx: &mut PgConnection,
-    options: &ContentBatchOptions,
-    lease: &EntityLease,
-    stage_id: Uuid,
-) -> Result<()> {
-    let community = options.community;
-    let request = crate::store::entity_deletion::lock_owned(&mut *tx, lease).await?;
-    crate::store::entity_deletion::validate_approved_inventory(&mut *tx, &request).await?;
-    let relay = crate::user_deletion::UserDeletionInventory::resolve_relay_pubkey(
-        request.inventory_manifest.as_ref(),
-        options.relay_pubkey.as_deref(),
-    )?;
-    if relay
-        .as_deref()
-        .map(normalize_user_deletion_pubkey)
-        .transpose()?
-        != options
-            .relay_pubkey
-            .as_deref()
-            .map(normalize_user_deletion_pubkey)
-            .transpose()?
-    {
-        return Err(invalid(
-            "content stage relay key must match the saved discovery key",
-        ));
-    }
-    let expected = crate::user_deletion::UserDeletionInventory::read(&request)?
-        .non_owner_inputs(&request.target, Some(community))?;
-    let inputs: Option<Value> = sqlx::query_scalar("SELECT metadata_json->'inputs' FROM entity_deletion_stage_history WHERE id=$1 AND request_id=$2 AND stage='purge_content' AND target_community_id=$3 AND is_current AND status='running' FOR UPDATE")
-            .bind(stage_id).bind(lease.request_id).bind(community).fetch_optional(&mut *tx).await?;
-    if request.target != normalize_user_deletion_pubkey(&options.pubkey)?
-        || inputs.as_ref() != Some(&expected)
-    {
-        return Err(invalid("content stage differs from approved scope"));
-    }
     Ok(())
 }

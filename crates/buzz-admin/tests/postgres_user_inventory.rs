@@ -271,11 +271,7 @@ async fn inventory_submission_completes_demo_but_refuses_unfinished_real_workflo
         );
         assert_eq!(saved["status"], "inventoried");
         let id = saved["id"].as_str().unwrap();
-        let mut run = vec!["run", id];
-        if subject != "demo" {
-            run.push("--delete");
-        }
-        workflow_cli(&url, &run, false).await;
+        workflow_cli(&url, &["run", id], false).await;
         workflow_cli(
             &url,
             &[
@@ -401,6 +397,6 @@ async fn inventory_approval_and_resume_use_saved_account_identity_without_resolu
     assert_eq!(stopped["inventory_manifest"], saved["inventory_manifest"]);
     for stage in stopped["stage_history"].as_array().unwrap() {
         assert_eq!(stage["metadata_json"]["inputs"]["target"], account);
-        assert_eq!(stage["status"], "failed");
+        assert_eq!(stage["status"], "pending");
     }
 }
