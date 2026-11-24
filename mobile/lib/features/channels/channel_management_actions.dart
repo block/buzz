@@ -766,8 +766,12 @@ class ChannelActions {
     _ref.invalidate(channelMembersProvider(channelId));
     _ref.invalidate(channelBotPubkeysProvider(channelId));
     // A DM's title and portraits come from the list's participants, which the
-    // relay republished before accepting the removal.
-    unawaited(_ref.read(channelsProvider.notifier).refresh());
+    // relay republished before accepting the removal. List entries for other
+    // channels don't show members, so they need no re-read.
+    final channels = _ref.read(channelsProvider.notifier);
+    if (channels.channelById(channelId)?.isDm ?? false) {
+      unawaited(channels.refresh());
+    }
   }
 
   /// [targetAuthor] fills the NIP-25 `p` tag, which Activity reads by `#p`.

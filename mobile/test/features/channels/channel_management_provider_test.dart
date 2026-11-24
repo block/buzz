@@ -921,7 +921,7 @@ void main() {
   });
 
   test(
-    'a removal refreshes the list so DM participants drop the member',
+    'a DM removal refreshes the list so its participants drop the member',
     () async {
       final relay = FakeRelay();
       final container = ProviderContainer(
@@ -940,11 +940,29 @@ void main() {
       await connected.future;
       final channels =
           container.read(channelsProvider.notifier) as _CountingRefreshes;
-      await container
-          .read(channelActionsProvider)
-          .removeMember(channelId: _channelId, pubkey: _memberPubkey);
-      expect(relay.published.single.kind, 9001);
-      expect(channels.refreshes, 1);
+      await container.read(channelsProvider.future);
+      // Only a DM's list entry shows its members; a channel's needs no
+      // re-read.
+      for (final (type, refreshes) in [('stream', 0), ('dm', 1)]) {
+        channels.state = AsyncData([
+          Channel(
+            id: _channelId,
+            name: '',
+            channelType: type,
+            visibility: 'private',
+            description: '',
+            createdBy: 'owner',
+            createdAt: DateTime(2026),
+            memberCount: 3,
+            isMember: true,
+          ),
+        ]);
+        await container
+            .read(channelActionsProvider)
+            .removeMember(channelId: _channelId, pubkey: _memberPubkey);
+        expect(relay.published.last.kind, 9001);
+        expect(channels.refreshes, refreshes, reason: type);
+      }
     },
   );
 
