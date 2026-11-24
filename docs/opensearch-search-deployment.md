@@ -8,6 +8,7 @@ Postgres.
 | --- | --- |
 | `BUZZ_OPENSEARCH_URL` | HTTP(S) cluster URL without credentials, query or fragment. Unset turns indexing off. |
 | `BUZZ_OPENSEARCH_USERNAME`, `BUZZ_OPENSEARCH_PASSWORD` | Optional basic auth. Set both or neither. |
+| `BUZZ_OPENSEARCH_PREVIEW` | Required with the URL until [block/buzz#9862](https://github.com/block/buzz/pull/9862), because deleted messages stay in the index. Use it only on relays without real data. |
 
 ## Rollout order
 
@@ -20,14 +21,6 @@ Postgres.
 3. Set `BUZZ_OPENSEARCH_URL` on every relay. Each relay queues only the
    messages it stores, so one without the setting leaves gaps. A relay with
    the setting refuses to start before `0106` has run.
-
-Don't set it on a relay with real data yet. Deletes, edits and account
-scrubs don't reach the index until
-[block/buzz#9862](https://github.com/block/buzz/pull/9862), and nothing
-purges a deleted community's documents. Searches never return them, but
-their words stay in the index. That release also caps bulk requests at
-8 MiB; until then, a cluster with a 10 MiB request limit can reject a full
-batch.
 
 Messages stored before step 3 are not indexed; there is no backfill yet.
 
@@ -53,6 +46,6 @@ entries.
 
 ```sh
 docker compose --profile search up -d opensearch
-BUZZ_OPENSEARCH_URL=http://localhost:9200 just relay
+BUZZ_OPENSEARCH_URL=http://localhost:9200 BUZZ_OPENSEARCH_PREVIEW=true just relay
 curl -s 'localhost:9200/buzz-messages/_search?pretty'
 ```

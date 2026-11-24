@@ -1033,6 +1033,7 @@ impl Config {
             optional_utf8_env("BUZZ_OPENSEARCH_URL")?,
             optional_utf8_env("BUZZ_OPENSEARCH_USERNAME")?,
             optional_utf8_env("BUZZ_OPENSEARCH_PASSWORD")?,
+            parse_bool("BUZZ_OPENSEARCH_PREVIEW", false)?,
         )
         .map_err(ConfigError::InvalidValue)?;
         if !operator_listener_delivery_urls.is_empty() && relay_operator_api_origin.is_none() {
@@ -1663,10 +1664,14 @@ fn optional_utf8_env(name: &str) -> Result<Option<String>, ConfigError> {
 /// Parse the OpenSearch settings: an HTTP(S) URL without credentials, query,
 /// or fragment, and basic credentials given both or neither. Empty values
 /// count as unset.
+///
+/// Deletes and edits don't reach the index yet, so a URL also needs the
+/// `BUZZ_OPENSEARCH_PREVIEW` opt-in.
 fn parse_opensearch_config(
     url: Option<String>,
     username: Option<String>,
     password: Option<String>,
+    preview: bool,
 ) -> Result<Option<buzz_search::opensearch::OpenSearchConfig>, String> {
     let set = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
     let (username, password) = (set(username), set(password));
@@ -1679,6 +1684,9 @@ fn parse_opensearch_config(
         }
         return Ok(None);
     };
+    if !preview {
+        return Err("BUZZ_OPENSEARCH_URL needs BUZZ_OPENSEARCH_PREVIEW=true: deleted messages stay in the index, so use it only on a relay without real data".into());
+    }
     let parsed = url::Url::parse(raw.trim())
         .map_err(|e| format!("BUZZ_OPENSEARCH_URL is not a valid URL: {e}"))?;
     if !matches!(parsed.scheme(), "http" | "https")
@@ -1713,19 +1721,26 @@ mod tests {
     #[test]
     fn opensearch_config_is_optional_and_validated() {
         let some = |value: &str| Some(value.to_string());
-        assert!(parse_opensearch_config(None, None, None).unwrap().is_none());
-        assert!(parse_opensearch_config(some(" "), None, None)
+        assert!(parse_opensearch_config(None, None, None, false)
             .unwrap()
             .is_none());
-        assert!(parse_opensearch_config(None, some(""), some(""))
+        assert!(parse_opensearch_config(some(" "), None, None, false)
             .unwrap()
             .is_none());
-        let config = parse_opensearch_config(some("http://localhost:9200"), some(""), some(" "))
+        assert!(parse_opensearch_config(None, some(""), some(""), false)
             .unwrap()
-            .unwrap();
+            .is_none());
+        let config =
+            parse_opensearch_config(some("http://localhost:9200"), some(""), some(" "), true)
+                .unwrap()
+                .unwrap();
         assert!(config.basic_auth.is_none());
 
-        let config = parse_opensearch_config(some("http://localhost:9200"), None, None)
+        assert!(
+            parse_opensearch_config(some("http://localhost:9200"), None, None, false).is_err(),
+            "a URL without the preview opt-in"
+        );
+        let config = parse_opensearch_config(some("http://localhost:9200"), None, None, true)
             .unwrap()
             .unwrap();
         assert_eq!(config.url, "http://localhost:9200/");
@@ -1736,6 +1751,7 @@ mod tests {
             some("https://search.example.org"),
             some("relay"),
             some("secret"),
+            true,
         )
         .unwrap()
         .unwrap();
@@ -1751,7 +1767,7 @@ mod tests {
             (None, some("relay"), some("secret")),
         ] {
             assert!(
-                parse_opensearch_config(url.clone(), username, password).is_err(),
+                parse_opensearch_config(url.clone(), username, password, true).is_err(),
                 "{url:?}"
             );
         }
