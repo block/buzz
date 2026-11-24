@@ -5,7 +5,7 @@ CREATE TABLE git_repo_names (
     repo_id       TEXT NOT NULL,
     owner_pubkey  TEXT NOT NULL,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    -- Governed lands (migration 0107): see migrations/0107_git_repo_authority.sql.
+    -- Governed lands (migration 0108): see migrations/0108_git_repo_authority.sql.
     authority_version BIGINT NOT NULL DEFAULT 0,
     channel_id        UUID,
     manifest          TEXT,

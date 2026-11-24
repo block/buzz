@@ -99,8 +99,8 @@ pub use store::{
     feed, git_evidence, git_land, git_receipts, git_repo, governance, leader_lock, media,
     membership_snapshot, moderation, nip_fi_binding, operator_listener, partition, personal_read,
     pins, product_feedback, push, reaction, read_state, relay_admin_actions, relay_invite,
-    relay_members, relay_operators, reminder, replaceable, storage_accounting, thread,
-    thread_window, user, user_deletion, user_deletion_fences, workflow,
+    relay_members, relay_operators, reminder, replaceable, search_outbox, storage_accounting,
+    thread, thread_window, user, user_deletion, user_deletion_fences, workflow,
 };
 
 pub use allowlist::AllowlistEntry;
