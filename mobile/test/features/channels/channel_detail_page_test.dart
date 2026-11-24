@@ -7,6 +7,7 @@ import 'package:buzz/features/activity/activity_page.dart';
 import 'package:buzz/shared/drafts/compose_drafts_provider.dart';
 import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+import 'package:buzz/shared/widgets/app_route_observer.dart';
 import 'package:buzz/features/forum/forum_posts_view.dart';
 import 'package:buzz/features/channels/me/me_assistant_picker_sheet.dart';
 import 'package:buzz/features/channels/me/me_chat_settings.dart';
@@ -76,6 +77,8 @@ import 'package:buzz/features/channels/channel_stars/channel_stars_provider.dart
 import 'package:buzz/features/channels/channel_stars/channel_stars_storage.dart';
 import 'package:buzz/features/channels/channel_typing_provider.dart';
 import 'package:buzz/features/channels/composer_dock_size_reporter.dart';
+import 'package:buzz/features/channels/composer_geometry.dart';
+import 'package:buzz/features/channels/conversation_list_icon.dart';
 import 'package:buzz/features/channels/date_formatters.dart';
 import 'package:buzz/features/channels/day_divider.dart';
 import 'package:buzz/shared/emoji/emoji_picker.dart';
@@ -136,6 +139,7 @@ import '../../helpers/widget_helpers.dart';
 
 part 'thread_reply_refresh_cases.dart';
 part 'thread_title_capsule_cases.dart';
+part 'thread_up_level_cases.dart';
 part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
 part 'channel_detail_page_test/action_row_tests.dart';
@@ -1498,6 +1502,7 @@ void main() {
   _loadingReviewTests();
   threadReplyRefreshTests();
   threadTitleCapsuleTests();
+  threadUpLevelTests();
   presenceTests();
   actionRowTests();
   bubbleLayoutTests();

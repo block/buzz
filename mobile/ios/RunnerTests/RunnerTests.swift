@@ -1017,6 +1017,114 @@ class RunnerTests: XCTestCase {
   }
 
   @MainActor
+  func testTitleCapsuleThatLeadsSomewhereShowsItsMarksAndSaysWhere() async throws {
+    let messenger = NavigationTestMessenger()
+    let parent = UIViewController()
+    let window = UIWindow(frame: UIScreen.main.bounds)
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
+    let artwork = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24)).image { context in
+      UIColor.black.setFill()
+      context.fill(CGRect(x: 4, y: 4, width: 16, height: 16))
+    }.pngData()).base64EncodedString()
+    var args: [String: Any] = [
+      "title": "Thread", "subtitle": String(repeating: "customer-escalations-", count: 6),
+      "titleEnabled": true, "back": true, "titleMaxWidth": 200.0,
+      "subtitleIcon": true, "subtitleIconData": artwork, "titleDisclosure": true,
+      "titleAccessibilityLabel": "Go to parent thread"]
+    let factory = IosNavigationBarFactory(messenger: messenger, parent: parent)
+    let bar = factory.create(
+      withFrame: CGRect(x: 0, y: 0, width: window.bounds.width, height: 120),
+      viewIdentifier: 999989, arguments: args)
+    parent.view.addSubview(bar.view())
+    parent.view.layoutIfNeeded()
+    try await Task.sleep(nanoseconds: 200_000_000)
+    let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+    func capsule() throws -> NavigationTitleView {
+      parent.view.layoutIfNeeded()
+      bar.view().layoutIfNeeded()
+      let title = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView as? NavigationTitleView)
+      title.layoutIfNeeded()
+      return title
+    }
+    func mark(_ identifier: String, in title: NavigationTitleView) -> UIImageView? {
+      descendants(of: title.contentView).first { $0.accessibilityIdentifier == identifier } as? UIImageView
+    }
+
+    var title = try capsule()
+    // One action that says where it goes, not "Open settings for …".
+    XCTAssertEqual(title.accessibilityLabel, "Go to parent thread")
+    XCTAssertEqual(title.accessibilityTraits, .button)
+    let icon = try XCTUnwrap(mark("navigation-subtitle-icon", in: title))
+    let chevron = try XCTUnwrap(mark("navigation-title-disclosure", in: title))
+    let subtitle = try XCTUnwrap(descendants(of: title.contentView).compactMap { $0 as? UILabel }.last)
+    // Both marks take the subtitle's own ink, which follows light and dark.
+    XCTAssertEqual(icon.image?.renderingMode, .alwaysTemplate)
+    XCTAssertNotNil(chevron.image)
+    for view in [icon, chevron] {
+      XCTAssertEqual(view.tintColor, subtitle.textColor)
+      XCTAssertFalse(view.isAccessibilityElement)
+    }
+    XCTAssertEqual(subtitle.textColor, .secondaryLabel)
+    XCTAssertEqual(icon.traitCollection.userInterfaceStyle, .light)
+    // A long label ends in an ellipsis between its marks, inside a capsule
+    // that keeps its cap and its place in the middle of the bar.
+    XCTAssertLessThanOrEqual(title.bounds.width, 200)
+    XCTAssertEqual(subtitle.lineBreakMode, .byTruncatingTail)
+    XCTAssertLessThan(subtitle.bounds.width, subtitle.intrinsicContentSize.width)
+    let frames = [icon, subtitle, chevron].map { $0.convert($0.bounds, to: title) }
+    for frame in frames { XCTAssertTrue(title.bounds.contains(frame), "\(frame) in \(title.bounds)") }
+    // The icon sits against the name as a typed "#" would, not as a
+    // separate element; the chevron keeps its own small gap.
+    XCTAssertEqual(frames[1].minX - frames[0].maxX, NavigationTitleView.subtitleIconGap, accuracy: 0.01)
+    XCTAssertEqual(NavigationTitleView.subtitleIconGap, 2)
+    XCTAssertLessThanOrEqual(frames[1].maxX, frames[2].minX)
+    XCTAssertEqual(icon.bounds.size, CGSize(width: 13, height: 13))
+    XCTAssertGreaterThan(chevron.bounds.width, 0)
+    XCTAssertEqual(title.convert(title.bounds, to: navigation.navigationBar).midX,
+                   navigation.navigationBar.bounds.midX, accuracy: 1)
+    XCTAssertTrue(title.accessibilityActivate())
+    XCTAssertEqual(messenger.actions, ["title"])
+
+    // While a sub-thread's parent loads it cannot act: dimmed, refreshing,
+    // with no chevron, under the same conversation name, and the icon's slot
+    // is held until Flutter has rendered it.
+    args["titleEnabled"] = false
+    args["titleDisclosure"] = false
+    args["titleRefreshing"] = true
+    args["subtitleIconData"] = nil
+    args["titleAccessibilityLabel"] = "Loading parent thread"
+    args["dark"] = true
+    messenger.configure(args)
+    title = try capsule()
+    XCTAssertEqual(title.accessibilityLabel, "Loading parent thread")
+    XCTAssertEqual(title.accessibilityTraits, [.button, .notEnabled])
+    XCTAssertFalse(title.accessibilityActivate())
+    XCTAssertEqual(messenger.actions, ["title"])
+    let held = try XCTUnwrap(mark("navigation-subtitle-icon", in: title))
+    XCTAssertNil(held.image)
+    XCTAssertEqual(held.bounds.size, CGSize(width: 13, height: 13))
+    let name = try XCTUnwrap(descendants(of: title.contentView).compactMap { $0 as? UILabel }.last)
+    XCTAssertEqual(name.text, args["subtitle"] as? String)
+    XCTAssertEqual(name.convert(name.bounds, to: title).minX - held.convert(held.bounds, to: title).maxX,
+                   NavigationTitleView.subtitleIconGap, accuracy: 0.01)
+    XCTAssertNil(mark("navigation-title-disclosure", in: title))
+    XCTAssertEqual(held.traitCollection.userInterfaceStyle, .dark)
+    let refresh = try XCTUnwrap(descendants(of: title.contentView).compactMap { $0 as? NavigationRefreshBar }.first)
+    XCTAssertTrue(refresh.isRefreshing)
+
+    // Without those arguments the capsule is the plain one it always was.
+    messenger.configure(["title": "Thread", "subtitle": "general", "titleEnabled": false, "back": true])
+    title = try capsule()
+    XCTAssertEqual(title.accessibilityLabel, "Thread, general")
+    XCTAssertEqual(title.accessibilityTraits, .header)
+    XCTAssertNil(mark("navigation-subtitle-icon", in: title))
+    XCTAssertNil(mark("navigation-title-disclosure", in: title))
+    XCTAssertEqual(descendants(of: title.contentView).compactMap { ($0 as? UILabel)?.text }, ["Thread", "general"])
+  }
+
+  @MainActor
   func testConversationGlassAndBackdropAreReadyBeforeScrolling() throws {
     for subtitle in ["36 members", "Online", ""] {
       let messenger = NavigationTestMessenger()

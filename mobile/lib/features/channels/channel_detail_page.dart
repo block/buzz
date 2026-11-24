@@ -134,6 +134,7 @@ import 'timeline_message.dart';
 
 part 'channel_detail_page/message_list.dart';
 part 'channel_detail_page/initial_thread_route.dart';
+part 'channel_detail_page/message_reveal.dart';
 part 'channel_detail_page/jump_to_oldest_unread_button.dart';
 part 'channel_detail_page/row_cache.dart';
 part 'channel_detail_page/placement_route.dart';

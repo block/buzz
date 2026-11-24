@@ -9,6 +9,8 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
   private var contentLeading: NSLayoutConstraint!
   private let subtitleStack = UIStackView()
   private let maximumWidth: CGFloat?
+  private var subtitleIconSize: [NSLayoutConstraint] = []
+  private var disclosure: UIImageView?
   private(set) var portraitSlot: UIView?
 
   init(title: String?, subtitle: String, color: UIColor, maximumWidth: CGFloat? = nil) {
@@ -135,6 +137,44 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
     invalidateIntrinsicContentSize()
   }
 
+  /// Layout gap between the subtitle's leading artwork and its text.
+  static let subtitleIconGap: CGFloat = 2
+
+  /// Leads the subtitle with artwork tinted as its text. A nil image holds
+  /// the slot while Flutter renders it, so the label does not shift.
+  func setSubtitleIcon(_ image: UIImage?) {
+    let icon = UIImageView(image: image?.withRenderingMode(.alwaysTemplate))
+    icon.tintColor = .secondaryLabel
+    icon.contentMode = .scaleAspectFit
+    icon.isAccessibilityElement = false
+    icon.accessibilityIdentifier = "navigation-subtitle-icon"
+    icon.setContentCompressionResistancePriority(.required, for: .horizontal)
+    subtitleStack.insertArrangedSubview(icon, at: 0)
+    // The glyph reads as the first character of the name, as a typed "#"
+    // would: its artwork's own margin is most of a word space already.
+    subtitleStack.setCustomSpacing(Self.subtitleIconGap, after: icon)
+    subtitleIconSize = [icon.widthAnchor.constraint(equalToConstant: 0),
+                        icon.heightAnchor.constraint(equalToConstant: 0)]
+    NSLayoutConstraint.activate(subtitleIconSize)
+    updateFonts()
+    invalidateIntrinsicContentSize()
+  }
+
+  /// Ends the subtitle with a chevron: the capsule opens what it names.
+  func setDisclosure() {
+    let chevron = UIImageView(image: UIImage(systemName: "chevron.right"))
+    chevron.tintColor = .secondaryLabel
+    chevron.isAccessibilityElement = false
+    chevron.accessibilityIdentifier = "navigation-title-disclosure"
+    chevron.setContentCompressionResistancePriority(.required, for: .horizontal)
+    chevron.setContentHuggingPriority(.required, for: .horizontal)
+    subtitleStack.setCustomSpacing(3, after: subtitleLabel)
+    subtitleStack.addArrangedSubview(chevron)
+    disclosure = chevron
+    updateFonts()
+    invalidateIntrinsicContentSize()
+  }
+
   func setEphemeralStatus(_ label: String) {
     // The subtitle carries the visible temporary/expiry text. Keep the full
     // retention explanation on the title's single VoiceOver element too.
@@ -207,6 +247,11 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
     subtitleLabel.font = UIFontMetrics(forTextStyle: .caption1).scaledFont(
       for: .systemFont(ofSize: 12), maximumPointSize: 14,
       compatibleWith: traitCollection)
+    // The subtitle's artwork and chevron follow its text size.
+    let subtitleSize = subtitleLabel.font.pointSize
+    for side in subtitleIconSize { side.constant = subtitleSize + 1 }
+    disclosure?.preferredSymbolConfiguration = UIImage.SymbolConfiguration(
+      pointSize: subtitleSize * 0.75, weight: .semibold)
   }
 
   override func layoutSubviews() {

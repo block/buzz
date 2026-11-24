@@ -13,6 +13,26 @@ class AppRouteObserver extends RouteObserver<ModalRoute<dynamic>> {
   NavigatorObserver createNestedObserver() => _NestedAppRouteObserver(this);
 
   final _revealListeners = <ModalRoute<dynamic>, Set<VoidCallback>>{};
+  final _below = Expando<Route<dynamic>>();
+
+  /// The route [route] arrived on top of, or the one beneath the route it
+  /// replaced. Null for a navigator's first route, and on a navigator this
+  /// observer is not attached to.
+  Route<dynamic>? routeBelow(Route<dynamic> route) => _below[route];
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    super.didPush(route, previousRoute);
+    _below[route] = previousRoute;
+  }
+
+  @override
+  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) {
+    super.didReplace(newRoute: newRoute, oldRoute: oldRoute);
+    if (newRoute != null && oldRoute != null) {
+      _below[newRoute] = _below[oldRoute];
+    }
+  }
 
   /// Registers a layout refresh for the end of a covering route's transition.
   void addRevealListener(ModalRoute<dynamic> route, VoidCallback listener) {

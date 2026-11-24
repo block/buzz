@@ -8,6 +8,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 /// composer, so one composer owns the draft and its attachments.
 class OpenChannelRoutes {
   final _routes = <String, List<Route<Object?>>>{};
+  final _reveals = Expando<void Function(String messageId)>();
 
   /// The newest route showing [channelId] that is still on a navigator.
   Route<Object?>? latest(String channelId) {
@@ -18,6 +19,15 @@ class OpenChannelRoutes {
     }
     return null;
   }
+
+  /// Whether [route] is a page showing [channelId].
+  bool shows(String channelId, Route<Object?> route) =>
+      _routes[channelId]?.contains(route) ?? false;
+
+  /// Asks the page on [route] to bring [messageId] into view once it is shown
+  /// again. Does nothing for a page with no timeline to move.
+  void reveal(Route<Object?> route, String messageId) =>
+      _reveals[route]?.call(messageId);
 
   VoidCallback _register(String channelId, Route<Object?> route) {
     final routes = _routes.putIfAbsent(channelId, () => [])..add(route);
@@ -52,4 +62,23 @@ void useOpenChannelRoute(WidgetRef ref, String channelId) {
     if (route == null) return null;
     return ref.read(openChannelRoutesProvider)._register(channelId, route);
   }, [channelId, route]);
+}
+
+/// Lets a page above this one's route ask its timeline for a message, through
+/// [OpenChannelRoutes.reveal].
+void useOpenChannelReveal(
+  WidgetRef ref,
+  void Function(String messageId) reveal,
+) {
+  final route = ModalRoute.of(useContext());
+  final latest = useRef(reveal)..value = reveal;
+  useEffect(() {
+    if (route == null) return null;
+    final routes = ref.read(openChannelRoutesProvider);
+    void forward(String messageId) => latest.value(messageId);
+    routes._reveals[route] = forward;
+    return () {
+      if (routes._reveals[route] == forward) routes._reveals[route] = null;
+    };
+  }, [route]);
 }

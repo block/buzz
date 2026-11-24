@@ -217,6 +217,16 @@ class FrostedAppBar extends StatelessWidget {
   final bool nativeTitleRefreshing;
   final VoidCallback? onNativeTitlePressed;
 
+  /// Custom font artwork leading the native title capsule's subtitle.
+  final IconData? nativeSubtitleIcon;
+
+  /// Ends the native subtitle with a chevron: the capsule opens what it names.
+  final bool nativeTitleDisclosure;
+
+  /// What the native title capsule announces, in place of its title, subtitle
+  /// and the settings hint.
+  final String? nativeTitleAccessibilityLabel;
+
   /// Whether UIKit should expand the title at the top of the page.
   final bool nativeLargeTitle;
 
@@ -266,6 +276,9 @@ class FrostedAppBar extends StatelessWidget {
     this.nativeTitlePresenceColor,
     this.nativeTitleRefreshing = false,
     this.onNativeTitlePressed,
+    this.nativeSubtitleIcon,
+    this.nativeTitleDisclosure = false,
+    this.nativeTitleAccessibilityLabel,
     this.nativeLargeTitle = false,
     this.nativeLargeTitleWithActions = false,
     this.alignLargeTitleWithActions = false,
@@ -420,6 +433,9 @@ class FrostedAppBar extends StatelessWidget {
         titlePresenceColor: nativeTitlePresenceColor,
         titleRefreshing: nativeTitleRefreshing,
         onTitlePressed: onNativeTitlePressed,
+        subtitleIcon: nativeSubtitleIcon,
+        titleDisclosure: nativeTitleDisclosure,
+        titleAccessibilityLabel: nativeTitleAccessibilityLabel,
         largeTitle: nativeLargeTitle,
         alwaysFrosted: alwaysFrosted || strip != null,
         foregroundColor: iconColor,

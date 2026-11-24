@@ -46,6 +46,7 @@ import '../../../shared/widgets/buzz_loading_indicator.dart';
 import '../../../shared/widgets/modal_presentation.dart';
 import '../channel.dart';
 import '../compose_bar.dart';
+import '../conversation_list_icon.dart';
 import 'me_assistant_picker_sheet.dart';
 import 'new_me_project.dart';
 import 'me_workspace_picker.dart';

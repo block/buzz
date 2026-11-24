@@ -44,6 +44,8 @@ class _ChannelTile extends ConsumerWidget {
 
     final selected =
         ConversationPaneScope.maybeOf(context)?.selectedId == channel.id;
+    // A DM has no glyph; its row leads with its people instead.
+    final listIcon = conversationListIcon(channel);
     // The gutter insets only the selection paint; the whole row width
     // still opens the channel and its actions.
     final nativeHold =
@@ -88,7 +90,7 @@ class _ChannelTile extends ConsumerWidget {
                   ),
                   child: Row(
                     children: [
-                      if (channel.isDm) ...[
+                      if (listIcon == null) ...[
                         SizedBox(
                           width: _kChannelLeadingWidth,
                           child: Align(
@@ -106,9 +108,7 @@ class _ChannelTile extends ConsumerWidget {
                           child: Align(
                             alignment: Alignment.centerLeft,
                             child: Icon(
-                              channel.visibility == 'private'
-                                  ? BuzzIcons.lock
-                                  : BuzzIcons.hash,
+                              listIcon,
                               key: ValueKey('channel-icon-${channel.id}'),
                               size: _kChannelIconSize,
                               color: navigationRowIconForeground(context),
