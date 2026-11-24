@@ -4908,6 +4908,90 @@ mod route_integration_tests {
             }
         }
 
+        /// A full revoke clears any cutoff stored for its target, whether the
+        /// stored `until` grows, stays equal or is kept over a shorter one, and
+        /// pruning an expired target clears its cutoff too.
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn redis_store_accept_and_prune_clear_revoke_through() {
+            let url = std::env::var("BUZZ_TEST_REDIS_URL")
+                .or_else(|_| std::env::var("REDIS_URL"))
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+            let conn = buzz_pubsub::redis_connection(&url).expect("redis pool");
+            let namespace = test_namespace();
+            let store = redis_guard_in(&namespace);
+            let issuer = format!("https://{}.example", uuid::Uuid::new_v4());
+            let cutoffs = buzz_pubsub::nip_fi_command_replay::revoke_through_key(
+                &format!("{namespace}:deny"),
+                &issuer,
+            );
+            let (a, b) = (
+                nostr::Keys::generate().public_key(),
+                nostr::Keys::generate().public_key(),
+            );
+            let t = chrono::Utc::now() + chrono::Duration::hours(1);
+            let s = chrono::Duration::seconds;
+            let claim = |jti, target, until, now| buzz_auth::CommandClaim {
+                issuer: &issuer,
+                jti,
+                ttl_secs: 60,
+                target,
+                until,
+                capacity: 10,
+                now,
+            };
+            let seed = |key: &nostr::PublicKey| {
+                let mut conn = conn.clone();
+                let (cutoffs, field) = (cutoffs.clone(), key.to_hex());
+                async move {
+                    let _: () = redis::pipe()
+                        .atomic()
+                        .cmd("HSET")
+                        .arg(&cutoffs)
+                        .arg(field)
+                        .arg(1)
+                        .ignore()
+                        .cmd("EXPIRE")
+                        .arg(&cutoffs)
+                        .arg(60)
+                        .ignore()
+                        .query_async(&mut conn)
+                        .await
+                        .unwrap();
+                }
+            };
+            let held = |key: &nostr::PublicKey| {
+                let mut conn = conn.clone();
+                let (cutoffs, field) = (cutoffs.clone(), key.to_hex());
+                async move {
+                    let held: bool = redis::cmd("HEXISTS")
+                        .arg(cutoffs)
+                        .arg(field)
+                        .query_async(&mut conn)
+                        .await
+                        .unwrap();
+                    held
+                }
+            };
+            store
+                .try_claim(claim("c0", &a, t + s(60), t))
+                .await
+                .unwrap();
+            for (jti, until, case) in [("c1", t + s(60), "equal"), ("c2", t + s(30), "shorter")] {
+                seed(&a).await;
+                store.try_claim(claim(jti, &a, until, t)).await.unwrap();
+                assert!(!held(&a).await, "{case} until clears the cutoff");
+            }
+            // b expires before the next accept's now and is pruned.
+            store.try_claim(claim("c3", &b, t + s(1), t)).await.unwrap();
+            seed(&b).await;
+            store
+                .try_claim(claim("c4", &a, t + s(120), t + s(10)))
+                .await
+                .unwrap();
+            assert!(!held(&b).await, "pruning clears the cutoff");
+        }
+
         /// The Redis script checks replay and shared capacity before writing,
         /// keeps the exact maximum `until`, and records no entry for a past
         /// `until`.

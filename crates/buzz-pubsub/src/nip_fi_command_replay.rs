@@ -3,7 +3,7 @@
 //! Implements [`CommandReplayGuard`] from `buzz-auth`.  One Lua script checks
 //! replay and the issuer's shared capacity, and only when both pass sets the
 //! claim (`SET … EX`, same TTL clamp as [`crate::RedisNip98ReplayGuard`]) and
-//! records the deny entry.  Per issuer, entries live in two keys that expire
+//! records the deny entry.  Per issuer, entries live in three keys that expire
 //! with their latest entry:
 //!
 //! * `{deny}:{sha256(iss)}` — sorted set, member `pubkey_hex`, score `until`
@@ -11,6 +11,9 @@
 //!   removed only once its score is below `now`, so never early.
 //! * `{deny}-until:{sha256(iss)}` — hash, field `pubkey_hex`, value the exact
 //!   signed `until` as `secs:nanos`, merged by maximum.
+//! * `{deny}-revoke-through:{sha256(iss)}` — hash, field `pubkey_hex`: never
+//!   written here; every accept clears its target's field so a full revoke
+//!   is never narrowed by a cutoff another relay version stored.
 //!
 //! Only the issuer's hash is stored; readers map it back through configured
 //! issuers.
@@ -33,14 +36,17 @@ pub const DENY_STORE_PREFIX: &str = "buzz:nip-fi:deny";
 /// Deny-store key prefix for shadow-mode accepts, disjoint from enforce.
 pub const SHADOW_DENY_STORE_PREFIX: &str = "buzz:nip-fi:shadow-deny";
 
-/// KEYS: claim, index, exact.  ARGV: ttl, pubkey_hex, score_ms, secs, nanos,
+/// KEYS: claim, index, exact, cutoff.  ARGV: ttl, pubkey_hex, score_ms, secs, nanos,
 /// capacity, now_ms, active (0/1).
 const ACCEPT_SCRIPT: &str = r"
 if redis.call('EXISTS', KEYS[1]) == 1 then return 'replay' end
 local active = ARGV[8] == '1'
 if active then
   local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', '(' .. ARGV[7])
-  for _, member in ipairs(expired) do redis.call('HDEL', KEYS[3], member) end
+  for _, member in ipairs(expired) do
+    redis.call('HDEL', KEYS[3], member)
+    redis.call('HDEL', KEYS[4], member)
+  end
   redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', '(' .. ARGV[7])
   if not redis.call('ZSCORE', KEYS[2], ARGV[2])
      and redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[6]) then
@@ -59,9 +65,11 @@ if active then
     keep = s > ns or (s == ns and n >= nn)
   end
   if not keep then redis.call('HSET', KEYS[3], ARGV[2], ARGV[4] .. ':' .. ARGV[5]) end
+  redis.call('HDEL', KEYS[4], ARGV[2])
   local top = redis.call('ZRANGE', KEYS[2], -1, -1, 'WITHSCORES')
   redis.call('PEXPIREAT', KEYS[2], top[2])
   redis.call('PEXPIREAT', KEYS[3], top[2])
+  redis.call('PEXPIREAT', KEYS[4], top[2])
 end
 return 'claimed'
 ";
@@ -110,6 +118,12 @@ pub fn deny_store_keys(prefix: &str, issuer: &str) -> (String, String) {
     (format!("{prefix}:{hash}"), format!("{prefix}-until:{hash}"))
 }
 
+/// Per-target revoke-through cutoff hash for `issuer` under `prefix`.
+pub fn revoke_through_key(prefix: &str, issuer: &str) -> String {
+    let hash = hex::encode(Sha256::digest(issuer.as_bytes()));
+    format!("{prefix}-revoke-through:{hash}")
+}
+
 /// `until` in whole ms, rounded up.
 fn ceil_ms(t: DateTime<Utc>) -> i64 {
     let ms = t.timestamp_millis();
@@ -144,6 +158,7 @@ impl CommandReplayGuard for RedisCommandReplayGuard {
                 ))
                 .key(index)
                 .key(exact)
+                .key(revoke_through_key(&self.deny_prefix, claim.issuer))
                 .arg(ttl)
                 .arg(claim.target.to_hex())
                 .arg(ceil_ms(claim.until))
