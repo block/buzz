@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../hosted/bounded_http_response.dart';
 import '../http/app_http_client.dart';
 
 /// The gateway answered with a refusal. Signed installation calls answer every
@@ -29,6 +30,13 @@ class AndroidPushGatewayRejection implements Exception {
   String toString() => 'Push gateway refused $route: $status ${code ?? ''}';
 }
 
+/// The gateway answered with something the app cannot read: no JSON object,
+/// or one missing a field the call needs. Unlike a refusal, this points at a
+/// gateway or protocol defect, so it is reported to diagnostics.
+class AndroidPushGatewayResponseInvalid extends FormatException {
+  const AndroidPushGatewayResponseInvalid(super.message);
+}
+
 /// One round trip to the gateway's JSON API.
 class AndroidPushGatewayClient {
   AndroidPushGatewayClient({
@@ -42,19 +50,35 @@ class AndroidPushGatewayClient {
   final http.Client _client;
 
   /// Posts [body] to [route] and returns the JSON object answered with
-  /// [expectedStatus]. Transport failures propagate unchanged.
+  /// [expectedStatus]. Transport failures propagate unchanged. At [timeout]
+  /// the request is aborted, not just abandoned, so a retry never races a
+  /// copy of itself still on its way to the gateway.
   Future<Map<String, Object?>> post(
     String route,
     Map<String, Object?> body, {
     int expectedStatus = 200,
   }) async {
-    final response = await _client
-        .post(
-          baseUrl.resolve(route),
-          headers: const {'content-type': 'application/json'},
-          body: jsonEncode(body),
-        )
-        .timeout(timeout);
+    final http.Response response;
+    int? status;
+    try {
+      response = await boundedHttpResponse(
+        _client,
+        http.Request('POST', baseUrl.resolve(route))
+          ..headers['content-type'] = 'application/json'
+          ..body = jsonEncode(body),
+        timeout: timeout,
+        onHeaders: (headers) => status = headers.statusCode,
+      );
+    } on FormatException catch (error) {
+      // The only one a bounded read throws: a body over its limit. A refusal
+      // keeps its status, so an oversized 503 still reads as transient.
+      if (status case final status? when status != expectedStatus) {
+        throw AndroidPushGatewayRejection(route, status, null);
+      }
+      throw AndroidPushGatewayResponseInvalid(
+        'Push gateway answered $route unreadably: ${error.message}',
+      );
+    }
     final decoded = _object(response.bodyBytes);
     if (response.statusCode != expectedStatus) {
       throw AndroidPushGatewayRejection(
@@ -64,7 +88,7 @@ class AndroidPushGatewayClient {
       );
     }
     if (decoded == null) {
-      throw FormatException(
+      throw AndroidPushGatewayResponseInvalid(
         'Push gateway answered $route without a JSON object.',
       );
     }

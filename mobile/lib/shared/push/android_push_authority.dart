@@ -192,7 +192,13 @@ class AndroidPushAuthority {
           }
         }
         final grant = await _pointOrigin(relayOrigin, relayPubkey);
-        await _revokeUnreferencedDelegations(desiredRelays());
+        // This origin counts as desired even before the caller's list shows
+        // it, but only while it is still wanted: an opt-out that landed
+        // during the delegation must see that delegation revoked.
+        await _revokeUnreferencedDelegations({
+          ...desiredRelays(),
+          if (stillWanted()) relayOrigin,
+        });
         return grant;
       }
     } on _EnrollmentNoLongerWanted {
@@ -355,7 +361,7 @@ class AndroidPushAuthority {
     final handle = response['installation_handle'];
     final expiresAt = response['expires_at'];
     if (handle is! String || expiresAt is! int) {
-      throw const FormatException(
+      throw const AndroidPushGatewayResponseInvalid(
         'Push gateway returned a malformed installation.',
       );
     }
@@ -563,7 +569,9 @@ class AndroidPushAuthority {
     );
     final endpointGrant = response['endpoint_grant'];
     if (endpointGrant is! String || endpointGrant.isEmpty) {
-      throw const FormatException('Push gateway returned a malformed grant.');
+      throw const AndroidPushGatewayResponseInvalid(
+        'Push gateway returned a malformed grant.',
+      );
     }
     state = await _load();
     final granted = delegation.copyWith(
@@ -686,7 +694,7 @@ class AndroidPushAuthority {
     final id = response['challenge_id'];
     final text = response['challenge'];
     if (id is! String || text is! String) {
-      throw const FormatException(
+      throw const AndroidPushGatewayResponseInvalid(
         'Push gateway returned a malformed challenge.',
       );
     }
