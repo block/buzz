@@ -1,6 +1,7 @@
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:buzz/shared/community/paired_community_landing.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -108,6 +109,41 @@ void main() {
     );
     expect(find.text('Scan a QR code'), findsOneWidget);
   });
+
+  testWidgets('signed out, the app discards quick actions left on the icon', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    const channel = MethodChannel('buzz/home_screen_shortcuts');
+    final calls = <String>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      calls.add(call.method);
+      return null;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          authProvider.overrideWith(() => _FakeAuthNotifier()),
+          ageSignalProvider.overrideWith(() => _AllowedAgeSignalNotifier()),
+          savedPrefsProvider.overrideWithValue(prefs),
+        ],
+        child: const App(),
+      ),
+    );
+    await tester.pump();
+    expect(calls, ['discard']);
+    await tester.pumpWidget(const SizedBox.shrink());
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 }
 
 class _AllowedAgeSignalNotifier extends AgeSignalNotifier {

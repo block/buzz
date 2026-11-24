@@ -43,6 +43,10 @@ final class HomeScreenShortcuts {
         }
         UIApplication.shared.shortcutItems = shortcuts
         result(nil)
+      case "discard":
+        UIApplication.shared.shortcutItems = []
+        self?.pending = nil
+        result(nil)
       case "takePending":
         result(self?.pending)
         self?.pending = nil

@@ -42,6 +42,18 @@ Future<void> listenForHomeScreenShortcuts() async {
   }
 }
 
+/// Removes the app icon's quick actions and drops a tap still waiting for
+/// Home.
+Future<void> discardHomeScreenShortcuts() async {
+  pendingHomeScreenShortcut.value = null;
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    await _channel.invokeMethod<void>('discard');
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}
+
 /// Replaces the app icon's quick actions, in menu order.
 Future<void> publishHomeScreenShortcuts(
   List<({HomeScreenShortcut shortcut, String title})> items,

@@ -1,3 +1,4 @@
+import Flutter
 import UIKit
 import XCTest
 @testable import Buzz
@@ -49,5 +50,41 @@ final class HomeScreenShortcutsTests: XCTestCase {
   func testOtherLinksAreNotShortcuts() {
     publish(["new-chat", "new-dm", "message-bestie"])
     XCTAssertFalse(open("buzz://message?channel=c&id=e"))
+  }
+
+  @MainActor
+  func testDiscardDropsTheMenuAndATapWaitingForHome() {
+    // A menu left from an earlier session can buffer a tap before auth
+    // resolves signed out; discarding must drop both.
+    publish(["new-chat"])
+    let bridge = HomeScreenShortcuts()
+    let messenger = ShortcutsTestMessenger()
+    bridge.attach(messenger: messenger)
+    XCTAssertTrue(bridge.open(URL(string: "buzz://shortcut/new-chat")!))
+    messenger.invoke("discard") { _ in }
+    XCTAssertEqual(UIApplication.shared.shortcutItems?.count ?? 0, 0)
+    var pending: Any? = "unset"
+    messenger.invoke("takePending") { pending = $0 }
+    XCTAssertNil(pending)
+  }
+}
+
+private final class ShortcutsTestMessenger: NSObject, FlutterBinaryMessenger {
+  private var handler: FlutterBinaryMessageHandler?
+  func send(onChannel channel: String, message: Data?) {}
+  func send(onChannel channel: String, message: Data?, binaryReply callback: FlutterBinaryReply?) {
+    callback?(nil)
+  }
+  func setMessageHandlerOnChannel(_ channel: String,
+    binaryMessageHandler handler: FlutterBinaryMessageHandler?) -> FlutterBinaryMessengerConnection {
+    self.handler = handler
+    return 1
+  }
+  func cleanUpConnection(_ connection: FlutterBinaryMessengerConnection) { handler = nil }
+  func invoke(_ method: String, reply: @escaping (Any?) -> Void) {
+    let codec = FlutterStandardMethodCodec.sharedInstance()
+    handler?(codec.encode(FlutterMethodCall(methodName: method, arguments: nil))) {
+      reply($0.flatMap { codec.decodeEnvelope($0) })
+    }
   }
 }
