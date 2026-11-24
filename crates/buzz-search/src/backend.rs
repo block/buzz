@@ -12,10 +12,10 @@
 //! the other. It is read on every search, so a provider that changes values
 //! while the relay runs switches it without a restart.
 //!
-//! Searches the index cannot answer stay on Postgres at every setting:
-//! prefix mode, and any search that names a kind outside
-//! [`buzz_db::search_outbox::SEARCHABLE_KINDS`] or names no kinds. That is
-//! a routing rule known before the search runs, not a fallback: an
+//! A search that names a kind outside
+//! [`buzz_db::search_outbox::SEARCHABLE_KINDS`], or names no kinds, stays on
+//! Postgres at every setting: the index would silently drop those results.
+//! That is a routing rule known before the search runs, not a fallback: an
 //! OpenSearch failure at setting 2 still fails the search.
 //!
 //! Metrics and the shadow log line never carry query text.
@@ -31,7 +31,7 @@ use tracing::info;
 use buzz_db::search_outbox::SEARCHABLE_KINDS;
 
 use crate::opensearch::SearchIndex;
-use crate::{SearchError, SearchMode, SearchQuery, SearchResult};
+use crate::{SearchError, SearchQuery, SearchResult};
 
 /// Integer flag choosing the search backend for the relay; see the module
 /// docs. Environment form: `BUZZ_FEATURE_FLAG_SEARCH_BACKEND`.
@@ -161,6 +161,13 @@ impl OpenSearchBackend {
         self.shadow_deadline = deadline;
     }
 
+    /// The index serving `query`, if the setting is OpenSearch and the
+    /// index holds every kind it asks for.
+    pub(crate) fn serving(&self, query: &SearchQuery) -> Option<&SearchIndex> {
+        (self.selection.setting() == BackendSetting::OpenSearch && index_holds_kinds(query))
+            .then_some(&self.index)
+    }
+
     /// Decide where `query` runs, starting the shadow search if it gets one.
     pub(crate) fn route(&self, query: &SearchQuery) -> Route<'_> {
         let setting = self.selection.setting();
@@ -169,10 +176,6 @@ impl OpenSearchBackend {
         }
         if !index_holds_kinds(query) {
             skipped(setting, "unindexed_kinds");
-            return Route::Postgres;
-        }
-        if query.mode != SearchMode::FullText {
-            skipped(setting, "unsupported_mode");
             return Route::Postgres;
         }
         if setting == BackendSetting::OpenSearch {

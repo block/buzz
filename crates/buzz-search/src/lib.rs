@@ -50,8 +50,8 @@ pub use backend::{BackendSetting, SEARCH_BACKEND_FLAG};
 pub use buzz_core::CommunityId;
 pub use error::SearchError;
 pub use query::{
-    search, search_profile_names, ChannelScope, SearchHit, SearchMode, SearchQuery, SearchResult,
-    SearchSort, PROFILE_NAMES_PER_PAGE_MAX,
+    search, search_profile_names, ChannelScope, ScoreParts, ScoredHit, ScoredResult, SearchHit,
+    SearchMode, SearchQuery, SearchResult, SearchSort, PROFILE_NAMES_PER_PAGE_MAX,
 };
 
 use std::sync::Arc;
@@ -154,6 +154,20 @@ impl SearchService {
                 let _ = compare.send(result.as_ref().ok().map(backend::top_ids));
                 result
             }
+        }
+    }
+
+    /// [`SearchService::search`] with each hit's score parts, for tests and
+    /// ranking evaluation. It asks the backend that would serve the search,
+    /// Postgres while the community shadows, and records no metrics.
+    pub async fn search_scored(&self, query: &SearchQuery) -> Result<ScoredResult, SearchError> {
+        match self
+            .opensearch
+            .as_ref()
+            .and_then(|opensearch| opensearch.serving(query))
+        {
+            Some(index) => index.search_scored(query).await,
+            None => query::search(&self.pool, query).await.map(Into::into),
         }
     }
 

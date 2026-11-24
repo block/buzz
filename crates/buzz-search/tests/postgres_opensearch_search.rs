@@ -12,7 +12,11 @@ use search_suite::{search_suite_tests, Backend};
 
 // Not run here, with the reason:
 // - kind0_* and artifact_*: kinds 0 and 45010 are not searchable kinds;
-// - prefix_*: prefix mode is reworked with prefix analysis (issue 06).
+// - prefix_mode_matches_final_token_prefix_without_changing_full_text and
+//   prefix_relevance_ranks_only_the_newest_matches: Postgres' own prefix
+//   rules (a three-character minimum, all words required, only the newest
+//   1000 matches ranked). OpenSearch's prefix and word matching are checked
+//   in postgres_opensearch_relevance.
 search_suite_tests! {
     Backend::OpenSearch;
     #[ignore = "requires Postgres and OpenSearch"]
@@ -33,6 +37,8 @@ search_suite_tests! {
     fn author_only_kinds_are_storage_level_unsearchable,
     fn p_gated_persistent_kinds_have_storage_null_tsvector,
     fn deleted_events_are_excluded,
+    fn prefix_mode_handles_tsquery_boundary_punctuation,
+    fn prefix_mode_preserves_storage_level_privacy_exclusions,
 }
 
 use std::time::Duration;
@@ -45,7 +51,7 @@ use buzz_db::user_deletion::content_batches::ContentBatchOptions;
 use buzz_db::user_deletion::ExecutionMode;
 use buzz_db::{search_outbox, Db, DbConfig, DeletionTarget};
 use buzz_search::indexer::{Indexer, IndexerError};
-use buzz_search::opensearch::{OpenSearchConfig, SearchIndex};
+use buzz_search::opensearch::{OpenSearchConfig, SearchIndex, MAPPING_VERSION};
 use buzz_search::{ChannelScope, SearchMode, SearchQuery, SearchService, SearchSort};
 use nostr::{Event, EventBuilder, Keys, Kind, Tag, Timestamp};
 use opensearch::http::transport::Transport;
@@ -312,7 +318,9 @@ async fn a_failed_bulk_item_keeps_only_its_own_row() {
     let prefix = format!("test-{}-", Uuid::new_v4().simple());
     let response = raw_client()
         .indices()
-        .create(IndicesCreateParts::Index(&format!("{prefix}messages-v1")))
+        .create(IndicesCreateParts::Index(&format!(
+            "{prefix}messages-v{MAPPING_VERSION}"
+        )))
         .body(serde_json::json!({
             "mappings": { "properties": { "content": { "type": "keyword" } } },
             "aliases": { format!("{prefix}messages"): {} }
@@ -390,7 +398,7 @@ async fn writes_never_create_an_index() {
     let exists = raw_client()
         .indices()
         .exists(IndicesExistsParts::Index(&[&format!(
-            "{prefix}messages-v1"
+            "{prefix}messages-v{MAPPING_VERSION}"
         )]))
         .send()
         .await
@@ -403,6 +411,59 @@ async fn writes_never_create_an_index() {
     index.refresh().await.expect("refresh");
     let service = SearchService::with_opensearch(db.pool().clone(), index.clone());
     assert_eq!(find(&service, community, "orphan").await.len(), 1);
+    index.delete().await.expect("delete index");
+}
+
+/// A relay on a newer mapping version neither adopts nor writes into an
+/// older version's index behind the alias: `ensure`, which the indexer runs
+/// before every pass, refuses it and names the fix. Once that index is
+/// deleted, `ensure` creates this version's and indexing resumes.
+#[tokio::test]
+#[ignore = "requires Postgres and OpenSearch"]
+async fn an_older_mapping_version_behind_the_alias_is_refused() {
+    let db = sync_db().await;
+    let prefix = format!("test-{}-", Uuid::new_v4().simple());
+    let older = format!("{prefix}messages-v{}", MAPPING_VERSION - 1);
+    let response = raw_client()
+        .indices()
+        .create(IndicesCreateParts::Index(&older))
+        .body(serde_json::json!({
+            "mappings": { "properties": { "content": { "type": "text" } } },
+            "aliases": { format!("{prefix}messages"): {} }
+        }))
+        .send()
+        .await
+        .expect("create older index");
+    assert!(response.status_code().is_success());
+    let index = SearchIndex::new(&OpenSearchConfig {
+        url: opensearch_url(),
+        basic_auth: None,
+        aws_sigv4: None,
+        index_prefix: prefix.clone(),
+    })
+    .expect("client");
+
+    let refused = index.ensure().await.expect_err("an older index is refused");
+    assert!(refused.to_string().contains(&older), "{refused}");
+
+    raw_client()
+        .indices()
+        .delete(opensearch::indices::IndicesDeleteParts::Index(&[&older]))
+        .send()
+        .await
+        .expect("delete older index");
+    index.ensure().await.expect("create this version's index");
+    let community = search_suite::mk_community(db.pool(), "versioned.example").await;
+    db.insert_event(community, &message(&Keys::generate(), "versioned"), None)
+        .await
+        .expect("insert");
+    Indexer::new(db.clone(), index.clone())
+        .drain()
+        .await
+        .expect("drain");
+    index.refresh().await.expect("refresh");
+    let service = SearchService::with_opensearch(db.pool().clone(), index.clone());
+    assert_eq!(find(&service, community, "versioned").await.len(), 1);
     index.delete().await.expect("delete index");
 }
 

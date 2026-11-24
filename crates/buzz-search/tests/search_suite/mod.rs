@@ -107,11 +107,20 @@ pub struct Searcher<'a> {
 impl Searcher<'_> {
     /// [`SearchService::search`], once the backend has caught up.
     pub async fn search(&self, query: &SearchQuery) -> Result<SearchResult, SearchError> {
-        if let Some((indexer, index)) = &self.fixture.opensearch {
-            indexer.drain().await.expect("drain the search outbox");
-            index.refresh().await.expect("refresh the test index");
-        }
+        self.catch_up().await;
         self.fixture.service.search(&self.routed(query)).await
+    }
+
+    /// [`SearchService::search_scored`], once the backend has caught up.
+    pub async fn search_scored(
+        &self,
+        query: &SearchQuery,
+    ) -> Result<buzz_search::ScoredResult, SearchError> {
+        self.catch_up().await;
+        self.fixture
+            .service
+            .search_scored(&self.routed(query))
+            .await
     }
 
     /// `query` as the backend under test runs it. A search of every kind
@@ -123,6 +132,13 @@ impl Searcher<'_> {
             query.kinds = Some(buzz_db::search_outbox::SEARCHABLE_KINDS.to_vec());
         }
         query
+    }
+
+    async fn catch_up(&self) {
+        if let Some((indexer, index)) = &self.fixture.opensearch {
+            indexer.drain().await.expect("drain the search outbox");
+            index.refresh().await.expect("refresh the test index");
+        }
     }
 }
 

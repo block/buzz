@@ -57,7 +57,9 @@ pub enum ChannelScope {
 /// Search matching semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchMode {
-    /// Standard NIP-50-ish word/lexeme search using `websearch_to_tsquery`.
+    /// Standard NIP-50-ish word/lexeme search: `websearch_to_tsquery` on
+    /// Postgres; on OpenSearch, most query words matched exactly, by stem or
+    /// with a typo.
     FullText,
     /// Prefix-match the trailing normalized query token (`pro` matches `project`).
     ///
@@ -67,15 +69,18 @@ pub enum SearchMode {
     /// the newest 1000 matches. It does not change the access boundary. A
     /// trailing token that yields a lexeme shorter than three characters
     /// returns no hits unless the query is kind:0-only (see `PREFIX_MIN_CHARS`).
+    /// These limits are Postgres's: OpenSearch completes a trailing token of
+    /// two characters or more and ranks every match.
     Prefix,
 }
 
 /// Result ordering for a search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchSort {
-    /// `ts_rank_cd` relevance, newest first among equal ranks. In
-    /// [`SearchMode::Prefix`] outside profile search, only the newest 1000
-    /// matches are ranked, so pages end with them.
+    /// On Postgres, `ts_rank_cd` relevance, newest first among equal ranks;
+    /// in [`SearchMode::Prefix`] outside profile search, only the newest 1000
+    /// matches are ranked, so pages end with them. On OpenSearch, the query
+    /// match times an age factor (see [`ScoreParts`]).
     Relevance,
     /// Newest first, ignoring relevance; ties ordered by event id.
     Newest,
@@ -142,6 +147,67 @@ pub struct SearchResult {
     pub hits: Vec<SearchHit>,
     /// 1-indexed page returned.
     pub page: u32,
+}
+
+/// The parts of a hit's relevance score, for tests, tuning and ranking
+/// evaluation; never sent to clients. A hit ranked by relevance within
+/// OpenSearch's age window (its top 500) has the rank Q × T; any other hit's
+/// rank is Q alone.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScoreParts {
+    /// Q, how well the message matches the query.
+    pub query_match: f32,
+    /// T, the age factor: 1 for a new message, falling towards 0.2. Postgres
+    /// search has no age factor and reports 1.
+    pub age: f32,
+}
+
+/// A hit with the parts of its score.
+#[derive(Debug, Clone)]
+pub struct ScoredHit {
+    /// The hit, as [`SearchService::search`](crate::SearchService::search)
+    /// returns it.
+    pub hit: SearchHit,
+    /// How its rank was made.
+    pub parts: ScoreParts,
+}
+
+/// A search result with each hit's score parts.
+#[derive(Debug, Clone)]
+pub struct ScoredResult {
+    /// Hits on this page, in the query's `sort` order.
+    pub hits: Vec<ScoredHit>,
+    /// 1-indexed page returned.
+    pub page: u32,
+}
+
+impl From<SearchResult> for ScoredResult {
+    /// Each hit's rank as its query match, with no age factor.
+    fn from(result: SearchResult) -> Self {
+        Self {
+            hits: result
+                .hits
+                .into_iter()
+                .map(|hit| ScoredHit {
+                    parts: ScoreParts {
+                        query_match: hit.rank,
+                        age: 1.0,
+                    },
+                    hit,
+                })
+                .collect(),
+            page: result.page,
+        }
+    }
+}
+
+impl From<ScoredResult> for SearchResult {
+    fn from(result: ScoredResult) -> Self {
+        Self {
+            hits: result.hits.into_iter().map(|scored| scored.hit).collect(),
+            page: result.page,
+        }
+    }
 }
 
 const PER_PAGE_MAX: u32 = 500;
