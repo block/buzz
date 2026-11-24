@@ -103,9 +103,10 @@ class _MessageList extends HookConsumerWidget {
     final previousLatestEntryId = useRef<String?>(null);
     final observedLocalSendIds = useRef(localSendAnimations.keys.toSet());
     final didJumpToInitialMessage = useRef(false);
-    // The target's index when last placed and, once relay history had
-    // loaded, the latest entry then.
-    final initialMessageAnchor = useRef<(int, String?)?>(null);
+    // The target's index when last placed, kept until a scroll, navigation
+    // or local send releases it.
+    final initialMessageAnchor = useRef<int?>(null);
+    final initialMessagePlacement = useRef(0);
     final isUnreadNavigationDismissed = useState(false);
     final detachedWhileUnreadShown = useRef(false);
     final oldestUnreadMessageId = useState<String?>(null);
@@ -735,39 +736,39 @@ class _MessageList extends HookConsumerWidget {
 
     _useInitialThreadRoute(context, ref);
 
+    // Older pages and live posts both move the target's index, and the list
+    // keeps its numeric position, so re-place the target whenever its index
+    // changes until the anchor is released.
+    final initialMessageIndex = reversedIndexOf(initialMessageId);
     useEffect(() {
-      final targetIndex = reversedIndexOf(initialMessageId);
-      final anchor = initialMessageAnchor.value;
-      // Older pages filling the gap below the target move its index, so keep
-      // it in place until a scroll or a navigation. Entries after the latest
-      // one it was placed with are live updates, which leave it where it is.
-      final liveCount = anchor?.$2 == null ? 0 : reversedIndexOf(anchor!.$2);
+      final targetIndex = initialMessageIndex;
+      final placed = initialMessageAnchor.value;
       if (initialThreadRootId != null ||
           targetIndex == null ||
           (didJumpToInitialMessage.value &&
-              (anchor == null ||
-                  liveCount == null ||
-                  targetIndex - liveCount == anchor.$1))) {
+              (placed == null || placed == targetIndex))) {
         return null;
       }
+      final placement = ++initialMessagePlacement.value;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!context.mounted || !itemScrollController.isAttached) return;
+        if (placement != initialMessagePlacement.value ||
+            !context.mounted ||
+            !itemScrollController.isAttached) {
+          return;
+        }
         if (didJumpToInitialMessage.value &&
             initialMessageAnchor.value == null) {
           return;
         }
         didJumpToInitialMessage.value = true;
-        initialMessageAnchor.value = (
-          targetIndex,
-          relayHistoryReady ? latestEntryId : null,
-        );
+        initialMessageAnchor.value = targetIndex;
         followsLatest.value = false;
         hasUserScrolled.value = false;
         isAtLatest.value = false;
         itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
       });
       return null;
-    }, [initialMessageId, initialThreadRootId, entries.length]);
+    }, [initialMessageId, initialThreadRootId, initialMessageIndex]);
 
     useEffect(() {
       final previous = previousLatestEntryId.value;

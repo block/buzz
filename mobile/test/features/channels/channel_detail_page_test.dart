@@ -9135,6 +9135,25 @@ void main() {
         final anchoredTop = tester.getRect(target).top;
         expect(anchoredTop, inInclusiveRange(0, 800));
 
+        // Live posts alone move the target's index too; it stays where it was.
+        final history = [for (var i = 10; i < 91; i++) message(i)];
+        NostrEvent live(int i) => _textMsg(
+          id: 'live$i',
+          pubkey: 'alice',
+          content: 'Live $i',
+          createdAt: 100000 + i,
+        );
+        for (var i = 1; i <= 20; i++) {
+          messagesNotifier.setMessages([
+            ...history,
+            for (var j = 0; j < i; j++) live(j),
+          ]);
+          await tester.pump();
+          await tester.pump();
+        }
+        await tester.pumpAndSettle();
+        expect(tester.getRect(target).top, moreOrLessEquals(anchoredTop));
+
         // Scrolling takes over: history arriving below the target afterwards
         // must not pull the list back to it.
         await tester.drag(
@@ -9152,6 +9171,7 @@ void main() {
               createdAt: 10500 + i,
             ),
           for (var i = 11; i < 91; i++) message(i),
+          for (var j = 0; j < 20; j++) live(j),
         ]);
         await tester.pumpAndSettle();
         expect(

@@ -27,6 +27,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/widget_helpers.dart';
@@ -1175,71 +1176,108 @@ void main() {
       null,
     ),
   ]) {
-    testWidgets('opens $name', (tester) async {
-      final channel = Channel(
-        id: 'ops',
-        name: 'ops',
-        channelType: channelType,
-        visibility: 'open',
-        description: '',
-        createdBy: 'test',
-        createdAt: DateTime(2025),
-        memberCount: 1,
-        isMember: true,
-      );
-      SharedPreferences.setMockInitialValues({});
-      final prefs = await SharedPreferences.getInstance();
-      await tester.pumpWidget(
-        WidgetHelpers.testable(
-          overrides: [
-            searchProvider.overrideWith(
-              () => _FakeSearchNotifier(
-                SearchState(
-                  query: 'deploy',
-                  messageResults: [
-                    SearchHit(
-                      eventId: 'hit-1',
-                      content: 'Deploy is done',
-                      kind: kind,
-                      pubkey: 'alice',
-                      channelId: 'ops',
-                      channelName: 'ops',
-                      createdAt: 1,
-                      score: 1,
-                      tags: tags,
-                    ),
-                  ],
+    for (final wide in [false, true]) {
+      testWidgets('opens $name (wide: $wide)', (tester) async {
+        if (wide) {
+          tester.view.devicePixelRatio = 1;
+          tester.view.physicalSize = const Size(951, 669);
+          addTearDown(tester.view.reset);
+        }
+        final channel = Channel(
+          id: 'ops',
+          name: 'ops',
+          channelType: channelType,
+          visibility: 'open',
+          description: '',
+          createdBy: 'test',
+          createdAt: DateTime(2025),
+          memberCount: 1,
+          isMember: true,
+        );
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        await tester.pumpWidget(
+          WidgetHelpers.testable(
+            overrides: [
+              searchProvider.overrideWith(
+                () => _FakeSearchNotifier(
+                  SearchState(
+                    query: 'deploy',
+                    messageResults: [
+                      SearchHit(
+                        eventId: 'hit-1',
+                        content: 'Deploy is done',
+                        kind: kind,
+                        pubkey: 'alice',
+                        channelId: 'ops',
+                        channelName: 'ops',
+                        createdAt: 1,
+                        score: 1,
+                        tags: tags,
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
-            recentSearchesProvider.overrideWith(
-              () => _FakeRecentSearchesNotifier(const []),
-            ),
-            profileProvider.overrideWith(() => _FakeProfileNotifier()),
-            channelsProvider.overrideWith(
-              () => _FakeChannelsNotifier([channel]),
-            ),
-            relaySessionProvider.overrideWith(
-              () => _ChannelMetadataRelaySession(const {}),
-            ),
-            savedPrefsProvider.overrideWithValue(prefs),
-            meGroupsProvider.overrideWith((ref) => const Stream.empty()),
-          ],
-          child: const SearchPage(),
-        ),
-      );
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('search-message-row-hit-1')));
-      await tester.pump();
-      await tester.pump();
+              recentSearchesProvider.overrideWith(
+                () => _FakeRecentSearchesNotifier(const []),
+              ),
+              profileProvider.overrideWith(() => _FakeProfileNotifier()),
+              channelsProvider.overrideWith(
+                () => _FakeChannelsNotifier([channel]),
+              ),
+              relaySessionProvider.overrideWith(
+                () => _ChannelMetadataRelaySession(const {}),
+              ),
+              savedPrefsProvider.overrideWithValue(prefs),
+              meGroupsProvider.overrideWith((ref) => const Stream.empty()),
+            ],
+            child: wide
+                ? const AdaptiveConversationDestination(child: SearchPage())
+                : const SearchPage(),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey('search-message-row-hit-1')),
+        );
+        await tester.pump();
+        await tester.pump();
 
-      final page = tester.widget<ChannelDetailPage>(
-        find.byType(ChannelDetailPage),
-      );
-      expect(page.channel.id, 'ops');
-      expect(page.initialMessageId, messageId);
-      expect(page.initialThreadRootId, threadRootId);
-    });
+        final page = tester.widget<ChannelDetailPage>(
+          find.byType(ChannelDetailPage),
+        );
+        expect(page.channel.id, 'ops');
+        expect(page.initialMessageId, messageId);
+        expect(page.initialThreadRootId, threadRootId);
+        expect(
+          page.initialThreadRouteBehavior,
+          wide
+              ? InitialThreadRouteBehavior.push
+              : InitialThreadRouteBehavior.replaceCurrentRoute,
+        );
+        if (wide) {
+          // The pane rebuilds its detail after a new query unmounts the tile.
+          ProviderScope.containerOf(
+            tester.element(find.byType(SearchPage)),
+          ).read(searchProvider.notifier).search('other');
+          await tester.pump();
+          expect(
+            find.byKey(const ValueKey('search-message-row-hit-1')),
+            findsNothing,
+          );
+          tester.view.physicalSize = const Size(1000, 700);
+          await tester.pump();
+          expect(
+            tester
+                .widget<ChannelDetailPage>(find.byType(ChannelDetailPage))
+                .initialThreadRouteBehavior,
+            InitialThreadRouteBehavior.push,
+          );
+        }
+        await tester.pumpWidget(const SizedBox.shrink());
+      });
+    }
   }
 
   testWidgets('does not label an unjoined channel as having zero members', (

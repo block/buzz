@@ -812,6 +812,10 @@ Future<void> _openSearchChannel(
 }) async {
   try {
     if (!context.mounted) return;
+    // The pane keeps this builder after the tapped tile unmounts.
+    final threadRouteBehavior = ConversationPaneScope.maybeOf(context) == null
+        ? InitialThreadRouteBehavior.replaceCurrentRoute
+        : InitialThreadRouteBehavior.push;
     await openConversationPane(
       context,
       messageId ?? channel.id,
@@ -819,10 +823,7 @@ Future<void> _openSearchChannel(
         channel: channel,
         initialMessageId: messageId,
         initialThreadRootId: threadRootId,
-        initialThreadRouteBehavior:
-            ConversationPaneScope.maybeOf(context) == null
-            ? InitialThreadRouteBehavior.replaceCurrentRoute
-            : InitialThreadRouteBehavior.push,
+        initialThreadRouteBehavior: threadRouteBehavior,
       ),
       reopen: messageId != null,
     );
