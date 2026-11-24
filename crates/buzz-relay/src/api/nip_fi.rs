@@ -4058,6 +4058,88 @@ mod route_integration_tests {
         });
     }
 
+    /// A partly unreadable load on a shadow pod applies the readable records
+    /// through the shadow close path, which closes no real session, and
+    /// still fails, so the generation never finishes.
+    #[tokio::test]
+    async fn shadow_partial_restore_observes_and_stays_unrestored() {
+        let source = Arc::new(FailingReplayGuard {
+            load_unreadable: true.into(),
+            ..Default::default()
+        });
+        let key = nostr::Keys::generate().public_key();
+        let message = store_deny(&source.inner, &key).await;
+        let mut config = crate::config::Config::for_test();
+        config.nip_fi.mode = NipFiMode::Shadow;
+        config.nip_fi.registry.insert(test_issuer_policy());
+        let mut state = build_test_app_state(10, config).await;
+        state.nip_fi_command_replay = Arc::clone(&source) as _;
+        let pod = Arc::new(state);
+        let deny_map = pod.nip_fi_deny_map.as_deref().unwrap();
+        let session = IssuerSessions::register(&pod, TEST_ISS, &key);
+        deny_map.begin_restore();
+        assert_eq!(
+            restore_nip_fi_denies(&pod, &[source as _]).await,
+            Err("unreadable")
+        );
+        session.assert_open("shadow only observes");
+        assert!(
+            !deny_map.is_restored(),
+            "a partial load leaves it restoring"
+        );
+        assert_eq!(
+            merge_nip_fi_disconnect(&pod, &message, chrono::Utc::now()),
+            NipFiDisconnectApplyResult::Applied(buzz_auth::CrossPodMergeResult::Unchanged),
+            "the readable record was applied"
+        );
+    }
+
+    /// The consumer's own timer retries a partly unreadable restore: the
+    /// first attempt applies the readable record and stays closed; once the
+    /// bad record is gone the next attempt reopens.
+    #[tokio::test]
+    async fn consumer_retries_a_partly_unreadable_restore() {
+        let source = Arc::new(FailingReplayGuard {
+            load_unreadable: true.into(),
+            ..Default::default()
+        });
+        let (revoked, bystander) = (
+            nostr::Keys::generate().public_key(),
+            nostr::Keys::generate().public_key(),
+        );
+        store_deny(&source.inner, &revoked).await;
+        let pod = store_pod(10, Arc::clone(&source) as _).await;
+        let deny_map = pod.nip_fi_deny_map.as_deref().unwrap();
+        deny_map.begin_restore();
+        let sessions = [&revoked, &bystander].map(|k| IssuerSessions::register(&pod, TEST_ISS, k));
+        let (_tx, rx) = tokio::sync::broadcast::channel(16);
+        let (sub_tx, sub_rx) =
+            tokio::sync::watch::channel(buzz_pubsub::NipFiSubscription::default());
+        let consumer = tokio::spawn(run_nip_fi_disconnect_consumer(
+            Arc::clone(&pod),
+            rx,
+            sub_rx,
+            vec![Arc::clone(&source) as _],
+        ));
+        tokio::time::pause();
+        go_live(&sub_tx);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(source.loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        sessions[0].assert_closed("readable record past a bad one");
+        sessions[1].assert_open("not revoked");
+        assert!(!deny_map.is_restored(), "unreadable keeps admission closed");
+
+        source
+            .load_unreadable
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        assert_eq!(source.loads.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(deny_map.is_restored(), "the timer's retry reopens");
+        assert!(!is_denied(&pod, &bystander));
+        assert!(is_denied(&pod, &revoked));
+        consumer.abort();
+    }
+
     /// While restores keep failing, delivered disconnects still close their
     /// sessions, admission stays closed, and steady traffic does not postpone
     /// the next restore attempt.
@@ -4408,7 +4490,7 @@ mod route_integration_tests {
             .map(|k| IssuerSessions::register(&pod, TEST_ISS, k));
         pod.nip_fi_deny_map.as_deref().unwrap().begin_restore();
         let unreadable = Arc::new(FailingReplayGuard {
-            load_unreadable: true,
+            load_unreadable: true.into(),
             ..Default::default()
         });
         assert_eq!(
@@ -4497,8 +4579,9 @@ mod route_integration_tests {
         inner: Arc<buzz_auth::InMemoryCommandReplayGuard>,
         applies: bool,
         load_fails: bool,
-        /// Fails loads as an undecodable stored record.
-        load_unreadable: bool,
+        /// Fails loads as an undecodable stored record, still returning
+        /// `inner`'s records as the readable ones.
+        load_unreadable: std::sync::atomic::AtomicBool,
         /// Fails loads for this issuer only.
         fail_issuer: Option<String>,
         loads: std::sync::atomic::AtomicUsize,
@@ -4537,11 +4620,14 @@ mod route_integration_tests {
                     Err(buzz_auth::AuthError::Internal("simulated Redis outage".into()).into())
                 });
             }
-            if self.load_unreadable {
-                return Box::pin(async {
+            if self
+                .load_unreadable
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Box::pin(async move {
                     Err(buzz_auth::LoadDeniesError::Unreadable {
                         record: "simulated bad record".into(),
-                        readable: Vec::new(),
+                        readable: self.inner.load_denies(issuer, now).await?,
                     })
                 });
             }
@@ -4893,7 +4979,7 @@ mod route_integration_tests {
                     &format!("{namespace}:deny"),
                     &issuer,
                 );
-                // The bad record first, so the readable ones come after it.
+                // Written first; HGETALL doesn't promise to return it first.
                 let mut fields: Vec<_> = extra.into_iter().collect();
                 fields.extend([bytes(live.clone()), bytes(expired.clone())]);
                 // One transaction, so the fixture always expires.
