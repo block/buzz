@@ -5454,6 +5454,73 @@ mod route_integration_tests {
             assert!(is_denied(&pod, &revoked), "the good record still denies");
         }
 
+        /// Past a bad record, restore applies a readable deny at its cutoff,
+        /// not as the whole key, and admission stays fenced.
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn redis_partial_restore_keeps_a_readable_cutoff() {
+            let url = std::env::var("BUZZ_TEST_REDIS_URL")
+                .or_else(|_| std::env::var("REDIS_URL"))
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+            let mut conn = buzz_pubsub::redis_connection(&url).expect("redis pool");
+            let namespace = test_namespace();
+            let store = redis_guard_in(&namespace);
+            let (revoked, bystander) = (
+                nostr::Keys::generate().public_key(),
+                nostr::Keys::generate().public_key(),
+            );
+            let now = chrono::Utc::now();
+            let c = now.timestamp();
+            let outcome = store
+                .try_claim(buzz_auth::CommandClaim {
+                    issuer: TEST_ISS,
+                    jti: "good",
+                    ttl_secs: 60,
+                    target: &revoked,
+                    until: now + chrono::Duration::seconds(120),
+                    scope: buzz_auth::DenyScope::IssuedThrough(c),
+                    capacity: 10,
+                    now,
+                })
+                .await
+                .unwrap();
+            assert_eq!(outcome, buzz_auth::ClaimOutcome::Claimed);
+            let (_, hash) = buzz_pubsub::nip_fi_command_replay::deny_store_keys(
+                &format!("{namespace}:deny"),
+                TEST_ISS,
+            );
+            let _: () = redis::cmd("HSET")
+                .arg(&hash)
+                .arg("not-a-key")
+                .arg("1:0")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+
+            let pod = store_pod(10, Arc::clone(&store)).await;
+            let deny_map = pod.nip_fi_deny_map.as_deref().unwrap();
+            let at = |secs| chrono::DateTime::from_timestamp(secs, 0).unwrap();
+            let after = at(c) + chrono::Duration::seconds(1);
+            let old = IssuerSessions::register_issued(&pod, TEST_ISS, &revoked, at(c));
+            let fresh = IssuerSessions::register_issued(&pod, TEST_ISS, &revoked, after);
+            deny_map.begin_restore();
+            assert_eq!(
+                restore_nip_fi_denies(&pod, &[store]).await,
+                Err("unreadable")
+            );
+            assert!(
+                !deny_map.is_restored(),
+                "a partial load leaves it restoring"
+            );
+            old.assert_closed("issued at the cutoff");
+            fresh.assert_open("the readable deny is scoped to its cutoff, not the whole key");
+            assert_eq!(
+                deny_map.deny_status(TEST_ISS, &bystander, after, chrono::Utc::now()),
+                buzz_auth::DenyStatus::Unavailable,
+                "admission stays fenced while a record is unreadable"
+            );
+        }
+
         /// The deny-store writer and reader before cutoffs, from #9860's
         /// `02627cce` (the script verbatim, the reader with its logging
         /// dropped and errors as text): the code a rolled-back or
@@ -5511,7 +5578,7 @@ return 'claimed'
                 let (index, exact) =
                     buzz_pubsub::nip_fi_command_replay::deny_store_keys(prefix, issuer);
                 let ceil_ms = until.timestamp_millis()
-                    + i64::from(until.timestamp_subsec_nanos() % 1_000_000 != 0);
+                    + i64::from(!until.timestamp_subsec_nanos().is_multiple_of(1_000_000));
                 redis::Script::new(ACCEPT_SCRIPT)
                     .key(format!("{prefix}:claim:{issuer}:{jti}"))
                     .key(index)
@@ -6000,6 +6067,12 @@ return 'claimed'
         #[tokio::test]
         #[ignore = "requires Redis"]
         async fn redis_accept_refuses_an_unreadable_stored_cutoff() {
+            /// Index members with scores, then the exact and cutoff hashes.
+            type DenyStoreSnapshot = (
+                Vec<(String, f64)>,
+                Vec<(String, String)>,
+                Vec<(String, String)>,
+            );
             let url = std::env::var("BUZZ_TEST_REDIS_URL")
                 .or_else(|_| std::env::var("REDIS_URL"))
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
@@ -6047,11 +6120,7 @@ return 'claimed'
                     let mut conn = conn.clone();
                     let (index, exact, cutoffs) = (index.clone(), exact.clone(), cutoffs.clone());
                     async move {
-                        let state: (
-                            Vec<(String, f64)>,
-                            Vec<(String, String)>,
-                            Vec<(String, String)>,
-                        ) = redis::pipe()
+                        let state: DenyStoreSnapshot = redis::pipe()
                             .cmd("ZRANGE")
                             .arg(&index)
                             .arg(0)
