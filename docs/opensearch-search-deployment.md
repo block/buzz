@@ -21,7 +21,29 @@ Postgres.
    messages it stores, so one without the setting leaves gaps. A relay with
    the setting refuses to start before `0106` has run.
 
+Don't set it on a relay with real data yet. Deletes, edits and account
+scrubs don't reach the index until
+[block/buzz#9862](https://github.com/block/buzz/pull/9862), and nothing
+purges a deleted community's documents. Searches never return them, but
+their words stay in the index. That release also caps bulk requests at
+8 MiB; until then, a cluster with a 10 MiB request limit can reject a full
+batch.
+
 Messages stored before step 3 are not indexed; there is no backfill yet.
+
+To turn indexing off, unset the URL and restart the relays. Queued rows stay
+until it is back on.
+
+## Operating
+
+While OpenSearch is down the queue grows without bound. Check it with:
+
+```sh
+psql -c 'SELECT count(*), min(created_at) FROM search_outbox'
+```
+
+The index holds the words of every indexed message, DMs included, so anyone
+who can query the cluster can search them. Limit cluster access to the relays.
 
 If you stream Postgres changes through logical replication, leave
 `search_outbox` out of the publication. Its rows are short-lived queue

@@ -50,8 +50,8 @@ pub struct OpenSearchConfig {
     pub url: String,
     /// HTTP basic credentials, if the cluster needs them.
     pub basic_auth: Option<(String, String)>,
-    /// Prefix of the alias and index names, so deployments can share a
-    /// cluster.
+    /// Prefix of the alias and index names. The relay always uses
+    /// [`DEFAULT_INDEX_PREFIX`]; tests set their own to share a cluster.
     pub index_prefix: String,
 }
 
