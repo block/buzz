@@ -1,6 +1,6 @@
 # Prepare and approve a user-deletion request
 
-Use the subject’s public key to select current memberships. Preview and submission use the same query. Submission saves the list and its digest in one transaction. Approval binds the request to that list.
+Use the subject’s public key to select current memberships and communities owned by their direct agents. Preview and submission use the same query. Submission saves the list and its digest in one transaction. Approval binds the request to that list.
 
 ## Prepare a local database
 

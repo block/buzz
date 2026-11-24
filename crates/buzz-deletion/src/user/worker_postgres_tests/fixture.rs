@@ -153,7 +153,7 @@ pub(super) async fn fixture_with_roles(roles: &[&str]) -> Fixture {
                     if failure.load(Ordering::SeqCst) {
                         "<ListVersionsResult><IsTruncated>false</IsTruncated>".into()
                     } else {
-                        let entry = if removed.load(Ordering::SeqCst) || (request.contains("prefix=_uploads") || request.contains("prefix=_meta")) {
+                        let entry = if removed.load(Ordering::SeqCst) || !request.contains(&format!("prefix={hash}.")) {
                             String::new()
                         } else {
                             format!("<Version><Key>{hash}.png</Key><VersionId>v1</VersionId><Size>1</Size></Version>")

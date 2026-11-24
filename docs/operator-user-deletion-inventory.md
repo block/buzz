@@ -1,6 +1,6 @@
 # Inspect community memberships for user deletion
 
-Inventory, read-only submission and deletion submission select the subject’s current community and channel memberships. A saved request keeps the list approved for that run.
+Inventory, read-only submission and deletion submission select the subject’s current community and channel memberships, plus communities owned by their direct agents. A saved request keeps the list approved for that run.
 
 ## Build and choose a database
 
@@ -37,7 +37,7 @@ MODE=(--read-only)
 ./target/debug/buzz-admin user-deletions inventory --pubkey "$SUBJECT"
 ```
 
-The command accepts hex or npub. Each entry contains a community ID, host label and relationship. Use `MODE=(--delete)` only when executing an ordinary deletion request on disposable test data. Omit `--read-only` on submission for that mode.
+The command accepts hex or npub. Each entry contains a community ID, host label and relationship. An entry with `owned_by_agent: true` means a direct agent owns that community. The worker routes it to a separate community deletion request and approval, including when the human has never joined. Use `MODE=(--delete)` only when executing an ordinary deletion request on disposable test data. Omit `--read-only` on submission for that mode.
 
 ## 2. Submit and inspect
 
@@ -120,12 +120,14 @@ inventory is not regenerated on resubmission.
 
 1. Normalize the hex key or npub.
 2. Select communities from `relay_members` and active channel memberships (`channel_members.removed_at IS NULL`). Historical messages alone do not select a community.
-3. Preserve the owner relationship when present. Other current members and channel-only participants are participants.
+3. Include communities where a direct agent has the owner role in the same community as its ownership record. Human or agent ownership takes precedence over participant membership.
 4. Include archived or deleting communities that meet the same membership rule. Return each community once, ordered by UUID.
 
 Discovery uses one statement snapshot, a 30-second timeout, and a 1,000-community
 cap. Errors and oversized results fail rather than return partial inventories.
 A failed discovery during submission rolls back the request too.
+
+Before global media cleanup starts, the worker checks the approved ownership routes against current ownership. Community cleanup checks again when committing participant batches or creating a child request. An existing child has its own approval and the parent can follow it after its owner records disappear. If a new owner requires a different route, inspect the request and the current inventory. Retrying the same request keeps its original approved scope.
 Preview uses a read-only transaction and needs no workflow tables or migrations.
 
 Preview and submission use the same selector. Read-only execution records the ID of each owned

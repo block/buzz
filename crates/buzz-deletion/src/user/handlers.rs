@@ -75,6 +75,12 @@ async fn execute(
         "execution mode differs from request"
     );
     if row.stage == "purge_media" {
+        let request = store.get(lease.request_id).await?;
+        options
+            .db
+            .user_deletion_store()
+            .check_owned_inventory(subject, &UserDeletionInventory::read(&request)?)
+            .await?;
         return purge_media(row, options, subject).await;
     }
     if row.stage == "purge_content" {

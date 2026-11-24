@@ -1,6 +1,8 @@
 use super::*;
 use buzz_db::Db;
 
+#[path = "worker_postgres_tests/agent_owners.rs"]
+mod agent_owners_postgres_tests;
 #[path = "worker_postgres_tests/fixture.rs"]
 mod media_fixture;
 #[path = "worker_postgres_tests/media_retry.rs"]

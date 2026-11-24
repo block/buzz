@@ -21,9 +21,7 @@ submission and completion rules, and marks an outstanding owned stage
 | Waiting persistence | `buzz-db/src/store/entity_deletion/observations.rs` | Save an external observation under the parent lease/generation check |
 
 `submit_and_prepare` is a regular Rust function, not an API object or network
-endpoint. The community CLI and user handler both call it with the existing
-`DeletionStore` and `MediaStorage`. It calls the existing `submit`, shared
-`build_inventory`, and `freeze_inventory` operations. There is one request
+endpoint. The community CLI and user handler share the database admission, inventory build and freeze operations. The parent checks current user or agent ownership under the community write lock when it creates a child. There is one request
 insertion query; no separate user-specific community submission implementation.
 It needs no Redis connection and requires the same operator authority as the CLI.
 An approved inventory describes scope, not operator authentication or proof of
@@ -47,8 +45,7 @@ parent inventory, and requires `relationship: "owner"`.
 
 1. **Lookup by community ID.** Call `DeletionStore::find_for_community`. If a request exists, read it without modifying
    its inventory, approval, provenance, or execution state.
-2. **Submit only when missing.** Call the same `submit_and_prepare` function as
-   the community CLI, pinning the approved community ID. Create an operator-origin
+2. **Submit only when missing.** Confirm current ownership and pin the approved community ID when submitting. Create an operator-origin
    request, prepare/freeze its inventory, and return its ID and current stage. Concurrent
    submissions converge on the existing community request. A child is never
    approved or executed by this handler.

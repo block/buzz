@@ -20,10 +20,20 @@ pub async fn submit_and_prepare(
     reason: Option<&str>,
     expected_community: Option<CommunityId>,
 ) -> Result<DeletionRequest> {
-    let request = match store
+    let submission = store
         .submit(host, requested_by, reason, expected_community)
-        .await
-    {
+        .await;
+    prepare_submission(store, media, host, expected_community, submission).await
+}
+
+pub(crate) async fn prepare_submission(
+    store: &DeletionStore,
+    media: &MediaStorage,
+    host: Option<&str>,
+    expected_community: Option<CommunityId>,
+    submission: buzz_db::Result<DeletionRequest>,
+) -> Result<DeletionRequest> {
+    let request = match submission {
         Ok(request) => request,
         Err(error @ DbError::DeletionSafety(_)) if expected_community.is_some() => {
             // A separate read sees a concurrent submitter's committed row.

@@ -1,6 +1,6 @@
 //! Owned-community delegation. The caller owns claim, heartbeat and release.
 
-use crate::community::submit_and_prepare;
+use crate::community::prepare_submission;
 use crate::RETRY_DELAY;
 use anyhow::{bail, Context, Result};
 use buzz_core::CommunityId;
@@ -133,18 +133,16 @@ async fn resolve_child(
         Some(child) => child,
         None if saved_child.is_some() => bail!("previously observed community request is missing"),
         None => {
-            submit_and_prepare(
-                community_store,
-                media,
-                None,
-                &request.requested_by,
-                Some(&format!(
-                    "User deletion request {}; stage {}",
-                    request.id, row.id
-                )),
-                Some(community),
-            )
-            .await?
+            let reason = format!("User deletion request {}; stage {}", request.id, row.id);
+            let submission = community_store
+                .submit_for_user_deletion(
+                    community,
+                    &request.target,
+                    &request.requested_by,
+                    &reason,
+                )
+                .await;
+            prepare_submission(community_store, media, None, Some(community), submission).await?
         }
     };
     // The stage tracks the approved community, not one deletion attempt. A

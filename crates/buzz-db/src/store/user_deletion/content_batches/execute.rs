@@ -148,6 +148,13 @@ pub(super) async fn execute_owned_batch(
         .await?;
     ownership::recheck(&mut tx, options, start).await?;
     if let Some((lease, stage_id)) = stage {
+        super::super::check_community_ownership(
+            &mut tx,
+            &normalize_user_deletion_pubkey(&options.pubkey)?,
+            community,
+            false,
+        )
+        .await?;
         let request = crate::store::entity_deletion::lock_owned(&mut tx, lease).await?;
         crate::store::entity_deletion::validate_approved_inventory(&mut tx, &request).await?;
         let expected = crate::user_deletion::UserDeletionInventory::read(&request)?

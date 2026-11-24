@@ -13,6 +13,7 @@ mod media;
 pub mod profile_batches;
 pub use agent_ownership::UserDeletionTargets;
 mod requests;
+pub(crate) use discovery::check_community_ownership;
 pub use discovery::normalize_user_deletion_pubkey;
 pub use inventory::UserDeletionInventory;
 
@@ -70,6 +71,9 @@ async fn validate_cleanup_stage(
     target: &str,
 ) -> crate::Result<()> {
     use crate::store::entity_deletion::{lock_owned, validate_approved_inventory};
+    if let Some(id) = community {
+        check_community_ownership(tx, target, id, false).await?;
+    }
     let request = lock_owned(tx, lease).await?;
     validate_approved_inventory(tx, &request).await?;
     let inputs =

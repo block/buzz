@@ -931,12 +931,58 @@ impl DeletionStore {
         reason: Option<&str>,
         expected_community: Option<CommunityId>,
     ) -> Result<DeletionRequest> {
+        self.submit_checked(
+            community_host,
+            requested_by,
+            reason,
+            expected_community,
+            None,
+        )
+        .await
+    }
+
+    /// Create an operator-origin child only while the user or a direct agent
+    /// still owns the pinned community. The child needs its own approval.
+    pub async fn submit_for_user_deletion(
+        &self,
+        community: CommunityId,
+        target: &str,
+        requested_by: &str,
+        reason: &str,
+    ) -> Result<DeletionRequest> {
+        self.submit_checked(
+            None,
+            requested_by,
+            Some(reason),
+            Some(community),
+            Some(target),
+        )
+        .await
+    }
+
+    async fn submit_checked(
+        &self,
+        community_host: Option<&str>,
+        requested_by: &str,
+        reason: Option<&str>,
+        expected_community: Option<CommunityId>,
+        user_target: Option<&str>,
+    ) -> Result<DeletionRequest> {
         if community_host.is_none() && expected_community.is_none() {
             return Err(DbError::DeletionSafety(
                 "community host or ID is required".into(),
             ));
         }
         let mut tx = self.pool.begin().await?;
+        if let (Some(community), Some(subject)) = (expected_community, user_target) {
+            crate::user_deletion::check_community_ownership(
+                &mut tx,
+                subject,
+                *community.as_uuid(),
+                true,
+            )
+            .await?;
+        }
         // Keep resolution and admission together, including when a caller pins
         // the immutable ID. NO KEY UPDATE permits `FOR KEY SHARE` reference checks.
         let target: Option<Uuid> = sqlx::query_scalar(
@@ -3397,15 +3443,15 @@ async fn guard_manifest_chunk_write(
     Ok(())
 }
 
-async fn lock_community_deletion(
-    tx: &mut Transaction<'_, Postgres>,
+pub(crate) async fn lock_community_deletion(
+    conn: &mut PgConnection,
     community: CommunityId,
 ) -> Result<()> {
     crate::observability::observe_advisory_lock(
         crate::observability::LockType::Deletion,
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(community_deletion_lock_key(community))
-            .execute(&mut **tx),
+            .execute(conn),
     )
     .await?;
     Ok(())
