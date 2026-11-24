@@ -951,7 +951,6 @@ Docker Compose provides the full local development stack. All services include h
 | `workflow_runs` | Execution records with trigger context and trace |
 | `workflow_approvals` | Approval gates (token stored as SHA-256 hash) |
 | `audit_log` | Hash-chain audit entries; per-community chain/head in multi-community mode |
-| `delivery_log` | Delivery tracking (partitioned; Rust module pending) |
 
 ### Redis Key Patterns
 
