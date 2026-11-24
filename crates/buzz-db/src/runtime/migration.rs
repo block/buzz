@@ -4552,7 +4552,7 @@ mod postgres_tests {
             .expect_err("deletion refuses a catalog missing later tenant tables")
             .to_string();
         assert!(
-            drift.contains("(missing=search_outbox, unknown=)"),
+            drift.contains("(missing=channel_heads,search_outbox,thread_heads, unknown=)"),
             "deletion must accept the pre-retirement fences: {drift}"
         );
         run_migrations(&pool).await.expect("apply all migrations");
@@ -4639,7 +4639,7 @@ mod postgres_tests {
             .expect_err("deletion refuses a catalog missing later tenant tables")
             .to_string();
         assert!(
-            drift.contains("(missing=search_outbox, unknown=)"),
+            drift.contains("(missing=channel_heads,search_outbox,thread_heads, unknown=)"),
             "deletion must accept the catalog before the drop: {drift}"
         );
         run_migrations(&pool).await.expect("apply all migrations");

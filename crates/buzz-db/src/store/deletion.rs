@@ -4884,6 +4884,7 @@ pub(crate) mod postgres_tests {
         crate::migration::create_tenant_tables_added_after_fence_retirement(&db.pool)
             .await
             .expect("tenant tables added since");
+        crate::test_support::stand_in_later_expected_tables(&db.pool).await;
         let store = db.deletion_store();
         let community = db
             .ensure_configured_community("optional-fences.example")
@@ -5032,6 +5033,7 @@ DROP FUNCTION community_deletion_lock_key(UUID);
         crate::migration::create_tenant_tables_added_after_fence_retirement(&db.pool)
             .await
             .expect("tenant tables added since");
+        crate::test_support::stand_in_later_expected_tables(&db.pool).await;
         let community = db
             .ensure_configured_community("optional-guards.example")
             .await
