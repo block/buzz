@@ -5994,8 +5994,8 @@ return 'claimed'
             assert!(!held(&b).await, "pruning clears the cutoff");
         }
 
-        /// A disconnect over a stored cutoff restore would reject is refused
-        /// with nothing written: the claim stays unused and the deny state is
+        /// A disconnect over an active deny whose stored cutoff restore would
+        /// reject is refused with nothing written: the claim stays unused and the deny state is
         /// unchanged.
         #[tokio::test]
         #[ignore = "requires Redis"]
@@ -6017,13 +6017,29 @@ return 'claimed'
                 ("out of range", "9223372036854775807"),
             ] {
                 let key = nostr::Keys::generate().public_key();
-                let _: () = redis::pipe()
-                    .atomic()
-                    .cmd("HSET")
+                let base = buzz_auth::CommandClaim {
+                    issuer: &issuer,
+                    jti: "base",
+                    ttl_secs: 60,
+                    target: &key,
+                    until: now + chrono::Duration::seconds(120),
+                    scope: buzz_auth::DenyScope::IssuedThrough(now.timestamp()),
+                    capacity: 10,
+                    now,
+                };
+                let base_jti = format!("base-{key}");
+                let outcome = store
+                    .try_claim(buzz_auth::CommandClaim {
+                        jti: &base_jti,
+                        ..base
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(outcome, buzz_auth::ClaimOutcome::Claimed);
+                let _: () = redis::cmd("HSET")
                     .arg(&cutoffs)
                     .arg(key.to_hex())
                     .arg(bad)
-                    .ignore()
                     .query_async(&mut conn)
                     .await
                     .unwrap();
@@ -6031,19 +6047,23 @@ return 'claimed'
                     let mut conn = conn.clone();
                     let (index, exact, cutoffs) = (index.clone(), exact.clone(), cutoffs.clone());
                     async move {
-                        let state: (Vec<String>, Vec<(String, String)>, Vec<(String, String)>) =
-                            redis::pipe()
-                                .cmd("ZRANGE")
-                                .arg(&index)
-                                .arg(0)
-                                .arg(-1)
-                                .cmd("HGETALL")
-                                .arg(&exact)
-                                .cmd("HGETALL")
-                                .arg(&cutoffs)
-                                .query_async(&mut conn)
-                                .await
-                                .unwrap();
+                        let state: (
+                            Vec<(String, f64)>,
+                            Vec<(String, String)>,
+                            Vec<(String, String)>,
+                        ) = redis::pipe()
+                            .cmd("ZRANGE")
+                            .arg(&index)
+                            .arg(0)
+                            .arg(-1)
+                            .arg("WITHSCORES")
+                            .cmd("HGETALL")
+                            .arg(&exact)
+                            .cmd("HGETALL")
+                            .arg(&cutoffs)
+                            .query_async(&mut conn)
+                            .await
+                            .unwrap();
                         state
                     }
                 };
