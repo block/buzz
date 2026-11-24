@@ -315,9 +315,15 @@ async fn merge_stored_denies(
     for source in sources {
         for issuer in deny_map.issuers() {
             let now = chrono::Utc::now();
-            let Ok(entries) = source.load_denies(&issuer, now).await else {
-                result = result.and(Err("store"));
-                continue;
+            let entries = match source.load_denies(&issuer, now).await {
+                Ok(entries) => entries,
+                Err(e) => {
+                    result = result.and(Err(match e {
+                        buzz_auth::LoadDeniesError::Store(_) => "store",
+                        buzz_auth::LoadDeniesError::Unreadable(_) => "unreadable",
+                    }));
+                    continue;
+                }
             };
             for (key, until) in entries {
                 let message = buzz_pubsub::NipFiDisconnect {
@@ -4392,6 +4398,25 @@ mod route_integration_tests {
         );
         session.assert_closed("issuer after a store error");
         closed(&pod);
+
+        // Unreadable: a bad stored record is reported apart from an outage.
+        let pod = store_pod(10, Arc::clone(&store) as _).await;
+        let sessions = keys
+            .each_ref()
+            .map(|k| IssuerSessions::register(&pod, TEST_ISS, k));
+        pod.nip_fi_deny_map.as_deref().unwrap().begin_restore();
+        let unreadable = Arc::new(FailingReplayGuard {
+            load_unreadable: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            restore_nip_fi_denies(&pod, &[unreadable, Arc::clone(&store) as _]).await,
+            Err("unreadable")
+        );
+        for session in &sessions {
+            session.assert_closed("source after an unreadable record");
+        }
+        closed(&pod);
     }
 
     /// Live delivery still closes sessions when the entry is unchanged.
@@ -4470,6 +4495,8 @@ mod route_integration_tests {
         inner: Arc<buzz_auth::InMemoryCommandReplayGuard>,
         applies: bool,
         load_fails: bool,
+        /// Fails loads as an undecodable stored record.
+        load_unreadable: bool,
         /// Fails loads for this issuer only.
         fail_issuer: Option<String>,
         loads: std::sync::atomic::AtomicUsize,
@@ -4505,8 +4532,13 @@ mod route_integration_tests {
             self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.load_fails || self.fail_issuer.as_deref() == Some(issuer) {
                 return Box::pin(async {
-                    Err(buzz_auth::AuthError::Internal(
-                        "simulated Redis outage".into(),
+                    Err(buzz_auth::AuthError::Internal("simulated Redis outage".into()).into())
+                });
+            }
+            if self.load_unreadable {
+                return Box::pin(async {
+                    Err(buzz_auth::LoadDeniesError::Unreadable(
+                        "simulated bad record".into(),
                     ))
                 });
             }

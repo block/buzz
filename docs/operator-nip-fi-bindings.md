@@ -267,6 +267,14 @@ What this covers, and what it does not:
   Redis is reachable but the restore fails, the pod runs and refuses
   assertion-bearing connections with `503` (authorization unavailable) until
   it has restored. Watch `buzz_nip_fi_deny_restore_failures_total{reason}`.
+- **Unreadable deny record:** `reason="unreadable"` means Redis answered but
+  a stored deny record could not be decoded: its field is not a hex pubkey,
+  or its value is not exactly `secs:nanos`. The pod stays closed until the
+  record is removed. The warning log names the record. Find it in the
+  issuer's deny hash, `buzz:nip-fi:deny-until:<sha256(issuer) hex>`
+  (`buzz:nip-fi:shadow-deny-until:…` in shadow mode), with `HGETALL`, then
+  `HDEL` that field. The pod retries on its own. Removing the record drops
+  that revocation, so send the disconnect again if it is still needed.
 - **Deny set over capacity on a pod:** if a revocation this pod receives does
   not fit its `deny_set_capacity`, the pod closes admission the same way and
   restores until its active entries fit.

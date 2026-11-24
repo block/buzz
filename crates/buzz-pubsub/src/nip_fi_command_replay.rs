@@ -19,8 +19,8 @@ use buzz_auth::nip_fi::{
     namespaced_command_replay_key, COMMAND_REPLAY_PREFIX, SHADOW_COMMAND_REPLAY_PREFIX,
 };
 use buzz_auth::{
-    error::AuthError, ClaimOutcome, CommandClaim, CommandReplayGuard, DEFAULT_REPLAY_TTL_SECS,
-    MAX_REPLAY_TTL_SECS,
+    error::AuthError, ClaimOutcome, CommandClaim, CommandReplayGuard, LoadDeniesError,
+    DEFAULT_REPLAY_TTL_SECS, MAX_REPLAY_TTL_SECS,
 };
 use chrono::{DateTime, Utc};
 use nostr::PublicKey;
@@ -177,9 +177,10 @@ impl CommandReplayGuard for RedisCommandReplayGuard {
             // admission without that revocation.
             let mut denies = Vec::with_capacity(entries.len());
             for (key, until) in entries {
-                let key = PublicKey::from_hex(&key).map_err(internal)?;
+                let key =
+                    PublicKey::from_hex(&key).map_err(|_| unreadable(format!("deny key {key}")))?;
                 let until = parse_until(&until)
-                    .ok_or_else(|| internal(format!("unreadable deny until: {until}")))?;
+                    .ok_or_else(|| unreadable(format!("deny until {until} for {key}")))?;
                 if until > now {
                     denies.push((key, until));
                 }
@@ -192,6 +193,11 @@ impl CommandReplayGuard for RedisCommandReplayGuard {
 fn parse_until(value: &str) -> Option<DateTime<Utc>> {
     let (secs, nanos) = value.split_once(':')?;
     DateTime::from_timestamp(secs.parse().ok()?, nanos.parse().ok()?)
+}
+
+fn unreadable(record: String) -> LoadDeniesError {
+    tracing::warn!(record, "nip-fi command store: unreadable deny record");
+    LoadDeniesError::Unreadable(record)
 }
 
 #[cfg(test)]

@@ -76,8 +76,20 @@ pub trait CommandReplayGuard: Send + Sync {
 }
 
 /// The future [`CommandReplayGuard::load_denies`] returns.
-pub type LoadDenies<'a> =
-    Pin<Box<dyn Future<Output = Result<Vec<(PublicKey, DateTime<Utc>)>, AuthError>> + Send + 'a>>;
+pub type LoadDenies<'a> = Pin<
+    Box<dyn Future<Output = Result<Vec<(PublicKey, DateTime<Utc>)>, LoadDeniesError>> + Send + 'a>,
+>;
+
+/// Why [`CommandReplayGuard::load_denies`] failed.
+#[derive(Debug, thiserror::Error)]
+pub enum LoadDeniesError {
+    /// The store could not be read.
+    #[error(transparent)]
+    Store(#[from] AuthError),
+    /// A stored deny record could not be decoded.
+    #[error("unreadable deny record: {0}")]
+    Unreadable(String),
+}
 
 /// Redis key for a command replay claim:
 /// `buzz:nip-fi:command:{sha256(len(iss) || iss || len(jti) || jti)}`.

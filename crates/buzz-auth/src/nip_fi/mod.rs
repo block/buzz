@@ -34,7 +34,8 @@ pub use command::{
 pub use command_replay::InMemoryCommandReplayGuard;
 pub use command_replay::{
     command_replay_key, namespaced_command_replay_key, ClaimOutcome, CommandClaim,
-    CommandReplayGuard, LoadDenies, COMMAND_REPLAY_PREFIX, SHADOW_COMMAND_REPLAY_PREFIX,
+    CommandReplayGuard, LoadDenies, LoadDeniesError, COMMAND_REPLAY_PREFIX,
+    SHADOW_COMMAND_REPLAY_PREFIX,
 };
 pub use community::{CommunityBinding, CommunityBindingError};
 pub use config::{
