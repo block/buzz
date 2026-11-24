@@ -160,12 +160,10 @@ pub const RETIRING_SCOPED_TABLES: &[&str] = &["delivery_log", "subscriptions"];
 /// [`EXPECTED_SCOPED_TABLES`] and [`PURGE_SCOPED_TABLES`]. These tables have
 /// no foreign keys, so purge order does not matter.
 pub const PENDING_SCOPED_TABLES: &[&str] = &[
-    "channel_heads",
     "identity_retirement_actions",
     "identity_retirement_holds",
     "identity_retirement_workflows",
     "search_backfill",
-    "thread_heads",
 ];
 
 /// Tenant tables an expand migration may add between a deletion's approval
