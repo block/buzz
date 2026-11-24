@@ -614,6 +614,62 @@ void main() {
     }
   });
 
+  test('a read-only client never removes the session it shares', () async {
+    FlutterSecureStorage.setMockInitialValues({
+      storageKey: record('account-1', 'old'),
+    });
+    final oldChecked = Completer<void>();
+    var revoked = false;
+    http.Response verified() => http.Response(
+      jsonEncode({'subject': 'account-1', 'expires_at': expiry}),
+      200,
+    );
+    final foreground = BuilderlabAccountClient(
+      httpClient: MockClient((request) async {
+        if (request.url.path.endsWith('/exchange')) {
+          return http.Response(
+            jsonEncode({'session_credential': 'new', 'expires_at': expiry}),
+            200,
+          );
+        }
+        return verified();
+      }),
+    );
+    final wake = BuilderlabAccountClient(
+      readOnlySession: true,
+      httpClient: MockClient((request) async {
+        final credential = request.headers['X-BB-Session-Credential'];
+        if (credential == 'old') {
+          await oldChecked.future;
+          return http.Response('{}', 401);
+        }
+        if (request.url.path.endsWith('/me')) {
+          return revoked ? http.Response('{}', 401) : verified();
+        }
+        return http.Response('{}', 401);
+      }),
+    );
+
+    // The user signs in again while the wake's check of the old session is
+    // pending; its rejection must not delete the new one.
+    final restoring = wake.restore();
+    await foreground.exchange(code: 'code', verifier: verifier);
+    oldChecked.complete();
+    expect(await restoring, isNull);
+    expect(jsonDecode((await stored())!)['credential'], 'new');
+
+    // Nor may a request whose session check is rejected.
+    expect((await wake.restore())!.subject, 'account-1');
+    revoked = true;
+    await expectLater(
+      wake.currentIdentity(),
+      throwsA(AccountFailure.signedOut),
+    );
+    expect(wake.account, isNull);
+    expect(jsonDecode((await stored())!)['credential'], 'new');
+    expect(foreground.account!.subject, 'account-1');
+  });
+
   test(
     'unreadable record is a storage failure, not an absent session',
     () async {

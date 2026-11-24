@@ -632,6 +632,16 @@ void main() {
           .timeout(const Duration(seconds: 2));
       expect(unloaded.notifications, isEmpty);
       expect(unloaded.interrupted, isTrue);
+
+      // The runner passes that on, so the caller still falls back.
+      final run = await PushWakeRunner(
+        (budget) => fixture.wake(
+          timeouts: PushWakeTimeouts(total: budget),
+          loadCommunities: () => Completer<List<Community>>().future,
+        ),
+      ).wake(remaining: Duration.zero).timeout(const Duration(seconds: 2));
+      expect(run.notifications, isEmpty);
+      expect(run.incomplete, isTrue);
     });
 
     test('the whole wake stops at its total budget, claims included', () async {
