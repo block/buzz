@@ -286,7 +286,10 @@ echo "Seeded governance errors (each must violate the property named)"
 gcheck announcer-is-owner        LandsUnderCurrentAuthority    authority  announcer-is-owner
 gcheck owner-borrows-agent-repo  LandsUnderCurrentAuthority    authority  owner-borrows-agent-repo
 gcheck agent-uses-owner          LandsUnderCurrentAuthority    authority  agent-uses-owner
-gcheck grant-ignored             LandsUnderCurrentAuthority    authority  grant-ignored
+gcheck grant-uncapped            LandsUnderCurrentAuthority    authority  grant-uncapped
+gcheck grant-any-repo            LandsUnderCurrentAuthority    authority  grant-any-repo
+gcheck grant-level-ignored       LandsUnderCurrentAuthority    authority  grant-level-ignored
+gcheck owner-ban-ignored         LandsUnderCurrentAuthority    authority  owner-ban-ignored
 gcheck authority-at-receive      LandsUnderCurrentAuthority    authority  authority-at-receive
 gcheck owner-replaceable         OwnerPinned                   authority  owner-replaceable
 gcheck no-receipt-on-refusal     ReceiptsMatchDecisions        authority  no-receipt-on-refusal
@@ -326,7 +329,7 @@ gcheck channel-tags-protect      GovernedDocsOnlyByCommand     governance channe
 gcheck freshness-window-only     CommandsApplyOnceWhereMeant   governance freshness-window-only
 gcheck command-unbound           CommandsApplyOnceWhereMeant   governance command-unbound
 gcheck unrecorded-governance     EveryGovernanceChangeRecorded governance unrecorded-governance
-gcheck role-change-uncapped      RoleChangesByCurrentAuthority roles      role-change-uncapped
+gcheck grant-admins-channel      RoleChangesByCurrentAuthority roles      grant-admins-channel
 gcheck pusher-of-new-only        LandsUnderCurrentAuthority    repush     pusher-of-new-only
 gcheck receipt-omits-evidence    ReceiptsMatchDecisions        review     receipt-omits-evidence
 gcheck receipt-omits-checks      ReceiptsMatchDecisions        check      receipt-omits-checks
@@ -336,7 +339,7 @@ gcheck unfenced-accept           RefsMoveOnlyByLanding         fence      unfenc
 gcheck ban-unfenced              ReservationsFenced            fence      ban-unfenced
 gcheck fence-nominal             ReservationsFenced            fence      fence-nominal
 gcheck abort-receipted           ReceiptsMatchDecisions        fence      abort-receipted
-gcheck accept-after-expiry       LandsUnderCurrentAuthority    fence      grant-ignored
+gcheck accept-after-expiry       LandsUnderCurrentAuthority    fence      authority-at-receive
 
 echo
 echo "Governance coverage (behaviors of the design that must be reachable)"
@@ -344,6 +347,8 @@ gcheck lands-reviewed      NeverLandsReviewed review
 gcheck lands-checked       NeverLandsChecked  check
 gcheck lands-owned         NeverLandsOwned    owners
 gcheck lands-by-agent      NeverLandsByAgent  review
+gcheck lands-member-agent-no-grant NeverLandsByMemberAgentWithoutGrant authority
+gcheck lands-grant-only-agent NeverLandsByGrantOnlyAgent fence
 gcheck rebinds             NeverRebinds       governance
 gcheck stale-base-counts   NeverCountsOldBase staleok
 gcheck aborts              NeverAborts               fence

@@ -36,11 +36,15 @@
 (*   - Authority comes only from the repo's bound channel, for every key.  *)
 (*     Announcing a repo, owning the agent that announced it, or being     *)
 (*     named in its event grants nothing.                                  *)
-(*   - An agent acts with the lesser of its own role and its recorded      *)
-(*     owner's, only under a live grant.  Its work is its owner's work.    *)
-(*     A grant is a tag the owner signs for the window it states and the   *)
-(*     agent carries on each request.  Nothing ends it early but a ban of  *)
-(*     the agent's key.                                                    *)
+(*   - A key acts with its own role in the channel, agents included.  An  *)
+(*     agent with a recorded owner may also act under a live grant from    *)
+(*     that owner, at the lesser of the grant's level and the owner's      *)
+(*     role, and takes the higher of the two routes.  A grant never        *)
+(*     narrows, and it reaches the repo, not the channel.  An owner ban    *)
+(*     ends both routes.  The agent's work is its owner's work.  A grant   *)
+(*     is a tag the owner signs for the window it states and the agent     *)
+(*     carries on each request.  Nothing ends it early but a ban of the    *)
+(*     agent's key or its owner's.                                         *)
 (*   - A push lands whole or not at all, and its commits stay in           *)
 (*     quarantine, visible to no one, until it lands.  A repo has at most  *)
 (*     one accepted push waiting to publish.                               *)
@@ -88,7 +92,7 @@ CONSTANTS
     RoleChanges,   \* <<channel, key, role>> a channel admin may apply
     Bans,          \* <<admin, key>>
     Registrations, \* <<agent, person>>: attestations an agent may present
-    GrantChoices,  \* <<agent, repo>> an owner may grant
+    GrantChoices,  \* <<agent, repo, level>> an owner may grant
     Proposals,     \* <<key, repo, {<<ref, new commit>>, ...}>>: pushes
     Reviews,       \* <<key, repo, ref, commit>>: approvals
     Posts,         \* <<key, check, repo, commit, result>>: check results
@@ -107,6 +111,7 @@ Ancestry(c) == IF c = NoCommit THEN {} ELSE {c} \cup Ancestry(Parent[c])
 ChanRoles == {"none", "guest", "member", "admin"}
 Rank == [none |-> 0, guest |-> 1, member |-> 2, admin |-> 3]
 MinRole(a, b) == IF Rank[a] <= Rank[b] THEN a ELSE b
+MaxRole(a, b) == IF Rank[a] >= Rank[b] THEN a ELSE b
 
 (***************************************************************************)
 (* Governance documents.  Each is one relay-signed state, replaced whole   *)
@@ -131,7 +136,7 @@ VARIABLES
     commRole,   \* commRole[k]: "none" (not admitted, or banned), "member", "admin"
     chanRole,   \* chanRole[ch][k]: k's role in channel ch
     owner,      \* owner[a]: the first owner recorded for agent a, or None
-    grants,     \* live grants: <<agent, repo>>
+    grants,     \* live grants: <<agent, repo, level>>, level a channel role
     gov,        \* gov[d]: the name of governance document d's current body
     ver,        \* ver[d]: how many commands have replaced d
     sent,       \* every command ever signed; anyone may deliver one again
@@ -193,21 +198,31 @@ Init ==
 Principal(k) ==
     IF k \in Agents /\ "agent-is-own-principal" \notin Faults THEN owner[k] ELSE k
 
-\* The role the relay credits k with in repo r: k's role in the repo's
-\* bound channel, and for an agent, capped by its owner's and only under a
-\* live grant.
+Owned(k) == k \in Agents /\ owner[k] # None
+
+\* The role a live grant from k's owner credits k with in repo r: the
+\* highest level among k's grants for r, capped by the owner's role there.
+ViaGrant(k, r) ==
+    LET ch == ChanOf(r)
+        levels == {IF "grant-level-ignored" \in Faults THEN "admin" ELSE x[3] :
+                     x \in {x \in grants : x[1] = k /\ (x[2] = r \/ "grant-any-repo" \in Faults)}}
+        level == IF levels = {} THEN "none" ELSE CHOOSE l \in levels : \A l2 \in levels : Rank[l] >= Rank[l2]
+    IN IF ~Owned(k) THEN "none"
+       ELSE IF "grant-uncapped" \in Faults THEN level
+       ELSE MinRole(level, chanRole[ch][owner[k]])
+
+\* The role the relay credits k with in repo r: the higher of k's own role
+\* in the repo's bound channel and, for an owned agent, what a live grant
+\* gives it.  A ban of k, or of its recorded owner, credits nothing.
 CreditedRole(k, r) ==
     LET ch == ChanOf(r) IN
     IF commRole[k] = "none" THEN "none"
     ELSE IF "announcer-is-owner" \in Faults /\ k = RepoKey[r] THEN "admin"
     ELSE IF "owner-borrows-agent-repo" \in Faults
             /\ RepoKey[r] \in Agents /\ owner[RepoKey[r]] = k THEN "admin"
-    ELSE IF k \notin Agents THEN chanRole[ch][k]
-    ELSE IF owner[k] = None THEN "none"
-    ELSE IF "agent-uses-owner" \in Faults THEN chanRole[ch][owner[k]]
-    ELSE IF <<k, r>> \notin grants /\ "grant-ignored" \notin Faults THEN "none"
-    ELSE IF commRole[owner[k]] = "none" THEN "none"
-    ELSE MinRole(chanRole[ch][k], chanRole[ch][owner[k]])
+    ELSE IF Owned(k) /\ commRole[owner[k]] = "none" /\ "owner-ban-ignored" \notin Faults THEN "none"
+    ELSE IF Owned(k) /\ "agent-uses-owner" \in Faults THEN chanRole[ch][owner[k]]
+    ELSE MaxRole(chanRole[ch][k], ViaGrant(k, r))
 
 Holds(k, r, n) == Rank[CreditedRole(k, r)] >= Rank[n]
 
@@ -365,13 +380,15 @@ Deliver(m, d) ==
     /\ act' = [kind |-> "govern", cmd |-> m, doc |-> d]
     /\ UNCHANGED <<commRole, chanRole, owner, grants, sent, gitVars, receipts, audit>>
 
-\* A channel admin adds, removes or re-roles a member.  An agent counts as a
-\* channel admin only if its owner is one too and it holds a grant for a
-\* repo of that channel: changing roles is authority like any other.
+\* A channel admin adds, removes or re-roles a member: a key admitted, with
+\* an admitted owner if it has one, whose own role in the channel is admin.
+\* A grant reaches a repo, not its channel, so it never makes an agent a
+\* channel admin.
 ChannelAdmin(k, ch) ==
-    /\ commRole[k] # "none" /\ chanRole[ch][k] = "admin"
-    /\ k \in Agents /\ "role-change-uncapped" \notin Faults =>
-          \E r \in Repos : ChanOf(r) = ch /\ Holds(k, r, "admin")
+    /\ commRole[k] # "none"
+    /\ Owned(k) => commRole[owner[k]] # "none"
+    /\ \/ chanRole[ch][k] = "admin"
+       \/ "grant-admins-channel" \in Faults /\ \E r \in Repos : ChanOf(r) = ch /\ Holds(k, r, "admin")
 
 SetRole(k, x) ==
     /\ ChannelAdmin(k, x[1]) /\ ~ChanFenced(x[1])
@@ -399,10 +416,10 @@ Register(g) ==
     /\ act' = [kind |-> "register"]
     /\ UNCHANGED <<commRole, chanRole, grants, gov, ver, sent, govlog, gitVars, receipts, audit>>
 
-\* An owner signs its agent a grant for a repo.  It is a tag, not a relay
-\* write, so the owner can sign one at any time and nothing waits for it.
-\* A grant only narrows: what the agent may do is still capped by its own
-\* and its owner's roles, judged when the agent uses it.
+\* An owner signs its agent a grant for a repo at a level.  It is a tag, not
+\* a relay write, so the owner can sign one at any time and nothing waits
+\* for it.  What it gives is capped by the owner's role, judged when the
+\* agent uses it; it never takes away the agent's own role.
 Grant(g) ==
     /\ g \notin grants /\ owner[g[1]] # None
     /\ grants' = grants \cup {g}
@@ -608,19 +625,23 @@ TypeOK ==
     /\ commRole \in [Keys -> {"none", "member", "admin"}]
     /\ chanRole \in [Channels -> [Keys -> ChanRoles]]
     /\ owner \in [Agents -> People \cup {None}]
-    /\ grants \subseteq Agents \X Repos
+    /\ grants \subseteq Agents \X Repos \X (ChanRoles \ {"none"})
     /\ refs \in [Repos -> [Refs -> CommitOrNone]]
     /\ \A r \in Repos : visible[r] \subseteq Commits /\ ChanOf(r) \in Channels
 
 \* k may act at level n in repo r now.  Authority comes only from the
-\* channel r is bound to.  An agent also needs a live grant and an owner
-\* who may act at level n himself.
+\* channel r is bound to, by one of two routes: k's own role there, or,
+\* for an agent with a recorded owner, a live grant for r at level n or
+\* above from an owner who holds level n there himself.  Neither k nor its
+\* owner is banned.
 MayAct(k, r, n) ==
     LET ch == ChanOf(r) IN
-    /\ commRole[k] # "none" /\ Rank[chanRole[ch][k]] >= Rank[n]
-    /\ k \in Agents => /\ owner[k] # None /\ <<k, r>> \in grants
-                       /\ commRole[owner[k]] # "none"
-                       /\ Rank[chanRole[ch][owner[k]]] >= Rank[n]
+    /\ commRole[k] # "none"
+    /\ k \in Agents /\ owner[k] # None => commRole[owner[k]] # "none"
+    /\ \/ Rank[chanRole[ch][k]] >= Rank[n]
+       \/ /\ k \in Agents /\ owner[k] # None
+          /\ \E x \in grants : x[1] = k /\ x[2] = r /\ Rank[x[3]] >= Rank[n]
+          /\ Rank[chanRole[ch][owner[k]]] >= Rank[n]
 
 Person(k) == IF k \in Agents THEN owner[k] ELSE k
 
@@ -810,12 +831,13 @@ ReservationsFenced ==
           /\ act'.kind # "expire" => {x \in grants : x[2] = r} \subseteq grants']_vars
 
 \* Every change of who may act in a channel is made by an admin of that
-\* channel; an agent only within its owner's authority and a live grant.
+\* channel in its own right, not through a grant, and not while it or its
+\* owner is banned.
 RoleChangesByCurrentAuthority ==
     [][act'.kind = "role" =>
           LET k == act'.by  ch == act'.ch IN
           /\ commRole[k] # "none" /\ chanRole[ch][k] = "admin"
-          /\ k \in Agents => \E r \in Repos : ChanOf(r) = ch /\ MayAct(k, r, "admin")]_vars
+          /\ k \in Agents /\ owner[k] # None => commRole[owner[k]] # "none"]_vars
 
 EveryGovernanceChangeRecorded ==
     [][act'.kind = "govern" =>
@@ -835,6 +857,14 @@ NeverLandsChecked ==
 NeverLandsOwned ==
     ~\E x \in receipts : x.ok /\ x.evidence # {} /\ \E y \in x.rules : \E z \in y[2] : z.req = "codeowners"
 NeverLandsByAgent == ~\E x \in receipts : x.ok /\ x.by \in Agents
+\* An owned agent is accepted on its own channel role, holding no grant for
+\* the repo; and one is accepted with no role in the channel at all.
+NeverLandsByMemberAgentWithoutGrant ==
+    [][\A p \in pending : Accepted(p) /\ p.by \in Agents /\ owner[p.by] # None =>
+          \E x \in grants : x[1] = p.by /\ x[2] = p.repo]_vars
+NeverLandsByGrantOnlyAgent ==
+    [][\A p \in pending : Accepted(p) /\ p.by \in Agents =>
+          chanRole[ChanOf(p.repo)][p.by] # "none"]_vars
 NeverRebinds == ~\E x \in govlog : x.doc[1] = "bind"
 \* A push accepted and then abandoned.
 NeverAborts == [][act'.kind # "abort"]_vars

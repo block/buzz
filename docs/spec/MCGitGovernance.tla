@@ -15,12 +15,17 @@
 (*   d   member of ch1, who reviews; c1 names d as code owner              *)
 (*   m   community member outside ch1                                      *)
 (*   g   an agent; b is its owner unless the scenario leaves it unowned    *)
+(*       ("authority", where it may register b or m).  It is a guest of    *)
+(*       ch1 in "authority", in no channel in "fence" and "roles", where   *)
+(*       its grant is its only route, and a member of ch1 otherwise.       *)
 (*   ci  the key trusted to report check "ci"                              *)
 (*   t2  the key trusted to report check "lint" only                       *)
 (*                                                                         *)
 (* "fence" has two pushes of r1's main, one by g under a grant that can   *)
 (* expire, and an admin who can ban g or change the floor and r2's rules   *)
-(* while one of them waits to publish.                                     *)
+(* while one of them waits to publish.  "authority" offers grants for r1  *)
+(* at two levels and one for r2, so each grant fault has a wrong grant to  *)
+(* credit.                                                                 *)
 (*                                                                         *)
 (* The history:   c0 ── c1 ── c2        c0 ── s1 ── s2   (s1 has a secret) *)
 (*                  └── x1                                                 *)
@@ -73,15 +78,17 @@ MCInit ==
     [commRole |-> [k \in Keys |-> IF k = a THEN "admin" ELSE "member"],
      chanRole |-> [ch \in Channels |-> [k \in Keys |->
                      CASE ch = ch1 /\ k = a -> "admin"
-                       [] ch = ch1 /\ k = b -> IF S = "governance" THEN "admin" ELSE "member"
+                       [] ch = ch1 /\ k = b -> IF S \in {"governance", "roles"} THEN "admin" ELSE "member"
                        [] ch = ch1 /\ k \in {c, d, ci, t2} -> "member"
                        [] ch = ch1 /\ k = g -> CASE S = "authority" -> "guest"
-                                                   [] S = "roles" -> "admin"
+                                                   [] S \in {"roles", "fence"} -> "none"
                                                    [] OTHER -> "member"
                        [] ch = ch2 /\ k = a -> "admin"
                        [] OTHER -> "none"]],
      owner    |-> [x \in Agents |-> IF S = "authority" THEN None ELSE b],
-     grants   |-> IF S \in {"review", "roles", "fence"} THEN {<<g, r1>>} ELSE {},
+     grants   |-> CASE S \in {"review", "fence"} -> {<<g, r1, "member">>}
+                    [] S = "roles" -> {<<g, r1, "admin">>}
+                    [] OTHER -> {},
      gov      |-> [x \in DocIds |->
                      CASE x[1] = "floor"   -> StartFloor
                        [] x[1] = "trusted" -> "trust"
@@ -132,13 +139,14 @@ MCRoleChanges ==
       [] S = "review"    -> {<<ch1, d, "none">>}
       [] S = "reads"     -> {<<ch1, b, "none">>}
       [] S = "governance" -> {<<ch1, b, "member">>}
-      [] S = "roles"     -> {<<ch1, b, "admin">>, <<ch1, d, "admin">>}
+      [] S = "roles"     -> {<<ch1, d, "admin">>}
       [] OTHER -> {}
 
 MCBans == CASE S = "authority" -> {<<a, b>>} [] S = "fence" -> {<<a, g>>} [] OTHER -> {}
 
 MCRegistrations == IF S = "authority" THEN {<<g, b>>, <<g, m>>} ELSE {}
-MCGrantChoices == IF S = "authority" THEN {<<g, r1>>} ELSE {}
+MCGrantChoices ==
+    IF S = "authority" THEN {<<g, r1, "member">>, <<g, r1, "guest">>, <<g, r2, "member">>} ELSE {}
 
 MCReadChoices ==
     CASE S = "reads"   -> {<<k, r1, x>> : k \in {b, m}, x \in Doors}

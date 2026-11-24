@@ -9,7 +9,9 @@
 (* The cast is the smallest one in which the protocol's choices matter:    *)
 (* one repo r with one branch, an admin a, an owner b, and two agents of   *)
 (* b, one per relay process, each pushing its own commit under a grant     *)
-(* that expires when the clock reaches Expiry.  The authority write the    *)
+(* that expires when the clock reaches Expiry.  Neither agent is a member *)
+(* of ch, so its grant is its only route and expiry matters.  The          *)
+(* authority write the                                                     *)
 (* protocol calls Revoke is a's ban of b, which ends both agents'          *)
 (* authority.  Pointer value v is commit C[v]; 0 is the empty repo.        *)
 (*                                                                         *)
@@ -106,6 +108,8 @@ GovDocs == [d \in DocIdsHere |-> CASE d[1] = "bind" -> "bind"
                                    [] d[1] = "head" -> "main"
                                    [] OTHER -> "none"]
 Owned == [k \in Keys |-> IF k = a THEN "admin" ELSE "member"]
+ChanRoleHere == [x \in {ch} |-> [k \in Keys |-> IF k \in {g1, g2} THEN "none" ELSE "admin"]]
+GrantsHere == {<<g1, r, "admin">>, <<g2, r, "admin">>}  \* k1 -> k2 is a rewrite: it takes admin
 
 Gov == INSTANCE GitGovernance WITH
     People <- {a, b}, Agents <- {g1, g2}, Channels <- {ch}, Repos <- {r},
@@ -115,9 +119,9 @@ Gov == INSTANCE GitGovernance WITH
     Content <- [x \in {"none", "bind", "main"} |->
                   CASE x = "bind" -> ch [] x = "main" -> main [] OTHER -> {}],
     Init_ <- [commRole |-> Owned,
-              chanRole |-> [x \in {ch} |-> [k \in Keys |-> "admin"]],
+              chanRole |-> ChanRoleHere,
               owner |-> [x \in {g1, g2} |-> b],
-              grants |-> {<<g1, r>>, <<g2, r>>},
+              grants |-> GrantsHere,
               gov |-> GovDocs,
               refs |-> [x \in {r} |-> [f \in {main} |-> NoCommit]],
               visible |-> [x \in {r} |-> {}], pushed |-> {}],
@@ -126,9 +130,9 @@ Gov == INSTANCE GitGovernance WITH
     Reviews <- {}, Posts <- {}, ReadChoices <- {}, TagChoices <- {}, Archives <- {},
     Faults <- {},
     commRole <- IF revoked THEN [Owned EXCEPT ![b] = "none"] ELSE Owned,
-    chanRole <- [x \in {ch} |-> [k \in Keys |-> "admin"]],
+    chanRole <- ChanRoleHere,
     owner <- [x \in {g1, g2} |-> b],
-    grants <- IF clock < Expiry THEN {<<g1, r>>, <<g2, r>>} ELSE {},
+    grants <- IF clock < Expiry THEN GrantsHere ELSE {},
     gov <- GovDocs, ver <- [d \in DocIdsHere |-> 0], sent <- {}, govlog <- {},
     refs <- [x \in {r} |-> [f \in {main} |-> C[pointer]]],
     visible <- [x \in {r} |-> {C[v] : v \in Landed1}],
