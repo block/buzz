@@ -221,8 +221,16 @@ internal class WakeNotifier(private val context: Context) {
         if (!genericLost()) manager.cancel(GENERIC_TAG, GENERIC_ID)
     }
 
-    /** Whether the generic notification is still showing. */
-    fun genericActive(): Boolean = activeGeneric() != null
+    /**
+     * Posts the generic notification marked lost, so later wakes leave it. A
+     * card this wake already showed ([shownThisWake]), and the user has since
+     * cleared, stays cleared. Returns whether it is showing.
+     */
+    fun keepGeneric(shownThisWake: Boolean, silent: Boolean): Boolean {
+        if (shownThisWake && activeGeneric() == null) return false
+        postGeneric(silent, lost = true)
+        return true
+    }
 
     private fun genericLost(): Boolean = activeGeneric()?.notification?.extras?.getBoolean(LOST_EXTRA) == true
 

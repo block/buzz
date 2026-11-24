@@ -201,18 +201,13 @@ internal object PushWake {
                 // A message claimed but never returned can't be named, and no
                 // later wake finds it, so the generic notification stands in
                 // for it, beside any named ones, until the user clears it.
-                map["unreported"] == true -> keepGeneric(silent = genericShown || notifications.isNotEmpty())
+                map["unreported"] == true -> {
+                    val silent = genericShown || notifications.isNotEmpty()
+                    if (notifier.keepGeneric(genericShown, silent)) genericShown = true
+                }
                 notifications.isEmpty() && map["incomplete"] == true -> showGeneric()
                 else -> removeGeneric()
             }
-        }
-
-        private fun keepGeneric(silent: Boolean) {
-            // A card this wake already showed, and the user has since cleared,
-            // stays cleared.
-            if (genericShown && !notifier.genericActive()) return
-            genericShown = true
-            notifier.postGeneric(silent, lost = true)
         }
 
         private fun showGeneric(silent: Boolean = false) {
