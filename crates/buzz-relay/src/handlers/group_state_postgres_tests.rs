@@ -266,6 +266,8 @@ pub(crate) async fn edit_channel(
     match ingest_event(state, tenant, event, http_auth(keys)).await {
         Ok(result) if result.accepted => Ok(()),
         Ok(result) => Err(result.message),
+        // The receipt text a client sees in its `OK false`.
+        Err(IngestError::Rejected(message)) => Err(message),
         Err(error) => Err(format!("{error:?}")),
     }
 }

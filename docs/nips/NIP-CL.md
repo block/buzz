@@ -66,6 +66,9 @@ Example kind:39000 (signing fields and unrelated tags omitted):
 | `P` | 39000–39002 | Public key that signed the kind:9007 that created the channel. |
 | `created_at` | 39000 | Time the channel was created, in unix seconds, as a decimal string. |
 | `auto_join` | 39000 | Present (bare, no value) while the relay joins new community members into this channel: the channel's `auto_join` setting is on and it is open and unarchived. |
+| `landing` | 39000 | Present (bare, no value) on the community's landing channel. A projection of the NIP-11 `landing_channel` designation (extension `buzz-landing-channel`), which is authoritative. |
+| `welcome` | 39000 | The community's custom welcome message, on the landing channel only. Markdown source, stored as sent; the client renders it and may resolve its `buzz://` channel and message links and `nostr:npub` identity links. Absent while the client default applies. |
+| `welcome_title` | 39000 | The custom title of the welcome message, on the landing channel only. One line of plain text. Absent while the client default applies. |
 
 **Channel type.** Clients MUST read the channel type from the first `t` tag.
 Later `t` tags are labels.
@@ -81,6 +84,29 @@ would mix creators with members.
 
 **Creation time.** The `created_at` tag does not change when the channel is
 edited. Use it, not the event's `created_at`, to compare the age of channels.
+
+**Welcome text.** The relay accepts a `welcome` or `welcome_title` value
+only when it is not blank and contains no bidirectional control character.
+The length and control-character limits are in NOSTR.md. A client that
+validates before sending SHOULD apply these two rules exactly:
+
+- A value is *blank* when every character is Unicode `White_Space` or one
+  of these invisible characters: U+00AD, U+034F, U+061C, U+115F, U+1160,
+  U+17B4, U+17B5, U+180B–U+180F, U+200B–U+200F, U+202A–U+202E,
+  U+2060–U+206F, U+2800, U+3164, U+FE00–U+FE0F, U+FEFF, U+FFA0,
+  U+FFF9–U+FFFB, U+1BCA0–U+1BCA3, U+1D173–U+1D17A, U+E0000–U+E007F and
+  U+E0100–U+E01EF. A blank value would render as an empty heading or card.
+  Invisible characters beside visible text are allowed, for example a
+  zero-width joiner in an emoji sequence. Test the `White_Space` property
+  itself, not a trim function: JavaScript's `String.prototype.trim` differs
+  from it, stripping U+FEFF and keeping U+0085.
+- The bidirectional controls U+061C, U+200E, U+200F, U+202A–U+202E and
+  U+2066–U+2069 are refused anywhere in the value, because they can reorder
+  how the text around them is displayed. Each is also invisible, so a value
+  made only of them is refused as blank.
+
+On kind:9002 an empty value restores the client default; it is not refused
+as blank. kind:39000 then omits the tag.
 
 **Older events.** A relay adds these tags only when it publishes a
 channel-state event. An event that a relay version without this NIP published
@@ -248,7 +274,9 @@ type.
 The `#p` rule for 44100/44101 still applies: it must be the reader's own
 pubkey. An `ids` filter does not lift it: the relay returns, counts or
 delivers a 44100/44101 only to the pubkey in its `p` tag, even to a reader
-who knows the event id.
+who knows the event id. A filter whose `authors` are all the reader's own
+pubkey is also admitted, with or without `#p` or `kinds`; it returns no
+notice, because only the relay signs them.
 
 Because the notices are stored, a client that reconnects can set `since` to
 the newest notice it has seen. One subscription then returns the notices it

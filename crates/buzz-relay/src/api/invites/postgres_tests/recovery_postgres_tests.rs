@@ -4,31 +4,6 @@ mod postgres_tests {
     use crate::handlers::ingest::ingest_event;
     use crate::handlers::side_effects::auto_join_default_channels;
 
-    // Cancel the real listing query only after PostgreSQL reports that it is
-    // blocked by our table lock. No timer or production-only failure hook.
-    async fn cancel_blocked_query(pool: &sqlx::PgPool, pattern: &str) {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let cancelled: Vec<bool> = sqlx::query_scalar(
-                    "SELECT pg_cancel_backend(pid) FROM pg_stat_activity \
-                 WHERE datname = current_database() AND wait_event_type = 'Lock' \
-                 AND query LIKE $1",
-                )
-                .bind(pattern)
-                .fetch_all(pool)
-                .await
-                .expect("cancel blocked default-channel listing");
-                if !cancelled.is_empty() {
-                    assert!(cancelled.into_iter().all(|cancelled| cancelled));
-                    return;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the admission must reach the actual default-channel listing");
-    }
-
     async fn recovery_fixture(
         label: &str,
         channel_count: usize,
@@ -181,14 +156,22 @@ mod postgres_tests {
             .unwrap()
             .is_none());
         assert_eq!(
-            added_notification_count(&state, community, &member_hex).await,
+            added_notification_count(&state, community, &channels, &member_hex).await,
             2
         );
     }
 
+    /// A temporary failure of the admission's first channel read retains the
+    /// retry record on every admission path, and the next admission finishes
+    /// the work. The blocker holds `channels` exclusively and the cancel
+    /// targets whatever that lock stalls. Since the landing join runs ahead of
+    /// the pending default-channel work, the stalled statement is the landing
+    /// channel's eligibility read, not the default-channel listing; the
+    /// listing-failure branch of `finish_default_channel_joins` is covered
+    /// only through the shared token-retention path exercised here.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn temporary_listing_failure_is_recovered_for_each_admission_path() {
+    async fn temporary_first_channel_read_failure_is_recovered_for_each_admission_path() {
         let host = format!("join-recovery-{}.example", Uuid::new_v4().simple());
         let state = invite_test_state(&host).await.expect("test state");
         let community = state
@@ -256,16 +239,16 @@ mod postgres_tests {
                 }
             };
             let mut blocker = state.db.pool().begin().await.unwrap();
+            let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *blocker)
+                .await
+                .unwrap();
             sqlx::query("LOCK TABLE channels IN ACCESS EXCLUSIVE MODE")
                 .execute(&mut *blocker)
                 .await
                 .unwrap();
             let request = tokio::spawn(admit());
-            cancel_blocked_query(
-                state.db.pool(),
-                "%FROM channels%WHERE community_id = $1 AND auto_join%",
-            )
-            .await;
+            cancel_query_blocked_by(state.db.pool(), blocker_pid).await;
             tokio::time::timeout(Duration::from_secs(10), request)
                 .await
                 .unwrap()
@@ -305,7 +288,7 @@ mod postgres_tests {
                 .unwrap()
                 .is_none());
             assert_eq!(
-                added_notification_count(&state, community, &member_hex).await,
+                added_notification_count(&state, community, &[channel], &member_hex).await,
                 1
             );
             let leave = EventBuilder::new(Kind::Custom(9022), "")
