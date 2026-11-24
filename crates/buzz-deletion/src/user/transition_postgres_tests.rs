@@ -565,4 +565,46 @@ async fn real_user_requires_gate_then_global_media_before_community_cleanup() {
     };
     assert_eq!(next.stage, "purge_content");
     assert_eq!(next.target_community_id, Some(community));
+
+    // Advance through the community prerequisites to exercise the final handler.
+    for name in ["purge_content", "purge_account", "purge_profile"] {
+        let NextStage::Stage(row) = store.get_next_stage(&lease, None).await.unwrap() else {
+            panic!("expected {name}");
+        };
+        assert_eq!(row.stage, name);
+        store.start_stage(&lease, row.id).await.unwrap();
+        store
+            .save_stage_success(
+                &lease,
+                row.id,
+                serde_json::json!({"account_erasure_complete": false}),
+            )
+            .await
+            .unwrap();
+    }
+    let NextStage::Stage(global) = store.get_next_stage(&lease, None).await.unwrap() else {
+        panic!("expected global cleanup");
+    };
+    assert_eq!(global.stage, "global_cleanup");
+    super::super::handlers::dispatch(&store, &lease, &global, &options)
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.get_next_stage(&lease, Some(global.id)).await.unwrap(),
+        NextStage::Finished
+    ));
+    let saved = store.inspect(request.id).await.unwrap();
+    assert_eq!(saved.request.status, "completed");
+    let stage = saved
+        .stage_history
+        .iter()
+        .find(|stage| stage.id == global.id)
+        .unwrap();
+    assert_eq!(stage.status, "completed");
+    assert_eq!(
+        stage.metadata_json["result"],
+        serde_json::json!({
+            "execution_mode": "delete", "implemented": false, "account_erasure_complete": false
+        })
+    );
 }

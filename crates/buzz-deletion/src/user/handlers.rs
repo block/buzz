@@ -180,8 +180,8 @@ async fn handle_remaining_stage(
     options: &RunOptions,
     subject: &str,
 ) -> Result<serde_json::Value> {
-    match (row.stage.as_str(), options.delete) {
-        ("gate_user", _) | ("global_cleanup", false) => {
+    match row.stage.as_str() {
+        "gate_user" | "global_cleanup" => {
             let mode = if options.delete {
                 "delete"
             } else {
@@ -191,7 +191,7 @@ async fn handle_remaining_stage(
                 serde_json::json!({"execution_mode":mode,"implemented":false,"account_erasure_complete":false}),
             )
         }
-        ("delete_owned_community", _) => {
+        "delete_owned_community" => {
             let request = store.get(lease.request_id).await?;
             if !options.delete {
                 let community = super::owned_community::approved_community(&request, row)?;
@@ -226,7 +226,7 @@ async fn handle_remaining_stage(
             }
             Ok(metadata)
         }
-        ("purge_profile", _) => {
+        "purge_profile" => {
             let db = options.db.as_ref().context("missing source database")?;
             let profiles = db.user_deletion_store();
             let batch = ProfileBatchOptions {
@@ -249,7 +249,7 @@ async fn handle_remaining_stage(
             };
             Ok(serde_json::to_value(summary)?)
         }
-        (name, _) => bail!("real handler {name} is not implemented for deletion"),
+        name => bail!("real handler {name} is not implemented for deletion"),
     }
 }
 

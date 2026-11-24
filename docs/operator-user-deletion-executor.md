@@ -5,9 +5,10 @@
 The workflow orders account gating, media cleanup, and per-community content,
 account and profile cleanup. Both modes record the account gate as unimplemented and continue.
 The gate does not prevent new writes by the user or their agents. Use read-only mode
-for live data while the gate is unimplemented. Delete mode stops at `global_cleanup`,
-whose workflow delete handler is unimplemented. Demo requests simulate all stages and
-never delete media or content.
+for live data while the gate is unimplemented. Both modes finish `global_cleanup` with
+`implemented: false` and `account_erasure_complete: false`. The parent can
+complete while global operator roles, listener registrations and feedback remain.
+Demo requests simulate all stages and never delete media or content.
 
 Direct `media-batches` and `content-batches` commands remain available for
 operator-controlled cleanup. Neither command installs or enforces the account
@@ -205,9 +206,9 @@ New real requests start at `gate_user`, then inspect media across communities.
 For each participant the order is `purge_content`, `purge_account`, then
 `purge_profile`. For an owner it is `delete_owned_community`. The worker picks
 the next uncovered community from the frozen inventory. After the last one it
-reaches `global_cleanup`. In read-only mode the gate and global cleanup record
-that their destructive handlers are unimplemented. The profile stage records
-outstanding prerequisites it observes while previous stages leave rows in place.
+reaches `global_cleanup`. In both modes the gate and global cleanup record
+that their destructive handlers are unimplemented. In read-only mode the profile stage
+records outstanding prerequisites it observes while previous stages leave rows in place.
 
 Older requests keep their saved transition rules. Demo content still branches
 on the recorded `has_agents` result.
