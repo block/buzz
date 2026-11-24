@@ -18,6 +18,15 @@ const double _searchIdleIconInset = Grid.xxs;
 const double _searchCompactTextInset =
     _searchIdleIconInset + _searchCompactIconSize + Grid.xxs;
 
+double buzzSearchPageFieldHeight(BuildContext context) {
+  final scaledFontSize = MediaQuery.textScalerOf(
+    context,
+  ).scale(buzzSearchIdleTextSize);
+  final contentHeight =
+      scaledFontSize * (20 / buzzSearchIdleTextSize) + Grid.xxs * 2;
+  return contentHeight > Grid.xl ? contentHeight : Grid.xl;
+}
+
 /// Buzz's global-search text field treatment, shared by search-like inputs.
 class BuzzSearchField extends StatelessWidget {
   /// Creates a search field with Buzz's shared styling.
@@ -106,6 +115,7 @@ class BuzzSearchField extends StatelessWidget {
     return DecoratedBox(
       decoration: BoxDecoration(
         color: surfaceColor,
+        border: Border.fromBorderSide(context.navigationControlStroke),
         borderRadius: BorderRadius.circular(
           defaultTargetPlatform == TargetPlatform.android
               ? Radii.full

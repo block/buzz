@@ -665,7 +665,7 @@ void main() {
           find.byKey(const ValueKey('buzz-sheet-surface-clip')),
           findsOneWidget,
         );
-        expect(tester.getSize(closeButton), const Size.square(44));
+        expect(tester.getSize(closeButton), const Size.square(48));
         expect(tester.widget<Text>(title).style?.fontSize, 16);
         expect(
           find.byKey(const ValueKey('buzz-sheet-header-gradient')),
@@ -720,7 +720,7 @@ void main() {
         expect(closeGutter, findsOneWidget);
         final gutterRect = tester.getRect(closeGutter);
         final closeRect = tester.getRect(closeButton);
-        expect(closeRect.top - gutterRect.top, Grid.gutter);
+        expect(closeRect.top - gutterRect.top, 16);
         expect(gutterRect.right - closeRect.right, Grid.gutter);
         expect(
           tester.widget<BottomSheet>(find.byType(BottomSheet)).showDragHandle,
@@ -733,7 +733,7 @@ void main() {
         expect(
           tester.getTopLeft(closeButton).dy -
               tester.getTopLeft(find.byType(BottomSheet)).dy,
-          Grid.gutter,
+          16,
         );
         final dismissHandle = find.bySemanticsLabel('Dismiss').first;
         expect(dismissHandle, findsOneWidget);

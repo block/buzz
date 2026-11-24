@@ -300,6 +300,15 @@ void main() {
         tester.getCenter(find.byType(EditableText)).dy,
         closeTo(center, 1),
       );
+      if (defaultTargetPlatform == TargetPlatform.android) {
+        final box = tester.widget<DecoratedBox>(
+          find.ancestor(of: field, matching: find.byType(DecoratedBox)).first,
+        );
+        final decoration = box.decoration as BoxDecoration;
+        expect(decoration.color, const Color(0xFFF5F5F6));
+        expect(decoration.border, isNotNull);
+        return;
+      }
       final surface = tester.widget<ConcentricSheetSurface>(
         find.byType(ConcentricSheetSurface),
       );

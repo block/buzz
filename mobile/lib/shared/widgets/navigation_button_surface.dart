@@ -27,7 +27,7 @@ class NavigationButtonSurface extends StatelessWidget {
     if (defaultTargetPlatform != TargetPlatform.iOS) {
       return Material(
         color: backgroundColor ?? context.controlSurface,
-        shape: const StadiumBorder(),
+        shape: StadiumBorder(side: context.navigationControlStroke),
         clipBehavior: Clip.antiAlias,
         child: child,
       );

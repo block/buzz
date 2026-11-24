@@ -19,6 +19,7 @@ class AndroidExpandingMenuButton extends HookWidget {
     this.expansionBoundsContext,
     this.trigger,
     this.backgroundColor,
+    this.blurBackground = false,
     this.width = 112,
     this.height = 56,
     this.dividerBefore = const {},
@@ -31,6 +32,7 @@ class AndroidExpandingMenuButton extends HookWidget {
   final String label;
   final Widget? trigger;
   final Color? backgroundColor;
+  final bool blurBackground;
   final double width, height;
   final Set<int> dividerBefore;
   final Map<int, String> sectionTitles;
@@ -77,6 +79,7 @@ class AndroidExpandingMenuButton extends HookWidget {
                   final captured = actions;
                   final route = _CreateMenuRoute(
                     anchor: rect,
+                    blurBackground: blurBackground,
                     backgroundColor: backgroundColor ?? context.controlSurface,
                     expansionBounds: expansionBounds,
                     label: label,
@@ -131,6 +134,7 @@ class _NewLabel extends StatelessWidget {
 class _CreateMenuRoute extends PopupRoute<int> {
   _CreateMenuRoute({
     required this.anchor,
+    required this.blurBackground,
     required this.expansionBounds,
     required this.label,
     required this.trigger,
@@ -142,6 +146,7 @@ class _CreateMenuRoute extends PopupRoute<int> {
     required this.dismissLabel,
   });
   final Rect anchor;
+  final bool blurBackground;
   final Rect? expansionBounds;
   final String label;
   final Widget trigger;
@@ -218,6 +223,15 @@ class _CreateMenuRoute extends PopupRoute<int> {
         final contentOpacity = ((t - .25) / .75).clamp(0.0, 1.0);
         return Stack(
           children: [
+            if (blurBackground && t > 0)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 4 * t, sigmaY: 4 * t),
+                    child: const SizedBox.expand(),
+                  ),
+                ),
+              ),
             Positioned.fromRect(
               rect: rect,
               child: DecoratedBox(
@@ -236,6 +250,12 @@ class _CreateMenuRoute extends PopupRoute<int> {
                   child: BackdropFilter(
                     filter: ImageFilter.blur(sigmaX: 16 * t, sigmaY: 16 * t),
                     child: Material(
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(
+                          Radii.navigationCapsule,
+                        ),
+                        side: context.navigationControlStroke,
+                      ),
                       color: backgroundColor.withValues(alpha: 1 - .12 * t),
                       child: Stack(
                         children: [

@@ -135,7 +135,7 @@ void main() {
       expect(navigationPrimaryForeground(context), primaryForeground);
       expect(navigationSecondaryForeground(context), secondaryForeground);
       expect(navigationSectionForeground(context), secondaryForeground);
-      expect(navigationSearchSurface(context), const Color(0xFFF0F0F0));
+      expect(navigationSearchSurface(context), const Color(0xFFF5F5F6));
       expect(
         navigationDivider(context, 0.15),
         primaryForeground.withValues(alpha: 0.15),

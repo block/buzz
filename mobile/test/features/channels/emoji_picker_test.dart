@@ -274,7 +274,7 @@ void main() {
         );
         final close = tester.getRect(find.byTooltip('Close sheet'));
 
-        expect(close.size, const Size.square(44));
+        expect(close.size, const Size.square(48));
         expect(search.center.dy, close.center.dy);
         expect(close.left - search.right, Grid.xxs);
       },

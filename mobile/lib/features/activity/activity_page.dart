@@ -703,10 +703,16 @@ class ActivityPage extends HookConsumerWidget {
                                     )
                                   : IconButton(
                                       tooltip: 'Close activity',
+                                      style: androidNavigationButtonStyle(
+                                        context,
+                                      ),
                                       icon: const Icon(BuzzIcons.x),
                                       onPressed: () =>
                                           Navigator.of(context).pop(),
                                     ),
+                            if (!closeInRail &&
+                                defaultTargetPlatform == TargetPlatform.android)
+                              const SizedBox(width: Grid.twelve),
                             Expanded(
                               child: Text('Activity', style: headerTitleStyle),
                             ),

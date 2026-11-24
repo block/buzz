@@ -48,24 +48,9 @@ part 'search_page/message_tile.dart';
 
 enum _SearchFilter { all, messages, channels, people }
 
-const _searchIdleFieldHeight = 48.0;
-const _searchIdleTextSize = 15.0;
-const _searchFieldVerticalPadding = Grid.xxs;
 const _searchFilterChipVerticalPadding = Grid.xxs;
 const _searchFilterBarVerticalPadding = Grid.xxs;
 const _searchHeaderFiltersMinHeight = Grid.xl;
-
-double _idleSearchFieldHeight(BuildContext context) {
-  final scaledFontSize = MediaQuery.textScalerOf(
-    context,
-  ).scale(_searchIdleTextSize);
-  final contentHeight =
-      scaledFontSize * (20 / _searchIdleTextSize) +
-      _searchFieldVerticalPadding * 2;
-  return contentHeight > _searchIdleFieldHeight
-      ? contentHeight
-      : _searchIdleFieldHeight;
-}
 
 double _searchHeaderFiltersHeight(BuildContext context) {
   const style = filterChipTextStyle;
@@ -101,7 +86,7 @@ class SearchPage extends HookConsumerWidget {
     final searchSurfaceColor = navigationSearchSurface(context);
     final searchPrimaryColor = navigationPrimaryForeground(context);
     final searchPlaceholderColor = navigationSecondaryForeground(context);
-    final fieldHeight = _idleSearchFieldHeight(context);
+    final fieldHeight = buzzSearchPageFieldHeight(context);
     final filtersHeight = nativeIos
         ? (MediaQuery.textScalerOf(context).scale(16) * 1.4 + 16).clamp(
                 48.0,
@@ -230,6 +215,7 @@ class SearchPage extends HookConsumerWidget {
                                     tooltip: 'Close search',
                                     onPressed: closeSearch,
                                     style: IconButton.styleFrom(
+                                      side: context.navigationControlStroke,
                                       backgroundColor: searchSurfaceColor,
                                       foregroundColor: searchPrimaryColor,
                                     ),

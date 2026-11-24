@@ -155,6 +155,7 @@ ButtonStyle _activityFilterStyle(BuildContext context, bool active) =>
         max(44.0, MediaQuery.textScalerOf(context).scale(16) * 1.4 + 12),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 12),
+      side: active ? BorderSide.none : context.navigationControlStroke,
       shape: const StadiumBorder(),
       textStyle: filterChipTextStyle.copyWith(
         leadingDistribution: TextLeadingDistribution.even,

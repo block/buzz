@@ -32,6 +32,10 @@ class _ChannelHeaderActions extends StatelessWidget {
   );
   Widget _surface(BuildContext context, Widget child) => ClipRRect(
     borderRadius: BorderRadius.circular(Radii.full),
-    child: ColoredBox(color: context.controlSurface, child: child),
+    child: Material(
+      color: context.controlSurface,
+      shape: StadiumBorder(side: context.navigationControlStroke),
+      child: child,
+    ),
   );
 }

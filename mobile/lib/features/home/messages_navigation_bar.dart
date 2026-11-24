@@ -220,6 +220,8 @@ class MessagesNavigationBar extends HookWidget {
                         NavigationButtonSurface(child: _search(context)),
                         const SizedBox(width: Grid.xs),
                         AndroidExpandingMenuButton(
+                          blurBackground:
+                              defaultTargetPlatform == TargetPlatform.android,
                           expansionBoundsContext: controlsContext,
                           actions: creationActions,
                           dividerBefore: const {3},
