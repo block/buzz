@@ -1,6 +1,13 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
-//! Buzz search — community-scoped Postgres full-text search over Buzz events.
+//! Buzz search — community-scoped message search over Buzz events.
+//!
+//! [`SearchService`] answers from one of two backends: Postgres full-text
+//! search, described below and still the one the relay uses, or the
+//! [`opensearch`] index, which [`indexer::Indexer`] keeps in sync from the
+//! `search_outbox` queue.
+//!
+//! ## Postgres full-text search
 //!
 //! The index lives in the `events` table: `search_tsv TSVECTOR GENERATED
 //! ALWAYS AS (to_tsvector('simple', content)) STORED`, with `GIN
@@ -18,13 +25,18 @@
 //!
 //! Every [`SearchQuery`] carries a [`CommunityId`]. There is no construction
 //! path through this crate that omits it, and every SQL execution binds
-//! `community_id = $ctx` as the first predicate. A query bound to community
+//! `community_id = $ctx` as the first predicate; every OpenSearch query
+//! filters on the community first. A query bound to community
 //! A cannot return events stored under community B, by construction.
 
 #[doc(hidden)]
 pub mod cancel;
 /// Search error types.
 pub mod error;
+/// The OpenSearch indexer worker.
+pub mod indexer;
+/// The OpenSearch message index.
+pub mod opensearch;
 /// Search query execution.
 pub mod query;
 
@@ -49,24 +61,55 @@ pub fn pool_options() -> PgPoolOptions {
     })
 }
 
-/// Thin handle around a `PgPool` for community-scoped FTS.
+/// The single entry point for community-scoped message search: a
+/// [`SearchQuery`] in, a [`SearchResult`] of hit keys out.
 ///
-/// Holds nothing the pool itself doesn't already own. The whole purpose of
-/// this type is a stable injection point for the relay's `AppState`.
+/// Which engine answers [`SearchService::search`] is internal to this type,
+/// so callers and their tests don't depend on it. Profile name search always
+/// runs on Postgres.
 #[derive(Debug, Clone)]
 pub struct SearchService {
     pool: PgPool,
+    backend: Backend,
+}
+
+/// The engine behind [`SearchService::search`].
+#[derive(Debug, Clone)]
+enum Backend {
+    /// Postgres full-text search over `events.search_tsv`.
+    Postgres,
+    /// The OpenSearch message index, kept in sync by [`indexer::Indexer`].
+    OpenSearch(Box<opensearch::SearchIndex>),
 }
 
 impl SearchService {
-    /// Build a search service over an existing Postgres pool.
+    /// Build a search service over an existing Postgres pool, searching with
+    /// Postgres full-text search.
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            backend: Backend::Postgres,
+        }
     }
 
-    /// Execute a community-scoped FTS query.
+    /// Build a search service that answers message searches from the
+    /// OpenSearch `index`. Profile name search stays on `pool`.
+    ///
+    /// Only tests select this backend for now; the relay still searches
+    /// Postgres.
+    pub fn with_opensearch(pool: PgPool, index: opensearch::SearchIndex) -> Self {
+        Self {
+            pool,
+            backend: Backend::OpenSearch(Box::new(index)),
+        }
+    }
+
+    /// Execute a community-scoped message search.
     pub async fn search(&self, query: &SearchQuery) -> Result<SearchResult, SearchError> {
-        query::search(&self.pool, query).await
+        match &self.backend {
+            Backend::Postgres => query::search(&self.pool, query).await,
+            Backend::OpenSearch(index) => index.search(query).await,
+        }
     }
 
     /// Find people by profile name, and by verified profile names signed by
