@@ -4063,6 +4063,9 @@ mod route_integration_tests {
             nostr::Keys::generate().public_key(),
         );
         let sessions = [&a, &b, &bystander].map(|k| IssuerSessions::register(&pod, TEST_ISS, k));
+        // Controlled time from here on: the retry deadline, not scheduler
+        // pauses, decides how many loads happen.
+        tokio::time::pause();
         go_live(&sub_tx);
         // Steady traffic, a message every 100ms for 2.5s, spanning two retry
         // deadlines.
@@ -4782,15 +4785,20 @@ mod route_integration_tests {
                 );
                 let mut fields = vec![live.clone(), expired.clone()];
                 fields.extend(extra);
-                for (field, value) in fields {
-                    let _: () = redis::cmd("HSET")
-                        .arg(&hash)
-                        .arg(field)
-                        .arg(value)
-                        .query_async(&mut conn)
-                        .await
-                        .unwrap();
-                }
+                // One transaction, so the fixture always expires.
+                let _: () = redis::pipe()
+                    .atomic()
+                    .cmd("HSET")
+                    .arg(&hash)
+                    .arg(&fields)
+                    .ignore()
+                    .cmd("EXPIRE")
+                    .arg(&hash)
+                    .arg(60)
+                    .ignore()
+                    .query_async(&mut conn)
+                    .await
+                    .unwrap();
                 let loaded = store.load_denies(&issuer, now).await;
                 if ok {
                     let keys: Vec<_> = loaded
