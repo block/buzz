@@ -75,8 +75,8 @@ impl Facts {
 impl KeyFacts {
     /// Admitted to the community: on its own, or, for an unbanned agent,
     /// through its recorded owner's admission, as the relay admits an agent
-    /// its owner vouches for. Authority is still the agent's own channel
-    /// role, capped by its owner's.
+    /// its owner vouches for. Repository authority is evaluated separately:
+    /// the key's own channel role or an owner-capped Git grant.
     pub fn admitted(&self, open: bool) -> bool {
         self.key.admitted(open)
             || (!self.key.banned && self.owner.as_ref().is_some_and(|(_, o)| o.admitted(open)))

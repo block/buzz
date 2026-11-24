@@ -1,22 +1,7 @@
-//! The role the relay credits a key with in a channel-bound repository.
-//!
-//! One function, shared by the read gate, the push policy and repository
-//! management, so the three can never disagree about who holds what:
-//!
-//! ```text
-//!   key ──► its role in the repo's bound channel ─┐
-//!                                                 ├─► min ──► credited role
-//!   agent ──► its recorded owner's role there ────┘
-//! ```
-//!
-//! Authority comes only from the bound channel. Announcing the repository,
-//! owning the agent that announced it, or being named in its event grants
-//! nothing. An agent with a recorded owner acts only under a live Git grant
-//! from that owner, presented with the request, with the lesser of its own
-//! role and its owner's, so it never holds more than its owner currently
-//! does, and loses access when its owner does or the grant ends. Bans are
-//! enforced before this runs, on every Git request, and cascade from owner
-//! to agent.
+//! Repository authority is the greater of direct channel membership and a
+//! live owner grant capped by the owner's channel role. Admission and owner
+//! bans are enforced before these helpers; the land checks them again under
+//! its authority locks. Announcing a repository grants no authority.
 
 use buzz_core::channel::MemberRole;
 use buzz_core::governance::{GitGrant, GrantAction, RepoCoordinate};
@@ -25,37 +10,25 @@ use uuid::Uuid;
 
 /// Why a key is credited with nothing.
 pub(crate) const NOT_A_MEMBER: &str = "not a channel member";
-/// Why an agent is credited with nothing although it and its owner are members.
-pub(crate) const NO_GRANT: &str = "no live grant from the agent's owner";
 
-/// The role `key` is credited with in `channel`, with its recorded owner when
-/// it is an agent, or why it may not touch the repository at all. An agent's
-/// grant is not judged here: see [`credited_role`].
+/// Resolve the hook's channel roles. Its HMAC authenticates the grant level;
+/// the final land rechecks the grant's owner, repo, clock and floor.
 pub(crate) async fn channel_role(
     db: &buzz_db::Db,
     community: buzz_core::CommunityId,
     channel: Uuid,
     key: &[u8],
-) -> buzz_db::Result<Result<(MemberRole, Option<Vec<u8>>), &'static str>> {
+    grant: Option<MemberRole>,
+) -> buzz_db::Result<Result<MemberRole, &'static str>> {
     let own = db.get_member_role(community, channel, key).await?;
     let owner = match db.get_agent_channel_policy(community, key).await? {
-        Some((_, Some(owner))) => Some((
-            owner.clone(),
-            db.get_member_role(community, channel, &owner).await?,
-        )),
+        Some((_, Some(owner))) => Some(db.get_member_role(community, channel, &owner).await?),
         _ => None,
     };
-    Ok(
-        match credit(own.as_deref(), owner.as_ref().map(|(_, r)| r.as_deref())) {
-            Some(role) => Ok((role, owner.map(|(owner, _)| owner))),
-            None => Err(NOT_A_MEMBER),
-        },
-    )
+    Ok(credit(own.as_deref(), owner.as_ref().map(|r| r.as_deref()), grant).ok_or(NOT_A_MEMBER))
 }
 
-/// The role `key` is credited with in `repo`, bound to `channel`, for
-/// `action`: its [`channel_role`], and for an agent only under `grant`, the
-/// Git grant it presented, signed by its recorded owner.
+/// Resolve a live grant and combine it with independent membership authority.
 pub(crate) async fn credited_role(
     db: &buzz_db::Db,
     community: buzz_core::CommunityId,
@@ -65,33 +38,51 @@ pub(crate) async fn credited_role(
     grant: Option<&GitGrant>,
     action: GrantAction,
 ) -> buzz_db::Result<Result<MemberRole, &'static str>> {
-    let (role, owner) = match channel_role(db, community, channel, key).await? {
-        Ok(credited) => credited,
-        Err(reason) => return Ok(Err(reason)),
-    };
-    if let Some(owner) = owner {
-        if !db
-            .git_live_grant(community, grant, repo, &owner, action)
-            .await?
-        {
-            return Ok(Err(NO_GRANT));
+    let level = match db.get_agent_channel_policy(community, key).await? {
+        Some((_, Some(owner))) => {
+            db.git_live_grant_level(community, grant, repo, &owner)
+                .await?
         }
-    }
-    Ok(Ok(role))
+        _ => None,
+    };
+    Ok(
+        channel_role(db, community, channel, key, level.map(grant_role))
+            .await?
+            .and_then(|role| {
+                if role.has_at_least(grant_role(action)) {
+                    Ok(role)
+                } else {
+                    Err(NOT_A_MEMBER)
+                }
+            }),
+    )
 }
 
-/// The credited role from stored channel roles: the key's own, and for an
-/// agent with a recorded owner, the owner's (`Some(None)` when the owner holds
-/// none). The governed land credits with this too, from rows it has locked.
-///
-/// A bot is credited as a member: bot is what a key is, not what it may do.
-/// An unrecognized stored role credits nothing (fail closed).
-pub(crate) fn credit(own: Option<&str>, owner: Option<Option<&str>>) -> Option<MemberRole> {
-    let own = git_role(own?)?;
-    match owner {
-        None => Some(own),
-        Some(theirs) => Some(lesser(own, git_role(theirs?)?)),
+/// Translate the three delegation levels to channel authority.
+pub(crate) fn grant_role(level: GrantAction) -> MemberRole {
+    match level {
+        GrantAction::Read => MemberRole::Guest,
+        GrantAction::Push => MemberRole::Member,
+        GrantAction::Manage => MemberRole::Admin,
     }
+}
+
+/// Combine direct membership with a grant capped by the recorded owner's role.
+/// Admission (including owner bans) is checked by the caller.
+pub(crate) fn credit(
+    own: Option<&str>,
+    owner: Option<Option<&str>>,
+    grant: Option<MemberRole>,
+) -> Option<MemberRole> {
+    let own = own.and_then(git_role);
+    let delegated = owner
+        .flatten()
+        .and_then(git_role)
+        .zip(grant)
+        .map(|(owner, grant)| lesser(owner, grant));
+    own.into_iter()
+        .chain(delegated)
+        .max_by_key(|r| r.permission_level())
 }
 
 /// The Git role a stored channel role carries. A bot is credited as a member;
@@ -136,19 +127,37 @@ mod tests {
     }
 
     #[test]
-    fn credit_caps_an_agent_by_its_owner_and_needs_both() {
+    fn credit_combines_independent_membership_and_capped_delegation() {
         use MemberRole::*;
-        for (own, owner, want) in [
-            (Some("admin"), None, Some(Admin)),
-            (None, None, None),
-            (Some("admin"), Some(Some("member")), Some(Member)),
-            (Some("member"), Some(Some("owner")), Some(Member)),
-            (Some("admin"), Some(None), None),
-            (None, Some(Some("owner")), None),
-            (Some("bot"), Some(Some("admin")), Some(Member)),
-            (Some("admin"), Some(Some("superuser")), None),
-        ] {
-            assert_eq!(credit(own, owner), want, "{own:?} under {owner:?}");
+        let roles = [
+            None,
+            Some("guest"),
+            Some("member"),
+            Some("admin"),
+            Some("owner"),
+            Some("bot"),
+            Some("unknown"),
+        ];
+        for own in roles {
+            for owner in std::iter::once(None).chain(roles.into_iter().map(Some)) {
+                for grant in [None, Some(Guest), Some(Member), Some(Admin)] {
+                    let direct = own.and_then(git_role);
+                    let delegated = owner
+                        .flatten()
+                        .and_then(git_role)
+                        .zip(grant)
+                        .map(|(r, g)| lesser(r, g));
+                    let got = credit(own, owner, grant);
+                    for need in [Guest, Member, Admin, Owner] {
+                        assert_eq!(
+                            got.is_some_and(|r| r.has_at_least(need)),
+                            direct.is_some_and(|r| r.has_at_least(need))
+                                || delegated.is_some_and(|r| r.has_at_least(need)),
+                            "own={own:?} owner={owner:?} grant={grant:?} need={need:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 

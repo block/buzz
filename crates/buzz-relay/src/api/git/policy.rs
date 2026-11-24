@@ -51,6 +51,20 @@ use buzz_db::EventQuery;
 
 use crate::state::AppState;
 
+/// The hook wire format permits only the three delegation levels.
+fn deserialize_grant_role<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<buzz_core::channel::MemberRole>, D::Error> {
+    use buzz_core::channel::MemberRole;
+    match Option::<String>::deserialize(deserializer)?.as_deref() {
+        None => Ok(None),
+        Some("guest") => Ok(Some(MemberRole::Guest)),
+        Some("member") => Ok(Some(MemberRole::Member)),
+        Some("admin") => Ok(Some(MemberRole::Admin)),
+        _ => Err(serde::de::Error::custom("invalid grant role")),
+    }
+}
+
 /// Maximum age of a hook callback (seconds). Push is synchronous so 30s is generous.
 const MAX_CALLBACK_AGE_SECS: u64 = 30;
 
@@ -66,9 +80,10 @@ pub struct HookCallbackRequest {
     pub community_id: String,
     /// Hex-encoded pusher pubkey.
     pub pusher_pubkey: String,
-    /// Whether the push request carried a Git grant covering a push of this
-    /// repository. Only an agent's is read; the land judges the rest.
-    pub granted: bool,
+    /// Repo-scoped grant level, authenticated by the hook HMAC.
+    /// The land revalidates liveness and the owner.
+    #[serde(default, deserialize_with = "deserialize_grant_role")]
+    pub grant: Option<buzz_core::channel::MemberRole>,
     /// Ref updates from git stdin (old_oid, new_oid, ref_name, is_ancestor).
     pub ref_updates: Vec<HookRefUpdate>,
     /// Unix timestamp when the hook was invoked.
@@ -123,7 +138,7 @@ impl From<Denial> for DenialResponse {
 ///
 /// Format (length-prefixed, `|`-separated, structurally unambiguous):
 /// ```text
-/// len(repo_id):repo_id | repo_owner(64) | community_id(36) | pusher(64) | granted("1"/"0") | sorted_refs | timestamp
+/// len(repo_id):repo_id | repo_owner(64) | community_id(36) | pusher(64) | grant role (or "none") | sorted_refs | timestamp
 /// ```
 /// where each ref is: `old_oid(40) + new_oid(40) + len(ref_name):ref_name + is_ancestor("1"/"0")`
 ///
@@ -144,7 +159,7 @@ fn compute_hmac(secret: &[u8], req: &HookCallbackRequest) -> Vec<u8> {
     mac.update(b"|");
     mac.update(req.pusher_pubkey.as_bytes()); // Fixed 64 chars, no ambiguity.
     mac.update(b"|");
-    mac.update(if req.granted { b"1" } else { b"0" });
+    mac.update(req.grant.map_or("none", |r| r.as_str()).as_bytes());
     mac.update(b"|");
     // Deterministic ref update representation: sorted by ref_name.
     // Each ref is length-prefixed to prevent concatenation ambiguity.
@@ -389,27 +404,18 @@ pub async fn hook_policy_check(
         Ok(bytes) if bytes.len() == 32 => bytes,
         _ => return (StatusCode::FORBIDDEN, "invalid pusher pubkey").into_response(),
     };
-    // An agent's push stops here, before its packs are stored, unless its
-    // request carried a grant to push this repository. The land judges the
-    // grant's owner, window and cap, and binds.
+    // The hook authenticates the repo-scoped delegation level. The land
+    // revalidates its liveness and owner before publishing anything.
     let git_role = match crate::api::git::authority::channel_role(
         &state.db,
         community,
         channel_id,
         &pusher_bytes,
+        req.grant,
     )
     .await
     {
-        Ok(Ok((_, Some(_)))) if !req.granted => {
-            return refuse(
-                &state,
-                community,
-                &req,
-                crate::api::git::authority::NO_GRANT,
-            )
-            .await
-        }
-        Ok(Ok((role, _))) => role,
+        Ok(Ok(role)) => role,
         Ok(Err(reason)) => return refuse(&state, community, &req, reason).await,
         Err(e) => {
             error!(error = %e, "hook callback: role lookup failed");
@@ -525,7 +531,7 @@ pub fn generate_hook_hmac(
     repo_owner: &str,
     community_id: &str,
     pusher_pubkey: &str,
-    granted: bool,
+    grant: Option<buzz_core::channel::MemberRole>,
     ref_updates: &[HookRefUpdate],
     timestamp: u64,
 ) -> String {
@@ -534,7 +540,7 @@ pub fn generate_hook_hmac(
         repo_owner: repo_owner.to_string(),
         community_id: community_id.to_string(),
         pusher_pubkey: pusher_pubkey.to_string(),
-        granted,
+        grant,
         ref_updates: ref_updates.to_vec(),
         timestamp,
         signature: String::new(), // Not used in computation.
@@ -553,7 +559,7 @@ mod postgres_tests {
             repo_owner: "a".repeat(64),
             community_id: uuid::Uuid::from_u128(1).to_string(),
             pusher_pubkey: "b".repeat(64),
-            granted: false,
+            grant: None,
             ref_updates: vec![HookRefUpdate {
                 old_oid: "1".repeat(40),
                 new_oid: "2".repeat(40),
@@ -635,7 +641,7 @@ mod postgres_tests {
         let secret = b"test-secret";
         let mut req = make_request();
         sign_request(&mut req, secret);
-        req.granted = true;
+        req.grant = Some(buzz_core::channel::MemberRole::Admin);
         assert!(!verify_hmac(secret, &req));
     }
 
@@ -723,7 +729,7 @@ mod postgres_tests {
             &req.repo_owner,
             &req.community_id,
             &req.pusher_pubkey,
-            req.granted,
+            req.grant,
             &req.ref_updates,
             req.timestamp,
         );
@@ -769,7 +775,7 @@ mod postgres_tests {
             &repo_owner,
             &community_id,
             &pusher,
-            true,
+            Some(buzz_core::channel::MemberRole::Member),
             &ref_updates,
             timestamp,
         );
@@ -784,7 +790,7 @@ BUZZ_REPO_ID="{repo_id}"
 BUZZ_REPO_OWNER="{repo_owner}"
 BUZZ_COMMUNITY_ID="{community_id}"
 BUZZ_PUSHER_PUBKEY="{pusher}"
-BUZZ_PUSH_GRANTED="1"
+BUZZ_PUSH_GRANT="member"
 BUZZ_HOOK_SECRET="{secret}"
 TIMESTAMP="{timestamp}"
 
@@ -799,7 +805,7 @@ echo "refs/heads/feature {old2} {new2} 0" >> "$HMAC_FILE"
 
 # Build HMAC input — exact logic from hook script
 REPO_ID_LEN=${{#BUZZ_REPO_ID}}
-HMAC_INPUT="${{REPO_ID_LEN}}:${{BUZZ_REPO_ID}}|${{BUZZ_REPO_OWNER}}|${{BUZZ_COMMUNITY_ID}}|${{BUZZ_PUSHER_PUBKEY}}|${{BUZZ_PUSH_GRANTED}}|"
+HMAC_INPUT="${{REPO_ID_LEN}}:${{BUZZ_REPO_ID}}|${{BUZZ_REPO_OWNER}}|${{BUZZ_COMMUNITY_ID}}|${{BUZZ_PUSHER_PUBKEY}}|${{BUZZ_PUSH_GRANT}}|"
 sort "$HMAC_FILE" | while IFS=' ' read -r ref_name old_oid new_oid is_anc; do
     REF_LEN=${{#ref_name}}
     printf '%s%s%s:%s%s' "$old_oid" "$new_oid" "$REF_LEN" "$ref_name" "$is_anc"
@@ -865,7 +871,7 @@ printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "$BUZZ_HOOK_SECRET" -hex 
             &repo_owner,
             &community_id,
             &pusher,
-            false,
+            None,
             &ref_updates,
             timestamp,
         );
@@ -879,7 +885,7 @@ HMAC_FILE="$WORK_DIR/hmac"
 echo "refs/heads/main {old} {new} 1" >> "$HMAC_FILE"
 BUZZ_REPO_ID="{repo_id}"
 REPO_ID_LEN=${{#BUZZ_REPO_ID}}
-HMAC_INPUT="${{REPO_ID_LEN}}:${{BUZZ_REPO_ID}}|{owner}|{community_id}|{pusher}|0|"
+HMAC_INPUT="${{REPO_ID_LEN}}:${{BUZZ_REPO_ID}}|{owner}|{community_id}|{pusher}|none|"
 sort "$HMAC_FILE" | while IFS=' ' read -r ref_name old_oid new_oid is_anc; do
     REF_LEN=${{#ref_name}}
     printf '%s%s%s:%s%s' "$old_oid" "$new_oid" "$REF_LEN" "$ref_name" "$is_anc"
@@ -970,7 +976,7 @@ printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "{secret}" -hex 2>/dev/nu
         binding_tags: Vec<nostr::Tag>,
     ) -> axum::response::Response {
         announce(state, community, keys, repo_id, binding_tags).await;
-        push_response(state, community, keys, repo_id, &keys.public_key(), false).await
+        push_response(state, community, keys, repo_id, &keys.public_key(), None).await
     }
 
     async fn announce(
@@ -1008,14 +1014,14 @@ printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "{secret}" -hex 2>/dev/nu
         announcer: &nostr::Keys,
         repo_id: &str,
         pusher: &nostr::PublicKey,
-        granted: bool,
+        grant: Option<buzz_core::channel::MemberRole>,
     ) -> axum::response::Response {
         let mut req = HookCallbackRequest {
             repo_id: repo_id.to_string(),
             repo_owner: announcer.public_key().to_hex(),
             community_id: community.as_uuid().to_string(),
             pusher_pubkey: pusher.to_hex(),
-            granted,
+            grant,
             ref_updates: vec![HookRefUpdate {
                 old_oid: "0".repeat(40),
                 new_oid: "2".repeat(40),
@@ -1181,8 +1187,19 @@ printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "{secret}" -hex 2>/dev/nu
             let (announcer, repo, pusher) =
                 (announcer.clone(), repo.to_string(), pusher.public_key());
             async move {
-                let response =
-                    push_response(&state, community, &announcer, &repo, &pusher, granted).await;
+                let response = push_response(
+                    &state,
+                    community,
+                    &announcer,
+                    &repo,
+                    &pusher,
+                    if granted {
+                        Some(MemberRole::Member)
+                    } else {
+                        None
+                    },
+                )
+                .await;
                 body_string(response).await
             }
         };
@@ -1218,42 +1235,39 @@ printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "{secret}" -hex 2>/dev/nu
             assert_eq!(body, "not a channel member");
         }
 
-        // The agent is a member, but its owner is not: it holds nothing.
-        let (code, body) = push(&announcer_agent, &repo, &agent).await;
-        assert_eq!(code, StatusCode::FORBIDDEN, "{body}");
-        assert_eq!(body, "not a channel member");
-        // Every refusal is receipted, as the hook's.
-        let receipts = refused(&announcer_agent, &repo).await;
-        assert_eq!(receipts.len(), 3, "{receipts:?}");
-        assert_eq!(receipts[0]["stage"], "hook");
-        assert_eq!(receipts[0]["reasons"][0]["reason"], "not a channel member");
-
-        // Once the owner is a member, the agent still needs a grant to push
-        // in its request, so nothing of an ungranted push is stored...
-        put(&human, MemberRole::Member).await;
+        // Direct membership stands without an owner channel role or a grant.
         let (code, body) = push_granted(&announcer_agent, &repo, &agent, false).await;
-        assert_eq!(code, StatusCode::FORBIDDEN, "{body}");
-        assert_eq!(body, crate::api::git::authority::NO_GRANT);
-        // ...and with one, the hook credits it as a member: the land judges
-        // the grant itself, and binds...
+        assert_eq!(code, StatusCode::OK, "{body}");
+        let receipts = refused(&announcer_agent, &repo).await;
+        assert_eq!(receipts.len(), 2, "{receipts:?}");
+        assert_eq!(receipts[0]["stage"], "hook");
+
+        // A weaker owner or grant cannot narrow the independent member role.
+        put(&human, MemberRole::Guest).await;
         let (code, body) = push(&announcer_agent, &repo, &agent).await;
         assert_eq!(code, StatusCode::OK, "{body}");
-
-        // ...and only as its owner currently may: a guest owner caps it at guest.
-        put(&human, MemberRole::Guest).await;
+        // Removing direct membership leaves only the owner's capped grant.
+        state
+            .db
+            .remove_member(
+                community,
+                channel,
+                agent.public_key().as_bytes(),
+                admin.public_key().as_bytes(),
+            )
+            .await
+            .unwrap();
         let (code, body) = push(&announcer_agent, &repo, &agent).await;
         assert_eq!(code, StatusCode::FORBIDDEN, "{body}");
         assert!(
             body.contains("requires member role (you have guest)"),
             "{body}"
         );
-        let receipts = refused(&announcer_agent, &repo).await;
-        assert_eq!(
-            receipts.len(),
-            5,
-            "the allowed push left none: {receipts:?}"
-        );
-        assert_eq!(receipts[0]["reasons"][0]["ref"], "refs/heads/main");
+        put(&human, MemberRole::Member).await;
+        let (code, body) = push(&announcer_agent, &repo, &agent).await;
+        assert_eq!(code, StatusCode::OK, "grant-only push: {body}");
+        let (code, body) = push_granted(&announcer_agent, &repo, &agent, false).await;
+        assert_eq!(code, StatusCode::FORBIDDEN, "neither route: {body}");
 
         // A rule this relay does not know denies even the channel's owner.
         let strict = format!("repo-{}", uuid::Uuid::new_v4().simple());

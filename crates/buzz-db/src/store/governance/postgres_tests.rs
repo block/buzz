@@ -1,0 +1,238 @@
+//! Both Git authorization routes at the database policy boundary.
+use super::*;
+
+struct Fixture {
+    db: Db,
+    community: CommunityId,
+    channel: Uuid,
+    next: Uuid,
+    repo: RepoCoordinate,
+    owner: Keys,
+    agent: Keys,
+}
+
+impl Fixture {
+    async fn new() -> Self {
+        let db = Db::new(&crate::DbConfig {
+            database_url: crate::test_support::database_url(),
+            max_connections: 3,
+            min_connections: 1,
+            ..Default::default()
+        })
+        .await
+        .expect("connect");
+        let community = CommunityId::from_uuid(Uuid::new_v4());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1,$2)")
+            .bind(community.as_uuid())
+            .bind(format!("git-authority-{}.example", community.as_uuid()))
+            .execute(db.pool())
+            .await
+            .expect("community");
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        sqlx::query("INSERT INTO users (community_id,pubkey,agent_owner_pubkey) VALUES ($1,$2,$3)")
+            .bind(community.as_uuid())
+            .bind(agent.public_key().as_bytes())
+            .bind(owner.public_key().as_bytes())
+            .execute(db.pool())
+            .await
+            .expect("agent");
+        let channel = Uuid::new_v4();
+        let next = Uuid::new_v4();
+        for ch in [channel, next] {
+            sqlx::query("INSERT INTO channels (community_id,id,name,channel_type,visibility,created_by) VALUES ($1,$2,$3,'stream','private',$4)")
+                .bind(community.as_uuid()).bind(ch).bind(ch.to_string())
+                .bind(owner.public_key().as_bytes()).execute(db.pool()).await.expect("channel");
+        }
+        let repo = RepoCoordinate {
+            owner: owner.public_key().to_hex(),
+            name: "authority".into(),
+        };
+        crate::git_repo::reserve_repo_name(db.pool(), community, &repo.name, &repo.owner)
+            .await
+            .expect("repo");
+        let announcement = EventBuilder::new(Kind::Custom(30617), "")
+            .tags([
+                Tag::parse(["d", &repo.name]).expect("d tag"),
+                Tag::parse(["buzz-channel", &channel.to_string()]).expect("channel tag"),
+            ])
+            .sign_with_keys(&owner)
+            .expect("announcement");
+        db.insert_event(community, &announcement, Some(channel))
+            .await
+            .expect("insert announcement");
+        Self {
+            db,
+            community,
+            channel,
+            next,
+            repo,
+            owner,
+            agent,
+        }
+    }
+
+    async fn role(&self, channel: Uuid, key: &Keys, role: Option<&str>) {
+        sqlx::query(
+            "DELETE FROM channel_members WHERE community_id=$1 AND channel_id=$2 AND pubkey=$3",
+        )
+        .bind(self.community.as_uuid())
+        .bind(channel)
+        .bind(key.public_key().as_bytes())
+        .execute(self.db.pool())
+        .await
+        .expect("remove membership");
+        if let Some(role) = role {
+            sqlx::query("INSERT INTO channel_members (community_id,channel_id,pubkey,role) VALUES ($1,$2,$3,$4::member_role)")
+                .bind(self.community.as_uuid()).bind(channel).bind(key.public_key().as_bytes())
+                .bind(role).execute(self.db.pool()).await.expect("membership");
+        }
+    }
+
+    fn grant(&self, level: GrantAction) -> GitGrant {
+        let now = Timestamp::now().as_secs();
+        GitGrant {
+            owner: self.owner.public_key(),
+            repo: Some(self.repo.clone()),
+            level,
+            after: Some(now - 10),
+            before: Some(now + 600),
+        }
+    }
+
+    async fn check(&self, grant: Option<&GitGrant>, read: bool, manage: bool) {
+        let mut tx = self
+            .db
+            .begin_event_write_transaction(self.community)
+            .await
+            .expect("tx");
+        let id = DocumentId::Rules(self.repo.clone());
+        assert_eq!(
+            authorize_read(&mut tx, &id, self.agent.public_key().as_bytes(), grant)
+                .await
+                .is_ok(),
+            read,
+            "read {grant:?}"
+        );
+        assert_eq!(
+            repo_admin(
+                &mut tx,
+                &self.repo,
+                self.agent.public_key().as_bytes(),
+                self.channel,
+                grant
+            )
+            .await
+            .expect("admin"),
+            manage,
+            "manage {grant:?}"
+        );
+        tx.rollback().await.expect("rollback");
+    }
+
+    async fn prepared(&self, grant: Option<&GitGrant>, bind: bool) -> Prepared {
+        let (id, body) = if bind {
+            (
+                DocumentId::Bind(self.repo.clone()),
+                serde_json::json!({"version":1,"body":{"type":"bind","channel":self.next}})
+                    .to_string(),
+            )
+        } else {
+            (
+                DocumentId::Rules(self.repo.clone()),
+                r#"{"version":1,"body":{"type":"rules","rules":[]}}"#.into(),
+            )
+        };
+        let event = buzz_core::governance::command_builder(
+            *self.community.as_uuid(),
+            &id,
+            &ExpectedHead::Absent,
+            &body,
+        )
+        .expect("command")
+        .sign_with_keys(&self.agent)
+        .expect("sign");
+        let mut tx = self
+            .db
+            .begin_event_write_transaction(self.community)
+            .await
+            .expect("tx");
+        fence_authority_write(&mut tx, &id).await.expect("fence");
+        let prepared = self
+            .db
+            .prepare_governance_command(&mut tx, &event, grant, &self.owner)
+            .await
+            .expect("prepare");
+        tx.rollback().await.expect("rollback");
+        prepared
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn membership_and_delegation_independently_authorize_repo_documents() {
+    let f = Fixture::new().await;
+    // An agent's own role works without its owner being in the channel.
+    for (role, read, manage) in [
+        (None, false, false),
+        (Some("guest"), true, false),
+        (Some("bot"), true, false),
+        (Some("admin"), true, true),
+    ] {
+        f.role(f.channel, &f.agent, role).await;
+        f.check(None, read, manage).await;
+    }
+    let manage = f.grant(GrantAction::Manage);
+    let read = f.grant(GrantAction::Read);
+    let mut expired = manage.clone();
+    expired.before = Some(Timestamp::now().as_secs() - 1);
+    let mut wrong_repo = manage.clone();
+    wrong_repo.repo.as_mut().expect("repo").name = "elsewhere".into();
+    // A narrower, expired or unrelated grant cannot revoke independent admin.
+    for grant in [&read, &expired, &wrong_repo] {
+        f.check(Some(grant), true, true).await;
+        assert_eq!(f.prepared(Some(grant), false).await.valid_until, None);
+    }
+    // Removing membership leaves only delegation, capped by the owner.
+    f.role(f.channel, &f.agent, None).await;
+    f.check(Some(&manage), false, false).await;
+    f.role(f.channel, &f.owner, Some("guest")).await;
+    f.check(Some(&manage), true, false).await;
+    f.role(f.channel, &f.owner, Some("admin")).await;
+    f.check(Some(&read), true, false).await;
+    f.check(Some(&f.grant(GrantAction::Push)), true, false)
+        .await;
+    f.check(Some(&manage), true, true).await;
+    assert_eq!(
+        f.prepared(Some(&manage), false).await.valid_until,
+        manage.before.map(|at| at as i64)
+    );
+    for grant in [&expired, &wrong_repo] {
+        f.check(Some(grant), false, false).await;
+    }
+    let mut wrong_owner = manage.clone();
+    wrong_owner.owner = Keys::generate().public_key();
+    f.check(Some(&wrong_owner), false, false).await;
+    // A wildcard still needs the recorded owner's channel role.
+    let mut wildcard = manage.clone();
+    wildcard.repo = None;
+    f.check(Some(&wildcard), true, true).await;
+    f.role(f.channel, &f.owner, None).await;
+    f.check(Some(&wildcard), false, false).await;
+
+    // Bind requires both channels; expiry matters when either uses delegation.
+    f.role(f.channel, &f.agent, Some("admin")).await;
+    f.role(f.next, &f.owner, Some("admin")).await;
+    assert_eq!(
+        f.prepared(Some(&manage), true).await.valid_until,
+        manage.before.map(|at| at as i64)
+    );
+    f.role(f.next, &f.agent, Some("admin")).await;
+    assert_eq!(f.prepared(Some(&expired), true).await.valid_until, None);
+
+    // Owner bans override both routes, including the agent's independent role.
+    sqlx::query("INSERT INTO community_bans (community_id,pubkey,banned,actor_pubkey) VALUES ($1,$2,true,$2)")
+        .bind(f.community.as_uuid()).bind(f.owner.public_key().as_bytes())
+        .execute(f.db.pool()).await.expect("ban");
+    f.check(Some(&manage), false, false).await;
+}

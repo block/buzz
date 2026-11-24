@@ -211,15 +211,12 @@ pub mod relay_members {
         }
     }
 
-    /// Refusal of a Git request whose auth tag verifies as neither kind.
-    pub(crate) const INVALID_AUTH_TAG: &str = "restricted: invalid auth tag";
-
     /// The one owner, and the Git grant if any, that a Git request proves.
     ///
     /// A verified agent token names the owner; a Git grant alongside it must
     /// name the same one. Otherwise the tag does: a Git grant, or a plain tag
-    /// (an owner with no grant). A tag that verifies as neither is refused,
-    /// never read as no owner.
+    /// (an owner with no grant). An unverifiable tag supplies no authority;
+    /// independent membership and a verified token remain usable.
     pub(crate) fn git_owner(
         agent: &nostr::PublicKey,
         tag: Option<&str>,
@@ -229,7 +226,9 @@ pub mod relay_members {
         let Some(tag) = tag else {
             return Ok((token_owner, None));
         };
-        let at = signed_auth_created_at.ok_or(INVALID_AUTH_TAG)?;
+        let Some(at) = signed_auth_created_at else {
+            return Ok((token_owner, None));
+        };
         if let Ok(grant) = buzz_sdk::nip_oa::verify_git_grant(tag, agent, at) {
             return match token_owner {
                 Some(owner) if owner != grant.owner => Err(OWNER_MISMATCH),
@@ -238,7 +237,7 @@ pub mod relay_members {
         }
         match buzz_sdk::nip_oa::verify_auth_tag_for_auth_event(tag, agent, at) {
             Ok(owner) => Ok((token_owner.or(Some(owner)), None)),
-            Err(_) => Err(INVALID_AUTH_TAG),
+            Err(_) => Ok((token_owner, None)),
         }
     }
 
@@ -902,7 +901,7 @@ pub mod relay_members {
                 Some(OWNER_MISMATCH)
             );
             assert!(prove(Some(&grant), Some(owner.public_key())).is_ok_and(|(_, g)| g.is_some()));
-            // A tag that verifies as neither kind is refused, never no owner.
+            // An unverifiable tag contributes nothing; it does not deny membership.
             for bad in [
                 git(&owner, "repo=*&git=push&created_at>1000&created_at<1100"),
                 git(&owner, "repo=*&git=push&created_at<1000"),
@@ -913,14 +912,20 @@ pub mod relay_members {
                     .replace(&other.public_key().to_hex(), &owner.public_key().to_hex()),
             ] {
                 assert_eq!(
-                    prove(Some(&bad), None).err(),
-                    Some(INVALID_AUTH_TAG),
+                    prove(Some(&bad), None).map(|(o, g)| (o, g.is_none())),
+                    Ok((None, true)),
                     "{bad}"
+                );
+                assert_eq!(
+                    prove(Some(&bad), Some(owner.public_key())).map(|(o, g)| (o, g.is_none())),
+                    Ok((Some(owner.public_key()), true)),
+                    "bad tag must preserve the verified token owner: {bad}"
                 );
             }
             assert_eq!(
-                git_owner(&agent.public_key(), Some(&grant), None, None).err(),
-                Some(INVALID_AUTH_TAG),
+                git_owner(&agent.public_key(), Some(&grant), None, None)
+                    .map(|(o, g)| (o, g.is_none())),
+                Ok((None, true)),
                 "no signed auth time"
             );
         }

@@ -30,7 +30,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use buzz_core::channel::MemberRole;
 use buzz_core::git_perms::{parse_protection_tags, Denial, ProtectionRule, RefUpdate, UpdateKind};
-use buzz_core::governance::{GrantAction, RepoCoordinate};
+use buzz_core::governance::RepoCoordinate;
 use buzz_core::TenantContext;
 use buzz_db::git_land;
 use serde_json::json;
@@ -66,9 +66,8 @@ pub(super) struct Authority {
     pub channel: uuid::Uuid,
     /// The actor's facts and, for an agent, its owner's.
     pub facts: git_land::KeyFacts,
-    /// For an agent: a live grant from its owner for this repository and
-    /// change. Always true for a person.
-    pub granted: bool,
+    /// The role supplied by a live owner grant, before the owner cap.
+    pub grant: Option<MemberRole>,
     /// When the authority relied on lapses with no write, if it does.
     pub valid_until: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -104,11 +103,13 @@ pub(super) enum Verdict {
 
 /// Land `change` if `decide` allows it under the authority read in the land.
 /// Every verdict commits a receipt; an error commits nothing.
+/// `decide` must only read: it may run twice to determine whether acceptance
+/// depends on a grant that expires.
 pub(super) async fn land(
     state: &AppState,
     lease: &buzz_db::deletion::ServingWriteLease,
     change: Change<'_>,
-    decide: impl AsyncFnOnce(&mut buzz_db::AdmittedTx, &Authority) -> Result<Decision, Response>,
+    decide: impl AsyncFnOnce(&mut buzz_db::AdmittedTx, &Authority) -> Result<Decision, Response> + Clone,
 ) -> Result<Verdict, Response> {
     let (_guard, tracer) = LandGuard::arm(state.land_tracer.clone(), "git_land");
     let trace = Trace::new(&tracer, &change);
@@ -124,8 +125,30 @@ pub(super) async fn land(
             trace.decide(&denials, 0, None, &counted);
             (Verdict::Refused(denials), None, None)
         }
-        Judged::Held(authority, version) => {
-            let decision = decide(&mut tx, &authority).await?;
+        Judged::Held(mut authority, version) => {
+            // If direct membership permits this exact change, its acceptance
+            // must survive expiry of an unrelated or weaker grant. Evaluate
+            // the same rules under the same locks without delegation first.
+            let decision = if authority.valid_until.is_some() {
+                let grant = authority.grant.take();
+                let delegated_role = authority.role;
+                authority.role = admitted_role(
+                    &authority.facts,
+                    !state.config.require_relay_membership,
+                    None,
+                );
+                let direct = decide.clone()(&mut tx, &authority).await?;
+                authority.grant = grant;
+                authority.role = delegated_role;
+                if direct.verdict.is_ok() {
+                    authority.valid_until = None;
+                    direct
+                } else {
+                    decide(&mut tx, &authority).await?
+                }
+            } else {
+                decide(&mut tx, &authority).await?
+            };
             counted = decision.counted;
             let denials = decision.verdict.err().unwrap_or_default();
             trace.decide(&denials, version, authority.valid_until, &counted);
@@ -251,47 +274,34 @@ async fn judge(
     let facts = git_land::key_facts(tx, channel, change.actor)
         .await
         .map_err(unavailable)?;
-    // An agent acts only under a live Git grant from its owner, judged
-    // under the locks the floor's writer takes. The swap applies only before
-    // the grant lapses; the commit may follow just after, as the model
-    // allows ("commit-after-expiry").
-    let granted = match &facts.owner {
+    let grant = match &facts.owner {
         Some((owner, _)) => {
-            let action = match change.kind {
-                "push" => GrantAction::Push,
-                _ => GrantAction::Manage,
-            };
-            buzz_db::governance::live_grant(tx, change.grant, change.repo, owner, action)
+            buzz_db::governance::live_grant_level(tx, change.grant, change.repo, owner)
                 .await
                 .map_err(unavailable)?
+                .map(super::authority::grant_role)
         }
-        None => true,
+        None => None,
     };
-    if !granted {
-        return Ok(Judged::Refused(super::authority::NO_GRANT));
-    }
     let open = !state.config.require_relay_membership;
-    let role = if !facts.admitted(open) {
-        None
+    let role = admitted_role(&facts, open, grant);
+    // No clock fence is needed when delegation adds no authority at all.
+    let needs_grant = role != admitted_role(&facts, open, None);
+    let valid_until = if needs_grant {
+        change
+            .grant
+            .and_then(|g| g.before)
+            .map(|at| {
+                i64::try_from(at)
+                    .ok()
+                    .and_then(|at| chrono::DateTime::from_timestamp(at, 0))
+                    .ok_or_else(|| {
+                        unavailable(buzz_db::DbError::InvalidData("invalid grant expiry".into()))
+                    })
+            })
+            .transpose()?
     } else {
-        match &facts.owner {
-            Some((_, owner)) if !owner.admitted(open) => None,
-            owner => super::authority::credit(
-                facts.key.channel_role.as_deref(),
-                owner.as_ref().map(|(_, f)| f.channel_role.as_deref()),
-            ),
-        }
-    };
-    let valid_until = match (&facts.owner, change.grant.and_then(|g| g.before)) {
-        (Some(_), Some(at)) => Some(
-            i64::try_from(at)
-                .ok()
-                .and_then(|at| chrono::DateTime::from_timestamp(at, 0))
-                .ok_or_else(|| {
-                    unavailable(buzz_db::DbError::InvalidData("invalid grant expiry".into()))
-                })?,
-        ),
-        _ => None,
+        None
     };
     Ok(Judged::Held(
         Authority {
@@ -299,11 +309,27 @@ async fn judge(
             rules,
             channel,
             facts,
-            granted,
+            grant,
             valid_until,
         },
         held.version,
     ))
+}
+
+/// Admission and owner bans apply to both independent access routes.
+fn admitted_role(
+    facts: &git_land::KeyFacts,
+    open: bool,
+    grant: Option<MemberRole>,
+) -> Option<MemberRole> {
+    if !facts.admitted(open) || facts.owner.as_ref().is_some_and(|(_, o)| !o.admitted(open)) {
+        return None;
+    }
+    super::authority::credit(
+        facts.key.channel_role.as_deref(),
+        facts.owner.as_ref().map(|(_, o)| o.channel_role.as_deref()),
+        grant,
+    )
 }
 
 fn refuse_all(change: &Change<'_>, reason: &str) -> Vec<Denial> {

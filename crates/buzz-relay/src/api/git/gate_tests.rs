@@ -122,7 +122,7 @@ fn review(n: u32) -> Requirement {
 struct Case {
     policy: Policy,
     pusher: git_land::KeyFacts,
-    granted: bool,
+    grant: Option<buzz_core::channel::MemberRole>,
     updates: Vec<RefUpdate>,
     scan: gate::Scan,
     rows: Vec<EvidenceRow>,
@@ -134,7 +134,7 @@ impl Case {
         Self {
             policy,
             pusher: person("member"),
-            granted: false,
+            grant: None,
             updates: vec![ff()],
             scan: gate::Scan::Clean,
             rows: Vec::new(),
@@ -148,7 +148,7 @@ impl Case {
         let pusher = Principal {
             key: PUSHER.into(),
             facts: &self.pusher,
-            granted: self.granted,
+            grant: self.grant,
         };
         assemble(
             &self.policy,
@@ -175,30 +175,32 @@ fn no_governance_leaves_the_baseline() {
     assert!(!c.lands(), "baseline: a member may not force-push");
 }
 
-/// Seed grant-ignored: an agent without a live grant acts for nobody, even
-/// when it and its owner are both admins.
+/// Direct membership and capped delegation are independent, including on
+/// branches that require admin authority.
 #[test]
-fn an_agent_without_a_grant_is_denied_even_as_admin() {
-    let mut c = Case::new(policy(vec![], vec![]));
-    c.pusher = agent("admin", "admin");
-    c.granted = false;
-    assert!(!c.lands());
-    c.granted = true;
-    assert!(c.lands(), "control: the same agent with a grant lands");
-}
-
-/// Seed agent-uses-owner: an agent is credited with the lesser role.
-#[test]
-fn an_agent_is_credited_with_the_lesser_role() {
+fn agents_use_membership_or_capped_grants() {
+    use buzz_core::channel::MemberRole;
     let mut c = Case::new(policy(
         vec![rule(&[MAIN], vec![Requirement::AdminPush])],
         vec![],
     ));
-    c.granted = true;
     c.pusher = agent("admin", "member");
-    assert!(!c.lands());
-    c.pusher = agent("admin", "admin");
-    assert!(c.lands());
+    assert!(c.lands(), "direct admin needs no grant or owner admin role");
+    c.grant = Some(MemberRole::Guest);
+    assert!(c.lands(), "read grant cannot reduce direct admin");
+    c.pusher = agent("guest", "admin");
+    assert!(!c.lands(), "read grant cannot delegate admin");
+    c.grant = Some(MemberRole::Member);
+    assert!(!c.lands(), "push grant cannot delegate admin");
+    c.grant = Some(MemberRole::Admin);
+    assert!(c.lands(), "manage grant raises guest to admin");
+    c.pusher.key.channel_role = None;
+    assert!(c.lands(), "grant-only admin");
+    c.pusher.owner.as_mut().unwrap().1.channel_role = Some("member".into());
+    assert!(!c.lands(), "delegation cannot exceed owner");
+    c.pusher.owner.as_mut().unwrap().1.channel_role = Some("admin".into());
+    c.grant = None;
+    assert!(!c.lands(), "neither route");
 }
 
 /// Seeds stale-approval, self-approval, duplicate-reviewer-counts,
@@ -428,7 +430,15 @@ fn a_restricted_relay_admits_an_agent_through_its_owner() {
         ..facts("admin")
     };
     let mut admitted = |read: &git_land::KeyFacts| {
-        key_facts(&mut ids, PUSHER, read, true, false, &BTreeSet::new()).admitted
+        key_facts(
+            &mut ids,
+            PUSHER,
+            read,
+            Some(buzz_core::channel::MemberRole::Member),
+            false,
+            &BTreeSet::new(),
+        )
+        .admitted
     };
     let via_owner = git_land::KeyFacts {
         key: outsider.clone(),

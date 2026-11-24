@@ -237,6 +237,9 @@ async fn channel_role(tx: &mut AdmittedTx, ch: Uuid, key: &[u8]) -> Result<Optio
     Ok(sqlx::query_scalar("SELECT m.role::text FROM channel_members m JOIN channels c ON c.community_id=m.community_id AND c.id=m.channel_id WHERE m.community_id=$1 AND m.channel_id=$2 AND m.pubkey=$3 AND m.removed_at IS NULL AND c.deleted_at IS NULL")
         .bind(community.as_uuid()).bind(ch).bind(key).fetch_optional(tx.conn()).await?)
 }
+fn reader(role: Option<&str>) -> bool {
+    matches!(role, Some("owner" | "admin" | "member" | "guest" | "bot"))
+}
 fn admin(role: Option<&str>) -> bool {
     matches!(role, Some("owner" | "admin"))
 }
@@ -258,46 +261,49 @@ async fn repo_admin(
     ch: Uuid,
     grant: Option<&GitGrant>,
 ) -> Result<bool> {
-    if !active(tx, key).await? || !admin(channel_role(tx, ch, key).await?.as_deref()) {
+    if !active(tx, key).await? {
         return Ok(false);
     }
+    let own_admin = admin(channel_role(tx, ch, key).await?.as_deref());
     if let Some(owner) = owner(tx, key).await? {
-        if !active(tx, &owner).await? || !admin(channel_role(tx, ch, &owner).await?.as_deref()) {
+        if !active(tx, &owner).await? {
             return Ok(false);
         }
-        return live_grant(tx, grant, repo, &owner, GrantAction::Manage).await;
+        return Ok(own_admin
+            || (admin(channel_role(tx, ch, &owner).await?.as_deref())
+                && live_grant_level(tx, grant, repo, &owner).await? == Some(GrantAction::Manage)));
     }
-    Ok(true)
+    Ok(own_admin)
 }
 
-/// Whether `grant`, the Git grant an agent presented with this request,
-/// lets it take `action` on `repo` now: signed by `owner`, the agent's
-/// recorded owner; covering the repo and the action; live by this clock; and,
-/// under a floor, bounded on both sides within its lifetime cap. The floor is
-/// read under the caller's fences, so a land sees the one in force.
-pub async fn live_grant(
+/// The level of the grant presented for this repository, if live: signed by
+/// the recorded owner, covering the repo, within its window and the floor's
+/// lifetime cap. Callers separately cap this level by the owner's channel role.
+pub async fn live_grant_level(
     tx: &mut AdmittedTx,
     grant: Option<&GitGrant>,
     repo: &RepoCoordinate,
     owner: &[u8],
-    action: GrantAction,
-) -> Result<bool> {
-    let Some(grant) = grant.filter(|g| g.owner.to_bytes()[..] == *owner && g.allows(repo, action))
+) -> Result<Option<GrantAction>> {
+    let Some(grant) = grant
+        .filter(|g| g.owner.to_bytes()[..] == *owner && g.repo.as_ref().is_none_or(|r| r == repo))
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let now = clock(tx).await?;
     if grant.after.is_some_and(|f| f >= now) || grant.before.is_some_and(|t| t <= now) {
-        return Ok(false);
+        return Ok(None);
     }
-    Ok(match body(tx, &DocumentId::Floor).await?.map(|d| d.body) {
+    let within_cap = match body(tx, &DocumentId::Floor).await?.map(|d| d.body) {
         None => true,
         Some(Body::Floor {
             max_grant_seconds, ..
         }) => grant.window().is_some_and(|w| w <= max_grant_seconds),
         Some(_) => return Err(invalid("invalid floor")),
-    })
+    };
+    Ok(within_cap.then(|| grant.level.clone()))
 }
+
 async fn clock(tx: &mut AdmittedTx) -> Result<u64> {
     let now: i64 =
         sqlx::query_scalar("SELECT floor(extract(epoch from clock_timestamp()))::bigint")
@@ -348,7 +354,7 @@ pub async fn authorize(
 }
 
 /// Authorize a current-document read; errors reveal no repository existence.
-/// An agent reads a repository's documents only under `grant`.
+/// Channel membership and an owner-capped live grant are independent routes.
 pub async fn authorize_read(
     tx: &mut AdmittedTx,
     id: &DocumentId,
@@ -360,16 +366,17 @@ pub async fn authorize_read(
     }
     if let Some(repo) = id.repo() {
         let ch = repo_channel(tx, repo).await?;
-        if channel_role(tx, ch, actor).await?.is_none() {
+        let own_read = reader(channel_role(tx, ch, actor).await?.as_deref());
+        let allowed = if let Some(owner) = owner(tx, actor).await? {
+            active(tx, &owner).await?
+                && (own_read
+                    || (reader(channel_role(tx, ch, &owner).await?.as_deref())
+                        && live_grant_level(tx, grant, repo, &owner).await?.is_some()))
+        } else {
+            own_read
+        };
+        if !allowed {
             return Err(denied());
-        }
-        if let Some(owner) = owner(tx, actor).await? {
-            if !active(tx, &owner).await? || channel_role(tx, ch, &owner).await?.is_none() {
-                return Err(denied());
-            }
-            if !live_grant(tx, grant, repo, &owner, GrantAction::Read).await? {
-                return Err(denied());
-            }
         }
     } else {
         // A community document governs every key with a place in the
@@ -472,17 +479,30 @@ impl Db {
             }
         }
         validate_against_floor(tx, &command).await?;
-        // An agent's repo command was authorized under its grant: the write
-        // must commit before that grant lapses.
-        let valid_until = match grant.and_then(|g| g.before) {
-            Some(before)
-                if matches!(command.document, DocumentId::Rules(_) | DocumentId::Bind(_))
-                    && owner(tx, event.pubkey.as_bytes()).await?.is_some() =>
-            {
-                Some(i64::try_from(before).map_err(|_| invalid("invalid grant expiry"))?)
+        // Only a command that needs delegated authority depends on the
+        // grant's expiry. A member's own admin role survives an expired grant.
+        // Rebinding needs authority in both the old and the new channel.
+        let mut needs_grant = false;
+        if matches!(command.document, DocumentId::Rules(_) | DocumentId::Bind(_)) {
+            let current = channel.ok_or_else(denied)?;
+            needs_grant = !admin(
+                channel_role(tx, current, event.pubkey.as_bytes())
+                    .await?
+                    .as_deref(),
+            );
+            if let Body::Bind { channel: next } = command.body.body {
+                needs_grant |= !admin(
+                    channel_role(tx, next, event.pubkey.as_bytes())
+                        .await?
+                        .as_deref(),
+                );
             }
-            _ => None,
-        };
+        }
+        let valid_until = grant
+            .filter(|_| needs_grant)
+            .and_then(|g| g.before)
+            .map(|before| i64::try_from(before).map_err(|_| invalid("invalid grant expiry")))
+            .transpose()?;
         // A bind moves the pin, the one binding every Git path reads, in the
         // transaction that records it, under the repository's exclusive fence.
         if let (DocumentId::Bind(repo), Body::Bind { channel }) =
@@ -546,19 +566,18 @@ impl Db {
         })
     }
 
-    /// [`live_grant`] in its own transaction, for the gates outside a land.
-    pub async fn git_live_grant(
+    /// [`live_grant_level`] in its own transaction, for gates outside a land.
+    pub async fn git_live_grant_level(
         &self,
         community: CommunityId,
         grant: Option<&GitGrant>,
         repo: &RepoCoordinate,
         owner: &[u8],
-        action: GrantAction,
-    ) -> Result<bool> {
+    ) -> Result<Option<GrantAction>> {
         let mut tx = self.begin_event_write_transaction(community).await?;
-        let live = live_grant(&mut tx, grant, repo, owner, action).await?;
+        let level = live_grant_level(&mut tx, grant, repo, owner).await?;
         tx.rollback().await?;
-        Ok(live)
+        Ok(level)
     }
 
     /// Read a signed governance head with current repository authorization.
@@ -578,3 +597,6 @@ impl Db {
         Ok(result)
     }
 }
+
+#[cfg(test)]
+mod postgres_tests;

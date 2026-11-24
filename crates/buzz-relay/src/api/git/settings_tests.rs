@@ -1229,8 +1229,8 @@ mod postgres_tests {
         .unwrap();
         assert_eq!(
             role,
-            Err(super::super::super::authority::NOT_A_MEMBER),
-            "first presented owner is outside channel, so smart Git must cap this request"
+            Ok(MemberRole::Admin),
+            "first presented owner is outside channel; independent admin membership remains"
         );
 
         // The recorded owner is first-write-wins: a different one is refused.
@@ -1345,8 +1345,8 @@ mod postgres_tests {
         .unwrap();
         assert_eq!(
             role,
-            Err(super::super::super::authority::NOT_A_MEMBER),
-            "first presented owner is outside channel, so smart Git must cap this request"
+            Ok(MemberRole::Admin),
+            "first presented owner is outside channel; independent admin membership remains"
         );
 
         // The recorded owner is first-write-wins: a different one is refused.
@@ -1438,7 +1438,7 @@ mod postgres_tests {
                 assert_eq!(
                     authority.role,
                     Some(MemberRole::Admin),
-                    "land must preserve valid owner admission while capping own channel role"
+                    "land must preserve valid owner admission and independent channel role"
                 );
                 Ok(super::super::super::gate::Decision {
                     verdict: Ok(()),
@@ -2244,22 +2244,21 @@ mod external_infra {
 
     #[tokio::test]
     #[ignore = "requires isolated Postgres, Redis and MinIO"]
-    async fn default_branch_owner_attestation_caps_the_signer() {
+    async fn default_branch_owner_attestation_preserves_member_authority() {
         let f = Fixture::new().await;
-        // An admin that presents an owner attestation becomes that owner's
-        // agent, and acts with no more than the owner holds: here, nothing.
+        // Recording an owner preserves independently held channel authority.
         assert_eq!(f.set(&f.member, "main", None).await.0, StatusCode::OK);
         let unrelated = Keys::generate();
         let tag =
             buzz_sdk::nip_oa::compute_auth_tag(&unrelated, &f.member.public_key(), "").unwrap();
         assert_eq!(
             f.set(&f.member, "legacy", Some(&tag)).await.0,
-            StatusCode::NOT_FOUND
+            StatusCode::OK
         );
         assert_eq!(
             f.set(&f.member, "legacy", None).await.0,
-            StatusCode::NOT_FOUND,
-            "the recorded owner keeps capping it"
+            StatusCode::OK,
+            "recorded ownership does not narrow independent membership"
         );
     }
 
@@ -2297,16 +2296,16 @@ mod external_infra {
         let tag = buzz_sdk::nip_oa::compute_auth_tag(&f.owner, &bot.public_key(), "").unwrap();
         assert_eq!(
             f.set(&bot, "main", Some(&tag)).await.0,
-            StatusCode::NOT_FOUND,
-            "ungranted, it cannot even read"
+            StatusCode::FORBIDDEN,
+            "direct membership reads and pushes, but cannot manage"
         );
         let read = f.grant(&f.owner, &bot, "read", 1800);
         assert_eq!(
             f.set(&bot, "main", Some(&read)).await.0,
             StatusCode::FORBIDDEN
         );
-        // An agent that is an admin itself manages, capped by its recorded
-        // owner's current role, under a grant it carries per request.
+        // Direct admin authority does not need its owner's channel role.
+        // Once removed, the same agent relies on capped delegation.
         let agent = Keys::generate();
         f.add(&agent).await;
         put(&agent, MemberRole::Admin).await;
@@ -2314,9 +2313,19 @@ mod external_infra {
             buzz_sdk::nip_oa::compute_auth_tag(&f.maintainer, &agent.public_key(), "").unwrap();
         assert_eq!(
             f.set(&agent, "main", Some(&tag)).await.0,
-            StatusCode::NOT_FOUND,
-            "its owner has granted it nothing, not even a read"
+            StatusCode::OK,
+            "direct admin authority needs no grant"
         );
+        f.state
+            .db
+            .remove_member(
+                community,
+                f.channel,
+                agent.public_key().as_bytes(),
+                f.owner.public_key().as_bytes(),
+            )
+            .await
+            .unwrap();
         let push = f.grant(&f.maintainer, &agent, "push", 1800);
         let manage = f.grant(&f.maintainer, &agent, "manage", 1800);
         assert_eq!(
@@ -2978,12 +2987,11 @@ mod external_infra {
         }
     }
 
-    /// An agent pushes only under a live Git grant from its recorded owner
-    /// for the repository, inside the floor's cap: every other grant refuses
-    /// at the land.
+    /// Membership works independently; without membership the owner grant
+    /// must cover the repository, action and current floor lifetime.
     #[tokio::test]
     #[ignore = "requires isolated Postgres, Redis and MinIO"]
-    async fn an_agent_pushes_only_under_a_live_grant() {
+    async fn an_agent_pushes_by_membership_or_a_live_grant() {
         use super::super::super::land::Verdict;
         let f = Fixture::new().await;
         let agent = Keys::generate();
@@ -3034,7 +3042,7 @@ mod external_infra {
                 f.land_push_as(&agent, grant.as_ref(), &push, &parent).await
             }
         };
-        let refused = |v: &Verdict| matches!(v, Verdict::Refused(d) if d[0].reason == "no live grant from the agent's owner");
+        let refused = |v: &Verdict| matches!(v, Verdict::Refused(_));
         let now = chrono::Utc::now().timestamp() as u64;
         let repo = super::super::super::land::coordinate(&f.owner.public_key().to_hex(), &f.repo);
         let grant =
@@ -3048,8 +3056,27 @@ mod external_infra {
         use buzz_core::governance::GrantAction::{Manage, Push, Read};
         let live = grant(Push, Some(now - 60), Some(now + 1800));
 
+        assert_eq!(push("refs/heads/member", None).await, Verdict::Landed);
+        assert_eq!(
+            push(
+                "refs/heads/member-expired",
+                Some(grant(Push, Some(now - 120), Some(now - 60)))
+            )
+            .await,
+            Verdict::Landed
+        );
+        f.state
+            .db
+            .remove_member(
+                f.tenant.community(),
+                f.channel,
+                agent.public_key().as_bytes(),
+                f.owner.public_key().as_bytes(),
+            )
+            .await
+            .unwrap();
         let v = push("refs/heads/a", None).await;
-        assert!(refused(&v), "no grant: {v:?}");
+        assert!(refused(&v), "no membership or grant: {v:?}");
         let v = push(
             "refs/heads/b",
             Some(grant(Read, Some(now - 60), Some(now + 1800))),
@@ -3159,9 +3186,21 @@ mod external_infra {
                     authority.valid_until.is_some(),
                     "live grant carries expiry into swap"
                 );
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let permitted = authority
+                    .role
+                    .is_some_and(|r| r.has_at_least(MemberRole::Member));
+                if permitted {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                }
                 Ok(super::super::super::gate::Decision {
-                    verdict: Ok(()),
+                    verdict: if permitted {
+                        Ok(())
+                    } else {
+                        Err(vec![buzz_core::git_perms::Denial {
+                            ref_name: "HEAD".into(),
+                            reason: "membership required".into(),
+                        }])
+                    },
                     counted: Default::default(),
                 })
             },
@@ -3180,6 +3219,61 @@ mod external_infra {
                 .await
                 .unwrap(),
             before
+        );
+        serving.finish().await.unwrap();
+
+        // A manage grant raises member authority, but this push only needs
+        // member. Let the grant expire after deciding: the direct route wins.
+        f.state
+            .db
+            .add_member(
+                f.tenant.community(),
+                f.channel,
+                agent.public_key().as_bytes(),
+                MemberRole::Member,
+                Some(f.owner.public_key().as_bytes()),
+            )
+            .await
+            .unwrap();
+        let serving = buzz_deletion::acquire_serving_write(
+            &f.state.db,
+            f.tenant.community(),
+            "member-expiry",
+        )
+        .await
+        .unwrap();
+        let ending = grant(
+            Manage,
+            Some(now - 60),
+            Some(chrono::Utc::now().timestamp() as u64 + 2),
+        );
+        let verdict = super::super::super::land::land(
+            &f.state,
+            serving.lease(),
+            super::super::super::land::Change {
+                kind: "push",
+                repo: &repo,
+                actor: agent.public_key().as_bytes(),
+                grant: Some(&ending),
+                seen: before.as_deref(),
+                new: before.as_deref().unwrap(),
+                updates: &[],
+            },
+            async |_tx, authority| {
+                assert_eq!(authority.role, Some(MemberRole::Member));
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                Ok(super::super::super::gate::Decision {
+                    verdict: Ok(()),
+                    counted: Default::default(),
+                })
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            verdict,
+            Verdict::Landed,
+            "independent membership survives grant expiry"
         );
         serving.finish().await.unwrap();
     }

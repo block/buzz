@@ -25,8 +25,7 @@ use tracing::{error, info};
 /// - `BUZZ_REPO_ID` — repo identifier (d-tag)
 /// - `BUZZ_COMMUNITY_ID` — server-resolved community UUID for the git HTTP request
 /// - `BUZZ_PUSHER_PUBKEY` — authenticated pusher's hex pubkey
-/// - `BUZZ_PUSH_GRANTED` — `1` if the request carried a Git grant to push this
-///   repository, else `0`
+/// - `BUZZ_PUSH_GRANT` — repo-scoped grant role: none, guest, member or admin.
 ///
 /// Git sets automatically (quarantine):
 /// - `GIT_OBJECT_DIRECTORY` — quarantine object store
@@ -47,7 +46,7 @@ ZERO="0000000000000000000000000000000000000000"
 : "${BUZZ_REPO_OWNER:?error: BUZZ_REPO_OWNER not set}"
 : "${BUZZ_COMMUNITY_ID:?error: BUZZ_COMMUNITY_ID not set}"
 : "${BUZZ_PUSHER_PUBKEY:?error: BUZZ_PUSHER_PUBKEY not set}"
-case "${BUZZ_PUSH_GRANTED:-}" in 0|1) ;; *) echo "error: BUZZ_PUSH_GRANTED not set" >&2; exit 1 ;; esac
+case "${BUZZ_PUSH_GRANT:-}" in none|guest|member|admin) ;; *) echo "error: BUZZ_PUSH_GRANT not set" >&2; exit 1 ;; esac
 : "${BUZZ_HOOK_URL:?error: BUZZ_HOOK_URL not set}"
 : "${BUZZ_HOOK_SECRET:?error: BUZZ_HOOK_SECRET not set}"
 
@@ -97,13 +96,13 @@ done
 
 # Phase 2: Compute HMAC-SHA256 signature.
 # Payload format MUST match relay's compute_hmac() in policy.rs:
-#   repo_id | repo_owner | community_id | pusher_pubkey | granted | (old_oid + new_oid + ref_name + is_ancestor) per ref sorted by ref_name | timestamp
+#   repo_id | repo_owner | community_id | pusher_pubkey | grant | (old_oid + new_oid + ref_name + is_ancestor) per ref sorted by ref_name | timestamp
 TIMESTAMP=$(date +%s)
 
 # Structurally unambiguous HMAC format (matches Rust's compute_hmac):
-# len(repo_id):repo_id | repo_owner | community_id | pusher | granted | (old_oid + new_oid + len(ref):ref + is_anc)* | timestamp
+# len(repo_id):repo_id | repo_owner | community_id | pusher | grant | (old_oid + new_oid + len(ref):ref + is_anc)* | timestamp
 REPO_ID_LEN=${#BUZZ_REPO_ID}
-HMAC_INPUT="${REPO_ID_LEN}:${BUZZ_REPO_ID}|${BUZZ_REPO_OWNER}|${BUZZ_COMMUNITY_ID}|${BUZZ_PUSHER_PUBKEY}|${BUZZ_PUSH_GRANTED}|"
+HMAC_INPUT="${REPO_ID_LEN}:${BUZZ_REPO_ID}|${BUZZ_REPO_OWNER}|${BUZZ_COMMUNITY_ID}|${BUZZ_PUSHER_PUBKEY}|${BUZZ_PUSH_GRANT}|"
 # Sort by ref_name (field 1) — matches Rust's sort_by(|a, b| a.ref_name.cmp(&b.ref_name))
 if [ -f "$HMAC_FILE" ]; then
     sort "$HMAC_FILE" | while IFS=' ' read ref_name old_oid new_oid is_anc; do
@@ -125,7 +124,9 @@ fi
 # repo_id is free-form (user-chosen d-tag) — must be escaped for JSON safety.
 # repo_owner, community_id, and pusher_pubkey are validated fixed-shape strings — no escaping needed.
 SAFE_REPO_ID=$(printf '%s' "$BUZZ_REPO_ID" | sed 's/\\/\\\\/g; s/"/\\"/g')
-BODY="{\"repo_id\":\"${SAFE_REPO_ID}\",\"repo_owner\":\"${BUZZ_REPO_OWNER}\",\"community_id\":\"${BUZZ_COMMUNITY_ID}\",\"pusher_pubkey\":\"${BUZZ_PUSHER_PUBKEY}\",\"granted\":$([ "$BUZZ_PUSH_GRANTED" = 1 ] && echo true || echo false),\"ref_updates\":[${REFS}],\"timestamp\":${TIMESTAMP},\"signature\":\"${SIGNATURE}\"}"
+GRANT_JSON="null"
+if [ "$BUZZ_PUSH_GRANT" != none ]; then GRANT_JSON="\"${BUZZ_PUSH_GRANT}\""; fi
+BODY="{\"repo_id\":\"${SAFE_REPO_ID}\",\"repo_owner\":\"${BUZZ_REPO_OWNER}\",\"community_id\":\"${BUZZ_COMMUNITY_ID}\",\"pusher_pubkey\":\"${BUZZ_PUSHER_PUBKEY}\",\"grant\":${GRANT_JSON},\"ref_updates\":[${REFS}],\"timestamp\":${TIMESTAMP},\"signature\":\"${SIGNATURE}\"}"
 
 HTTP_CODE=$(curl --silent --max-time 10 \
     -o "$RESP_FILE" \

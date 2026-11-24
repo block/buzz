@@ -221,7 +221,7 @@ pub(super) async fn decide(
     let pusher = Principal {
         key: hex::encode(actor),
         facts: &authority.facts,
-        granted: authority.granted,
+        grant: authority.grant,
     };
     assemble(
         &policy, repo, &pusher, updates, scan, &rows, &approvers, open,
@@ -232,7 +232,7 @@ pub(super) async fn decide(
 pub(super) struct Principal<'a> {
     pub key: String,
     pub facts: &'a git_land::KeyFacts,
-    pub granted: bool,
+    pub grant: Option<buzz_core::channel::MemberRole>,
 }
 
 /// The latest approval statement per producer and subject, by audit
@@ -281,7 +281,7 @@ fn assemble(
         &mut ids,
         &pusher.key,
         pusher.facts,
-        pusher.granted,
+        pusher.grant,
         open,
         &trusted_keys,
     );
@@ -350,7 +350,7 @@ fn assemble(
             .get(&row.actor)
             .ok_or_else(|| DbError::InvalidData("approver facts not read".into()))?;
         // An approver acts for itself; it holds no grant.
-        let by = key_facts(&mut ids, &row.actor, read, false, open, &trusted_keys);
+        let by = key_facts(&mut ids, &row.actor, read, None, open, &trusted_keys);
         let e = &row.evidence;
         approvals.push(gate::Approval {
             by,
@@ -417,7 +417,7 @@ fn key_facts(
     ids: &mut Interner,
     hex_key: &str,
     read: &git_land::KeyFacts,
-    granted: bool,
+    grant: Option<buzz_core::channel::MemberRole>,
     open: bool,
     trusted: &BTreeSet<u64>,
 ) -> gate::KeyFacts {
@@ -434,7 +434,7 @@ fn key_facts(
             }),
             None => gate::Who::Person,
         },
-        granted,
+        grant: role(grant.map(|r| r.as_str())),
         check_key: trusted.contains(&key),
     }
 }

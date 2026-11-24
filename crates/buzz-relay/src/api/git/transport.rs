@@ -771,8 +771,8 @@ pub(super) fn hydrate_error_to_response(owner: &str, repo: &str, err: HydrateErr
 /// 2. the repository's pinned channel, which the first touch seeds from the
 ///    announcement's `buzz-channel` tag; a later re-announcement moves nothing;
 /// 3. [`super::authority::credited_role`] for the caller — a read is allowed
-///    only when it credits a role (for an agent, its owner must hold one too,
-///    and have granted it the repository).
+///    through its own channel role or, for an agent, a live grant capped by
+///    its owner's channel role.
 ///
 /// The door then picks what it will show and records the read
 /// ([`record_read`]) before showing it.
@@ -1532,8 +1532,8 @@ pub async fn receive_pack(
         ),
         ("BUZZ_PUSHER_PUBKEY", pusher_hex.clone()),
         (
-            "BUZZ_PUSH_GRANTED",
-            pushes(auth.grant.as_ref(), &coordinate).into(),
+            "BUZZ_PUSH_GRANT",
+            grant_level(auth.grant.as_ref(), &coordinate).into(),
         ),
     ];
     hook_env.extend(receive_pack_git_config(hooks_dir));
@@ -1565,16 +1565,17 @@ pub async fn receive_pack(
     Ok(finalize_push(&state, ctx).await)
 }
 
-/// The pre-receive hook's `BUZZ_PUSH_GRANTED`: whether `grant` covers a push
-/// of `repo`.
-fn pushes(
+/// The hook receives the grant's repo-scoped level; final land rechecks its
+/// owner and liveness. A member's own role remains independent of this value.
+fn grant_level(
     grant: Option<&buzz_core::governance::GitGrant>,
     repo: &buzz_core::governance::RepoCoordinate,
 ) -> &'static str {
-    match grant.is_some_and(|g| g.allows(repo, buzz_core::governance::GrantAction::Push)) {
-        true => "1",
-        false => "0",
-    }
+    grant
+        .filter(|g| g.allows(repo, buzz_core::governance::GrantAction::Read))
+        .map_or("none", |g| {
+            super::authority::grant_role(g.level.clone()).as_str()
+        })
 }
 
 /// Per-process git configuration for the hydrated receive-pack workspace.
@@ -2641,11 +2642,23 @@ mod track_c_tests {
         };
         let id = validate_repo_id(&owner, "x.git").unwrap();
         let url = super::super::land::coordinate(&owner, id);
-        assert_eq!(pushes(Some(&grant("x", GrantAction::Push)), &url), "1");
-        assert_eq!(pushes(Some(&grant("x", GrantAction::Manage)), &url), "1");
-        assert_eq!(pushes(Some(&grant("x", GrantAction::Read)), &url), "0");
-        assert_eq!(pushes(Some(&grant("y", GrantAction::Push)), &url), "0");
-        assert_eq!(pushes(None, &url), "0");
+        assert_eq!(
+            grant_level(Some(&grant("x", GrantAction::Push)), &url),
+            "member"
+        );
+        assert_eq!(
+            grant_level(Some(&grant("x", GrantAction::Manage)), &url),
+            "admin"
+        );
+        assert_eq!(
+            grant_level(Some(&grant("x", GrantAction::Read)), &url),
+            "guest"
+        );
+        assert_eq!(
+            grant_level(Some(&grant("y", GrantAction::Push)), &url),
+            "none"
+        );
+        assert_eq!(grant_level(None, &url), "none");
     }
 
     /// The URL strips one `.git` and no more: a name that still ends in
