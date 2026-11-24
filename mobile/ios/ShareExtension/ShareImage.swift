@@ -11,8 +11,10 @@ import UniformTypeIdentifiers
 enum ShareImage {
   static func prepare(_ provider: NSItemProvider) async throws -> SharedContent.Attachment {
     let offered = provider.registeredTypeIdentifiers.compactMap(UTType.init)
+    // A GIF first: Photos can also offer a still JPEG of it.
     let type =
-      offered.first { $0.conforms(to: .jpeg) }
+      offered.first { $0.conforms(to: .gif) }
+      ?? offered.first { $0.conforms(to: .jpeg) }
       ?? offered.first { $0.conforms(to: .heic) }
       ?? offered.first { $0.conforms(to: .image) }
       ?? .image
@@ -24,8 +26,15 @@ enum ShareImage {
     try? handle.close()
     let mime = detectMime(head)
     if mime == "image/gif" {
-      // The app sanitizes animated images in Dart; not wired up here yet.
-      throw ShareError.message("GIFs can't be shared from here yet.")
+      // Sent as is; the share screen strips its metadata with the app's
+      // Dart sanitizer before it uploads, as the composer does.
+      temporary.removeAll()
+      let size = (try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+      guard size <= SharedContent.maximumImageBytes else {
+        try? FileManager.default.removeItem(at: source)
+        throw ShareError.message("This GIF is too large to send (over 50 MB).")
+      }
+      return SharedContent.Attachment(kind: .gif, url: source, mime: mime!, size: size)
     }
     let png = mime == "image/png" || mime == "image/webp"
     var input = source
@@ -52,7 +61,7 @@ enum ShareImage {
       try? FileManager.default.removeItem(at: output)
       throw ShareError.message("This photo is too large to send (over 50 MB).")
     }
-    return SharedContent.Attachment(url: output, mime: png ? "image/png" : "image/jpeg", size: size, filename: nil)
+    return SharedContent.Attachment(kind: .image, url: output, mime: png ? "image/png" : "image/jpeg", size: size)
   }
 
   private static func transcodeToJpeg(_ source: URL) throws -> URL {

@@ -31,9 +31,23 @@ class ShareBridge {
     ];
   }
 
-  /// Uploads the shared photo and returns its blob descriptor.
-  Future<Map<String, Object?>> upload() async =>
-      (await _channel.invokeMapMethod<String, Object?>('upload')) ?? const {};
+  /// Signs in to another of the app's communities, returning [payload] with
+  /// that community, its Bestie and its saved conversations.
+  Future<SharePayload> switchCommunity(SharePayload payload, String id) async {
+    final raw = await _channel.invokeMapMethod<String, Object?>(
+      'switchCommunity',
+      {'id': id},
+    );
+    return payload.withAccount(raw ?? const {});
+  }
+
+  /// Uploads attachment [index] (and a video's poster) and returns its blob
+  /// descriptor.
+  Future<Map<String, Object?>> upload(int index) async =>
+      (await _channel.invokeMapMethod<String, Object?>('upload', {
+        'index': index,
+      })) ??
+      const {};
 
   /// Signs and submits a message. The same [createdAt] gives a retry the same
   /// event ID, so the relay drops a duplicate whose first answer was lost.
@@ -57,11 +71,10 @@ class SharePayload {
   const SharePayload({
     required this.text,
     required this.missed,
-    this.imagePath,
-    this.imageMime,
-    this.filePath,
-    this.filename,
+    this.attachments = const [],
+    this.communities = const [],
     this.problem,
+    this.suggestion,
     this.suggested,
     this.community,
     this.signedOut,
@@ -69,24 +82,48 @@ class SharePayload {
     this.conversations,
   });
 
-  factory SharePayload.fromMap(Map<String, Object?> map) {
-    final image = map['image'] as Map<Object?, Object?>?;
-    final file = map['file'] as Map<Object?, Object?>?;
+  factory SharePayload.fromMap(Map<String, Object?> map) => SharePayload(
+    text: [for (final item in map['text'] as List? ?? const []) '$item'],
+    missed: map['missed'] as int? ?? 0,
+    attachments: [
+      for (final item
+          in (map['attachments'] as List? ?? const [])
+              .whereType<Map<Object?, Object?>>())
+        ShareAttachment(
+          kind: ShareAttachmentKind.values.byName(item['kind'] as String),
+          path: item['path'] as String,
+          mime: item['mime'] as String,
+          filename: item['filename'] as String?,
+          poster: item['poster'] as String?,
+        ),
+    ],
+    communities: [
+      for (final item
+          in (map['communities'] as List? ?? const [])
+              .whereType<Map<Object?, Object?>>())
+        (id: '${item['id']}', name: '${item['name']}'),
+    ],
+    problem: map['problem'] as String?,
+    suggestion: map['suggested'] as String?,
+  ).withAccount(map);
+
+  /// This payload signed in to the community in [map].
+  SharePayload withAccount(Map<String, Object?> map) {
     final community = map['community'] as Map<Object?, Object?>?;
     final bestie = map['bestie'] as Map<Object?, Object?>?;
     final conversations = map['conversations'] as List<Object?>?;
     return SharePayload(
-      text: [for (final item in map['text'] as List? ?? const []) '$item'],
-      missed: map['missed'] as int? ?? 0,
-      imagePath: image?['path'] as String?,
-      imageMime: image?['mime'] as String?,
-      filePath: file?['path'] as String?,
-      filename: file?['filename'] as String?,
-      problem: map['problem'] as String?,
-      suggested: _suggestedChannel(map['suggested'] as String?, community),
+      text: text,
+      missed: missed,
+      attachments: attachments,
+      communities: communities,
+      problem: problem,
+      suggestion: suggestion,
+      suggested: _suggestedChannel(suggestion, community),
       community: community == null
           ? null
           : (
+              id: community['id'] as String? ?? '',
               name: community['name'] as String? ?? '',
               pubkey: community['pubkey'] as String? ?? '',
             ),
@@ -120,18 +157,21 @@ class SharePayload {
 
   final List<String> text;
   final int missed;
-  final String? imagePath;
-  final String? imageMime;
 
-  /// A shared file other than a photo, sent as is.
-  final String? filePath;
-  final String? filename;
+  /// The photos, GIFs, videos and files, readied for upload, in share order.
+  final List<ShareAttachment> attachments;
+
+  /// Every community the app is signed in to.
+  final List<({String id, String name})> communities;
   final String? problem;
+
+  /// The iOS share suggestion's identifier, whichever community it names.
+  final String? suggestion;
 
   /// The channel of the iOS share suggestion picked, when it belongs to this
   /// community.
   final String? suggested;
-  final ({String name, String pubkey})? community;
+  final ({String id, String name, String pubkey})? community;
   final String? signedOut;
   final ({String pubkey, String name})? bestie;
 
@@ -141,6 +181,30 @@ class SharePayload {
 
   /// The note's starting text: each link or text item on its own line.
   String get note => text.join('\n');
+}
+
+enum ShareAttachmentKind { image, gif, video, file }
+
+/// A shared item on disk in the extension, readied as the composer readies
+/// it: photos re-encoded and scrubbed, videos transcoded with a poster.
+class ShareAttachment {
+  const ShareAttachment({
+    required this.kind,
+    required this.path,
+    required this.mime,
+    this.filename,
+    this.poster,
+  });
+
+  final ShareAttachmentKind kind;
+  final String path;
+  final String mime;
+
+  /// The file's name, for a file.
+  final String? filename;
+
+  /// The poster frame's path, for a video.
+  final String? poster;
 }
 
 /// The suggestion's channel, from the `[communityId, channelId]` identifier

@@ -76,7 +76,11 @@ class _DestinationList extends StatelessWidget {
         ),
         if (bestie != null && query.isEmpty) row(bestie, subtitle: 'Bestie'),
         if (loaded.hasError)
-          ListTile(title: Text('Couldn’t load conversations: ${loaded.error}'))
+          ListTile(
+            title: Text(
+              'Couldn’t load conversations: ${_describe(loaded.error!)}',
+            ),
+          )
         else if (data == null)
           const Padding(
             padding: EdgeInsets.all(Grid.sm),

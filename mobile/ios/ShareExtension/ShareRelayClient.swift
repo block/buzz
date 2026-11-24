@@ -3,10 +3,18 @@ import CryptoKit
 import Foundation
 import Security
 
-/// Talks to the last-used community's relay over its HTTP bridge, signing as
-/// the account the app shares with its extensions.
+/// A signed-in community, as the app hands it to the share extension.
+struct ShareAccount: Decodable {
+  let id: String
+  let name: String
+  let relayUrl: String
+  let pubkey: String?
+}
+
+/// Talks to a community's relay over its HTTP bridge, signing as the account
+/// the app shares with its extensions.
 final class ShareRelayClient {
-  let community: PushLeaseCommunity
+  let community: ShareAccount
   let pubkey: String
   let baseURL: URL
   private let privateKey: String
@@ -21,7 +29,7 @@ final class ShareRelayClient {
     }
   }
 
-  private init(community: PushLeaseCommunity, pubkey: String, baseURL: URL, privateKey: String) {
+  private init(community: ShareAccount, pubkey: String, baseURL: URL, privateKey: String) {
     self.community = community
     self.pubkey = pubkey
     self.baseURL = baseURL
@@ -44,17 +52,23 @@ final class ShareRelayClient {
       })
   }
 
-  /// The last-used community and its signing key.
-  static func current() throws -> ShareRelayClient {
+  /// Every community the app is signed in to, in its order.
+  static func accounts() -> [ShareAccount] {
     guard let container = appGroupURL,
-      let data = try? Data(contentsOf: container.appendingPathComponent(BuzzPushPresentationCacheStore.fileName)),
-      let snapshot = try? JSONDecoder().decode(PushLeaseSnapshot.self, from: data),
-      !snapshot.communities.isEmpty
-    else { throw ShareError.notSignedIn }
+      let data = try? Data(contentsOf: container.appendingPathComponent("ShareAccounts.json")),
+      let accounts = try? JSONDecoder().decode([ShareAccount].self, from: data)
+    else { return [] }
+    return accounts
+  }
+
+  /// The community `id`, or the last one used in the app, and its signing key.
+  static func current(id: String? = nil) throws -> ShareRelayClient {
+    let accounts = accounts()
+    guard !accounts.isEmpty else { throw ShareError.notSignedIn }
     let defaults = (info["BuzzAppGroupIdentifier"] as? String).flatMap { UserDefaults(suiteName: $0) }
-    let selected = BuzzSelectedCommunity.id(in: defaults)
-    let community = snapshot.communities.first { $0.id == selected } ?? snapshot.communities[0]
-    guard let keyData = keychainData(service: "buzz.push.nse.signing", account: community.id, group: keychainAccessGroup),
+    let wanted = id ?? BuzzSelectedCommunity.id(in: defaults)
+    let community = accounts.first { $0.id == wanted } ?? accounts[0]
+    guard let keyData = keychainData(service: "buzz.share.signing", account: community.id, group: keychainAccessGroup),
       let key = String(data: keyData, encoding: .utf8),
       let pubkey = NostrEventSigner.publicKey(privateKeyHex: key),
       community.pubkey == nil || community.pubkey?.lowercased() == pubkey,
@@ -116,16 +130,27 @@ final class ShareRelayClient {
     return event.id
   }
 
-  /// Uploads the photo or file, streaming it from disk; returns the blob
-  /// descriptor.
-  func upload(_ image: SharedContent.Attachment) async throws -> [String: Any] {
-    let sha256 = try Self.sha256(of: image.url)
-    var (data, response) = try await put("/upload", file: image.url, mime: image.mime, sha256: sha256)
+  /// Uploads an attachment, streaming it from disk, and a video's poster;
+  /// returns the blob descriptor, with the poster as its `image`.
+  func upload(_ attachment: SharedContent.Attachment) async throws -> [String: Any] {
+    var descriptor = try await upload(file: attachment.url, mime: attachment.mime)
+    if let poster = attachment.poster,
+      let image = try? await upload(file: poster, mime: "image/jpeg"),
+      let url = image["url"] as? String
+    {
+      descriptor["image"] = url
+    }
+    return descriptor
+  }
+
+  private func upload(file: URL, mime: String) async throws -> [String: Any] {
+    let sha256 = try Self.sha256(of: file)
+    var (data, response) = try await put("/upload", file: file, mime: mime, sha256: sha256)
     if let status = (response as? HTTPURLResponse)?.statusCode, status == 404 || status == 405 {
-      (data, response) = try await put("/media/upload", file: image.url, mime: image.mime, sha256: sha256)
+      (data, response) = try await put("/media/upload", file: file, mime: mime, sha256: sha256)
     }
     if let status = (response as? HTTPURLResponse)?.statusCode, status == 413 {
-      throw ShareError.message(image.filename == nil ? "This photo is too large to send." : "This file is too large to send.")
+      throw ShareError.message("This attachment is too large to send.")
     }
     try Self.check(response, data)
     guard let descriptor = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -206,6 +231,12 @@ final class ShareRelayClient {
       throw ShareError.message("The relay didn't answer.")
     }
     guard (200..<300).contains(status) else {
+      // The relay's errors carry a readable `message`.
+      if let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let message = body["message"] as? String
+      {
+        throw ShareError.message(message)
+      }
       let text = String(data: data.prefix(300), encoding: .utf8) ?? ""
       throw ShareError.message("The relay answered \(status). \(text)")
     }

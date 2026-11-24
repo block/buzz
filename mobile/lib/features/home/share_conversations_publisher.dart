@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/community/community_provider.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/relay/relay_provider.dart';
 import '../../shared/share/share_bestie.dart';
@@ -20,9 +21,6 @@ import '../channels/dm_channel_labels.dart';
 class ShareConversationsPublisher extends HookConsumerWidget {
   const ShareConversationsPublisher({super.key});
 
-  /// More than the share sheet's picker needs to scroll through.
-  static const _limit = 200;
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     useEffect(() {
@@ -36,8 +34,9 @@ class ShareConversationsPublisher extends HookConsumerWidget {
 
   static Future<void> _publish(WidgetRef ref) async {
     final me = ref.read(myPubkeyProvider)?.toLowerCase();
+    final community = ref.read(activeCommunityProvider).value?.id;
     final channels = ref.read(channelsProvider).value;
-    if (me == null || channels == null) return;
+    if (me == null || community == null || channels == null) return;
     final names = ref.read(identityNameSourcesProvider);
     final active = [
       for (final channel in channels)
@@ -49,8 +48,9 @@ class ShareConversationsPublisher extends HookConsumerWidget {
     active.sort((a, b) => at(b).compareTo(at(a)));
     await publishShareConversations(
       pubkey: me,
+      community: community,
       conversations: jsonEncode([
-        for (final channel in active.take(_limit))
+        for (final channel in active)
           {
             'id': channel.id,
             'name': resolveDmChannelDisplayLabel(

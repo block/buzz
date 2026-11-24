@@ -18,49 +18,65 @@ class _SendFailed extends _SendState {
   final String message;
 }
 
-/// Uploads the photo or file once, then publishes the message. [upload] keeps the
-/// uploaded descriptor so a retry only republishes.
+/// Uploads each attachment once, then publishes one message with all of
+/// them, as the composer sends it. [uploads] keeps the uploaded descriptors
+/// so a retry uploads only what's left and republishes.
 Future<void> sendShare({
   required SharePayload payload,
   required String note,
   required ShareConversation target,
   required int createdAt,
-  required ObjectRef<Map<String, Object?>?> upload,
-  required VoidCallback onUploading,
+  required Map<int, BlobDescriptor> uploads,
+  required void Function(int index) onUploading,
 }) async {
-  var content = note.trim();
-  final tags = <List<String>>[
-    ['h', target.id],
-    for (final pubkey in target.recipients) ['p', pubkey],
-  ];
-  if (payload.imagePath != null || payload.filePath != null) {
-    if (upload.value == null) {
-      onUploading();
-      upload.value = await _bridge.upload();
-    }
-    final blob = upload.value!;
-    final url = blob['url'] as String;
-    // Named as the composer names a Files attachment.
-    final filename = payload.filePath == null
-        ? null
-        : safeAttachmentFilename(payload.filename ?? 'file');
-    tags.add([
-      'imeta',
-      'url $url',
-      'm ${blob['type']}',
-      'x ${blob['sha256']}',
-      'size ${blob['size']}',
-      if (blob['dim'] case final String dim) 'dim $dim',
-      if (blob['blurhash'] case final String blurhash) 'blurhash $blurhash',
-      if (filename != null) 'filename $filename',
-    ]);
-    final link = filename == null
-        ? '![image]($url)'
-        : '[${filename.replaceAllMapped(RegExp(r'[\\\[\]]'), (m) => '\\${m[0]}')}]($url)';
-    content = content.isEmpty ? link : '$content\n$link';
+  final attachments = payload.attachments;
+  for (var i = 0; i < attachments.length; i++) {
+    if (uploads.containsKey(i)) continue;
+    onUploading(i);
+    uploads[i] = await _upload(i, attachments[i]);
   }
+  final blobs = [for (var i = 0; i < attachments.length; i++) uploads[i]!];
+  final text = note.trim();
+  final content = [
+    if (text.isNotEmpty) text,
+    for (final blob in blobs) blob.toMarkdownImage(),
+  ].join('\n');
   if (content.isEmpty) throw StateError('Add a note to send.');
-  await _bridge.publish(content: content, tags: tags, createdAt: createdAt);
+  await _bridge.publish(
+    content: content,
+    tags: [
+      ['h', target.id],
+      for (final pubkey in target.recipients) ['p', pubkey],
+      for (final blob in blobs) blob.toImetaTag(),
+    ],
+    createdAt: createdAt,
+  );
+}
+
+Future<BlobDescriptor> _upload(int index, ShareAttachment attachment) async {
+  if (attachment.kind == ShareAttachmentKind.gif) {
+    // The composer strips an animated image's metadata in Dart before it
+    // uploads; the extension does the same, in place.
+    final file = File(attachment.path);
+    try {
+      final clean = sanitizeAnimatedImageForUpload(
+        await file.readAsBytes(),
+        attachment.mime,
+      );
+      await file.writeAsBytes(clean, flush: true);
+    } on FormatException {
+      throw StateError("We couldn't prepare this GIF for upload.");
+    }
+  }
+  final raw = await _bridge.upload(index);
+  final blob = BlobDescriptor.fromJson({
+    'uploaded': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    ...raw,
+  });
+  return switch (attachment.filename) {
+    final name? => blob.withFilename(safeAttachmentFilename(name)),
+    null => blob,
+  };
 }
 
 /// Picker id of the New Solo chat row.
