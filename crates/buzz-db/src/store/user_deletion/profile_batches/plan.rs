@@ -98,14 +98,10 @@ pub(super) async fn validate_ownership(conn: &mut PgConnection, scope: &Scope) -
 pub(super) async fn dependencies(conn: &mut PgConnection, scope: &Scope) -> Result<Vec<String>> {
     let mut blockers = Vec::new();
     // Static fragments only. These checks also run immediately before final user removal.
-    // Repository announcements/state (30617/30618) survive content and profile cleanup.
-    // Keep this exemption narrow: other authored content still requires disposition.
     for (table, selector) in [
         ("api_tokens","owner_pubkey=ANY($2::bytea[])"),
-        ("workflows","owner_pubkey=ANY($2::bytea[])"),
         ("channel_members","pubkey=ANY($2::bytea[])"),
         ("relay_members","pubkey=ANY(SELECT encode(k,'hex') FROM unnest($2::bytea[]) k)"),
-        ("events","pubkey=ANY($2::bytea[]) AND kind NOT IN (0,10100,30177,30179,9035,9036,30617,30618)"),
         ("archived_identities","NOT(pubkey=ANY(SELECT encode(k,'hex') FROM unnest($2::bytea[]) k)) AND (actor=ANY(SELECT encode(k,'hex') FROM unnest($2::bytea[]) k) OR replaced_by=ANY(SELECT encode(k,'hex') FROM unnest($2::bytea[]) k))"),
     ] {
         let sql=format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE community_id=$1 AND ({selector}))");

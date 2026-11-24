@@ -43,7 +43,7 @@ OR EXISTS (SELECT 1 FROM workflow_runs WHERE community_id = c.id AND cause_pubke
         AND trigger_context->'webhook_fields' <> '{}'::jsonb)))
 OR EXISTS (SELECT 1 FROM workflow_approvals WHERE community_id = c.id
     AND approver_pubkey = decode($1, 'hex') AND note IS NOT NULL)
--- A retained owned workflow is a profile-cleanup prerequisite too.
+-- An owned workflow identifies a candidate community for content cleanup.
 OR EXISTS (SELECT 1 FROM workflows WHERE community_id = c.id AND owner_pubkey = decode($1, 'hex'))
 -- Reuse the content handler's exact signer/actor and private-state attribution.
 OR EXISTS (SELECT 1 FROM (
@@ -51,8 +51,8 @@ OR EXISTS (SELECT 1 FROM (
 ) attributed WHERE pubkey = decode($3, 'hex') AND kind NOT IN (30617,30618))
 OR EXISTS (
     SELECT 1 FROM events e WHERE e.community_id = c.id AND (
-        -- Profile prerequisites include unsupported authored content, but
-        -- repository announcements/state are explicitly retained without blocking.
+        -- Authored events are discovery evidence even when content cleanup retains them.
+        -- Repository announcements and state alone do not select a community.
         (e.pubkey = decode($1, 'hex') AND e.kind NOT IN (30617,30618))
         -- Profile handlers must inspect subject/replacement candidates even if
         -- malformed: silently skipping them would hide a cleanup blocker.
