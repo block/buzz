@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_activity.dart';
@@ -14,7 +15,6 @@ import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
-import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -26,6 +26,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 
 import 'sidebar_sync_fixture.dart';
+
+const _legacyChatId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+const _otherChatId = 'bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee';
 
 /// Home renders desktop's unified sidebar once its records arrive: its
 /// order, its filings across team and Solo rows, and no edits mobile can't
@@ -61,6 +64,27 @@ void main() {
         'assignments': {'design-crit': 'old'},
       }, now - 60),
     );
+    const community = 'https://relay.example';
+    final soloCoordinate = MeGroups.coordinate(community);
+    const savedGroups = MeGroups(
+      groups: [
+        // Shares Newer's ID, so Newer projects under another.
+        {'id': 'newer', 'name': 'Focus', 'defaultTemplateId': ''},
+        {'id': 'spare', 'name': 'Spare', 'defaultTemplateId': ''},
+      ],
+      assignments: {_legacyChatId: 'newer', _otherChatId: 'spare'},
+      channels: [_legacyChatId],
+    );
+    relay.stored.add(
+      relay.event(
+        soloCoordinate,
+        jsonDecode(savedGroups.encode(community)) as Object,
+        now - 60,
+        tags: [
+          ['t', MeGroups.tag],
+        ],
+      ),
+    );
 
     await tester.pumpWidget(
       ProviderScope(
@@ -84,16 +108,6 @@ void main() {
             }
             return now - 8 * 86400;
           }),
-          meGroupsProvider.overrideWith(
-            (ref) => Stream.value(
-              const MeGroups(
-                groups: [
-                  // Shares Newer's ID, so Newer projects under another.
-                  {'id': 'newer', 'name': 'Focus', 'defaultTemplateId': ''},
-                ],
-              ),
-            ),
-          ),
           defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
           meAssistantsProvider.overrideWith((ref) async => []),
           channelStarsProvider.overrideWith(_Stars.new),
@@ -238,17 +252,31 @@ void main() {
     expect(find.byTooltip('Discard changes'), findsNothing);
     // Team actions follow the Team section, not the Solo project sharing its
     // ID.
-    for (final (header, team) in [('Newer', true), ('Focus', false)]) {
-      await openEdit();
-      final menu = find.byTooltip('$header actions');
-      expect(menu, team ? findsOneWidget : findsNothing);
+    await openEdit();
+    for (final header in ['Newer', 'Focus']) {
       expect(
         find.byTooltip('Move $header with the up and down arrow keys'),
         findsOneWidget,
       );
-      await tester.tap(find.byTooltip('Discard order'));
+      await tester.tap(find.byTooltip('$header actions'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Rename'),
+        header == 'Newer' ? findsOneWidget : findsNothing,
+      );
+      expect(
+        find.text('Remove'),
+        header == 'Newer' ? findsOneWidget : findsNothing,
+      );
+      expect(
+        find.text('Delete workspace'),
+        header == 'Focus' ? findsOneWidget : findsNothing,
+      );
+      await tester.tapAt(const Offset(1, 1));
       await tester.pumpAndSettle();
     }
+    await tester.tap(find.byTooltip('Discard order'));
+    await tester.pumpAndSettle();
 
     // A Solo project header tells a screen reader whether it is expanded.
     final semantics = tester.ensureSemantics();
@@ -264,7 +292,61 @@ void main() {
       isSemantics(isButton: true, hasExpandedState: true, isExpanded: false),
     );
     semantics.dispose();
+    await tester.tap(inList('Focus'));
+    await tester.pumpAndSettle();
+    expect(top('legacy-solo-chat'), greaterThan(top('Focus')));
+    expect(top('legacy-solo-chat'), lessThan(top('Spare')));
 
+    Future<void> askToDelete(String name) async {
+      await tester.tap(find.byTooltip('$name actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete workspace'));
+      await tester.pumpAndSettle();
+      expect(find.text('Delete “$name”?'), findsOneWidget);
+    }
+
+    await openEdit();
+    await askToDelete('Focus');
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Focus actions'), findsOneWidget);
+    expect(relay.published, isEmpty);
+
+    await askToDelete('Focus');
+    await tester.tap(find.text('Delete workspace'));
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(
+        of: find.byType(ReorderableListView),
+        matching: find.text('Focus'),
+      ),
+      findsNothing,
+    );
+    expect(find.byTooltip('Newer actions'), findsOneWidget);
+    await tester.tap(find.byTooltip('Discard order'));
+    await tester.pumpAndSettle();
+    expect(inList('Focus'), findsNothing);
+    expect(inList('Newer'), findsOneWidget);
+    expect(inList('Spare'), findsOneWidget);
+    expect(top('legacy-solo-chat'), greaterThan(top('Solo')));
+    expect(top('legacy-solo-chat'), lessThan(top('Team')));
+    final saved = relay.published.single;
+    expect(saved.getTagValue('d'), soloCoordinate);
+    expect(
+      relay.decrypt(saved),
+      jsonDecode(
+        const MeGroups(
+          groups: [
+            {'id': 'spare', 'name': 'Spare', 'defaultTemplateId': ''},
+          ],
+          assignments: {_otherChatId: 'spare'},
+          channels: [_legacyChatId],
+        ).encode(community),
+      ),
+    );
+
+    await openEdit();
+    await askToDelete('Spare');
     // Desktop saves its unified records; they arrive live.
     for (final head in [
       relay.event('channel-workspaces', {
@@ -289,8 +371,17 @@ void main() {
         ..emit(head);
     }
     await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete workspace'));
+    await tester.pumpAndSettle();
+    expect(relay.published, [saved]);
+    expect(
+      find.text('Workspaces are now organized on desktop. Make changes there.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.byTooltip('Discard order'));
+    await tester.pumpAndSettle();
     expect(inList('Old'), findsNothing);
-    expect(inList('Focus'), findsNothing);
+    expect(inList('Spare'), findsNothing);
 
     expect(find.byTooltip('pinned'), findsOneWidget);
     expect(inList('Pins'), findsNothing);
@@ -363,7 +454,7 @@ void main() {
     expect(inList('solo-plan'), findsOneWidget);
     expect(inList('design-crit'), findsNothing);
     expect(inList('solo-scratch'), findsNothing);
-    expect(relay.published, isEmpty);
+    expect(relay.published, [saved]);
     await openDisplay();
     await choose(view, 'Active');
     await choose(
@@ -383,6 +474,8 @@ void main() {
     await tester.pumpAndSettle();
     await openEdit();
     await tester.pumpAndSettle();
+    expect(find.byTooltip('Launch actions'), findsNothing);
+    expect(find.byTooltip('Later actions'), findsNothing);
     Finder handle(String id) => find.descendant(
       of: find.byKey(ValueKey(id)).last,
       matching: find.byIcon(BuzzIcons.menu2),
@@ -517,19 +610,20 @@ void main() {
 
 late String _viewer;
 
-Channel _channel(String id, {bool solo = false, int day = 1}) => Channel(
-  id: id,
-  name: id,
-  channelType: 'stream',
-  visibility: 'private',
-  labels: solo ? const ['buzz.solo'] : const [],
-  description: '',
-  createdBy: solo ? _viewer : 'other',
-  createdAt: DateTime(2026),
-  lastMessageAt: DateTime(2026, 1, day),
-  memberCount: 2,
-  isMember: true,
-);
+Channel _channel(String id, {String? name, bool solo = false, int day = 1}) =>
+    Channel(
+      id: id,
+      name: name ?? id,
+      channelType: 'stream',
+      visibility: 'private',
+      labels: solo ? const ['buzz.solo'] : const [],
+      description: '',
+      createdBy: solo ? _viewer : 'other',
+      createdAt: DateTime(2026),
+      lastMessageAt: DateTime(2026, 1, day),
+      memberCount: 2,
+      isMember: true,
+    );
 
 class _Channels extends ChannelsNotifier {
   @override
@@ -541,6 +635,7 @@ class _Channels extends ChannelsNotifier {
     // Newest in Launch, so Recent puts it above design-crit.
     _channel('solo-plan', solo: true, day: 9),
     _channel('solo-scratch', solo: true),
+    _channel(_legacyChatId, name: 'legacy-solo-chat'),
   ];
 }
 

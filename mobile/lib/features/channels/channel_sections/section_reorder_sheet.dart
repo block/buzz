@@ -73,6 +73,8 @@ class SectionOrderScope extends InheritedWidget {
     super.key,
     this.sectionIds = const {},
     this.edit,
+    this.soloSectionIds = const {},
+    this.onDeleteSolo,
     required this.labels,
     required this.defaultOrder,
     required this.storageKey,
@@ -81,6 +83,12 @@ class SectionOrderScope extends InheritedWidget {
   final Map<String, String> sectionIds;
   final Future<void> Function(String key, ChannelSection section, bool remove)?
   edit;
+
+  /// Visible section keys mapped to legacy Solo workspace IDs.
+  final Map<String, String> soloSectionIds;
+
+  /// Confirms and persists deletion of a legacy Solo workspace.
+  final Future<void> Function(String id, String name)? onDeleteSolo;
   final Map<String, String> labels;
   final List<String> defaultOrder;
   final String storageKey;
@@ -91,6 +99,7 @@ class SectionOrderScope extends InheritedWidget {
   @override
   bool updateShouldNotify(SectionOrderScope oldWidget) =>
       !mapEquals(labels, oldWidget.labels) ||
+      !mapEquals(soloSectionIds, oldWidget.soloSectionIds) ||
       !listEquals(defaultOrder, oldWidget.defaultOrder) ||
       storageKey != oldWidget.storageKey;
 
@@ -148,11 +157,19 @@ class _ReorderSheet extends HookConsumerWidget {
     final teams = {
       for (final section in sections.store.sections) section.id: section,
     };
+    final solo = scope.soloSectionIds.isEmpty || !sections.editable
+        ? const <String, String>{}
+        : {
+            for (final section in ref.watch(sidebarLayoutProvider).sections)
+              if (section.teamId == null) section.id: section.name,
+          };
     final draft = useState(initialVisible);
     bool removed(String key) =>
         sections.editable &&
-        scope.sectionIds.containsKey(key) &&
-        !teams.containsKey(scope.sectionIds[key]);
+        ((scope.sectionIds.containsKey(key) &&
+                !teams.containsKey(scope.sectionIds[key])) ||
+            (scope.soloSectionIds.containsKey(key) &&
+                !solo.containsKey(scope.soloSectionIds[key])));
     final visibleKeys = draft.value.where((key) => !removed(key)).toList();
     final saving = useState(false);
     final failed = useState(false);
@@ -322,9 +339,23 @@ class _ReorderSheet extends HookConsumerWidget {
                         final section = sections.editable
                             ? teams[scope.sectionIds[key]]
                             : null;
-                        final label = section?.name ?? scope.labels[key]!;
+                        final soloId = scope.soloSectionIds[key];
+                        final soloName = solo[soloId];
+                        final label =
+                            section?.name ?? soloName ?? scope.labels[key]!;
                         final edit =
                             canEdit && scope.edit != null && section != null;
+                        final deleteSolo =
+                            canEdit &&
+                                editSections &&
+                                scope.onDeleteSolo != null &&
+                                soloId != null &&
+                                soloName != null
+                            ? () => scope.onDeleteSolo!(soloId, soloName)
+                            : null;
+                        final VoidCallback? remove = edit
+                            ? () => scope.edit!(key, section, true)
+                            : deleteSolo;
                         return Builder(
                           key: ValueKey(key),
                           builder: (rowContext) {
@@ -346,13 +377,20 @@ class _ReorderSheet extends HookConsumerWidget {
                                   trailing: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      if (edit) ...[
+                                      if (remove != null) ...[
                                         _SectionMenu(
                                           label: label,
-                                          rename: () =>
-                                              scope.edit!(key, section, false),
-                                          remove: () =>
-                                              scope.edit!(key, section, true),
+                                          rename: edit
+                                              ? () => scope.edit!(
+                                                  key,
+                                                  section,
+                                                  false,
+                                                )
+                                              : null,
+                                          removeLabel: edit
+                                              ? 'Remove'
+                                              : 'Delete workspace',
+                                          remove: remove,
                                         ),
                                         SizedBox(
                                           height: 20,
@@ -420,16 +458,20 @@ class _ReorderSheet extends HookConsumerWidget {
 class _SectionMenu extends StatelessWidget {
   const _SectionMenu({
     required this.label,
-    required this.rename,
+    this.rename,
+    required this.removeLabel,
     required this.remove,
   });
   final String label;
-  final VoidCallback rename, remove;
+  final String removeLabel;
+  final VoidCallback? rename;
+  final VoidCallback remove;
   @override
   Widget build(BuildContext context) {
     final actions = [
-      (label: 'Rename', symbol: 'pencil', onPressed: rename),
-      (label: 'Remove', symbol: 'trash', onPressed: remove),
+      if (rename case final rename?)
+        (label: 'Rename', symbol: 'pencil', onPressed: rename),
+      (label: removeLabel, symbol: 'trash', onPressed: remove),
     ];
     final tooltip = '$label actions';
     if (defaultTargetPlatform == TargetPlatform.iOS) {
@@ -443,7 +485,7 @@ class _SectionMenu extends StatelessWidget {
         actions: actions,
         consumeOutsideTap: true,
         eagerGestures: false,
-        destructiveIndices: const {1},
+        destructiveIndices: {actions.length - 1},
       );
     }
     return PopupMenuButton<int>(

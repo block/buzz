@@ -102,4 +102,22 @@ class MeGroups {
       channels: [...channels, if (!channels.contains(channel)) channel],
     );
   }
+
+  /// Delete a workspace without removing its chats from the Solo inventory.
+  MeGroups removeWorkspace(String id) {
+    if (!groups.any((group) => group['id'] == id)) {
+      throw StateError('This workspace no longer exists.');
+    }
+    return MeGroups(
+      groups: [
+        for (final group in groups)
+          if (group['id'] != id) group,
+      ],
+      assignments: {
+        for (final entry in assignments.entries)
+          if (entry.value != id) entry.key: entry.value,
+      },
+      channels: channels,
+    );
+  }
 }
