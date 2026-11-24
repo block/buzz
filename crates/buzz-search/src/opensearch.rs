@@ -40,6 +40,10 @@ pub const DEFAULT_INDEX_PREFIX: &str = "buzz-";
 /// Bound on every request, so a stalled cluster cannot hold an indexer batch
 /// (and its admitted transaction) or a search open.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bound on a bulk write, which is slower than a search: the first writes
+/// into a new Serverless index took 20 seconds. A write that times out is
+/// sent again while the first may still be applied late.
+const BULK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The status OpenSearch throttles with, notably Serverless while it scales.
 const THROTTLED: u16 = 429;
@@ -142,9 +146,10 @@ impl SearchIndex {
     }
 
     /// Create the versioned index behind the alias unless the alias exists.
-    pub async fn ensure(&self) -> Result<(), SearchError> {
+    /// Returns whether this call created it.
+    pub async fn ensure(&self) -> Result<bool, SearchError> {
         if self.alias_exists().await? {
-            return Ok(());
+            return Ok(false);
         }
         let response = self
             .client
@@ -159,13 +164,13 @@ impl SearchIndex {
             let body: Value = response.json().await.map_err(transport_error)?;
             if body["error"]["type"] == "resource_already_exists_exception" {
                 if self.alias_exists().await? {
-                    return Ok(());
+                    return Ok(false);
                 }
                 return Err(SearchError::Engine("index exists without its alias".into()));
             }
             return Err(SearchError::Engine("index creation rejected".into()));
         }
-        checked(response).await.map(drop)
+        checked(response).await.map(|_| true)
     }
 
     async fn alias_exists(&self) -> Result<bool, SearchError> {
@@ -302,6 +307,7 @@ impl SearchIndex {
             .client
             .bulk(BulkParts::None)
             .require_alias(true)
+            .request_timeout(BULK_TIMEOUT)
             .body(operations)
             .send()
             .await

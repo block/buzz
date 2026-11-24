@@ -36,6 +36,12 @@ const BACKFILL_OUTBOX_BOUND: i64 = 4 * BATCH_SIZE;
 /// How often an idle leader checks the queue, and a follower the lease.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How long a new index is left alone before the first write. On OpenSearch
+/// Serverless a write sent within two seconds of creating an index that
+/// replaces a deleted one can be acknowledged by the deleted index and lost,
+/// under the same name or another, and requests can fail for ten seconds.
+const NEW_INDEX_SETTLE: Duration = Duration::from_secs(30);
+
 /// Longest wait after repeated failures.
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
@@ -348,7 +354,9 @@ impl Indexer {
     /// batch's rows stay queued. Returns whether backfill queued anything, in
     /// which case the next pass should follow at once.
     async fn pass(&self) -> Result<bool, IndexerError> {
-        self.index.ensure().await?;
+        if self.index.ensure().await? {
+            tokio::time::sleep(NEW_INDEX_SETTLE).await;
+        }
         let backfilled = self.backfill().await?;
         self.drain().await?;
         Ok(backfilled > 0)
