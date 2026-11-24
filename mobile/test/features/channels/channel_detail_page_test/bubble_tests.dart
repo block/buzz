@@ -149,7 +149,7 @@ void bubbleLayoutTests() {
           );
           expect(
             tester.getTopLeft(reactions).dx,
-            greaterThanOrEqualTo(tester.getTopLeft(content).dx),
+            closeTo(tester.getTopLeft(content).dx, 1),
           );
         }
 

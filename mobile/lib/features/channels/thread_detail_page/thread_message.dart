@@ -74,7 +74,8 @@ class _ThreadMessage extends HookConsumerWidget {
     final mediaOffset = useMessageMediaOffset(message.content, message.tags);
     final action = message.action;
     final pk = message.pubkey.toLowerCase();
-    final ownMessage = currentPubkey?.toLowerCase() == pk;
+    // Narration and its controls stay on the room's leading edge for everyone.
+    final ownMessage = action == null && currentPubkey?.toLowerCase() == pk;
     final showSenderIdentity = showMessageAuthorName(
       ref,
       channelId,
