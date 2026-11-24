@@ -137,7 +137,10 @@ void _readSeedJourney(
     expect(container.read(readStateProvider).contexts, {'channel-0': now - 10});
     expect(weight('channel-0'), FontWeight.w600);
     expect(weight('channel-1'), FontWeight.w600);
-    expect(ReadStateStorage(prefs).readJournal(scope)!['seedPending'], isTrue);
+    // The landing is captured as it was, to apply once read state loads.
+    expect(ReadStateStorage(prefs).readJournal(scope)!['seedBaseline'], {
+      for (var i = 0; i < 400; i++) 'channel-$i': now,
+    });
     await tester.pumpWidget(const SizedBox());
     await tester.pumpAndSettle();
     session = _ReadSeedSession(keys.public, now)..snapshotError = offline;
@@ -161,8 +164,150 @@ void _readSeedJourney(
     expect(weight('channel-1'), FontWeight.w600);
     expect(weight('channel-10'), FontWeight.w400);
     final saved = ReadStateStorage(prefs).readJournal(scope)!;
+    expect(saved.containsKey('seedBaseline'), isFalse);
     expect(saved.containsKey('seedPending'), isFalse);
     expect(saved['observed'], reads);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  Future<ProviderContainer> mountReadSeed(
+    WidgetTester tester,
+    SharedPreferences prefs,
+    nostr.Keys keys,
+    _ReadSeedSession session,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        prefs: prefs,
+        overrides: [
+          relayConfigProvider.overrideWith(() => _ReadSeedConfig(keys.nsec)),
+          relaySessionProvider.overrideWith(() => session),
+          activeCommunityProvider.overrideWith((ref) async => null),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    return ProviderScope.containerOf(tester.element(find.byType(ChannelsPage)));
+  }
+
+  FontWeight? weightOf(WidgetTester tester, String name) =>
+      tester.widget<Text>(find.text(name)).style?.fontWeight;
+
+  for (final restart in [false, true]) {
+    testWidgets(
+      'a post after a failed first landing stays unread (restart: $restart)',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final keys = nostr.Keys.generate();
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final landing = now - 100;
+        var session = _ReadSeedSession(keys.public, landing)
+          ..snapshotError = TimeoutException('offline');
+        var container = await mountReadSeed(tester, prefs, keys, session);
+        expect(weightOf(tester, 'channel-10'), FontWeight.w600);
+
+        // channel-10 gets a new post, then a snapshot with no marks loads.
+        if (restart) {
+          await tester.pumpWidget(const SizedBox());
+          await tester.pumpAndSettle();
+          session = _ReadSeedSession(keys.public, landing)..later = now;
+          container = await mountReadSeed(tester, prefs, keys, session);
+        } else {
+          session.later = now;
+          await container.read(channelsProvider.notifier).refresh();
+          await tester.pumpAndSettle();
+          session.snapshotError = null;
+          await tester.pump(const Duration(seconds: 6));
+          await tester.pumpAndSettle();
+        }
+        final reads = container.read(readStateProvider);
+        expect(reads.initialSeedComplete, isTrue);
+        expect(reads.contexts['channel-10'], landing);
+        expect(weightOf(tester, 'channel-10'), FontWeight.w600);
+        expect(weightOf(tester, 'channel-0'), FontWeight.w400);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
+
+  testWidgets('a channel joined after a failed first landing stays unread', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keys = nostr.Keys.generate();
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final session = _ReadSeedSession(keys.public, now)
+      ..snapshotError = TimeoutException('offline');
+    final container = await mountReadSeed(tester, prefs, keys, session);
+
+    session.joined = true;
+    await container.read(channelsProvider.notifier).refresh();
+    await tester.pumpAndSettle();
+    session.snapshotError = null;
+    await tester.pump(const Duration(seconds: 6));
+    await tester.pumpAndSettle();
+    final reads = container.read(readStateProvider);
+    expect(reads.initialSeedComplete, isTrue);
+    expect(reads.contexts.containsKey('channel-00-joined'), isFalse);
+    expect(weightOf(tester, 'channel-00-joined'), FontWeight.w600);
+    expect(weightOf(tester, 'channel-0'), FontWeight.w400);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('an empty failed first landing keeps later channels unread', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keys = nostr.Keys.generate();
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final scope =
+        '${keys.public}:${Uri.encodeComponent('https://seed.example')}';
+    final first = _ReadSeedSession(keys.public, now)
+      ..available = false
+      ..snapshotError = TimeoutException('offline');
+    await mountReadSeed(tester, prefs, keys, first);
+    expect(ReadStateStorage(prefs).readJournal(scope)!['seedBaseline'], {});
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
+    final container = await mountReadSeed(
+      tester,
+      prefs,
+      keys,
+      _ReadSeedSession(keys.public, now),
+    );
+    final reads = container.read(readStateProvider);
+    expect(reads.initialSeedComplete, isTrue);
+    expect(reads.contexts, isEmpty);
+    expect(weightOf(tester, 'channel-0'), FontWeight.w600);
+    final saved = ReadStateStorage(prefs).readJournal(scope)!;
+    expect(saved.containsKey('seedBaseline'), isFalse);
+    expect(saved.containsKey('seedPending'), isFalse);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('a relay without the snapshot extension baselines the landing', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keys = nostr.Keys.generate();
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final session = _ReadSeedSession(keys.public, now)
+      ..snapshotError = const ReadStateSnapshotUnsupported();
+    final container = await mountReadSeed(tester, prefs, keys, session);
+    final reads = container.read(readStateProvider);
+    expect(reads.loadPending, isFalse);
+    expect(reads.initialSeedComplete, isTrue);
+    expect(reads.contexts, {for (var i = 0; i < 400; i++) 'channel-$i': now});
+    expect(weightOf(tester, 'channel-0'), FontWeight.w400);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
   });
@@ -262,21 +407,32 @@ class _ReadSeedSession extends RelaySessionNotifier {
   final String pubkey;
   int readStatePublishes = 0;
   bool available = true;
+  // A newer post in channel-10, at this time.
+  int? later;
+  // The user is also a member of channel-00-joined.
+  bool joined = false;
   Object? snapshotError;
   List<NostrEvent> snapshot = const [];
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
 
-  NostrEvent event(int kind, String channel, List<List<String>> tags) =>
-      NostrEvent(
-        id: '$kind-$channel',
-        pubkey: kind == 9 ? 'other-member' : pubkey,
-        createdAt: now,
-        kind: kind,
-        tags: tags,
-        content: '',
-        sig: '',
-      );
+  Iterable<String> get channels => [
+    for (var i = 0; i < 400; i++) 'channel-$i',
+    if (joined) 'channel-00-joined',
+  ];
+
+  NostrEvent event(int kind, String channel, List<List<String>> tags) {
+    final post = kind == 9 && channel == 'channel-10' ? later : null;
+    return NostrEvent(
+      id: post == null ? '$kind-$channel' : '$kind-$channel-$post',
+      pubkey: kind == 9 ? 'other-member' : pubkey,
+      createdAt: post ?? now,
+      kind: kind,
+      tags: tags,
+      content: '',
+      sig: '',
+    );
+  }
 
   @override
   Future<List<NostrEvent>> queryRelay(
@@ -288,9 +444,9 @@ class _ReadSeedSession extends RelaySessionNotifier {
     if (filter.kinds.contains(39002)) {
       if (filter.until != null) return [];
       return [
-        for (var i = 0; i < 400; i++)
-          event(39002, 'channel-$i', [
-            ['d', 'channel-$i'],
+        for (final id in channels)
+          event(39002, id, [
+            ['d', id],
             ['p', pubkey],
           ]),
       ];
@@ -319,10 +475,10 @@ class _ReadSeedSession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async => available && filter.kinds.contains(39000)
       ? [
-          for (var i = 0; i < 400; i++)
-            event(39000, 'channel-$i', [
-              ['d', 'channel-$i'],
-              ['name', 'channel-$i'],
+          for (final id in channels)
+            event(39000, id, [
+              ['d', id],
+              ['name', id],
               ['t', 'stream'],
               ['public'],
             ]),

@@ -2,6 +2,39 @@ part of 'read_state_manager.dart';
 
 /// The local journal: this installation's durable read-state copy.
 extension ReadStateJournal on ReadStateManager {
+  /// Whether the first channel-list landing's baseline has applied, so a
+  /// channel with no mark is genuinely unread.
+  bool get initialSeedComplete => _initialSeedComplete;
+
+  /// Baseline the first channel-list landing once per identity/community.
+  /// [landing] is each listed channel's newest message time. The first call
+  /// captures it, durably and never updated: later posts and joins are new
+  /// activity. Once read state has loaded, the captured channels still in
+  /// [eligible] with no mark are read to their captured time. The journal
+  /// persists even an empty landing, so later channels remain unread after
+  /// process death rather than becoming a new "first" landing.
+  void landInitialChannels(
+    Map<String, int> landing, {
+    required Set<String> eligible,
+  }) {
+    if (_disposed || _initialSeedComplete) return;
+    final captured = _landingBaseline != null;
+    final baseline = _landingBaseline ??= Map.unmodifiable(landing);
+    if (loadPending) {
+      if (!captured) _persistLocalState();
+      return;
+    }
+    _initialSeedComplete = true;
+    _landingBaseline = null;
+    seedContextsRead({
+      for (final MapEntry(:key, :value) in baseline.entries)
+        if (eligible.contains(key) && !_effectiveState.containsKey(key))
+          key: value,
+    });
+    _persistLocalState();
+    _onChanged();
+  }
+
   void _hydrateFromLocalStorage() {
     final journal = _storage.readJournal(_journalKey);
     Map<String, int> contexts(Object? value) => (value as Map).map(
@@ -9,8 +42,13 @@ extension ReadStateJournal on ReadStateManager {
     );
     if (journal != null) {
       // An existing journal, even empty, means this is not a first landing,
-      // unless it was saved before the first landing's baseline.
-      _initialSeedComplete = journal['seedPending'] != true;
+      // unless it was saved before the first landing's baseline applied:
+      // `seedPending` before the landing was captured, `seedBaseline` after.
+      _initialSeedComplete =
+          journal['seedPending'] != true && journal['seedBaseline'] == null;
+      if (journal['seedBaseline'] case final Object baseline) {
+        _landingBaseline = Map.unmodifiable(contexts(baseline));
+      }
       _clientId = journal['clientId'] as String;
       _effectiveState.addAll(contexts(journal['observed']));
       _localContexts.addAll(contexts(journal['local']));
@@ -189,7 +227,11 @@ extension ReadStateJournal on ReadStateManager {
               if (_pendingField(key) == field) key: value.toJson(),
           },
         'createdAt': _maxFetchedCreatedAt,
-        if (!_initialSeedComplete) 'seedPending': true,
+        if (!_initialSeedComplete)
+          if (_landingBaseline case final baseline?)
+            'seedBaseline': baseline
+          else
+            'seedPending': true,
       });
       final follows = {
         for (final key in threadFollows.keys) key: _followEdits[key] ?? 0,

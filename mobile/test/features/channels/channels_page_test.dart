@@ -75,6 +75,7 @@ import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/community/community_icon_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/relay/read_state_snapshot.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -4935,6 +4936,7 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
       version: state.version + 1,
       syncFailed: failed,
       syncUnsupported: unsupported,
+      initialSeedComplete: state.initialSeedComplete,
     );
   }
 
@@ -4951,14 +4953,36 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
       contexts: state.contexts,
       version: state.version + 1,
       forcedUnreadContexts: state.forcedUnreadContexts,
+      initialSeedComplete: state.initialSeedComplete,
     );
   }
 
   @override
-  void seedContextsRead(Map<String, int> contexts) {
-    for (final entry in contexts.entries) {
-      seedContextRead(entry.key, entry.value);
+  void landInitialChannels(
+    Map<String, int> landing, {
+    required Set<String> eligible,
+  }) {
+    if (state.initialSeedComplete) return;
+    for (final MapEntry(:key, :value) in landing.entries) {
+      if (eligible.contains(key) && !state.contexts.containsKey(key)) {
+        seedContextRead(key, value);
+      }
     }
+    state = ReadStateState(
+      isReady: state.isReady,
+      pubkey: state.pubkey,
+      contexts: state.contexts,
+      version: state.version + 1,
+      retentionFloor: state.retentionFloor,
+      forcedUnreadContexts: state.forcedUnreadContexts,
+      threadFollows: state.threadFollows,
+      threadFollowsIncomplete: state.threadFollowsIncomplete,
+      syncError: state.syncError,
+      failedClears: state.failedClears,
+      syncFailed: state.syncFailed,
+      syncUnsupported: state.syncUnsupported,
+      initialSeedComplete: true,
+    );
   }
 
   @override

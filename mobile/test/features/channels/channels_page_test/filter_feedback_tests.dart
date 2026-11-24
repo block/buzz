@@ -266,9 +266,10 @@ void _filterFeedbackTests(
       ),
     );
     // The channel future resolves before this frame. Seeding runs at its end,
-    // but the rendered frame still reflects timestamp-less read state.
+    // but the rendered frame still reflects timestamp-less read state. A
+    // seed would end the forced channel's manual unread, so it is skipped.
     await tester.pump();
-    expect(readState.seededContexts, {'history': 20, 'forced': 20});
+    expect(readState.seededContexts, {'history': 20});
     expect(find.text('history'), findsNothing);
     expect(find.text('forced'), findsOneWidget);
     expect(

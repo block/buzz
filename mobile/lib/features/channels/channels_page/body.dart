@@ -288,44 +288,35 @@ class _SliverChannelsList extends HookConsumerWidget {
       }
     }
 
-    final initialSeedComplete = useState(false);
-    final seededPubkey = useRef<String?>(null);
-    final seedCompleteForPubkey =
-        seededPubkey.value == readState.pubkey && initialSeedComplete.value;
-
-    // After a failed load a missing mark is unknown, not absent: baselining
-    // then would read every channel.
-    final loaded = readState.isReady && !readState.loadPending;
-    useEffect(() {
-      if (!loaded) {
-        return null;
-      }
-
-      return deferReadStateUpdate(context, () {
-        if (seededPubkey.value != readState.pubkey) {
-          seededPubkey.value = readState.pubkey;
-          initialSeedComplete.value = false;
-        }
-
-        if (initialSeedComplete.value) {
-          return;
-        }
-
-        final seeds = <String, int>{};
-        for (final channel in visibleChannels) {
-          if (readState.contexts.containsKey(channel.id)) {
-            continue;
-          }
-
-          final lastMessageAt = dateTimeToUnixSeconds(channel.lastMessageAt);
-          if (lastMessageAt != null) {
-            seeds[channel.id] = lastMessageAt;
-          }
-        }
-        ref.read(readStateProvider.notifier).seedContextsRead(seeds);
-        initialSeedComplete.value = true;
-      });
-    }, [loaded, readState.pubkey, visibleChannels]);
+    // The manager captures the first landing once and applies it after read
+    // state loads: a missing mark before then is unknown, not absent.
+    useEffect(
+      () {
+        if (!readState.isReady || readState.initialSeedComplete) return null;
+        return deferReadStateUpdate(context, () {
+          final forced = readState.locallyForcedChannelIds;
+          ref
+              .read(readStateProvider.notifier)
+              .landInitialChannels(
+                {
+                  for (final channel in visibleChannels)
+                    channel.id: ?dateTimeToUnixSeconds(channel.lastMessageAt),
+                },
+                eligible: {
+                  for (final channel in visibleChannels)
+                    if (!forced.contains(channel.id)) channel.id,
+                },
+              );
+        });
+      },
+      [
+        readState.isReady,
+        readState.initialSeedComplete,
+        readState.loadPending,
+        readState.pubkey,
+        visibleChannels,
+      ],
+    );
 
     final highlights = computeChannelListHighlights(
       channels: visibleChannels,
@@ -333,7 +324,7 @@ class _SliverChannelsList extends HookConsumerWidget {
       channelsNotifier: ref.read(channelsProvider.notifier),
     );
     bool seeded(String channelId) =>
-        seedCompleteForPubkey ||
+        readState.initialSeedComplete ||
         readState.effectiveTimestamp(channelId) != null;
     final locallyForcedChannelIds = readState.locallyForcedChannelIds;
     final unreadChannelIds = highlights.unread

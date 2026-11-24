@@ -185,28 +185,37 @@ void main() {
     },
   );
 
-  for (final entry in <String, Object?>{
-    'absent': {},
-    'wrong version': {
-      'read_state_snapshot': {'version': 2, 'community_id': _community},
-    },
-    'invalid community': {
-      'read_state_snapshot': {'version': 1, 'community_id': 'not-uuid'},
-    },
-    'non object': [],
-  }.entries) {
-    test('rejects ${entry.key} discovery before POST', () async {
+  // A relay without the optional extension is unsupported, which ends a
+  // pending load; an unreadable document is only a failed read.
+  final unsupported = throwsA(isA<ReadStateSnapshotUnsupported>());
+  for (final (name, body, matcher) in [
+    ('absent', jsonEncode({}), unsupported),
+    (
+      'wrong version',
+      jsonEncode({
+        'read_state_snapshot': {'version': 2, 'community_id': _community},
+      }),
+      unsupported,
+    ),
+    (
+      'invalid community',
+      jsonEncode({
+        'read_state_snapshot': {'version': 1, 'community_id': 'not-uuid'},
+      }),
+      unsupported,
+    ),
+    ('non object', jsonEncode([]), unsupported),
+    ('undecodable', '<html>', throwsFormatException),
+  ]) {
+    test('rejects $name discovery before POST', () async {
       var calls = 0;
       final h = harness(
         MockClient((_) async {
           calls++;
-          return http.Response(jsonEncode(entry.value), 200);
+          return http.Response(body, 200);
         }),
       );
-      await expectLater(
-        h.session.fetchReadStateSnapshot(),
-        throwsFormatException,
-      );
+      await expectLater(h.session.fetchReadStateSnapshot(), matcher);
       expect(calls, 1);
     });
   }

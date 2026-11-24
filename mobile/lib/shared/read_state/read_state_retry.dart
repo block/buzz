@@ -25,9 +25,13 @@ const _snapshotRetryMax = Duration(minutes: 5);
 /// and acknowledgement.
 extension ReadStateRetry on ReadStateManager {
   /// Whether synced read state has yet to load: no snapshot has merged
-  /// since this manager started. Local-only read state never waits.
+  /// since this manager started. Local-only read state never waits, nor
+  /// does a relay that offers no snapshot (NIP-RS makes it optional).
   bool get loadPending =>
-      _remoteEnabled && _relaySession != null && !_followsLoaded;
+      _remoteEnabled &&
+      _relaySession != null &&
+      !_followsLoaded &&
+      !_snapshotUnsupported;
 
   /// Retry now after a failed sync: the remote snapshot again if the last one
   /// failed, else any unpublished state. Does nothing while in sync.

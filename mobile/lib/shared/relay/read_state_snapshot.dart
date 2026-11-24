@@ -37,13 +37,23 @@ final _uuid = RegExp(
   r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
 );
 
+/// The relay's NIP-11 document offers no version-1 snapshot, which NIP-RS
+/// allows: no snapshot read can succeed until the relay changes.
+class ReadStateSnapshotUnsupported implements Exception {
+  const ReadStateSnapshotUnsupported();
+
+  @override
+  String toString() => 'Atomic read-state snapshot not discovered';
+}
+
 /// Requires explicit version-1 host-bound NIP-11 discovery, never a fallback.
+/// Throws [ReadStateSnapshotUnsupported] when it is missing or invalid.
 String readStateSnapshotCommunity(Object? descriptor) {
   if (descriptor is! Map<String, dynamic> ||
       descriptor['version'] != 1 ||
       descriptor['community_id'] is! String ||
       !_uuid.hasMatch(descriptor['community_id'] as String)) {
-    throw const FormatException('Atomic read-state snapshot not discovered');
+    throw const ReadStateSnapshotUnsupported();
   }
   return descriptor['community_id'] as String;
 }

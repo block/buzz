@@ -30,6 +30,10 @@ class ReadStateState {
   /// only be unknown. First-landing baselines wait for it.
   final bool loadPending;
 
+  /// Whether the first channel-list landing's baseline has applied, so a
+  /// channel with no mark is genuinely unread.
+  final bool initialSeedComplete;
+
   /// Forced-unread contexts, each mapped to the channel it belongs to so
   /// channel tiles and badges can surface message-level forces: channels
   /// with a live synced manual unread (keyed by the channel id), and this
@@ -63,6 +67,7 @@ class ReadStateState {
     this.syncFailed = false,
     this.syncUnsupported = false,
     this.loadPending = false,
+    this.initialSeedComplete = false,
   });
 
   const ReadStateState.inert()
@@ -74,6 +79,7 @@ class ReadStateState {
       syncFailed = false,
       syncUnsupported = false,
       loadPending = false,
+      initialSeedComplete = false,
       forcedUnreadContexts = const {},
       threadFollows = const {},
       threadFollowsIncomplete = true,
@@ -118,6 +124,7 @@ class ReadStateState {
       syncFailed: syncFailed,
       syncUnsupported: syncUnsupported,
       loadPending: loadPending,
+      initialSeedComplete: initialSeedComplete,
     );
   }
 }
@@ -389,9 +396,13 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     _currentManager?.seedContextRead(contextId, unixTimestamp);
   }
 
-  /// Seed the first channel-list landing once, durably across restarts.
-  void seedContextsRead(Map<String, int> contexts) {
-    _currentManager?.seedInitialContextsRead(contexts);
+  /// Baseline the first channel-list landing once, durably across restarts;
+  /// see [ReadStateManager.landInitialChannels].
+  void landInitialChannels(
+    Map<String, int> landing, {
+    required Set<String> eligible,
+  }) {
+    _currentManager?.landInitialChannels(landing, eligible: eligible);
   }
 
   /// Retry a failed read-state sync now.
@@ -457,6 +468,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       syncFailed: manager.syncError != null,
       syncUnsupported: manager.remoteUnsupported,
       loadPending: manager.loadPending,
+      initialSeedComplete: manager.initialSeedComplete,
       failedClears: manager.failedClears,
     );
   }

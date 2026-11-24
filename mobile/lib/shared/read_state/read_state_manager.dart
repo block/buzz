@@ -237,6 +237,9 @@ class ReadStateManager {
   Object? _liveOwner;
   bool _initialized = false;
   bool _initialSeedComplete = false;
+  // The first landing, captured before its baseline applies (empty is valid).
+  Map<String, int>? _landingBaseline;
+  bool _snapshotUnsupported = false; // No snapshot can ever load.
   // The one sync loop, while it runs. Each pass opens the live subscription
   // if it is missing, then reads the snapshot, so two passes never each
   // install a subscription and leak one. A request before a pass starts its
@@ -372,16 +375,6 @@ class ReadStateManager {
 
   void seedContextRead(String contextId, int unixTimestamp) {
     seedContextsRead({contextId: unixTimestamp});
-  }
-
-  /// Baseline the first channel-list landing once per identity/community.
-  /// The journal persists even an empty scope: later channels remain unread
-  /// after process death, rather than becoming a new "first" snapshot.
-  void seedInitialContextsRead(Map<String, int> contexts) {
-    if (_disposed || _initialSeedComplete) return;
-    _initialSeedComplete = true;
-    seedContextsRead(contexts);
-    _persistLocalState();
   }
 
   /// Advance local-only seeds together, saving and notifying once per batch.
@@ -524,6 +517,8 @@ class ReadStateManager {
         syncError = error;
         _snapshotError = error;
       }
+      // Retries continue, so an upgraded relay still merges real marks.
+      if (error is ReadStateSnapshotUnsupported) _snapshotUnsupported = true;
       debugPrint('[ReadStateManager] snapshot failed: $error');
       _scheduleSnapshotRetry();
       _onChanged();
@@ -785,6 +780,9 @@ class ReadStateManager {
           // Retry on the same backoff as a failed sync; the retry re-syncs
           // and publishes the journaled marks.
           if (_settleSnapshot(read, succeeded: false)) _snapshotError = error;
+          if (error is ReadStateSnapshotUnsupported) {
+            _snapshotUnsupported = true;
+          }
           _scheduleSnapshotRetry();
           rethrow;
         }
