@@ -288,6 +288,10 @@ async fn sync_http_reads_and_capability_are_available() {
         json!({"version":1,"max_events":4096})
     );
     assert_eq!(
+        info["artifacts"]["admin_types"],
+        json!(["buzz.webhook-subscription"])
+    );
+    assert_eq!(
         info["artifacts"]["incremental"],
         json!({"version":1,"overlapSeconds":120,
         "pageRows":100,"currentRows":100,"responseBytes":8388608,

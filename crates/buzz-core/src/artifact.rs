@@ -76,6 +76,27 @@ pub fn event_id(value: &str) -> Result<Vec<u8>, &'static str> {
     }
     hex::decode(value).map_err(|_| "invalid event ID")
 }
+/// Artifact type of a NIP-WH webhook subscription.
+pub const WEBHOOK_SUBSCRIPTION_TYPE: &str = "buzz.webhook-subscription";
+/// Artifact types that only channel owners and admins may write. Other types
+/// keep the NIP-AR rule: anyone who may post a kind-9 message in the channel.
+pub const ADMIN_TYPES: &[&str] = &[WEBHOOK_SUBSCRIPTION_TYPE];
+/// Who may write an artifact type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArtifactWriters {
+    /// Anyone who may post a kind-9 message in the channel.
+    ChannelWriters,
+    /// Channel owners and admins, who must also pass the kind-9 gates.
+    ChannelAdmins,
+}
+/// The writers of `artifact_type`.
+pub fn writers(artifact_type: &str) -> ArtifactWriters {
+    if ADMIN_TYPES.contains(&artifact_type) {
+        ArtifactWriters::ChannelAdmins
+    } else {
+        ArtifactWriters::ChannelWriters
+    }
+}
 /// Validate the complete envelope, leaving auth-tag verification to the relay.
 pub fn validate(event: &Event) -> Result<ArtifactEnvelope, &'static str> {
     if event.kind.as_u16() != 45010 {
@@ -168,6 +189,23 @@ pub fn validate(event: &Event) -> Result<ArtifactEnvelope, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_listed_types_need_channel_admins() {
+        for (artifact_type, expected) in [
+            (WEBHOOK_SUBSCRIPTION_TYPE, ArtifactWriters::ChannelAdmins),
+            ("buzz.task", ArtifactWriters::ChannelWriters),
+            (
+                "buzz.webhook-subscription.v2",
+                ArtifactWriters::ChannelWriters,
+            ),
+            (
+                "example.webhook-subscription",
+                ArtifactWriters::ChannelWriters,
+            ),
+        ] {
+            assert_eq!(writers(artifact_type), expected, "{artifact_type}");
+        }
+    }
     use nostr::{EventBuilder, Keys, Kind, Tag};
     fn event(extra: Vec<Vec<String>>, op: &str, content: &str) -> Event {
         let mut tags = vec![

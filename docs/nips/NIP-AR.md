@@ -73,7 +73,7 @@ Write permission means permission to post a kind-9 message in the channel, inclu
 | Create, update, delete, or restore | Write in the home channel. |
 | Move | Write in both source and destination. |
 
-These rules apply to every type and do not depend on who created the artifact. DM participants are peers. The relay determines channel type from the stored channel, not from an artifact tag.
+These rules apply to every type and do not depend on who created the artifact, with one exception. A relay MAY list types that only channel owners and admins write. For a listed type, every operation also requires the signer to be an owner or admin of each channel the operation names: the home channel, and for a move the source too. The relay checks the role in the same transaction that accepts the revision and refuses a write that fails with `restricted:`. Relays list these types in NIP-11 `admin_types`; types not listed keep the rules above. Readers are unchanged. DM participants are peers. The relay determines channel type from the stored channel, not from an artifact tag.
 
 Relationship tags organize work without changing access. Linking a task to a project does not move it or share it. References to repositories or other services retain those services' access and action permissions. Errors MUST NOT disclose inaccessible artifact details.
 
@@ -228,6 +228,12 @@ The NIP-11 relay information document has an `artifacts` object. A relay that su
 `max_events` is the largest set that a sync serves. It bounds each initial read and the held list (rule 1). There is no byte limit on the whole set: the relay reads and sends it in pages from one snapshot, and the relay's existing event size limit bounds each event. The relay does not advertise its snapshot time budget (rule 2); a reader that is too slow gets `CLOSED`.
 
 and sets `websocket_query_extensions` to `true`.
+
+A relay that restricts types to channel admins (see Access) lists them:
+
+```json
+"admin_types": ["buzz.webhook-subscription"]
+```
 
 Relays advertise `sync` and `head` only when every backend that can serve the connection runs them.
 

@@ -18,6 +18,9 @@ pub(crate) async fn accept(
     let env = buzz_core::artifact::validate(event)
         .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     verify_revision_auth(event)?;
+    if env.artifact_type == buzz_core::artifact::WEBHOOK_SUBSCRIPTION_TYPE {
+        super::webhook_subscription::check(event, &env).await?;
+    }
     let source = if env.op == ArtifactOp::Move {
         let source = state
             .db
@@ -59,6 +62,12 @@ pub(crate) async fn accept(
         }
         ArtifactOutcome::Rejected(message) => {
             return Err(IngestError::Rejected(format!("invalid: {message}")))
+        }
+        ArtifactOutcome::NotAdmin => {
+            return Err(IngestError::Rejected(format!(
+                "restricted: only channel admins can write {} artifacts",
+                env.artifact_type
+            )))
         }
     }
     Ok(IngestResult {

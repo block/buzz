@@ -1,0 +1,13 @@
+[package]
+name = "buzz-webhook-filter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CEL programs for Buzz webhook subscriptions"
+
+[dependencies]
+cel = { version = "0.16", default-features = false, features = ["regex", "chrono"] }
+thiserror = { workspace = true }
+

@@ -489,3 +489,5 @@ async fn generic_d_lookup_matches_before_limit() {
 
 #[path = "artifact_postgres_tests/sync_postgres_tests.rs"]
 mod sync_postgres_tests;
+#[path = "artifact_postgres_tests/webhook_subscription_postgres_tests.rs"]
+mod webhook_subscription_postgres_tests;

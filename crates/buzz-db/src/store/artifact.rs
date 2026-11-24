@@ -1,10 +1,12 @@
 //! NIP-AR atomic artifact acceptance. Payloads remain opaque signed events.
 //!
 //! Channel write permission is checked by the relay's ordinary ingest gates
-//! before this transaction; here the relay only serializes each identity and
-//! compares the expected head.
+//! before this transaction; here the relay serializes each identity, compares
+//! the expected head and, for types only channel admins may write, checks the
+//! signer's role.
 use crate::{Db, DbError, Result};
-use buzz_core::artifact::{ArtifactEnvelope, ArtifactOp};
+use buzz_core::artifact::{ArtifactEnvelope, ArtifactOp, ArtifactWriters};
+use buzz_core::channel::MemberRole;
 use buzz_core::{CommunityId, StoredEvent};
 use nostr::{Event, EventBuilder, Keys, Kind, Tag};
 use sqlx::Row;
@@ -23,6 +25,9 @@ pub enum ArtifactOutcome {
     Conflict(&'static str),
     /// Protocol violation with a public-safe reason.
     Rejected(&'static str),
+    /// The type needs a channel owner or admin, and the signer is not one in
+    /// every channel the revision writes.
+    NotAdmin,
 }
 
 /// Conflict for a non-create revision whose artifact is missing or lives
@@ -51,6 +56,31 @@ fn removal_marker(keys: &Keys, artifact: Uuid, source: Uuid, prev: &[u8]) -> Res
         .tags(tags)
         .sign_with_keys(keys)
         .map_err(|e| invalid(&e.to_string()))
+}
+
+/// Whether `pubkey` is an owner or admin of the live channel. The share lock
+/// holds a concurrent role change until this transaction ends.
+async fn is_locked_admin(tx: &mut crate::AdmittedTx, channel: Uuid, pubkey: &[u8]) -> Result<bool> {
+    let role: Option<String> = sqlx::query_scalar(
+        "SELECT cm.role::text FROM channel_members cm \
+         JOIN channels c ON c.community_id = cm.community_id AND c.id = cm.channel_id \
+             AND c.deleted_at IS NULL \
+         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.pubkey = $3 \
+             AND cm.removed_at IS NULL \
+         FOR SHARE OF cm",
+    )
+    .bind(tx.community().as_uuid())
+    .bind(channel)
+    .bind(pubkey)
+    .fetch_optional(tx.conn())
+    .await?;
+    Ok(match role {
+        Some(role) => role
+            .parse::<MemberRole>()
+            .map_err(DbError::InvalidData)?
+            .has_at_least(MemberRole::Admin),
+        None => false,
+    })
 }
 
 impl Db {
@@ -170,6 +200,15 @@ impl Db {
                 }
                 if op == ArtifactOp::Delete && env.root != old_root {
                     return Ok(ArtifactOutcome::Rejected("delete preserves root"));
+                }
+            }
+        }
+        if buzz_core::artifact::writers(&env.artifact_type) == ArtifactWriters::ChannelAdmins {
+            // A move writes its source as well as its new home.
+            let moved_from = source.filter(|_| env.op == ArtifactOp::Move);
+            for channel in std::iter::once(env.home).chain(moved_from) {
+                if !is_locked_admin(&mut tx, channel, event.pubkey.as_bytes()).await? {
+                    return Ok(ArtifactOutcome::NotAdmin);
                 }
             }
         }
