@@ -410,6 +410,18 @@ impl Credentials {
         Ok(buzz_core::engram::d_tag(&k_c, slug))
     }
 
+    /// The Buzz desktop, for owner-only calls such as `agent_read`.
+    #[cfg(unix)]
+    pub(crate) fn owner_desktop(&self) -> Result<&crate::desktop_provider::Provider, CliError> {
+        if let Some(provider) = &self.desktop {
+            return Ok(provider);
+        }
+        Err(CliError::Usage(
+            "this command needs the Buzz desktop: open Buzz and run `buzz auth desktop pair`"
+                .into(),
+        ))
+    }
+
     /// A stable, anonymous, relay-scoped id for the GIF provider (see
     /// [`customer_id`]). A link without local key material gets a random
     /// per-process id instead, as Buzz Desktop does per install.

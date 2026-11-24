@@ -113,6 +113,9 @@ impl ProviderError {
                     "invalid_request" => CliError::Other(format!(
                         "the Buzz desktop rejected `{method}` as malformed{detail}"
                     )),
+                    "conflict" => CliError::Conflict(format!(
+                        "the agent changed since it was read; run the command again{detail}"
+                    )),
                     _ => CliError::Auth(format!("the Buzz desktop refused `{method}`{detail}")),
                 }
             }
@@ -166,12 +169,16 @@ fn known_code(code: &str) -> &'static str {
         "unavailable" => "unavailable",
         "invalid_request" => "invalid_request",
         "unsupported_version" => "unsupported_version",
+        "conflict" => "conflict",
         _ => "denied",
     }
 }
 
 fn held(method: &str) -> bool {
-    matches!(method, "sign_event" | "nip44_decrypt" | "pair")
+    matches!(
+        method,
+        "sign_event" | "nip44_decrypt" | "pair" | "agent_apply"
+    )
 }
 
 /// A provider endpoint: `http://127.0.0.1:<port>/<path>`.
@@ -652,6 +659,36 @@ impl Provider {
             }) => Ok(None),
             Err(e) => Err(e.into_cli("nip44_decrypt")),
         }
+    }
+
+    /// The owner's local agent `agent`, a hex public key or an exact name, as
+    /// the JSON of an agent document and its revision. Owner pairings only.
+    pub async fn agent_read(&self, agent: &str) -> Result<String, CliError> {
+        self.call("agent_read", &[agent.to_owned()]).await
+    }
+
+    /// Asks the owner to approve `document` (agent document JSON) for
+    /// `agent`, or for a new agent when `agent` is empty. `revision` is the
+    /// one `agent_read` returned; the desktop answers `conflict` if the agent
+    /// changed since. `options` is JSON: `prune_channels` and `workspace`.
+    /// Returns the JSON result. Owner pairings only.
+    pub async fn agent_apply(
+        &self,
+        agent: &str,
+        document: &str,
+        revision: &str,
+        options: &str,
+    ) -> Result<String, CliError> {
+        self.call(
+            "agent_apply",
+            &[
+                agent.to_owned(),
+                document.to_owned(),
+                revision.to_owned(),
+                options.to_owned(),
+            ],
+        )
+        .await
     }
 
     /// The NIP-AE `d` tag for `slug`, derived by the desktop.

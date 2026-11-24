@@ -199,6 +199,8 @@ and signs. `sign_event` is subject to the [operation policy](#operation-policy).
 | `auth_tag` | `[]` | JSON-encoded NIP-OA `auth` tag, or empty string |
 | `engram_d_tag` | `[<peer pubkey hex>, <slug>]` | NIP-AE `d` tag for that slug |
 | `pair` | `[<client name>, <relay URL>]` or `[<client name>]` | JSON: token and identity |
+| `agent_read` | `[<agent pubkey hex or exact name>]` | JSON: `{revision, document}` |
+| `agent_apply` | `[<agent pubkey hex or "">, <document JSON>, <revision or "">, <options JSON>]` | JSON: `{agent, revision, changes}` |
 
 `describe` returns:
 
@@ -244,6 +246,24 @@ caller feature that needs either one, rather than an operation built on it,
 needs an explicit key.
 
 `pair` is described under [Pairing](#pairing).
+
+`agent_read` and `agent_apply` read and change one of the human's own local
+agents as an agent document, the JSON form of an `AGENT.md` file (see
+[Agent files](agent-files.md)). Only an `owner` token may call them; an `agent`
+token gets `denied`. The provider answers `denied` for an agent the human
+doesn't own or that this desktop doesn't run, and `invalid_request` for a name
+that matches no agent or more than one.
+
+- `agent_read` returns the agent's document and an opaque `revision`, which
+  changes whenever the agent's configuration does.
+- `agent_apply` takes the whole desired configuration. With an empty agent, it
+  creates one. With an agent, `revision` MUST be the one `agent_read` returned;
+  if the agent changed since, the provider answers `conflict`. Options are
+  `prune_channels` (leave channels the document doesn't list) and `workspace`
+  (an absolute folder for a new agent). The provider MUST show the human the
+  change and apply it only after they approve, holding the request open for at
+  most 120 seconds. It returns the agent's pubkey, its new revision and the
+  list of changes it made.
 
 ## Pairing
 
@@ -368,12 +388,13 @@ paired token SHOULD delete it and tell the human to pair again.
 | `unavailable` | 503 | The desktop cannot act now, for example signed out or its sign-in session lapsed | Fail with the message |
 | `unsupported_version` | 400 | See [Versions](#versions) | Retry with a common version |
 | `unknown_method` | 400 | The provider does not implement the method | Degrade (see below) |
+| `conflict` | 409 | The agent changed since the caller read it | Read again and retry |
 | `invalid_request` | 400 | Malformed envelope or params. For `nip44_decrypt`, also a payload that is not valid ciphertext for this identity | Fail; for `nip44_decrypt`, treat the payload as invalid (NIP-AE filters it) |
 
 Callers MUST decide on `error`, not on the HTTP status, and MUST treat an
 unrecognized code as `denied`.
 
-`sign_event`, `nip44_decrypt` and `pair` can be held for up to 120 seconds, so
+`sign_event`, `nip44_decrypt`, `pair` and `agent_apply` can be held for up to 120 seconds, so
 callers MUST allow at least 150 seconds for them. Other methods SHOULD answer
 within a few seconds.
 

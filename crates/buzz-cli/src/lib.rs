@@ -1,3 +1,4 @@
+pub mod agent_file;
 pub mod agent_management;
 mod cached_assertion;
 mod client;
@@ -654,6 +655,67 @@ buzz agents unarchive <PUBKEY> --reason returned"
         /// one automatic retry is a hard error rather than a silent bare send.
         #[arg(long, default_value_t = false)]
         admin: bool,
+    },
+    /// Write one of your local agents as an AGENT.md directory
+    #[command(
+        after_help = "Reads the agent from the Buzz desktop, which must be running and paired \
+(`buzz auth desktop pair`). The file holds the profile, settings, channels, wakes, persona prompt \
+and one `## When <wake ids>` section per Interest. It leaves out secrets and runtime state.\n\n\
+Examples:\n  \
+buzz agents export npub1...\n  \
+buzz agents export \"Triage Bot\" --out agents/triage-bot"
+    )]
+    Export {
+        /// The agent: npub, hex public key, or exact name
+        agent: String,
+        /// Directory to write; defaults to ./<name>
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        /// The file's name; defaults to the agent's display name as a slug
+        #[arg(long)]
+        name: Option<String>,
+        /// Overwrite an existing AGENT.md
+        #[arg(long)]
+        force: bool,
+    },
+    /// Apply an AGENT.md directory to a local agent, once you approve it in Buzz
+    #[command(
+        after_help = "The file is the agent's whole configuration: Interests, watches and \
+timers missing from it are deleted. Channels missing from it are left only with \
+--prune-channels. Prints the change as a diff of AGENT.md against the live agent first. \
+A file without identity.buzz creates a new agent, and its npub is written back.\n\n\
+Examples:\n  \
+buzz agents import triage-bot --dry\n  \
+buzz agents import triage-bot\n  \
+buzz agents import triage-bot --new --workspace ~/src/project"
+    )]
+    Import {
+        /// The directory holding AGENT.md, or the file itself
+        dir: std::path::PathBuf,
+        /// Print the diff and change nothing
+        #[arg(long)]
+        dry: bool,
+        /// Create a new agent from the file even if it names one
+        #[arg(long)]
+        new: bool,
+        /// The new agent's workspace folder on this computer
+        #[arg(long)]
+        workspace: Option<std::path::PathBuf>,
+        /// Remove the agent from channels the file doesn't list
+        #[arg(long)]
+        prune_channels: bool,
+    },
+    /// Edit one of your local agents as AGENT.md in $VISUAL or $EDITOR
+    #[command(
+        after_help = "Opens the live agent as AGENT.md. When you save and quit, prints the \
+diff and asks Buzz to apply it once you approve. Quit without saving to cancel.\n\n\
+Examples:\n  \
+buzz agents edit npub1...\n  \
+EDITOR=\"code --wait\" buzz agents edit \"Triage Bot\""
+    )]
+    Edit {
+        /// The agent: npub, hex public key, or exact name
+        agent: String,
     },
     /// Read the relay's current NIP-IA archive snapshot (kind 13535)
     #[command(
@@ -3117,6 +3179,9 @@ mod tests {
                 "archived",
                 "draft-create",
                 "draft-update",
+                "edit",
+                "export",
+                "import",
                 "unarchive"
             ]
         );
@@ -3264,7 +3329,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 5),
+            ("agents", 8),
             ("canvas", 4),
             ("channels", 17),
             ("dms", 4),
