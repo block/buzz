@@ -7431,20 +7431,33 @@ void main() {
         expect(sent.recipients, contains(agentPubkey));
       });
 
-      testWidgets('is a reference when the add is refused', (tester) async {
-        final actions = _DmAgentAdds(refusal: Exception(dmAgentsOnlyMessage));
-        final sent = await send(
-          tester,
-          actions: actions,
-          members: [me()],
-          answer: 'Invite',
-        );
+      for (final refusal in [
+        dmAgentsOnlyMessage,
+        'Couldn’t add them. This community can’t add agents to a DM from a '
+            'mention yet.',
+      ]) {
+        testWidgets(
+          'a refused add keeps the draft and sends nothing: $refusal',
+          (tester) async {
+            final actions = _DmAgentAdds(refusal: Exception(refusal));
+            final sent = await send(
+              tester,
+              actions: actions,
+              members: [me()],
+              answer: 'Invite',
+            );
 
-        expect(actions.calls, hasLength(1));
-        expect(find.text(dmAgentsOnlyMessage), findsOneWidget);
-        expect(sent.recipients, isNot(contains(agentPubkey)));
-        expect(sent.tags, contains(orderedEquals(['mention', agentPubkey])));
-      });
+            expect(actions.calls, hasLength(1));
+            expect(find.text(refusal), findsOneWidget);
+            expect(sent.recipients, isNull);
+            // The collapsed composer still holds the draft, mention and all.
+            expect(
+              find.text('hello @Helper Bot ', findRichText: true),
+              findsOneWidget,
+            );
+          },
+        );
+      }
 
       testWidgets('is a reference in a DM the sender cannot add to', (
         tester,

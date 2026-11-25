@@ -567,6 +567,7 @@ String _sendFailureMessage(Object error) => switch (error) {
   RelayAckLostError() => 'Not confirmed. Connection lost.',
   TimeoutException() => "Not sent. The relay didn't respond.",
   StateError(:final message) => 'Not sent: $message',
+  _DmAddRefused(:final message) => message,
   _ => 'Not sent: ${_composeSendErrorMessage(error)}',
 };
 
@@ -743,38 +744,41 @@ Future<_NonMemberAddOutcome> _addMentionedNonMembers(
   return _NonMemberAddOutcome(notAdded: notAdded, errors: errors);
 }
 
+/// Why a send stopped before posting: its mentioned agents could not join
+/// the DM. The draft stays, so a tagged agent is never silently unheard.
+class _DmAddRefused implements Exception {
+  const _DmAddRefused(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 /// Adds mentioned agents to the DM before a send, in place: the relay adds
-/// them to this DM or refuses the whole add and changes nothing. A refusal is
-/// reported, never thrown, as for a channel; [StateError] still propagates.
-Future<_NonMemberAddOutcome> _addMentionedAgentsToDm(
+/// them to this DM or refuses the whole add and changes nothing. Unlike a
+/// channel's, a refusal stops the send with [_DmAddRefused], keeping the draft
+/// as desktop does. [StateError] still propagates as itself.
+Future<void> _addMentionedAgentsToDm(
   ChannelActions channelActions, {
-  required _NonMemberMentionScan scan,
+  required String channelId,
   required List<String> agentPubkeys,
 }) async {
-  if (agentPubkeys.isEmpty) return _NonMemberAddOutcome.empty;
-  if (!scan.canAddMembers) {
-    return _NonMemberAddOutcome(
-      notAdded: agentPubkeys,
-      errors: const ['You cannot add people to this DM.'],
-    );
-  }
+  if (agentPubkeys.isEmpty) return;
+  final Channel dm;
   try {
-    final dm = await channelActions.addToDm(
-      channelId: scan.channelId,
+    dm = await channelActions.addToDm(
+      channelId: channelId,
       pubkeys: agentPubkeys,
       history: DmHistory.agents,
     );
-    // The relay never moves this add; anything else is not this DM.
-    if (dm.id != scan.channelId) throw Exception(dmAgentsOnlyMessage);
-    return _NonMemberAddOutcome.empty;
   } on StateError {
     rethrow;
   } catch (error) {
-    return _NonMemberAddOutcome(
-      notAdded: agentPubkeys,
-      errors: [_composeSendErrorMessage(error)],
-    );
+    throw _DmAddRefused(relayErrorText(error));
   }
+  // The relay never moves this add; anything else is not this DM.
+  if (dm.id != channelId) throw const _DmAddRefused(dmAgentsOnlyMessage);
 }
 
 /// Mentioned identities that aren't in the channel yet, plus whether the sender
@@ -940,33 +944,35 @@ class _OutgoingMentions {
     }
   }
 
-  /// Adds the scanned non-members, demoting and reporting whatever didn't land.
+  /// Adds the scanned non-members. In a channel, whatever didn't land is
+  /// demoted and reported; in a DM, a refusal throws and the send stops.
   Future<void> addNonMembers(
     ChannelActions channelActions, {
     required _NonMemberMentionScan scan,
     required ScaffoldMessengerState? messenger,
   }) async {
-    final outcome = scan.isDm
-        ? await _addMentionedAgentsToDm(
-            channelActions,
-            scan: scan,
-            agentPubkeys: [
-              for (final candidate in _invited) candidate.pubkey.toLowerCase(),
-            ],
-          )
-        : await _addMentionedNonMembers(
-            channelActions,
-            channelId: scan.channelId,
-            agentPubkeys: [
-              for (final candidate in _invited)
-                if (candidate.isAgent) candidate.pubkey.toLowerCase(),
-            ],
-            humanPubkeys: [
-              for (final candidate in _invited)
-                if (!candidate.isAgent) candidate.pubkey.toLowerCase(),
-            ],
-            canAddMembers: scan.canAddMembers,
-          );
+    if (scan.isDm) {
+      return _addMentionedAgentsToDm(
+        channelActions,
+        channelId: scan.channelId,
+        agentPubkeys: [
+          for (final candidate in _invited) candidate.pubkey.toLowerCase(),
+        ],
+      );
+    }
+    final outcome = await _addMentionedNonMembers(
+      channelActions,
+      channelId: scan.channelId,
+      agentPubkeys: [
+        for (final candidate in _invited)
+          if (candidate.isAgent) candidate.pubkey.toLowerCase(),
+      ],
+      humanPubkeys: [
+        for (final candidate in _invited)
+          if (!candidate.isAgent) candidate.pubkey.toLowerCase(),
+      ],
+      canAddMembers: scan.canAddMembers,
+    );
     demote(outcome.notAdded);
     if (outcome.errors.isNotEmpty) {
       messenger?.showFeedbackSnackBar(

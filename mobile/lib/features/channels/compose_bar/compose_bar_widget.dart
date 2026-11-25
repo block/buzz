@@ -650,8 +650,9 @@ class ComposeBar extends HookConsumerWidget {
 
       final queuedAttachments = List<_PendingAttachment>.of(attachments.value);
 
-      // An add that was refused doesn't block the message: it is reported and
-      // the un-added mentions are demoted to reference tags so the send lands.
+      // A channel add that was refused doesn't block the message: it is
+      // reported and the un-added mentions become references. A refused DM add
+      // stops the send and keeps the draft.
       Future<void> addMentionedNonMembers() => outgoing.addNonMembers(
         channelActions,
         scan: scan,
