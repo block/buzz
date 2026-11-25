@@ -72,6 +72,7 @@ async fn list_dms(client: &BuzzClient, limit: u32) -> Result<Vec<serde_json::Val
 }
 
 /// Open a DM with one or more users — sign and submit a kind:41010 event with a d-tag.
+/// Naming only your own pubkey opens your DM with yourself.
 pub async fn cmd_open_dm(client: &BuzzClient, pubkeys: &[String]) -> Result<(), CliError> {
     if pubkeys.is_empty() {
         return Err(CliError::Usage(
@@ -92,7 +93,10 @@ pub async fn cmd_open_dm(client: &BuzzClient, pubkeys: &[String]) -> Result<(), 
         .map(|pk| Tag::parse(["p", *pk]).map_err(|e| CliError::Other(format!("tag error: {e}"))))
         .collect::<Result<Vec<_>, _>>()?;
     tags.push(Tag::parse(["d", &dm_id]).map_err(|e| CliError::Other(format!("tag error: {e}")))?);
-    let builder = EventBuilder::new(Kind::Custom(41010), "").tags(tags);
+    // Keep a `p` tag naming the signer: that opens their DM with themselves.
+    let builder = EventBuilder::new(Kind::Custom(41010), "")
+        .tags(tags)
+        .allow_self_tagging();
     let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;

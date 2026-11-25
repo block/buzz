@@ -265,8 +265,9 @@ async fn find_opened_dm(
 /// existing one if a DM with the same participant set already exists.
 ///
 /// Rules:
-/// - `participants` must contain at least 2 entries, and at most
-///   [`MAX_DM_PEOPLE`] people; agents do not count (enforced here).
+/// - `participants` must contain at least 2 entries, or exactly one: the
+///   creator, a DM with oneself. It holds at most [`MAX_DM_PEOPLE`] people;
+///   agents do not count (enforced here).
 /// - `created_by` must be one of the participants.
 /// - The operation is idempotent: the same identity (see
 ///   [`opened_identity_hash`] for `by_people`) -> the same channel returned.
@@ -334,9 +335,11 @@ async fn find_or_create_dm(
     by_people: bool,
     policy: AgentAddPolicy<'_>,
 ) -> Result<(ChannelRecord, bool)> {
-    if participants.len() < 2 {
+    // A DM needs two participants, or one: the creator alone, a note to self.
+    let self_dm = participants.len() == 1 && participants[0] == created_by;
+    if participants.len() < 2 && !self_dm {
         return Err(DbError::InvalidData(
-            "DM requires at least 2 participants".to_string(),
+            "DM requires at least 2 participants, or only its creator".to_string(),
         ));
     }
     for pk in participants {
@@ -360,15 +363,16 @@ async fn find_or_create_dm(
         return Ok((existing, false));
     }
     let hash = opened_identity_hash(participants, &agents, by_people);
-    // Messaging one agent alone needs no permission: a new direct DM shares
-    // no one's history.
-    let direct = participants.len() == 2 && participants.contains(&created_by);
+    // Messaging one agent alone, or yourself, needs no permission: a new direct
+    // DM shares no one's history.
+    let direct = self_dm || (participants.len() == 2 && participants.contains(&created_by));
     if !direct {
         check_joining_agents(conn, community_id, created_by, participants, policy).await?;
     }
 
-    // Name the DM based on participant count.
-    let name = if participants.len() == 2 {
+    // Name the DM based on participant count. A DM with oneself is named as a
+    // DM with one other person is.
+    let name = if participants.len() <= 2 {
         "DM".to_string()
     } else {
         format!("Group DM ({})", participants.len())
@@ -578,7 +582,9 @@ pub async fn list_dms_for_user(
 /// Open or retrieve a DM for the given set of participants.
 ///
 /// `created_by` is automatically added to `pubkeys` if not already present,
-/// ensuring the caller is always a participant in their own DM.
+/// ensuring the caller is always a participant in their own DM. `pubkeys`
+/// must name someone; naming only `created_by` opens their DM with
+/// themselves, a note to self, which has one member.
 ///
 /// With `by_people`, the DM is found by its people ([`dm_identity_hash`]), so
 /// it may hold agents that `pubkeys` does not name, and lack agents it does.
@@ -601,6 +607,13 @@ pub async fn open_dm(
     by_people: bool,
     policy: AgentAddPolicy<'_>,
 ) -> Result<(ChannelRecord, bool)> {
+    // `created_by` is always a participant, so an empty list would silently
+    // open a DM with oneself: only naming oneself does.
+    if pubkeys.is_empty() {
+        return Err(DbError::InvalidData(
+            "DM requires at least 1 participant".to_string(),
+        ));
+    }
     let mut all: Vec<&[u8]> = vec![created_by];
     for pk in pubkeys {
         if !all.contains(pk) {

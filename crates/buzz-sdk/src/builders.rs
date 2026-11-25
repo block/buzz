@@ -2061,7 +2061,12 @@ fn dm_open(pubkeys: &[&str], include_history: bool) -> Result<EventBuilder, SdkE
     if include_history {
         tags.push(tag(&["history", "include"])?);
     }
-    Ok(EventBuilder::new(Kind::Custom(KIND_DM_OPEN as u16), "").tags(tags))
+    // `.allow_self_tagging()` keeps a `["p", <signer>]` tag, which opens the
+    // signer's DM with themselves. nostr 0.44 strips matching `p` tags by
+    // default, which would leave such an open with no one named.
+    Ok(EventBuilder::new(Kind::Custom(KIND_DM_OPEN as u16), "")
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a DM add-member event (kind 41011).
@@ -5296,6 +5301,19 @@ mod tests {
         assert_eq!(ev.kind.as_u16(), 41010);
         assert!(has_tag(&ev, "p", &pk));
         assert!(!ev.tags.iter().any(|t| t.as_slice()[0] == "history"));
+    }
+
+    #[test]
+    fn dm_open_keeps_the_signers_own_pubkey() {
+        let signer = keys();
+        let me = signer.public_key().to_hex();
+        for builder in [
+            build_dm_open(&[&me]).unwrap(),
+            build_dm_open_with_history(&[&me]).unwrap(),
+        ] {
+            let ev = builder.sign_with_keys(&signer).expect("sign");
+            assert!(has_tag(&ev, "p", &me));
+        }
     }
 
     #[test]

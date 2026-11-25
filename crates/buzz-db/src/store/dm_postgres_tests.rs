@@ -147,3 +147,144 @@ async fn cluster_global_concurrent_dm_creation_reports_only_the_inserter() {
         db.pool().close().await;
     }
 }
+
+/// A new community with `owner`, and every key in `users` known to it.
+async fn community_with_users(db: &Db, owner: &[u8; 32], users: &[&[u8; 32]]) -> CommunityId {
+    let community = match db
+        .create_community_with_owner(
+            &format!("dm-self-{}.example.org", Uuid::new_v4().simple()),
+            &hex::encode(owner),
+            &nostr::Keys::generate(),
+        )
+        .await
+        .expect("community")
+        .outcome
+    {
+        CreateCommunityWithOwnerResult::Created(row) => row.id,
+        other => panic!("unexpected community: {other:?}"),
+    };
+    for key in users {
+        db.ensure_user(community, *key).await.expect("user");
+    }
+    community
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn self_dm_is_created_once_and_reopened() {
+    let url = crate::test_support::database_url();
+    let db = Db::from_pool(PgPool::connect(&url).await.expect("database"));
+    let me = nostr::Keys::generate().public_key().to_bytes();
+    let other = nostr::Keys::generate().public_key().to_bytes();
+    let community = community_with_users(&db, &me, &[&me, &other]).await;
+
+    // Naming only oneself opens a DM with one member: oneself.
+    let (created_dm, created) = db
+        .open_dm(community, &[&me], &me, false, ALLOW)
+        .await
+        .expect("open self DM");
+    assert!(created);
+    assert_eq!(created_dm.channel_type, "dm");
+    assert_eq!(created_dm.name, "DM");
+    let members = db
+        .get_members(community, created_dm.id)
+        .await
+        .expect("members");
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].pubkey, me);
+
+    // Opening it again, either way, finds the same DM and creates nothing.
+    for by_people in [false, true] {
+        let (again, created) = db
+            .open_dm(community, &[&me], &me, by_people, ALLOW)
+            .await
+            .expect("reopen self DM");
+        assert_eq!(again.id, created_dm.id);
+        assert!(!created);
+    }
+
+    // It is the DM a workflow finds, and it is not a DM with anyone else.
+    let (found, created) = db
+        .create_dm_if_missing(community, &[&me], &me)
+        .await
+        .expect("workflow reuse");
+    assert_eq!(found.id, created_dm.id);
+    assert!(!created);
+    let (with_other, created) = db
+        .open_dm(community, &[&other], &me, false, ALLOW)
+        .await
+        .expect("open DM with someone else");
+    assert!(created);
+    assert_ne!(with_other.id, created_dm.id);
+
+    // Hiding it, then opening it again, shows it again.
+    db.hide_dm(community, created_dm.id, &me)
+        .await
+        .expect("hide");
+    assert!(db
+        .list_hidden_dms(community, &me)
+        .await
+        .expect("hidden DMs")
+        .contains(&created_dm.id));
+    let (reopened, created) = db
+        .open_dm(community, &[&me], &me, false, ALLOW)
+        .await
+        .expect("reopen hidden self DM");
+    assert_eq!(reopened.id, created_dm.id);
+    assert!(!created);
+    assert!(!db
+        .list_hidden_dms(community, &me)
+        .await
+        .expect("hidden DMs")
+        .contains(&created_dm.id));
+
+    // Each person has their own, and it lists with them as its only
+    // participant.
+    let (others_own, created) = db
+        .open_dm(community, &[&other], &other, false, ALLOW)
+        .await
+        .expect("open the other person's self DM");
+    assert!(created);
+    assert_ne!(others_own.id, created_dm.id);
+    let listed = list_dms_for_user(db.pool(), community, &me, 50, None)
+        .await
+        .expect("list DMs");
+    let mine = listed
+        .iter()
+        .find(|dm| dm.channel_id == created_dm.id)
+        .expect("self DM is listed");
+    assert_eq!(mine.participants.len(), 1);
+    assert_eq!(mine.participants[0].pubkey, me);
+    db.pool().close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn dm_still_needs_someone_to_message() {
+    let url = crate::test_support::database_url();
+    let db = Db::from_pool(PgPool::connect(&url).await.expect("database"));
+    let me = nostr::Keys::generate().public_key().to_bytes();
+    let other = nostr::Keys::generate().public_key().to_bytes();
+    let community = community_with_users(&db, &me, &[&me, &other]).await;
+
+    // No one named: not a DM with oneself.
+    assert!(matches!(
+        db.open_dm(community, &[], &me, false, ALLOW).await,
+        Err(DbError::InvalidData(_))
+    ));
+    // A lone participant must be the creator.
+    assert!(matches!(
+        db.create_dm_if_missing(community, &[&other], &me).await,
+        Err(DbError::InvalidData(_))
+    ));
+    assert!(matches!(
+        db.create_dm_if_missing(community, &[], &me).await,
+        Err(DbError::InvalidData(_))
+    ));
+    // A malformed pubkey is still refused.
+    assert!(matches!(
+        db.open_dm(community, &[&me[..31]], &me, false, ALLOW).await,
+        Err(DbError::InvalidData(_))
+    ));
+    db.pool().close().await;
+}
