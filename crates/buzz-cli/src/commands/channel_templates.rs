@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::error::CliError;
+use crate::validate::fold_name;
 
 /// Tauri bundle identifier for the production desktop app. `dirs::data_dir()`
 /// joined with this segment matches `app.path().app_data_dir()` exactly
@@ -98,11 +99,8 @@ fn load_templates(path: &Path) -> Result<Vec<ChannelTemplateRecord>, CliError> {
 /// (case-insensitive, exact match). Errors list available names if not found.
 pub fn find_template(path: &Path, name: &str) -> Result<ChannelTemplateRecord, CliError> {
     let templates = load_templates(path)?;
-    let needle = name.to_ascii_lowercase();
-    if let Some(t) = templates
-        .into_iter()
-        .find(|t| t.name.to_ascii_lowercase() == needle)
-    {
+    let needle = fold_name(name);
+    if let Some(t) = templates.into_iter().find(|t| fold_name(&t.name) == needle) {
         return Ok(t);
     }
     Err(CliError::NotFound(format!(
