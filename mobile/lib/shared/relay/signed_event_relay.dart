@@ -4,6 +4,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../diagnostics/diagnostic_reporter.dart';
 import 'nostr_models.dart';
+import 'relay_call_error.dart';
 import 'relay_closed_policy.dart';
 import 'relay_session.dart';
 import 'relay_socket.dart';
@@ -96,6 +97,9 @@ Future<NostrEvent> submitSignedEventOnce({
   // push tombstone; its reports must not name the active member.
   final reporter = SignerDiagnosticReporter(diagnostics, signer: event.pubkey);
   final result = Completer<NostrEvent>();
+  // Errors completed later, from a socket callback or timer, carry the stack
+  // of the caller, so an escaped error's report reaches app code.
+  final callSite = StackTrace.current;
   late final RelaySocket socket;
   socket = RelaySocket(
     wsUrl: wsUrl,
@@ -128,24 +132,70 @@ Future<NostrEvent> submitSignedEventOnce({
               operation: DiagnosticOperation.relayRejection,
             );
           }
-          result.completeError(Exception('Relay rejected event: $detail'));
+          result.completeError(_SignedEventRejection(detail), callSite);
         }
       }
     },
-    onConnected: () => socket.send(['EVENT', event.toJson()]),
+    onConnected: () {
+      if (!result.isCompleted) socket.send(['EVENT', event.toJson()]);
+    },
     onDisconnected: (error) {
-      if (!result.isCompleted) {
-        result.completeError(error ?? Exception('Relay disconnected'));
+      if (result.isCompleted) return;
+      // The socket's own authentication deadline is shorter than [timeout],
+      // so its plain timeout is typed here as this call's.
+      if (error is TimeoutException && error is! RelayCallError) {
+        result.completeError(
+          RelayTimeoutException(
+            RelayCall.publish,
+            error.message ?? 'Relay did not answer',
+            error.duration,
+          ),
+          callSite,
+        );
+        return;
       }
+      result.completeError(error ?? Exception('Relay disconnected'), callSite);
     },
   );
   socket.headers = headers;
   socket.diagnostics = reporter;
-  final resultFuture = result.future.timeout(timeout);
+  // The deadline covers connecting and authenticating too. Once it passes the
+  // event is never sent, and its timeout goes to the caller, never to the
+  // zone as an uncaught error.
+  final deadline = Timer(timeout, () {
+    if (result.isCompleted) return;
+    result.completeError(
+      RelayTimeoutException(
+        RelayCall.publish,
+        'Relay did not answer within $timeout',
+        timeout,
+      ),
+      callSite,
+    );
+  });
   try {
-    await socket.connect();
-    return await resultFuture;
+    // Whichever settles first: a failed connect, or the result (which the
+    // deadline settles if nothing else does). Future.any listens to both, so
+    // the other one's later error is not uncaught.
+    return await Future.any([
+      socket.connect().then((_) => result.future),
+      result.future,
+    ]);
   } finally {
+    deadline.cancel();
     await socket.disconnect();
   }
+}
+
+/// The relay answered a one-shot EVENT with OK false and [detail]. Its text
+/// names the refusal for callers; its reason class is the prefix of [detail].
+class _SignedEventRejection extends RelayEventRejectedException {
+  _SignedEventRejection(String detail)
+    : _reason = RelayReason.fromMessage(detail),
+      super('Relay rejected event: $detail');
+
+  final RelayReason _reason;
+
+  @override
+  RelayReason get reason => _reason;
 }

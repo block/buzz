@@ -351,8 +351,9 @@ On WebSocket upgrade:
    this registered connection before step 8; cancellation is terminal, so a
    cancelled connection MUST NOT be admitted.
 7. Check the deny set for `(iss, k)` and, if `verified.owner` is present, for
-   `(iss, verified.owner)`.  Either active entry (`now < until`) denies
-   `authorization_denied`.
+   `(iss, verified.owner)`.  Either entry denies `authorization_denied` when
+   it covers the assertion (see Deny scope); each key is checked
+   independently and either denial wins.
    [FI-TRACE-DENY-SET]
 8. Admit the connection only if it remains live and uncancelled.  The session's
    authority deadline is the minimum of all `authority_deadlines`; see Session
@@ -411,21 +412,68 @@ A disconnect call causes the relay to:
 
 1. Insert a **deny entry** keyed by `(iss, target_pubkey)` into the relay's
    in-memory deny set, with an absolute expiry of `until` (a Unix timestamp
-   carried in the signed command JWT; see Command JWT).  If an entry for
-   `(iss, target_pubkey)` already exists, the relay MUST retain
-   `max(existing_until, command.until)` — an accepted disconnect MUST NOT
-   shorten an active deny.  A past-`until` command still closes sessions but
-   MUST NOT clear or shorten an independently active entry.  Any subsequent
-   connection or admission attempt for that pubkey under the same issuer is
-   denied `authorization_denied` until `now >= until`.  If the deny set is at
+   carried in the signed command JWT; see Command JWT) and the command's scope
+   (see Deny scope).  If an entry for `(iss, target_pubkey)` already exists, the relay
+   MUST merge them under the Deny scope merge rule — an accepted disconnect
+   MUST NOT shorten an active deny.  A past-`until` command still performs its
+   scoped close but MUST NOT clear, shorten or strengthen an independently
+   active entry.  Any subsequent connection or admission attempt for that
+   pubkey under the same issuer whose assertion the entry covers is denied
+   `authorization_denied` until `now >= until`.  If the deny set is at
    capacity and a new entry cannot be inserted, the relay MUST reject the command
    `503`; no sessions are closed and no replay state is consumed.
 2. Close all live WebSocket connections registered under the command's issuer
    whose proven `k` equals the target pubkey or whose recorded owner equals
-   the target pubkey, whether or not admission has completed, synchronously.
+   the target pubkey, whether or not admission has completed, synchronously,
+   limited to the close scope (see Deny scope).
    Disconnect cancellation is terminal: a cancelled in-progress connection
    MUST NOT be subsequently admitted.  Connections
    registered under another issuer are not affected.
+
+### Deny scope
+
+A command MAY carry `revoke_through` (C).  Without C, its deny entry covers
+the whole key.  With C, it covers only assertions whose verified signed `iat`
+is at or before C.
+
+- **Admission.** An entry `(iss, key, until, C?)` denies an otherwise-valid
+  assertion exactly when `now < until` and either C is absent or the
+  assertion's verified signed `iat <= C`.  The `iat` is the verified claim,
+  never optional profile evidence.  This holds for WebSocket and HTTP
+  admission, for `(iss, k)` and `(iss, verified.owner)` alike.  Every other
+  authorization check still applies.
+- **Close scope.** A command with C closes only matching sessions whose
+  admitting assertion's verified `iat <= C`, including in-progress ones; a
+  command without C closes all matching sessions.  The close scope is the
+  union of the command's scope and the scope of any active entry for the
+  same key after merging, so a stronger active denial also applies.  A
+  session registers its verified `iat` before the post-registration deny
+  check, so a session straddling a disconnect is caught by the close scan or
+  the deny check.  A past-`until` command still performs its scoped close but
+  MUST NOT create, shorten or strengthen an active entry.
+- **Comparison.** `iat <= C` compares the full verified instant, including
+  any fractional part, against the integral C.
+- **Merging.** Merging an incoming entry into an active one takes the later
+  `until`; a whole-key scope beats a cutoff; two cutoffs merge to the larger
+  C.  An expired entry contributes nothing: an active entry ignores an
+  expired incoming one, and an incoming entry replaces an expired one.
+  Activity is judged at the instant the merge is applied.  These rules hold
+  identically for local state, any shared or durable store, inter-process
+  propagation and restore.
+- **Records.** A stored or propagated entry without C means whole-key.
+  Unreadable revocation state MUST NOT be treated as allowed.
+- **Issuer duty.** An issuer that sends C MUST ensure that every still-valid
+  assertion it released under the revoked authority has `iat <= C`.  While
+  a cutoff is active, it MUST NOT release a recovery assertion for that key
+  whose `iat <= C`.  It MUST record the revocation, C and the queued
+  delivery atomically, and retries MUST resend the recorded policy rather
+  than a new one.
+
+Oracle: with an active entry `(iss, k, until, C)`, an assertion for `k`
+signed with `iat = C` is denied and closed by every disconnect for `k`, an
+assertion signed with `iat = C + 0.5` is admitted and survives every
+redelivery of that command, and a whole-key entry for its owner still denies
+it.  [FI-TRACE-DENY-SET]
 
 The relay holds the deny set in memory and MAY also keep it in shared storage
 that outlives a relay process, with each entry expiring at its `until`.  A
@@ -504,6 +552,7 @@ The command JWT MUST carry the following claims:
 | `cmd` | Exactly `"disconnect"` (literal string).  Operation selector. |
 | `target_pubkey` | Lowercase hexadecimal encoding of the target 32-byte Nostr public key — the same encoding required for the assertion `nostr_pubkey` claim. |
 | `until` | Unix timestamp (NumericDate) at which the deny entry expires.  MUST NOT exceed `now + skew + maximum_assertion_age` for this issuer policy.  The relay validates this ceiling; a value that exceeds it rejects `400`. |
+| `revoke_through` | OPTIONAL.  Integral NumericDate C limiting the deny to assertions with `iat <= C` (see Deny scope).  Absent means the whole key.  A present value that is `null`, nonnumeric, fractional or unrepresentable rejects `evidence_rejected` before any state changes. |
 
 The `maximum_command_age` policy knob is a required positive finite
 configuration per authorized issuer, with a normative upper bound of
@@ -536,6 +585,14 @@ VerifyCommandJwt(token, request_method, request_path, request_body_pubkey):
   assert claims.cmd    == "disconnect"   or DENY(evidence_rejected)
   target_k := ParseHexKey(claims.target_pubkey) or DENY(evidence_rejected)
   until := claims.until or DENY(evidence_rejected)
+  // Optional cutoff: absent → whole key.  Present but null, nonnumeric,
+  // fractional or unrepresentable → deny before any state changes.
+  if "revoke_through" in claims:
+      assert IsIntegralRepresentableNumericDate(claims.revoke_through)
+          or DENY(evidence_rejected)
+      scope := IssuedThrough(claims.revoke_through)
+  else:
+      scope := WholeKey
 
   // 4. Validate until ceiling
   deny_ceiling := now + policy.skew + policy.maximum_assertion_age
@@ -560,19 +617,21 @@ VerifyCommandJwt(token, request_method, request_path, request_body_pubkey):
   // capacity failure, making the 503 contract unimplementable.  Capacity
   // is checked against the per-issuer bound for claims.iss; a different
   // issuer's capacity exhaustion does not produce a 503 here.
-  // On same-key collision: retain max(existing_until, until) — never shorten
-  // an active deny.  A past-until command merges as max(existing, past) which
-  // preserves any active entry; a fresh entry with a past-until inserts with
-  // an already-expired value (immediately inactive for future admissions).
+  // On same-key collision: merge under the Deny scope merge rule, judging
+  // activity at the moment of this mutation — never shorten an active deny.
+  // A past-until command leaves any active entry unchanged; a fresh entry
+  // with a past-until inserts an already-expired value (immediately inactive
+  // for future admissions).
   effective_expiry := min(claims.exp, claims.iat + policy.maximum_command_age)
   AtomicReserveJtiAndDenyEntry(
       iss=claims.iss, jti=claims.jti, effective_expiry=effective_expiry,
-      target_pubkey=target_k, until=until
+      target_pubkey=target_k, until=until, scope=scope
   ) or DENY(authorization_denied)  // replay: jti already reserved
     or REJECT(503)                 // capacity: deny set full; neither mutation applied
     or REJECT(authorization_unavailable) // shared storage outcome unknown: jti and deny entry may be recorded; no sessions closed
 
-  return CommandResult(target_pubkey=target_k, caller=(claims.iss, claims.sub))
+  return CommandResult(target_pubkey=target_k, caller=(claims.iss, claims.sub),
+                       until=until, scope=scope)
 ```
 
 Any failure at any step is fail-closed: no sessions are closed and the relay
@@ -597,7 +656,8 @@ inserts the deny entry — both or neither.  A capacity failure at that step rej
 retry the same signed command.  A relay that keeps the deny set in shared storage and cannot learn whether its write applied MUST reject `503` `authorization_unavailable` and close no sessions. The `jti` and deny entry may already be recorded, so the caller retries with a freshly signed command (new `jti`), not the same one.  On success, the relay MUST close every live connection
 registered under the command's issuer (`claims.iss`) whose proven key equals
 `CommandResult.target_pubkey` or whose recorded owner equals
-`CommandResult.target_pubkey`, whether or not admission has completed.
+`CommandResult.target_pubkey`, and whose admitting assertion falls in the
+close scope (see Deny scope), whether or not admission has completed.
 Disconnect cancellation is terminal: a cancelled in-progress connection MUST NOT
 be subsequently admitted.  This close scan matches the deny
 entry's `target_pubkey` against each connection's proven key and recorded
@@ -606,7 +666,7 @@ another issuer are not affected.  The `until` expiry is taken exclusively from
 the signed command JWT claim; the request body carries no `until` field.  An
 unknown or unprovable pubkey is not an error; the relay responds `200`
 with `{"disconnected": true}`.  An `until` value in the past is not an error;
-sessions are closed.  Absent an active same-key deny entry the past-`until`
+sessions in the close scope are closed.  Absent an active same-key deny entry the past-`until`
 creates no future denial; if an active entry already exists it remains unchanged
 under the merge rule.
 
@@ -826,8 +886,9 @@ On each protected HTTP request:
 5. Assert `verified.asserted_key == k`; mismatch → deny `authorization_denied`.
    [FI-TRACE-ASSERTION-KEY-MISMATCH]
 6. Check the deny set for `(iss, k)` and, if `verified.owner` is present, for
-   `(iss, verified.owner)`.  Either active entry (`now < until`) denies
-   `authorization_denied`.
+   `(iss, verified.owner)`.  Either entry denies `authorization_denied` when
+   it covers the assertion (see Deny scope); each key is checked
+   independently and either denial wins.
    [FI-TRACE-DENY-SET]
 7. Admit the request.
 
@@ -958,8 +1019,8 @@ deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
 | `FI-TRACE-JWKS-REMOVE` | Connections verified under a removed key deny on next revalidation or reconnect. |
 | `FI-TRACE-DEPENDENCY-FAIL-CLOSED` | An unreadable JWKS snapshot denies `authorization_unavailable`; no degraded Nostr-only access. |
 | `FI-TRACE-LEASE-BOUND` | A session closes at its earliest deadline; equality at any deadline is expired. |
-| `FI-TRACE-DENY-SET` | A pubkey in the deny set is denied `authorization_denied` on admission until `now >= until`; an expired or absent entry does not deny; a past-`until` command closes sessions — absent an active same-key entry it creates no future denial, while an active entry remains unchanged under the merge rule; a deny-set-full command is rejected `503` without closing sessions and without removing any existing entry; capacity is evaluated per issuer — one issuer's capacity exhaustion MUST NOT reject another issuer's command; a connection that passes the deny-set check before a concurrent deny-entry insertion but completes admission after MUST still be terminated (the session's proven `k` and admitting issuer are registered before the deny-set check, ensuring the close scan catches it); a registered-but-not-admitted connection caught by the close scan MUST be cancelled terminally and MUST NOT later be admitted; a disconnect command from one issuer MUST NOT close a same-key connection registered under a different issuer, whether or not admission has completed; two overlapping commands for the same `(iss, pubkey)` in either delivery order result in `until = max(until_A, until_B)` — delivery order does not shorten the longer deny; a past-`until` command arriving over an active entry leaves the active entry's `until` unchanged; a successful disconnect responds `{"disconnected": true}` regardless of how many sessions were closed; the deny entry applies across all communities served by the relay under that issuer. |
-| `FI-TRACE-HTTP-INGRESS` | A protected HTTP request with both valid headers and matching pubkeys is admitted; absent, mismatched, or invalid assertion or NIP-98 event denies; a request presenting only one of the two denies; an active deny-set entry denies; a route that cannot be classified as exempt is treated as protected; repeated, comma-combined, wrong-scheme, or alternative-credential `Authorization` fields deny `evidence_rejected`; a missing `Authorization` field denies `missing_evidence`; an authorization-relevant body without exactly one matching `payload` tag denies; the NIP-FI administrative API is not a protected surface.  For kind-24242 (Blossom) proofs on media routes: a `t=upload` proof with valid `x`, `server`, `expiration`, and freshness is admitted on `PUT /upload`; a `t=get` proof with valid `server`, `expiration`, and freshness is admitted on `GET\|HEAD /media/{hash…}`; a kind-24242 proof on any other route denies; an upload proof with absent or mismatched `server` tag denies; a read proof with absent or mismatched `server` tag denies; a proof with a duplicate, missing, or out-of-range `expiration` tag denies; a proof dated more than 120 seconds in the future denies; a proof older than 120 seconds denies; key mismatch between assertion `nostr_pubkey` and the kind-24242 event pubkey denies; an active deny-set entry denies. |
+| `FI-TRACE-DENY-SET` | A pubkey in the deny set is denied `authorization_denied` on admission until `now >= until` when the entry covers the assertion — a whole-key entry covers every assertion, a cutoff entry only those with verified `iat <= C`, so `iat = C` denies and `iat = C + 0.5` admits; an expired or absent entry does not deny; a disconnect with C closes only sessions with `iat <= C`, and a session with `iat > C` survives every redelivery unless a stronger active merged entry widens the close scope (see Deny scope); a whole-key entry beats a same-deadline cutoff and the later of two cutoffs wins, in either order; an entry that expires before a merge is applied contributes nothing to it; a past-`until` command performs its scoped close — absent an active same-key entry it creates no future denial, while an active entry remains unchanged under the merge rule; a deny-set-full command is rejected `503` without closing sessions and without removing any existing entry; capacity is evaluated per issuer — one issuer's capacity exhaustion MUST NOT reject another issuer's command; a connection within the effective close scope that passes the deny-set check before a concurrent deny-entry insertion but completes admission after MUST still be terminated (the session's proven `k` and admitting issuer are registered before the deny-set check, ensuring the close scan catches it); a registered-but-not-admitted connection caught by the close scan MUST be cancelled terminally and MUST NOT later be admitted; a disconnect command from one issuer MUST NOT close a same-key connection registered under a different issuer, whether or not admission has completed; two overlapping commands for the same `(iss, pubkey)` in either delivery order result in `until = max(until_A, until_B)` — delivery order does not shorten the longer deny; a past-`until` command arriving over an active entry leaves the active entry's `until` unchanged; a successful disconnect responds `{"disconnected": true}` regardless of how many sessions were closed; the deny entry applies across all communities served by the relay under that issuer. |
+| `FI-TRACE-HTTP-INGRESS` | A protected HTTP request with both valid headers and matching pubkeys is admitted; absent, mismatched, or invalid assertion or NIP-98 event denies; a request presenting only one of the two denies; an active deny-set entry that covers the assertion denies; a route that cannot be classified as exempt is treated as protected; repeated, comma-combined, wrong-scheme, or alternative-credential `Authorization` fields deny `evidence_rejected`; a missing `Authorization` field denies `missing_evidence`; an authorization-relevant body without exactly one matching `payload` tag denies; the NIP-FI administrative API is not a protected surface.  For kind-24242 (Blossom) proofs on media routes: a `t=upload` proof with valid `x`, `server`, `expiration`, and freshness is admitted on `PUT /upload`; a `t=get` proof with valid `server`, `expiration`, and freshness is admitted on `GET\|HEAD /media/{hash…}`; a kind-24242 proof on any other route denies; an upload proof with absent or mismatched `server` tag denies; a read proof with absent or mismatched `server` tag denies; a proof with a duplicate, missing, or out-of-range `expiration` tag denies; a proof dated more than 120 seconds in the future denies; a proof older than 120 seconds denies; key mismatch between assertion `nostr_pubkey` and the kind-24242 event pubkey denies; an active deny-set entry that covers the assertion denies. |
 | `FI-TRACE-DENIAL-ORACLE` | Each public-class row produces its exact fixed bytes; all private-state rows compare byte-identical. |
 | `FI-TRACE-DISCOVERY-PRIVATE` | Complete discovery bytes do not expose issuer, audience, or deployment-private state. |
 | `FI-TRACE-CROSS-DOMAIN-COLLISION` | Equal `sub` values under different `iss` values remain distinct identities. |
@@ -989,15 +1050,18 @@ assertions.  If the issuer continues issuing assertions, access continues.
 
 For the deny-until-TTL disconnect model (issuer issues a successful disconnect
 call with an `until` timestamp), the relay inserts a deny entry for the target
-pubkey with expiry `until` and then closes all matching connections synchronously.
+pubkey with expiry `until` and the command's scope, then closes all matching
+connections synchronously.
 Here, matching means connections registered under that issuer whose proven `k`
 equals that target pubkey or whose recorded owner equals the target pubkey,
-whether or not admission has completed; disconnect
+and whose admitting assertion falls in the close scope, whether or not
+admission has completed; disconnect
 cancellation is terminal, so a cancelled in-progress connection MUST NOT be
 subsequently admitted.  Connections registered under another issuer are not
 affected.  Any subsequent admission attempt for that pubkey under the same issuer
-is denied `authorization_denied`
-until `now >= until`.  The `until` ceiling enforced by the relay is
+whose assertion the entry covers is denied `authorization_denied`
+until `now >= until`.  A cutoff entry lets assertions issued after C in at
+once; its security rests on the issuer duty in Deny scope.  The `until` ceiling enforced by the relay is
 `now + skew + maximum_assertion_age`; this limits how long a deny entry may last —
 it does not ensure denial outlasts all live assertions.  A short or past
 `until` is valid, and if the issuer continues issuing after the entry
