@@ -82,6 +82,9 @@ import os.log
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
     engineBridge.pluginRegistry.registrar(forPlugin: "BuzzToastLayer")?.register(
       ToastLayerFactory(), withId: "buzz/toast_layer")
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "ActiveDaysWheel") {
+      registrar.register(ActiveDaysWheelFactory(messenger: registrar.messenger()), withId: "buzz/active_days_wheel")
+    }
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "BuzzIosMediaCarousel") {
       registrar.register(IosMediaCarouselFactory(messenger: registrar.messenger()), withId: "buzz/ios_media_carousel")
     }

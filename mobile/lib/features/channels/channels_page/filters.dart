@@ -1,5 +1,6 @@
 export 'messages_display.dart';
 import 'messages_display.dart';
+import 'active_days_picker.dart';
 import '../channel_sort/channel_sort_provider.dart';
 import '../channel_sections/section_reorder_sheet.dart';
 import '../../../shared/widgets/app_list.dart';
@@ -85,29 +86,60 @@ Future<String?> showSectionViewSheet(
       : BottomUpPageRoute.retainControlsForSheet(presentingRoute);
   ModalRoute<dynamic>? sheetRoute;
   String? action;
+  MessagesDisplay? draft;
+  final container = ProviderScope.containerOf(context, listen: false);
+  final scope = container.read(mobileSectionOrderKeyProvider);
+  final hostRoute = ModalRoute.of(context);
+  bool canReopen() =>
+      context.mounted &&
+      hostRoute?.isCurrent != false &&
+      scope == container.read(mobileSectionOrderKeyProvider);
   try {
-    action = await showBuzzModalBottomSheet<String>(
-      context: context,
-      nativeIosBarrier: presentingRoute != null,
-      showCloseButton: false,
-      showDragHandle: false,
-      isScrollControlled: true,
-      isDismissible: true,
-      enableDrag: false,
-      builder: (sheetContext) {
-        sheetRoute = ModalRoute.of(sheetContext);
-        return _SectionViewSheet(
-          centralized:
-              group == null || context.widget is MessagesSectionOptions,
-          canReorder: orderScope != null,
-          title: title,
-          group: group,
-          initialSort: sortMode,
-          onSort: onSort,
-          custom: custom,
+    do {
+      action = await showBuzzModalBottomSheet<String>(
+        context: context,
+        nativeIosBarrier: presentingRoute != null,
+        showCloseButton: false,
+        showDragHandle: false,
+        isScrollControlled: true,
+        isDismissible: true,
+        enableDrag: false,
+        builder: (sheetContext) {
+          sheetRoute = ModalRoute.of(sheetContext);
+          return _SectionViewSheet(
+            centralized:
+                group == null || context.widget is MessagesSectionOptions,
+            canReorder: orderScope != null,
+            title: title,
+            group: group,
+            initialSort: sortMode,
+            onSort: onSort,
+            custom: custom,
+            draft: draft,
+            onCustom: (value) {
+              draft = value;
+              Navigator.pop(sheetContext, 'customDays');
+            },
+          );
+        },
+      );
+      if (action == 'customDays') {
+        await sheetRoute?.completed;
+        if (!canReopen() || !context.mounted) return null;
+        final previous = draft!;
+        final picked = await showActiveDaysPicker(
+          context,
+          previous.days ?? defaultActiveWindowSeconds ~/ 86400,
         );
-      },
-    );
+        if (!canReopen() || !context.mounted) return null;
+        draft = MessagesDisplay(
+          sort: previous.sort,
+          mode: previous.mode,
+          count: previous.count,
+          days: picked ?? previous.days,
+        );
+      }
+    } while (action == 'customDays');
     // Keep the same Home header mounted through both reverse transitions.
     final opensEditor = action == 'reorder' || action == 'editSections';
     if (release != null || opensEditor) await sheetRoute?.completed;
@@ -134,6 +166,8 @@ class _SectionViewSheet extends HookConsumerWidget {
   final ChannelSortMode? initialSort;
   final ValueChanged<ChannelSortMode>? onSort;
   final bool custom;
+  final MessagesDisplay? draft;
+  final ValueChanged<MessagesDisplay> onCustom;
 
   const _SectionViewSheet({
     required this.centralized,
@@ -143,6 +177,8 @@ class _SectionViewSheet extends HookConsumerWidget {
     required this.initialSort,
     required this.onSort,
     required this.custom,
+    required this.draft,
+    required this.onCustom,
   });
 
   @override
@@ -171,24 +207,36 @@ class _SectionViewSheet extends HookConsumerWidget {
       channelSectionsProvider.select((state) => state.editable),
     );
     final originalManager = useRef(manager);
-    final sort = useState(global ? display.sort : initialSort);
+    final sort = useState(
+      draft != null
+          ? draft!.sort
+          : global
+          ? display.sort
+          : initialSort,
+    );
     final mode = useState(
-      global
+      draft != null
+          ? draft!.mode
+          : global
           ? display.mode
           : manager?.store.modeFor(group) ?? ChannelFilterMode.all,
     );
     final count = useState(
-      global
+      draft != null
+          ? draft!.count
+          : global
           ? display.count
           : manager?.store.countFor(group) ?? sectionCounts.first,
     );
     final days = useState(
-      global
+      draft != null
+          ? draft!.days
+          : global
           ? display.days
           : (manager?.store.windowFor(group) ?? defaultActiveWindowSeconds) ~/
                 86400,
     );
-    final filterDirty = useState(false);
+    final filterDirty = useState(draft != null);
     final saving = useState(false);
     final failed = useState(false);
     // A confirmed initial load may arrive while the sheet is open. Preserve edits.
@@ -413,16 +461,29 @@ class _SectionViewSheet extends HookConsumerWidget {
                                   {
                                     for (final day in {
                                       1,
+                                      3,
                                       7,
                                       30,
                                       90,
                                       if (days.value != null) days.value!,
                                     })
                                       day: '$day ${day == 1 ? 'day' : 'days'}',
+                                    0: 'Custom…',
                                   },
                                   days.value,
                                   writable
                                       ? (value) {
+                                          if (value == 0) {
+                                            onCustom(
+                                              MessagesDisplay(
+                                                sort: sort.value,
+                                                mode: mode.value,
+                                                count: count.value,
+                                                days: days.value,
+                                              ),
+                                            );
+                                            return;
+                                          }
                                           filterDirty.value = true;
                                           days.value = value;
                                         }

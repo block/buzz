@@ -22,6 +22,7 @@
 		DAAD00000000000000000001 /* QuickSend.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAAD00000000000000000002 /* QuickSend.swift */; };
 		C0AF00000000000000000001 /* NativeConfirmationDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AF00000000000000000002 /* NativeConfirmationDialog.swift */; };
 		C0AF00000000000000000021 /* NativePresenceMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AF00000000000000000022 /* NativePresenceMenu.swift */; };
+		A4DC00000000000000000021 /* ActiveDaysWheel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4DC00000000000000000022 /* ActiveDaysWheel.swift */; };
 		C0AF00000000000000000011 /* NativeAddMembersSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AF00000000000000000012 /* NativeAddMembersSheet.swift */; };
 		D0AF00000000000000000011 /* NativeChannelActionsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0AF00000000000000000012 /* NativeChannelActionsSheet.swift */; };
 		C0AF00000000000000000071 /* NativeCreateChannelSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AF00000000000000000072 /* NativeCreateChannelSheet.swift */; };
@@ -133,6 +134,7 @@
 		DAAB00000000000000000002 /* NativeTabler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTabler.swift; sourceTree = "<group>"; };
 		C0AF00000000000000000002 /* NativeConfirmationDialog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeConfirmationDialog.swift; sourceTree = "<group>"; };
 		C0AF00000000000000000022 /* NativePresenceMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePresenceMenu.swift; sourceTree = "<group>"; };
+		A4DC00000000000000000022 /* ActiveDaysWheel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActiveDaysWheel.swift; sourceTree = "<group>"; };
 		C0AF00000000000000000012 /* NativeAddMembersSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeAddMembersSheet.swift; sourceTree = "<group>"; };
 		D0AF00000000000000000012 /* NativeChannelActionsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeChannelActionsSheet.swift; sourceTree = "<group>"; };
 		C0AF00000000000000000072 /* NativeCreateChannelSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCreateChannelSheet.swift; sourceTree = "<group>"; };
@@ -367,6 +369,7 @@
 				4A71C0182F40C00100A17E01 /* HuddleAudioEngine.swift */,
 				C0AF00000000000000000002 /* NativeConfirmationDialog.swift */,
 				C0AF00000000000000000022 /* NativePresenceMenu.swift */,
+				A4DC00000000000000000022 /* ActiveDaysWheel.swift */,
 				C0AF00000000000000000012 /* NativeAddMembersSheet.swift */,
 				D0AF00000000000000000012 /* NativeChannelActionsSheet.swift */,
 				C0AF00000000000000000072 /* NativeCreateChannelSheet.swift */,
@@ -775,6 +778,7 @@
 				4A71C0172F40C00100A17E01 /* HuddleAudioEngine.swift in Sources */,
 				C0AF00000000000000000001 /* NativeConfirmationDialog.swift in Sources */,
 				C0AF00000000000000000021 /* NativePresenceMenu.swift in Sources */,
+				A4DC00000000000000000021 /* ActiveDaysWheel.swift in Sources */,
 				C0AF00000000000000000011 /* NativeAddMembersSheet.swift in Sources */,
 				D0AF00000000000000000011 /* NativeChannelActionsSheet.swift in Sources */,
 				C0AF00000000000000000071 /* NativeCreateChannelSheet.swift in Sources */,

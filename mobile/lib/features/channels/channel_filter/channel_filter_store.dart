@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
 
+const maxActiveWindowDays = 365;
 const defaultActiveWindowSeconds = 30 * 86400;
 
 const sectionCounts = [5, 10, 15, 20, 0]; // Zero means all matching chats.
@@ -10,7 +11,7 @@ enum ChannelFilterMode { all, unreads, active }
 bool validActiveWindow(Object? value) =>
     value is int &&
     value >= 86400 &&
-    value <= 365 * 86400 &&
+    value <= maxActiveWindowDays * 86400 &&
     value % 86400 == 0;
 
 /// Retains the entire encrypted record. Metadata is authoritative, including
