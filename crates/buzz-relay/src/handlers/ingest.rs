@@ -2634,8 +2634,8 @@ async fn ingest_event_inner(
         return Err(IngestError::Rejected("restricted: relay-only kind".into()));
     }
 
-    // NIP-WH deliveries come only from a configured ingress gateway. Intake is
-    // not enabled yet, so no signer is one.
+    // NIP-WH deliveries are queued by `webhook_delivery::intake`, which the HTTP
+    // bridge calls instead of this function. Nothing else may store one.
     if kind_u32 == buzz_core::kind::KIND_WEBHOOK_DELIVERY {
         return Err(IngestError::Rejected(
             "restricted: not an authorized webhook ingress".into(),

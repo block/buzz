@@ -98,6 +98,8 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i tables/public/push_wake_outbox.sql
 \i tables/public/push_match_queue.sql
 \i tables/public/search_outbox.sql
+\i tables/public/webhook_deliveries.sql
+\i tables/public/webhook_records.sql
 \i tables/public/push_gateway_challenges.sql
 \i tables/public/push_gateway_installations.sql
 \i tables/public/push_gateway_delegations.sql

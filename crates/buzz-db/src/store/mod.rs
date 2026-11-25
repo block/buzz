@@ -96,6 +96,8 @@ pub mod thread;
 pub mod thread_window;
 /// User profile persistence.
 pub mod user;
+/// NIP-WH webhook delivery queue.
+pub mod webhook;
 /// Workflow, run, and approval persistence.
 pub mod workflow;
 

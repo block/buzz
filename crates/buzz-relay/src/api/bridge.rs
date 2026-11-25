@@ -1488,6 +1488,20 @@ async fn submit_event_authed(
     }
     let is_typing = kind_u32 == buzz_core::kind::KIND_TYPING_INDICATOR;
 
+    // NIP-WH deliveries come from a configured ingress gateway, not a
+    // community member: its key stands in for the membership check.
+    if kind_u32 == buzz_core::kind::KIND_WEBHOOK_DELIVERY {
+        use crate::handlers::webhook_delivery;
+        let authorized = caller.admit(webhook_delivery::authorize(state, &pubkey), |_| {
+            crate::access::AuthResult::Denied(crate::access::AuthReason::NotWebhookIngress)
+        });
+        let result = match authorized {
+            Ok(()) => webhook_delivery::intake(state, tenant, event, &pubkey).await,
+            Err(refused) => Err(refused),
+        };
+        return ingest_outcome(kind_u32, result);
+    }
+
     // Enforce relay membership (with NIP-OA fallback via x-auth-tag header).
     let auth_tag = super::relay_members::extract_auth_tag_header(headers);
     let membership = super::relay_members::enforce_relay_membership(
@@ -1555,6 +1569,14 @@ async fn submit_event_authed(
         other => other.map_err(IngestError::into_legacy),
     };
 
+    ingest_outcome(kind_u32, result)
+}
+
+/// The response and log fields for an ingest result.
+fn ingest_outcome(
+    kind_u32: u32,
+    result: Result<crate::handlers::ingest::IngestResult, IngestError>,
+) -> SubmitOutcome {
     match result {
         Ok(result) => {
             let response = Json(serde_json::json!({

@@ -135,6 +135,30 @@ The gateway signs a delivery once and sends the same event on every retry, so it
 
 A relay MUST accept a delivery only over HTTP, and only from a gateway key its operator configured. The relay keeps no integration records: it trusts that gateway to post each delivery only to the relay host of its integration's community. A delivery reaches only subscriptions of that community that name its integration. It MUST refuse one over WebSocket, where the ephemeral path would broadcast it, and MUST NOT serve a delivery to any client. Other ephemeral-range events are unaffected.
 
+### Intake
+
+The gateway key need not be a member of the community; it replaces the membership check for this kind only. The event's pubkey MUST equal the NIP-98 signer. The relay queues an accepted delivery and never stores it as an event.
+
+A gateway buffers deliveries while a relay is unreachable, so a delivery's `created_at` may be older than the general ±900 s window. A relay accepts one up to a configured age (Buzz: `BUZZ_WEBHOOK_DELIVERY_MAX_AGE_SECS`, default 72 hours) and at most 900 s in the future.
+
+The tag values are checked as follows:
+
+- `integration` is a canonical lowercase UUID;
+- `t` is `provider:` followed by lowercase letters, digits, `_` or `-`, at most 64 bytes;
+- `delivery` is 1 to 256 bytes.
+
+Content is at most 256 KiB. It is a `DeliveryContent` with `version` 1, a non-empty `type`, a `delivery_id` equal to the `delivery` tag, and a `payload`. Other content fields are allowed.
+
+| Case | HTTP | `message` | Gateway action |
+|---|---|---|---|
+| Queued | 200 | `""` | Done |
+| Same event already queued | 200 | `duplicate: already have this event` | Done |
+| Signer is not a configured gateway key | 403 | `restricted: not an authorized webhook ingress` | Stop; alert |
+| Event pubkey differs from the NIP-98 signer | 403 | `invalid: event pubkey does not match authenticated identity` | Stop; alert |
+| Bad tags, content or size, or too old | 400 | `invalid: <reason>` | Dead-letter |
+| Community is being deleted | 400 | `restricted: community writes are fenced` | Dead-letter |
+| Rate limited, or relay or database unavailable | 429 / 5xx | — | Retry the same event |
+
 ## Records
 
 When a subscription matches a delivery, the relay publishes one record to the subscription's channel:
@@ -181,3 +205,7 @@ Add `"#t": ["subscription:<d>"]` for one subscription.
 | `integration` tags on a subscription revision | exactly 1, except on delete |
 | Expression size | 4096 bytes |
 | Expression depth | 64 levels |
+| Delivery content | 256 KiB |
+| Delivery age | relay-configured (Buzz default 72 hours); at most 900 s in the future |
+| `delivery` tag | 1 to 256 bytes |
+| Provider name | 64 bytes |
