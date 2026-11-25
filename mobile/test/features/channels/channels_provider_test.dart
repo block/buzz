@@ -3118,6 +3118,23 @@ void main() {
       at: unchecked.createdAt,
     ));
 
+    // A newer post in the gap replaces the deleted one, so the channel stays
+    // known.
+    final gone3 = message('gone3', now - 4);
+    session.emit(gone3);
+    await _waitUntil(
+      () => notifier.activityFor(_channelA).at == gone3.createdAt,
+    );
+    final after = message('after', now - 3);
+    session.recentMessages = [
+      old,
+      unchecked,
+      after,
+      deletionOf(gone3, at: now - 3),
+    ];
+    await reconnect();
+    expect(notifier.activityFor(_channelA), (known: true, at: after.createdAt));
+
     // A channel no Active section shows skips its gap read, and reads as
     // unknown until a catch-up while it is shown.
     shown.close();
