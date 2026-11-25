@@ -247,6 +247,11 @@ class ChannelSortStorage {
   }
 
   /// The last unified sort head, so a cold start sorts as desktop does.
+  ///
+  /// Builds before [_workspaceCacheVersion] wrote no version, and their
+  /// decoder dropped desktop's null (A–Z) registers. Such a cache keeps its
+  /// store, so legacy edits stay locked, but loses its cursor, so the startup
+  /// fetch decodes the same signed head again.
   ({ChannelSortStore store, int createdAt, String eventId})? readWorkspace(
     String pubkey,
     String relayUrl,
@@ -254,15 +259,17 @@ class ChannelSortStorage {
     final raw = _prefs.getString(_workspaceKey(pubkey, relayUrl));
     if (raw == null) return null;
     try {
-      if (jsonDecode(raw) case {
+      final cache = jsonDecode(raw);
+      if (cache case {
         'store': final Map<String, dynamic> store,
         'createdAt': final int createdAt,
         'eventId': final String eventId,
       }) {
+        final current = cache['cacheVersion'] == _workspaceCacheVersion;
         return (
           store: ChannelSortStore.fromJson(store),
-          createdAt: createdAt,
-          eventId: eventId,
+          createdAt: current ? createdAt : 0,
+          eventId: current ? eventId : '',
         );
       }
     } on FormatException {
@@ -281,12 +288,17 @@ class ChannelSortStorage {
     _prefs.setString(
       _workspaceKey(pubkey, relayUrl),
       jsonEncode({
+        'cacheVersion': _workspaceCacheVersion,
         'store': store.toJson(),
         'createdAt': createdAt,
         'eventId': eventId,
       }),
     );
   }
+
+  /// Bump when the head decoder changes what it keeps, so caches written by
+  /// the old decoder are rebuilt from the relay head.
+  static const _workspaceCacheVersion = 2;
 
   String _workspaceKey(String pubkey, String relayUrl) =>
       '${channelSortKey(pubkey, relayUrl)}:workspace';
