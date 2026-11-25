@@ -139,6 +139,17 @@ pub(super) struct Counted {
 pub(super) struct Decision {
     pub verdict: Result<(), Vec<Denial>>,
     pub counted: BTreeMap<String, Counted>,
+    /// The governance heads in force (`None`: the change consults none).
+    pub heads: Option<Heads>,
+}
+
+/// The governance documents a decision read, by head id (`None`: no head).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Heads {
+    pub floor: Option<nostr::EventId>,
+    pub trusted: Option<nostr::EventId>,
+    pub labels: Option<nostr::EventId>,
+    pub rules: Option<nostr::EventId>,
 }
 
 /// A push's verdict: the repository's legacy protections AND governance.
@@ -184,6 +195,7 @@ pub(super) async fn push(
     Ok(Decision {
         verdict,
         counted: governed.counted,
+        heads: governed.heads,
     })
 }
 
@@ -293,7 +305,9 @@ fn assemble(
             is_branch: u.ref_name.starts_with("refs/heads/"),
             old: ids.oid(&u.old_oid),
             // The swap is conditioned on the manifest this push was built
-            // on, so the tip it replaces is the tip in force.
+            // on (`git_land::swap`'s compare-and-set), so the tip it
+            // replaces is the tip in force: `current` is `old` by
+            // construction.
             current: ids.oid(&u.old_oid),
             new: ids.oid(&u.new_oid),
             fast_forward: u.kind == UpdateKind::FastForward,
@@ -409,7 +423,17 @@ fn assemble(
             denied
         })
     };
-    Ok(Decision { verdict, counted })
+    let heads = Some(Heads {
+        floor: policy.floor.head,
+        trusted: policy.trusted.head,
+        labels: policy.labels.head,
+        rules: policy.rules.head,
+    });
+    Ok(Decision {
+        verdict,
+        counted,
+        heads,
+    })
 }
 
 /// The gate's view of a key from the facts read under the land's locks.

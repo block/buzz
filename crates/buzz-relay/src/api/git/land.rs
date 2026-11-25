@@ -119,6 +119,7 @@ pub(super) async fn land(
         .await
         .map_err(unavailable)?;
     let mut counted = BTreeMap::new();
+    let (mut heads, mut principal) = (None, None);
     let (verdict, role, version) = match judge(state, &mut tx, &change).await? {
         Judged::Refused(reason) => {
             let denials = refuse_all(&change, reason);
@@ -150,6 +151,12 @@ pub(super) async fn land(
                 decide(&mut tx, &authority).await?
             };
             counted = decision.counted;
+            heads = decision.heads;
+            // Whom the actor acts for: its recorded owner, or itself.
+            principal = Some(match &authority.facts.owner {
+                Some((owner, _)) => hex::encode(owner),
+                None => hex::encode(change.actor),
+            });
             let denials = decision.verdict.err().unwrap_or_default();
             trace.decide(&denials, version, authority.valid_until, &counted);
             if !denials.is_empty() {
@@ -197,7 +204,14 @@ pub(super) async fn land(
             "updates": change.updates.iter().map(|u| json!({
                 "ref": u.ref_name, "old": u.old_oid, "new": u.new_oid, "kind": format!("{:?}", u.kind),
             })).collect::<Vec<_>>(),
+            "for": principal,
             "role": role.map(|r| r.as_str()),
+            "heads": heads.map(|h: super::gate::Heads| json!({
+                "floor": h.floor.map(|id| id.to_hex()),
+                "trusted": h.trusted.map(|id| id.to_hex()),
+                "labels": h.labels.map(|id| id.to_hex()),
+                "rules": h.rules.map(|id| id.to_hex()),
+            })),
             "authority_version": version,
             "reasons": reasons,
             "counted": counted.iter().map(|(r, c): (&String, &Counted)| (r.clone(), json!({

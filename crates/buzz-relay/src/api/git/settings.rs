@@ -205,6 +205,7 @@ impl DefaultBranchSnapshot {
                         _ => Err(refusal(MANAGE_DENIED)),
                     },
                     counted: Default::default(),
+                    heads: None,
                 })
             },
         )

@@ -1449,12 +1449,27 @@ mod postgres_tests {
                 Ok(super::super::super::gate::Decision {
                     verdict: Ok(()),
                     counted: Default::default(),
+                    heads: None,
                 })
             },
         )
         .await;
         assert!(result.is_ok());
         guard.finish().await.unwrap();
+        let principal: Option<String> = sqlx::query_scalar(
+            "SELECT detail->>'for' FROM audit_log WHERE community_id = $1 \
+             AND action = 'git_landed' AND object_id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(repo.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            principal,
+            Some(owner.public_key().to_hex()),
+            "an agent's receipt names its owner"
+        );
 
         // An admitted agent whose owner leaves the community is credited nothing.
         sqlx::query(
@@ -1493,6 +1508,7 @@ mod postgres_tests {
                 Ok(super::super::super::gate::Decision {
                     verdict: Ok(()),
                     counted: Default::default(),
+                    heads: None,
                 })
             },
         )
@@ -3252,6 +3268,7 @@ mod external_infra {
                         }])
                     },
                     counted: Default::default(),
+                    heads: None,
                 })
             },
         )
@@ -3315,6 +3332,7 @@ mod external_infra {
                 Ok(super::super::super::gate::Decision {
                     verdict: Ok(()),
                     counted: Default::default(),
+                    heads: None,
                 })
             },
         )
@@ -4034,6 +4052,25 @@ mod external_infra {
             stored,
             counted.iter().map(|o| o.0.clone()).collect::<Vec<_>>()
         );
+
+        // The receipt names whom the push was for and the rules in force.
+        let (principal, rules_head, rules_in_force): (String, Option<String>, String) =
+            sqlx::query_as(
+                "SELECT l.detail->>'for', l.detail->'heads'->>'rules', \
+                   (SELECT g.detail->'state'->>'id' FROM audit_log g WHERE g.community_id = $1 \
+                    AND g.action = 'governance_changed' AND g.detail->>'document' = $3 \
+                    ORDER BY g.seq DESC LIMIT 1) \
+                 FROM audit_log l WHERE l.community_id = $1 AND l.action = 'git_landed' \
+                 AND l.object_id = $2",
+            )
+            .bind(f.tenant.community().as_uuid())
+            .bind(repo.to_string())
+            .bind(format!("rules:{repo}"))
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(principal, owner);
+        assert_eq!(rules_head.as_deref(), Some(rules_in_force.as_str()));
 
         // The checker sees a broken fact in this same real trace.
         let broken = |edit: &dyn Fn(&mut LandAction) -> bool| {
