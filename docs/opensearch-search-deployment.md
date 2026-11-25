@@ -16,10 +16,16 @@ Postgres.
 
 With signing on, the relay takes credentials from the standard AWS chain:
 environment variables, the shared profile, a web identity token, then the
-container or instance role. It reloads them before they expire, so role
-credentials rotate without a restart. The identity needs HTTP access to the
-domain or, for Serverless, a data access policy on the collection and its
+container or instance role. It reloads them before they expire, and static
+keys every 15 minutes, so role credentials and a key changed in the shared
+profile are picked up without a restart. The identity needs HTTP access to
+the domain or, for Serverless, a data access policy on the collection and its
 `buzz-*` indexes plus `aoss:APIAccessAll`.
+
+When a load fails, the relay logs only the kind of error. For the cause, add
+`aws_config=warn` to `RUST_LOG`. That output can include what a
+`credential_process` helper printed, so make sure the helper prints no
+secrets.
 
 ## Rollout order
 

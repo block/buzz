@@ -26,4 +26,5 @@ chrono      = { workspace = true }
 rand        = { workspace = true }
 
 [dev-dependencies]
+tokio       = { workspace = true, features = ["test-util"] }
 nostr       = { workspace = true }

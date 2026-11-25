@@ -25,7 +25,7 @@ use opensearch::indices::{IndicesCreateParts, IndicesDeleteParts, IndicesExistsP
 use opensearch::{BulkOperation, BulkParts, OpenSearch, SearchParts};
 use serde_json::{json, Value};
 
-use crate::aws_credentials::{CachedCredentials, DefaultChain};
+use crate::aws_credentials::{default_chain, CachedCredentials};
 use crate::query::{normalized_search_text, page_bounds, PageBounds};
 use crate::{
     ChannelScope, SearchError, SearchHit, SearchMode, SearchQuery, SearchResult, SearchSort,
@@ -121,7 +121,7 @@ impl SearchIndex {
                 ));
             }
             let region = Region::new(sigv4.region.clone());
-            let credentials = CachedCredentials::new(DefaultChain::new(region.clone()));
+            let credentials = CachedCredentials::new(default_chain(region.clone()));
             transport = transport
                 .auth(Credentials::AwsSigV4(
                     SharedCredentialsProvider::new(credentials),
