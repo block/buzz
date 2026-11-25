@@ -90,12 +90,14 @@ class MessageMentionPill extends ConsumerWidget {
     final fontSize = style.fontSize ?? 16;
 
     final key = pubkey?.toLowerCase();
+    final profile = key == null || !showPortrait
+        ? null
+        : ref.watch(userCacheProvider.select((cache) => cache[key]));
     final picture = key == null || !showPortrait
         ? null
-        : ref.watch(
-                userCacheProvider.select((cache) => cache[key]?.avatarUrl),
-              ) ??
-              (isAgent
+        : profile != null
+        ? profile.avatarUrl
+        : (isAgent
                   ? ref.watch(
                       agentDirectoryPicturesProvider.select(
                         (pictures) => pictures[key],
@@ -105,7 +107,10 @@ class MessageMentionPill extends ConsumerWidget {
               candidateAvatar ??
               (isAgent
                   ? null
-                  : ref.watch(mentionSearchCacheProvider).portraitFor(key));
+                  : ref
+                        .watch(mentionSearchCacheProvider)
+                        .profileFor(key)
+                        ?.avatarUrl);
     final hasPicture = picture != null && picture.isNotEmpty;
     // The enclosing span already scales the chip.
     final size = fontSize;
@@ -136,7 +141,7 @@ class MessageMentionPill extends ConsumerWidget {
           if (hasPicture) ...[
             ExcludeSemantics(
               child: AvatarImage(
-                key: ValueKey(key),
+                key: ValueKey((key, picture)),
                 imageUrl: picture,
                 radius: size / 2,
                 backgroundColor: Colors.transparent,

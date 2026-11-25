@@ -181,6 +181,10 @@ void main() {
     );
     final icon = tester.widget<BuzzAgentIcon>(find.byType(BuzzAgentIcon));
     expect(icon.size, style.textStyle!.fontSize);
+    expect(
+      tester.getRect(find.byType(BuzzAgentIcon)).width,
+      closeTo(2 * icon.size, 0.01),
+    );
   });
 }
 

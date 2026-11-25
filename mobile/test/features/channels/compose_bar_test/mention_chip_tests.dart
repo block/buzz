@@ -26,6 +26,7 @@ void mentionChipTests() {
   Future<TextEditingController> mount(
     WidgetTester tester, {
     required ComposeBarOnSend onSend,
+    TextScaler? textScaler,
   }) async {
     final signer = nostr.Keys.generate();
     await tester.pumpWidget(
@@ -33,6 +34,7 @@ void mentionChipTests() {
         uploadService: _testUploadService(signer.nsec),
         currentPubkey: signer.public,
         members: members,
+        textScaler: textScaler,
         relayAgents: [
           AgentDirectoryEntry(
             pubkey: agent,
@@ -88,6 +90,7 @@ void mentionChipTests() {
     (tester) async {
       final controller = await mount(
         tester,
+        textScaler: const TextScaler.linear(2),
         onSend: (_, _, {mediaTags = const []}) async {},
       );
       final field = find.byType(TextField);
@@ -108,6 +111,15 @@ void mentionChipTests() {
       }
 
       checkChips();
+      final avatar = find.descendant(
+        of: agentChip,
+        matching: find.byType(AvatarImage),
+      );
+      final fontSize = tester
+          .widget<MessageMentionPill>(agentChip)
+          .textStyle!
+          .fontSize!;
+      expect(tester.getRect(avatar).width, closeTo(2 * fontSize, 0.01));
       FocusManager.instance.primaryFocus?.unfocus();
       await tester.pumpAndSettle();
       expect(field, findsNothing);

@@ -7158,10 +7158,12 @@ void main() {
         final container = ProviderScope.containerOf(
           tester.element(find.byType(ComposeBar)),
         );
+        expect(sentContent, 'hello @Mary Jane');
         // The picker has a portrait before the timeline has a hydrated profile.
         container.read(mentionSearchCacheProvider).put('Mary J', [
           UserProfile(
             pubkey: maryJane.pubkey,
+            displayName: 'Mary Jane',
             avatarUrl: 'https://example.org/mary.png',
           ),
         ]);

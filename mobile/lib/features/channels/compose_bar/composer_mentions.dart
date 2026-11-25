@@ -282,8 +282,7 @@ _resolveComposerMentions(
   return (recipients: winners.values.toList(), nameEnds: nameEnds);
 }
 
-/// The content sent for [text]. A picked multi-word person uses an identity
-/// link. Other bound mentions are written `@Name (<key>)`
+/// The content sent for [text]. A bound mention is written `@Name (<key>)`
 /// when its plain text would read as someone else in the bubble: when bound
 /// mentions of different keys share its name, ignoring case, as buzz-app's
 /// `composer-markdown.ts` qualifies them, or when the text typed against it
@@ -291,7 +290,8 @@ _resolveComposerMentions(
 /// `Bob-bot`), which the bubble's longest-name match would otherwise draw
 /// as that other person. [nameEnds] says where the longest name at each `@`
 /// ends, among the chips, the recipients and the channel's members; it is
-/// the send's one scan, from [_resolveComposerMentions]. No live mention sits inside code, where the controller
+/// the send's one scan, from [_resolveComposerMentions]. One key under a
+/// name stays bare. No live mention sits inside code, where the controller
 /// keeps a binding dormant, so code is sent as typed. The composer itself
 /// never showed the key.
 String _qualifiedMentionContent(
@@ -307,19 +307,6 @@ String _qualifiedMentionContent(
   }
   var content = text;
   for (final mention in mentions.reversed) {
-    // Preserve a picked full name as one inline identity even when the
-    // reader has only a first name or has yet to load this person's profile.
-    final label = text.substring(mention.start, mention.end);
-    if (!mention.candidate.isAgent &&
-        label.trim().contains(' ') &&
-        !_keyQualifier.hasMatch(label)) {
-      content = content.replaceRange(
-        mention.start,
-        mention.end,
-        mentionIdentityLink(label, mention.pubkey),
-      );
-      continue;
-    }
     if (keysByName[foldMentionLabel(mention.label(text))]!.length < 2 &&
         (nameEnds[mention.start] ?? 0) <= mention.end) {
       continue;

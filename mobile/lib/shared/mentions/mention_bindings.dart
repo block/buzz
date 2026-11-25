@@ -124,7 +124,6 @@ Map<String, Set<String>> renderedMentionBindings(
   String content,
   Map<String, String> names, [
   Iterable<String> signedPubkeys = const [],
-  Map<String, String> contextualLabels = const {},
 ]) {
   final bindings = <String, Set<String>>{};
   void add(String label, String key) =>
@@ -134,10 +133,6 @@ Map<String, Set<String>> renderedMentionBindings(
     add(entry.value.split(RegExp(r'\s+')).first, entry.key);
   }
   final keys = signedPubkeys.map((key) => key.toLowerCase()).toSet();
-  for (final key in keys) {
-    final label = contextualLabels[key];
-    if (label != null && label.trim().isNotEmpty) add(label, key);
-  }
   for (final match in RegExp(
     r'@([^@\r\n]+) \(([0-9a-f]{64})\)(?: ((?:[1-9][0-9]+|[2-9])))?',
     caseSensitive: false,

@@ -1,5 +1,23 @@
 part of '../message_content.dart';
 
+/// Use the picker's profile name while the row awaits profile hydration.
+(Map<String, String>, Map<String, Set<String>>) _resolveTaggedMentions(
+  WidgetRef ref,
+  String content,
+  Map<String, String> names,
+  Set<String> keys,
+) {
+  final resolved = {
+    ...names,
+    for (final key in keys)
+      if (!names.containsKey(key))
+        if (ref.watch(mentionSearchCacheProvider).profileFor(key)?.displayName
+            case final String name when name.trim().isNotEmpty)
+          key: name,
+  };
+  return (resolved, renderedMentionBindings(content, resolved, keys));
+}
+
 class _MentionMd {
   final bool ownBubble;
   final Map<String, Set<String>> bindings;

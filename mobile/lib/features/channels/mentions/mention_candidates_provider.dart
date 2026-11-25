@@ -109,11 +109,11 @@ class MentionSearchCache {
     return null;
   }
 
-  /// The newest search portrait for a picked identity awaiting profile hydration.
-  String? portraitFor(String pubkey) {
+  /// The newest search profile for a picked identity awaiting profile hydration.
+  UserProfile? profileFor(String pubkey) {
     for (final page in _pages.values.toList().reversed) {
       for (final profile in page) {
-        if (profile.pubkey == pubkey) return profile.avatarUrl;
+        if (profile.pubkey == pubkey) return profile;
       }
     }
     return null;

@@ -55,6 +55,7 @@ import 'message_content/edited_marker.dart';
 import 'message_content/buzz_link_label.dart';
 import 'message_content/channel_token_pattern.dart';
 import 'message_mention_pill.dart';
+import 'mentions/mention_candidates_provider.dart';
 import 'message_gallery.dart';
 import 'message_gallery_frame.dart';
 import 'message_long_press_region.dart';
@@ -276,13 +277,12 @@ class MessageContent extends HookConsumerWidget {
                   color: context.colors.onSurface,
                 ))
             ?.copyWith(color: bubble && ownMessage ? ownTextColor : null);
-    final resolvedMentionNames = mentionNames;
     final signedMentionPubkeys = mentionedPubkeysFromTags(tags);
-    final mentionBindings = renderedMentionBindings(
+    final (resolvedMentionNames, mentionBindings) = _resolveTaggedMentions(
+      ref,
       content,
       mentionNames,
       signedMentionPubkeys,
-      mentionLabels,
     );
     final resolvedAgentMentionPubkeys = {
       ...agentMentionPubkeys.map((pubkey) => pubkey.toLowerCase()),

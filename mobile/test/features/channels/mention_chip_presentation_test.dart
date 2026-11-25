@@ -53,7 +53,7 @@ void main() {
       );
       addTearDown(container.dispose);
       String? tapped;
-      const names = {_agentKey: 'Alice', _personKey: 'Bob'};
+      const names = {_agentKey: 'Helper', _personKey: 'Bob Smith'};
       for (final brightness in Brightness.values) {
         for (final own in [false, true]) {
           final theme = mobileAppearanceTheme(brightness, '#c0a2f1');
@@ -76,7 +76,7 @@ void main() {
                           content: '@Helper @Bob Smith',
                           mentionLabels: const {
                             _personKey: 'Bob Smith',
-                            _agentKey: 'Helper',
+                            _agentKey: 'Bob Smith',
                           },
                           tags: const [
                             ['p', _personKey],
@@ -96,10 +96,9 @@ void main() {
             ),
           );
           await tester.pumpAndSettle();
-          Color fill(String label) {
-            final pill = find.ancestor(
-              of: find.text(label),
-              matching: find.byType(MessageMentionPill),
+          Color fill(String key) {
+            final pill = find.byWidgetPredicate(
+              (w) => w is MessageMentionPill && w.pubkey == key,
             );
             final box = tester.widget<Container>(
               find.descendant(of: pill, matching: find.byType(Container)).first,
@@ -108,11 +107,11 @@ void main() {
           }
 
           expect(
-            fill('Helper'),
+            fill(_agentKey),
             own ? chatCodeTint(chat.foreground, .18) : chat.outgoing,
           );
           expect(
-            fill('Bob Smith'),
+            fill(_personKey),
             own
                 ? chatCodeTint(chat.foreground, .18)
                 : (brightness == Brightness.dark
@@ -144,7 +143,7 @@ void main() {
           expect(portrait.imageUrl, 'https://example.org/bob.png');
           expect(portrait.isAgent, isFalse);
           tapped = null;
-          await tester.tap(find.text('Bob Smith'));
+          await tester.tap(chips.last);
           expect(tapped, _personKey);
           expect(tester.takeException(), isNull);
 
@@ -155,8 +154,8 @@ void main() {
           ]);
           await tester.pump();
           if (!own) {
-            expect(fill('Bob Smith'), chat.outgoing);
-            expect(fill('Helper'), isNot(chat.outgoing));
+            expect(fill(_personKey), chat.outgoing);
+            expect(fill(_agentKey), isNot(chat.outgoing));
           }
           container.updateOverrides([
             profiles,
@@ -208,8 +207,12 @@ void main() {
             home: Scaffold(
               body: ValueListenableBuilder(
                 valueListenable: pubkey,
-                builder: (context, key, _) =>
-                    MessageMentionPill(label: key, pubkey: key, isAgent: false),
+                builder: (context, key, _) => MessageMentionPill(
+                  label: key,
+                  pubkey: key,
+                  isAgent: false,
+                  candidateAvatar: 'https://example.org/old.png',
+                ),
               ),
             ),
           ),
@@ -234,13 +237,20 @@ void main() {
       pubkey.value = 'alice';
       await tester.pump();
       expect(requests.last, 'https://example.org/swap-alice.png');
-      final loading = tester.widget<RawImage>(find.byType(RawImage)).image;
-      expect(loading?.isCloneOf(bob!), isNot(isTrue));
+      expect(find.byType(RawImage), findsNothing);
+      expect(find.text('@'), findsOneWidget);
 
       for (final response in responses.values) {
         if (!response.isCompleted) response.complete(http.Response('', 404));
       }
       await tester.pumpAndSettle();
+      expect(find.text('@'), findsOneWidget);
+      ProviderScope.containerOf(tester.element(find.byType(MessageMentionPill)))
+          .read(userCacheProvider.notifier)
+          .put(const UserProfile(pubkey: 'alice'));
+      await tester.pump();
+      expect(find.byType(AvatarImage), findsNothing);
+      expect(find.text('@'), findsOneWidget);
     },
   );
 }
