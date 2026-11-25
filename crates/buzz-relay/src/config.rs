@@ -415,10 +415,6 @@ pub struct Config {
     /// Deployment-admin API and SPA configuration. Absent means the surface is disabled.
     pub admin: Option<AdminConfig>,
 
-    /// Whether the Operator API accepts archive and unarchive. Set by
-    /// `BUZZ_ADMIN_IDENTITY_ARCHIVE=enabled`; unset or `disabled` returns 503.
-    pub admin_identity_archive: bool,
-
     /// Optional path to the web UI `dist/` directory.
     /// When set, the relay serves the invite landing page and its static assets.
     /// When unset, no static file serving happens (relay behaves as before).
@@ -1492,20 +1488,6 @@ impl Config {
             }
         };
 
-        let admin_identity_archive = match std::env::var("BUZZ_ADMIN_IDENTITY_ARCHIVE")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-        {
-            None | Some("") | Some("disabled") => false,
-            Some("enabled") => true,
-            Some(other) => {
-                return Err(ConfigError::InvalidValue(format!(
-                "BUZZ_ADMIN_IDENTITY_ARCHIVE must be \"enabled\" or \"disabled\"; got \"{other}\""
-            )))
-            }
-        };
-
         // Web UI static file serving
         let web_dir = std::env::var("BUZZ_WEB_DIR")
             .ok()
@@ -1631,7 +1613,6 @@ impl Config {
             join_policy,
             invite_v1_invalid_after: invite_v1_cutoff_from_env()?,
             admin,
-            admin_identity_archive,
             web_dir,
             serve_git_web_gui,
             nip_fi_provision_binding,

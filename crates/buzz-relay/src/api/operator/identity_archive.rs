@@ -2,20 +2,14 @@
 
 use std::sync::Arc;
 
-use axum::{
-    body::Bytes,
-    extract::{Path, Query, State},
-    http::{HeaderMap, Method, StatusCode, Uri},
-    Json,
+use axum::{http::StatusCode, Json};
+use buzz_db::operator_identity_archive::{
+    ArchiveChange, ArchiveInventoryError, OperatorArchiveRequest,
 };
-use buzz_db::operator_identity_archive::{ArchiveChange, ArchiveInventoryError};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::auth::authorize_write;
-use super::direct::refuse_staff_target;
-use super::error::ApiError;
-use super::{tenant_for_host, CommunityQuery};
+use crate::api::admin::{tenant_for_host, ApiError};
 use crate::handlers::side_effects::{
     publish_nipia_archival_list, publish_nipia_archived, publish_nipia_unarchived,
 };
@@ -24,7 +18,7 @@ use crate::state::AppState;
 const REASON_MAX: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum ArchiveOperation {
+pub(super) enum ArchiveOperation {
     Archive,
     Unarchive,
 }
@@ -46,32 +40,6 @@ struct UnarchiveBody {
 }
 
 type Reply = Result<(StatusCode, Json<serde_json::Value>), ApiError>;
-
-/// `POST /members/{pubkey}/archive`
-#[allow(clippy::too_many_arguments)] // one Axum extractor per argument
-pub(super) async fn archive(
-    State(state): State<Arc<AppState>>,
-    slot: crate::access::AccessSlot,
-    method: Method,
-    uri: Uri,
-    headers: HeaderMap,
-    Path(target): Path<String>,
-    Query(q): Query<CommunityQuery>,
-    body: Bytes,
-) -> Reply {
-    let principal = authorize_write(&state, &slot, &headers, &method, &uri, Some(&body))
-        .await?
-        .operator(&slot)?;
-    execute(
-        &state,
-        principal.pubkey,
-        ArchiveOperation::Archive,
-        target,
-        &q.community_host,
-        &body,
-    )
-    .await
-}
 
 fn invalid_body() -> ApiError {
     ApiError::bad_request("invalid_body", "invalid JSON body")
@@ -128,6 +96,7 @@ fn map_inventory_error(error: ArchiveInventoryError) -> ApiError {
         ArchiveInventoryError::TooLarge => {
             (StatusCode::UNPROCESSABLE_ENTITY, "inventory_too_large")
         }
+        ArchiveInventoryError::TargetIsStaff => (StatusCode::CONFLICT, "target_is_staff"),
         ArchiveInventoryError::Db(error) => return map_db_error(error),
     };
     ApiError {
@@ -139,7 +108,7 @@ fn map_inventory_error(error: ArchiveInventoryError) -> ApiError {
 
 /// Apply one visibility operation for an already-authorized Operator.
 /// The caller verified the signature over the exact community query and body.
-pub(crate) async fn execute(
+pub(super) async fn execute(
     state: &Arc<AppState>,
     actor: [u8; 32],
     operation: ArchiveOperation,
@@ -147,13 +116,6 @@ pub(crate) async fn execute(
     community_host: &str,
     body: &[u8],
 ) -> Reply {
-    if !state.config.admin_identity_archive {
-        return Err(ApiError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            code: "identity_archive_disabled",
-            message: "Operator identity archive is not enabled on this relay".into(),
-        });
-    }
     if !is_lower_hex_64(&target) {
         return Err(ApiError::bad_request(
             "invalid_pubkey",
@@ -179,17 +141,17 @@ pub(crate) async fn execute(
             let reason = validate_reason(body.reason)?;
             let mut key = [0; 32];
             hex::decode_to_slice(&target, &mut key).map_err(|_| ApiError::internal())?;
-            refuse_staff_target(state, &key).await?;
             let changes = state
                 .db
-                .archive_operator_identities(
-                    tenant.community(),
-                    &key,
-                    &actor_hex,
-                    &body.inventory_version,
-                    reason.as_deref(),
-                    body.replaced_by.as_deref(),
-                )
+                .archive_operator_identities(OperatorArchiveRequest {
+                    community: tenant.community(),
+                    target: &key,
+                    actor: &actor_hex,
+                    confirmed_version: &body.inventory_version,
+                    reason: reason.as_deref(),
+                    replaced_by: body.replaced_by.as_deref(),
+                    configured_operators: &state.config.relay_operator_pubkeys,
+                })
                 .await
                 .map_err(map_inventory_error)?;
             (body.request_id, reason, body.replaced_by, changes)
@@ -295,7 +257,3 @@ pub(crate) async fn execute(
         })),
     ))
 }
-
-#[cfg(test)]
-#[path = "identity_archive_postgres_tests.rs"]
-mod postgres_tests;

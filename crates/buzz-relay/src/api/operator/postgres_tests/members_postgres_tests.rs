@@ -10,14 +10,11 @@ mod postgres_tests {
     const AGENT: [u8; 32] = [0xb2; 32];
     const BASE: &str = "/operator/communities/members";
 
-    async fn identity_archive_state(operator: &Keys, enabled: bool) -> Option<Arc<AppState>> {
+    async fn identity_archive_state(operator: &Keys) -> Arc<AppState> {
         let redis = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-        let mut state =
-            operator_test_state_with_policy_and_redis(std::slice::from_ref(operator), None, &redis)
-                .await?;
-        let config = &mut Arc::get_mut(&mut state).expect("single owner").config;
-        Arc::make_mut(config).admin_identity_archive = enabled;
-        Some(state)
+        operator_test_state_with_policy_and_redis(std::slice::from_ref(operator), None, &redis)
+            .await
+            .expect("test state")
     }
 
     /// A community with a root, its agent and the agent's active workflow.
@@ -123,9 +120,7 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn operator_archive_and_unarchive_repair_visibility_on_retry() {
         let operator = Keys::generate();
-        let state = identity_archive_state(&operator, true)
-            .await
-            .expect("test state");
+        let state = identity_archive_state(&operator).await;
         let (c, host) = community(&state).await;
         let (other, other_host) = community(&state).await;
         let root = hex::encode(ROOT);
@@ -217,9 +212,7 @@ mod postgres_tests {
     async fn operator_member_routes_refuse_before_applying_anything() {
         let operator = Keys::generate();
         let outsider = Keys::generate();
-        let mut state = identity_archive_state(&operator, true)
-            .await
-            .expect("test state");
+        let mut state = identity_archive_state(&operator).await;
         Arc::get_mut(&mut state).expect("single owner").nip98_replay =
             Arc::new(SeenOnceReplayGuard(Mutex::new(HashSet::new())));
         let (community, host) = community(&state).await;
@@ -346,35 +339,87 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn operator_archive_is_refused_while_the_flag_is_off() {
+    async fn operator_archive_refuses_staff_in_the_confirmed_set() {
         let operator = Keys::generate();
-        let outsider = Keys::generate();
-        let state = identity_archive_state(&operator, false)
-            .await
-            .expect("test state");
+        let state = identity_archive_state(&operator).await;
         let (community, host) = community(&state).await;
-        let archive = format!("{BASE}/{}/archive?communityHost={host}", hex::encode(ROOT));
-        let body =
-            serde_json::json!({"requestId": Uuid::new_v4(), "inventoryVersion": "0".repeat(64)});
+        let root = hex::encode(ROOT);
+        let agent = hex::encode(AGENT);
+        let ownership = format!("{BASE}/{root}/ownership?communityHost={host}");
+        let (status, inventory) = call(&state, &operator, "GET", &ownership, None).await;
+        assert_eq!(status, StatusCode::OK, "{inventory}");
+        let version = inventory["inventoryVersion"].as_str().unwrap();
+        let archive = format!("{BASE}/{root}/archive?communityHost={host}");
 
-        // Authorization still comes first.
-        let (status, json) = call(&state, &outsider, "POST", &archive, Some(&body)).await;
-        assert_eq!(
-            (status, &json["code"]),
-            (StatusCode::FORBIDDEN, &"not_operator".into())
-        );
+        for (body, status, code) in [
+            (
+                serde_json::json!({"requestId": Uuid::new_v4()}),
+                StatusCode::BAD_REQUEST,
+                "invalid_body",
+            ),
+            (
+                serde_json::json!({
+                    "requestId": Uuid::new_v4(), "inventoryVersion": version, "replacedBy": root,
+                }),
+                StatusCode::BAD_REQUEST,
+                "invalid_replaced_by",
+            ),
+            (
+                serde_json::json!({
+                    "requestId": Uuid::new_v4(), "inventoryVersion": version, "reason": "Invalid reason",
+                }),
+                StatusCode::BAD_REQUEST,
+                "invalid_reason",
+            ),
+            (
+                serde_json::json!({
+                    "requestId": Uuid::new_v4(), "inventoryVersion": "0".repeat(64),
+                }),
+                StatusCode::CONFLICT,
+                "inventory_changed",
+            ),
+        ] {
+            let (actual, json) = call(&state, &operator, "POST", &archive, Some(&body)).await;
+            assert_eq!(
+                (actual, lifecycle_code(&json)),
+                (status, Some(code)),
+                "{json}"
+            );
+        }
+
+        // The grant lands after preview and before the archive request.
+        state
+            .db
+            .upsert_relay_operator(&AGENT, "moderator", &operator.public_key().to_bytes(), true)
+            .await
+            .unwrap();
+        let body = serde_json::json!({
+            "requestId": Uuid::new_v4(), "inventoryVersion": version,
+        });
         let (status, json) = call(&state, &operator, "POST", &archive, Some(&body)).await;
         assert_eq!(
             (status, lifecycle_code(&json)),
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Some("identity_archive_disabled")
-            )
+            (StatusCode::CONFLICT, Some("target_is_staff")),
+            "{json}"
         );
-        assert!(!state
-            .db
-            .is_archived(community, &hex::encode(ROOT))
-            .await
-            .unwrap());
+        assert!(!state.db.is_archived(community, &root).await.unwrap());
+        assert!(!state.db.is_archived(community, &agent).await.unwrap());
+        assert!(event_tags(&state, community, 8002).await.is_empty());
+        assert!(event_tags(&state, community, 13535).await.is_empty());
+
+        let key = operator.public_key().to_hex();
+        let ownership = format!("{BASE}/{key}/ownership?communityHost={host}");
+        let (_, inventory) = call(&state, &operator, "GET", &ownership, None).await;
+        let archive = format!("{BASE}/{key}/archive?communityHost={host}");
+        let body = serde_json::json!({
+            "requestId": Uuid::new_v4(), "inventoryVersion": inventory["inventoryVersion"],
+        });
+        let (status, json) = call(&state, &operator, "POST", &archive, Some(&body)).await;
+        assert_eq!(
+            (status, lifecycle_code(&json)),
+            (StatusCode::CONFLICT, Some("target_is_staff")),
+            "{json}"
+        );
+        assert!(!state.db.is_archived(community, &key).await.unwrap());
     }
 }

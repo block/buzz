@@ -5,6 +5,7 @@
 //! ingest, relay membership, channel scoping, storage, or fan-out.
 
 mod community_policy;
+mod identity_archive;
 mod invites;
 pub mod members;
 pub use community_policy::{community_nip_fi_policy_status, set_community_nip_fi_policy};

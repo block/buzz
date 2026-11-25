@@ -32,152 +32,6 @@ pub struct IdentityInventory {
     pub inventory_version: Option<String>,
 }
 
-#[cfg(test)]
-mod postgres_tests {
-    use super::*;
-
-    async fn community(pool: &sqlx::PgPool) -> CommunityId {
-        let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-            .bind(id)
-            .bind(format!("inventory-{}.example", id.simple()))
-            .execute(pool)
-            .await
-            .unwrap();
-        CommunityId::from_uuid(id)
-    }
-
-    async fn user(pool: &sqlx::PgPool, c: CommunityId, key: &[u8], owner: Option<&[u8]>) {
-        sqlx::query(
-            "INSERT INTO users (community_id, pubkey, agent_owner_pubkey) VALUES ($1, $2, $3)",
-        )
-        .bind(c.as_uuid())
-        .bind(key)
-        .bind(owner)
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-
-    async fn workflow(pool: &sqlx::PgPool, c: CommunityId, owner: &[u8]) -> Uuid {
-        sqlx::query_scalar("INSERT INTO workflows (community_id, owner_pubkey, name, definition, definition_hash) VALUES ($1, $2, 'example', '{}', $2) RETURNING id")
-            .bind(c.as_uuid()).bind(owner).fetch_one(pool).await.unwrap()
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn inventory_follows_exact_owner_and_community_and_preserves_archive_and_run_facts() {
-        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
-            .await
-            .unwrap();
-        let db = Db::from_pool(pool.clone());
-        let a = community(&pool).await;
-        let b = community(&pool).await;
-        let root = [1; 32];
-        let replacement = [2; 32];
-        let agent = [3; 32];
-        let other_agent = [4; 32];
-        for c in [a, b] {
-            user(&pool, c, &root, None).await;
-            user(&pool, c, &replacement, None).await;
-            user(&pool, c, &agent, Some(&root)).await;
-            user(&pool, c, &other_agent, Some(&replacement)).await;
-        }
-        let direct = workflow(&pool, a, &root).await;
-        let owned = workflow(&pool, a, &agent).await;
-        workflow(&pool, a, &other_agent).await;
-        workflow(&pool, b, &root).await;
-        db.archive(
-            a,
-            &hex::encode(agent),
-            "admin",
-            &hex::encode(root),
-            None,
-            None,
-            &"a".repeat(64),
-        )
-        .await
-        .unwrap();
-        for status in [
-            "pending",
-            "pending",
-            "running",
-            "waiting_approval",
-            "completed",
-        ] {
-            sqlx::query("INSERT INTO workflow_runs (community_id, workflow_id, status) VALUES ($1, $2, $3::run_status)")
-                .bind(a.as_uuid()).bind(owned).bind(status).execute(&pool).await.unwrap();
-        }
-        sqlx::query("UPDATE workflows SET status = 'archived', enabled = false WHERE community_id = $1 AND id = $2")
-            .bind(a.as_uuid()).bind(owned).execute(&pool).await.unwrap();
-        let inventory = db.admin_identity_inventory(a, &root).await.unwrap();
-        assert_eq!(inventory.community_id, *a.as_uuid());
-        assert_eq!(inventory.pubkey, hex::encode(root));
-        assert_eq!(inventory.identities.len(), 2);
-        assert_eq!(inventory.identities[0].pubkey, hex::encode(root));
-        assert!(inventory.identities[1].archived);
-        assert_eq!(
-            inventory.identities[1].owner_pubkey,
-            Some(hex::encode(root))
-        );
-        assert_eq!(inventory.workflows.len(), 2);
-        assert!(inventory.workflows.iter().any(|row| row.id == direct));
-        let row = inventory
-            .workflows
-            .iter()
-            .find(|row| row.id == owned)
-            .unwrap();
-        assert_eq!(
-            (
-                row.pending_runs,
-                row.running_runs,
-                row.waiting_approval_runs
-            ),
-            (2, 1, 1)
-        );
-        assert_eq!(row.status, "archived");
-        assert!(!row.enabled);
-        assert!(!inventory.identities_truncated && !inventory.workflows_truncated);
-        assert!(
-            !db.admin_identity_inventory(b, &root)
-                .await
-                .unwrap()
-                .identities[1]
-                .archived
-        );
-        let missing = db.admin_identity_inventory(a, &[9; 32]).await.unwrap();
-        assert_eq!(missing.identities.len(), 1);
-        assert!(missing.workflows.is_empty());
-        // A preview preserves all of the stored run/archive facts.
-        assert!(db.is_archived(a, &hex::encode(agent)).await.unwrap());
-        assert_eq!(
-            db.get_workflow(a, owned).await.unwrap().status.to_string(),
-            "archived"
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn inventory_discloses_identity_and_workflow_truncation() {
-        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
-            .await
-            .unwrap();
-        let db = Db::from_pool(pool.clone());
-        let c = community(&pool).await;
-        let root = [255; 32];
-        user(&pool, c, &root, None).await;
-        sqlx::query("INSERT INTO users (community_id, pubkey, agent_owner_pubkey) SELECT $1, decode(lpad(to_hex(i),64,'0'),'hex'), $2 FROM generate_series(1,201) i")
-            .bind(c.as_uuid()).bind(root.as_slice()).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO workflows (community_id, owner_pubkey, name, definition, definition_hash) SELECT $1, $2, 'example', '{}', $2 FROM generate_series(1,201)")
-            .bind(c.as_uuid()).bind(root.as_slice()).execute(&pool).await.unwrap();
-        let inventory = db.admin_identity_inventory(c, &root).await.unwrap();
-        assert_eq!(inventory.identities.len(), LIMIT);
-        assert_eq!(inventory.workflows.len(), LIMIT);
-        assert!(inventory.identities_truncated && inventory.workflows_truncated);
-        assert_eq!(inventory.identities[0].pubkey, hex::encode(root));
-    }
-}
-
 /// One identity, including archived and profile-less keys.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -333,5 +187,151 @@ impl Db {
             workflows_truncated,
             inventory_version,
         })
+    }
+}
+
+#[cfg(test)]
+mod postgres_tests {
+    use super::*;
+
+    async fn community(pool: &sqlx::PgPool) -> CommunityId {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(format!("inventory-{}.example", id.simple()))
+            .execute(pool)
+            .await
+            .unwrap();
+        CommunityId::from_uuid(id)
+    }
+
+    async fn user(pool: &sqlx::PgPool, c: CommunityId, key: &[u8], owner: Option<&[u8]>) {
+        sqlx::query(
+            "INSERT INTO users (community_id, pubkey, agent_owner_pubkey) VALUES ($1, $2, $3)",
+        )
+        .bind(c.as_uuid())
+        .bind(key)
+        .bind(owner)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn workflow(pool: &sqlx::PgPool, c: CommunityId, owner: &[u8]) -> Uuid {
+        sqlx::query_scalar("INSERT INTO workflows (community_id, owner_pubkey, name, definition, definition_hash) VALUES ($1, $2, 'example', '{}', $2) RETURNING id")
+            .bind(c.as_uuid()).bind(owner).fetch_one(pool).await.unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn inventory_follows_exact_owner_and_community_and_preserves_archive_and_run_facts() {
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .unwrap();
+        let db = Db::from_pool(pool.clone());
+        let a = community(&pool).await;
+        let b = community(&pool).await;
+        let root = [1; 32];
+        let replacement = [2; 32];
+        let agent = [3; 32];
+        let other_agent = [4; 32];
+        for c in [a, b] {
+            user(&pool, c, &root, None).await;
+            user(&pool, c, &replacement, None).await;
+            user(&pool, c, &agent, Some(&root)).await;
+            user(&pool, c, &other_agent, Some(&replacement)).await;
+        }
+        let direct = workflow(&pool, a, &root).await;
+        let owned = workflow(&pool, a, &agent).await;
+        workflow(&pool, a, &other_agent).await;
+        workflow(&pool, b, &root).await;
+        db.archive(
+            a,
+            &hex::encode(agent),
+            "admin",
+            &hex::encode(root),
+            None,
+            None,
+            &"a".repeat(64),
+        )
+        .await
+        .unwrap();
+        for status in [
+            "pending",
+            "pending",
+            "running",
+            "waiting_approval",
+            "completed",
+        ] {
+            sqlx::query("INSERT INTO workflow_runs (community_id, workflow_id, status) VALUES ($1, $2, $3::run_status)")
+                .bind(a.as_uuid()).bind(owned).bind(status).execute(&pool).await.unwrap();
+        }
+        sqlx::query("UPDATE workflows SET status = 'archived', enabled = false WHERE community_id = $1 AND id = $2")
+            .bind(a.as_uuid()).bind(owned).execute(&pool).await.unwrap();
+        let inventory = db.admin_identity_inventory(a, &root).await.unwrap();
+        assert_eq!(inventory.community_id, *a.as_uuid());
+        assert_eq!(inventory.pubkey, hex::encode(root));
+        assert_eq!(inventory.identities.len(), 2);
+        assert_eq!(inventory.identities[0].pubkey, hex::encode(root));
+        assert!(inventory.identities[1].archived);
+        assert_eq!(
+            inventory.identities[1].owner_pubkey,
+            Some(hex::encode(root))
+        );
+        assert_eq!(inventory.workflows.len(), 2);
+        assert!(inventory.workflows.iter().any(|row| row.id == direct));
+        let row = inventory
+            .workflows
+            .iter()
+            .find(|row| row.id == owned)
+            .unwrap();
+        assert_eq!(
+            (
+                row.pending_runs,
+                row.running_runs,
+                row.waiting_approval_runs
+            ),
+            (2, 1, 1)
+        );
+        assert_eq!(row.status, "archived");
+        assert!(!row.enabled);
+        assert!(!inventory.identities_truncated && !inventory.workflows_truncated);
+        assert!(
+            !db.admin_identity_inventory(b, &root)
+                .await
+                .unwrap()
+                .identities[1]
+                .archived
+        );
+        let missing = db.admin_identity_inventory(a, &[9; 32]).await.unwrap();
+        assert_eq!(missing.identities.len(), 1);
+        assert!(missing.workflows.is_empty());
+        // A preview preserves all of the stored run/archive facts.
+        assert!(db.is_archived(a, &hex::encode(agent)).await.unwrap());
+        assert_eq!(
+            db.get_workflow(a, owned).await.unwrap().status.to_string(),
+            "archived"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn inventory_discloses_identity_and_workflow_truncation() {
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .unwrap();
+        let db = Db::from_pool(pool.clone());
+        let c = community(&pool).await;
+        let root = [255; 32];
+        user(&pool, c, &root, None).await;
+        sqlx::query("INSERT INTO users (community_id, pubkey, agent_owner_pubkey) SELECT $1, decode(lpad(to_hex(i),64,'0'),'hex'), $2 FROM generate_series(1,201) i")
+            .bind(c.as_uuid()).bind(root.as_slice()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO workflows (community_id, owner_pubkey, name, definition, definition_hash) SELECT $1, $2, 'example', '{}', $2 FROM generate_series(1,201)")
+            .bind(c.as_uuid()).bind(root.as_slice()).execute(&pool).await.unwrap();
+        let inventory = db.admin_identity_inventory(c, &root).await.unwrap();
+        assert_eq!(inventory.identities.len(), LIMIT);
+        assert_eq!(inventory.workflows.len(), LIMIT);
+        assert!(inventory.identities_truncated && inventory.workflows_truncated);
+        assert_eq!(inventory.identities[0].pubkey, hex::encode(root));
     }
 }

@@ -19,6 +19,24 @@ pub struct ArchiveChange {
     pub changed: bool,
 }
 
+/// The Operator's confirmed archive request.
+pub struct OperatorArchiveRequest<'a> {
+    /// Community whose archive state is changing.
+    pub community: CommunityId,
+    /// Selected key, first in the confirmed identity set.
+    pub target: &'a [u8; 32],
+    /// Lowercase hex key of the authenticated Operator.
+    pub actor: &'a str,
+    /// Version of the identity set from the ownership preview.
+    pub confirmed_version: &'a str,
+    /// Optional NIP-IA reason.
+    pub reason: Option<&'a str>,
+    /// Optional replacement key for the target.
+    pub replaced_by: Option<&'a str>,
+    /// Lowercase hex keys from the deployment's Operator allowlist.
+    pub configured_operators: &'a [String],
+}
+
 /// Why an Operator archive was refused.
 #[derive(Debug, thiserror::Error)]
 pub enum ArchiveInventoryError {
@@ -28,6 +46,9 @@ pub enum ArchiveInventoryError {
     /// The confirmed set would exceed the size limit.
     #[error("identity inventory exceeds {MAX_ARCHIVE_IDENTITIES} keys")]
     TooLarge,
+    /// The target or one of its direct agents is relay staff.
+    #[error("identity set includes relay staff")]
+    TargetIsStaff,
     /// Database failure.
     #[error(transparent)]
     Db(#[from] DbError),
@@ -60,13 +81,17 @@ impl Db {
     #[datastore_span(name = "archive_operator_identities", system = "postgresql")]
     pub async fn archive_operator_identities(
         &self,
-        community: CommunityId,
-        target: &[u8; 32],
-        actor: &str,
-        confirmed_version: &str,
-        reason: Option<&str>,
-        replaced_by: Option<&str>,
+        request: OperatorArchiveRequest<'_>,
     ) -> Result<Vec<ArchiveChange>, ArchiveInventoryError> {
+        let OperatorArchiveRequest {
+            community,
+            target,
+            actor,
+            confirmed_version,
+            reason,
+            replaced_by,
+            configured_operators,
+        } = request;
         let mut tx = crate::begin_community_write_transaction(
             self.pool(),
             community,
@@ -78,8 +103,8 @@ impl Db {
             .await?;
         crate::relay_invite::lock_admission(tx.conn(), community).await?;
 
-        let agents: Vec<String> = sqlx::query_scalar(
-            "SELECT encode(pubkey, 'hex') FROM users \
+        let agents: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT pubkey FROM users \
              WHERE community_id = $1 AND agent_owner_pubkey = $2 AND pubkey <> $2 \
              ORDER BY pubkey LIMIT $3",
         )
@@ -92,19 +117,33 @@ impl Db {
             return Err(ArchiveInventoryError::TooLarge);
         }
 
-        let root = hex::encode(target);
-        let keys = std::iter::once(&root).chain(&agents);
-        if inventory_version(keys.clone().map(String::as_str)) != confirmed_version {
+        let pubkeys: Vec<_> = std::iter::once(target.to_vec()).chain(agents).collect();
+        let keys: Vec<_> = pubkeys.iter().map(hex::encode).collect();
+        if inventory_version(keys.iter().map(String::as_str)) != confirmed_version {
             return Err(ArchiveInventoryError::Changed);
         }
 
-        let mut identities = Vec::with_capacity(1 + agents.len());
-        for key in keys {
-            let replacement = if key == &root { replaced_by } else { None };
+        // Check the exact set under the same ownership lock used for the write.
+        // The Operator API requires a configured key, so the admin-host owner
+        // fallback can never be effective here.
+        if keys.iter().any(|key| configured_operators.contains(key))
+            || sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM relay_operators WHERE pubkey = ANY($1))",
+            )
+            .bind(&pubkeys)
+            .fetch_one(tx.conn())
+            .await?
+        {
+            return Err(ArchiveInventoryError::TargetIsStaff);
+        }
+
+        let mut identities = Vec::with_capacity(keys.len());
+        for (index, key) in keys.into_iter().enumerate() {
+            let replacement = if index == 0 { replaced_by } else { None };
             let changed =
-                archive_in_tx(&mut tx, key, "relay", actor, reason, replacement, "").await?;
+                archive_in_tx(&mut tx, &key, "relay", actor, reason, replacement, "").await?;
             identities.push(ArchiveChange {
-                pubkey: key.clone(),
+                pubkey: key,
                 changed,
             });
         }

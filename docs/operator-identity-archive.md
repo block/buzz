@@ -22,13 +22,8 @@ HTTP attempt. A unique `nonce` tag distinguishes attempts signed within the
 same second.
 
 The admin-host API also provides `GET /api/admin/v1/members/<hex>/ownership`
-and `POST /api/admin/v1/members/<hex>/archive` with the same community query and
-archive body. These routes require a signed Operator and use `BUZZ_ADMIN_HOST`
-for the signed origin.
-
-Operator mutations are off by default. Set
-`BUZZ_ADMIN_IDENTITY_ARCHIVE=enabled` to enable them. Signed NIP-IA requests
-have their own authorization rules.
+with the same community query. This preview requires a signed Operator and
+uses `BUZZ_ADMIN_HOST` for the signed origin.
 
 ## Archive and unarchive
 
@@ -47,8 +42,8 @@ First read the [ownership preview](operator-identity-inventory.md). Use its
 The relay re-reads the target and its direct agents in one admitted
 transaction. A successful archive inserts missing rows with `consent=relay`
 and preserves existing rows. It records `replacedBy` on the target only and
-refuses to archive a relay staff target. Use an exact lowercase hex pubkey in
-the route.
+refuses the request if the target or any direct agent is relay staff. Use an
+exact lowercase hex pubkey in the route.
 
 For unarchive, use the selected key in the route and send a JSON body with
 `requestId` and an optional `reason`. Unarchive removes that key's archive
@@ -75,8 +70,8 @@ A retry can republish the current snapshot after an earlier failure.
 
 - `409 inventory_changed` means the direct identities differ from the
   confirmed preview. Read the preview and confirm again.
+- `409 target_is_staff` means the confirmed set includes a relay staff key.
 - `422 inventory_too_large` means the archive exceeds 200 identities.
-- `503 identity_archive_disabled` means the feature is off.
 - `503 retry_later` means the store reported a lock or statement timeout.
   The write was rolled back.
 

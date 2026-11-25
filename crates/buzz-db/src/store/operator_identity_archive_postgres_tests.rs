@@ -4,7 +4,7 @@ use buzz_core::CommunityId;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::operator_identity_archive::ArchiveInventoryError;
+use crate::operator_identity_archive::{ArchiveInventoryError, OperatorArchiveRequest};
 use crate::Db;
 
 const ROOT: [u8; 32] = [0x11; 32];
@@ -40,9 +40,17 @@ async fn archive_confirms_direct_agents_and_ignores_workflow_changes() {
         .unwrap();
     add_agent(&pool, c, &AGENT, &ROOT).await;
     let actor = "a".repeat(64);
+    let request = |confirmed_version| OperatorArchiveRequest {
+        community: c,
+        target: &ROOT,
+        actor: &actor,
+        confirmed_version,
+        reason: None,
+        replaced_by: None,
+        configured_operators: &[],
+    };
     assert!(matches!(
-        db.archive_operator_identities(c, &ROOT, &actor, &original, None, None)
-            .await,
+        db.archive_operator_identities(request(&original)).await,
         Err(ArchiveInventoryError::Changed)
     ));
     assert!(db.list_archived(c).await.unwrap().is_empty());
@@ -73,14 +81,11 @@ async fn archive_confirms_direct_agents_and_ignores_workflow_changes() {
         .unwrap();
     let replacement = "c".repeat(64);
     let changes = db
-        .archive_operator_identities(
-            c,
-            &ROOT,
-            &actor,
-            &confirmed,
-            Some("duplicate"),
-            Some(&replacement),
-        )
+        .archive_operator_identities(OperatorArchiveRequest {
+            reason: Some("duplicate"),
+            replaced_by: Some(&replacement),
+            ..request(&confirmed)
+        })
         .await
         .unwrap();
     assert_eq!(changes.len(), 2);
@@ -112,8 +117,7 @@ async fn archive_confirms_direct_agents_and_ignores_workflow_changes() {
     assert!(inventory.identities_truncated);
     assert!(inventory.inventory_version.is_none());
     assert!(matches!(
-        db.archive_operator_identities(c, &ROOT, &actor, &confirmed, None, None)
-            .await,
+        db.archive_operator_identities(request(&confirmed)).await,
         Err(ArchiveInventoryError::TooLarge)
     ));
     assert_eq!(db.list_archived(c).await.unwrap().len(), 2);

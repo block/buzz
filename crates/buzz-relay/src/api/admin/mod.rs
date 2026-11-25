@@ -9,7 +9,6 @@
 mod auth;
 mod direct;
 mod error;
-mod identity_archive;
 mod reads;
 
 use std::sync::Arc;
@@ -28,7 +27,7 @@ use axum::{
     Json, Router,
 };
 use chrono::{DateTime, Utc};
-use error::ApiError;
+pub(crate) use error::ApiError;
 use serde::{Deserialize, Serialize};
 use tower_http::limit::RequestBodyLimitLayer;
 use uuid::Uuid;
@@ -42,7 +41,6 @@ pub(crate) fn is_admin_host(state: &crate::state::AppState, headers: &HeaderMap)
 /// the advertised origin without reaching into the private `auth` module.
 pub(crate) use auth::admin_api_origin;
 pub(crate) use auth::is_relay_operator;
-pub(crate) use identity_archive::{execute as execute_identity_archive, ArchiveOperation};
 pub(crate) use reads::{identity_inventory_in, search_members_in, MemberSearchQuery};
 
 /// Build the deployment-admin routes.
@@ -73,10 +71,6 @@ pub fn router(state: Arc<crate::state::AppState>) -> Router {
         .route(
             "/members/{pubkey}/ownership",
             get(reads::identity_inventory),
-        )
-        .route(
-            "/members/{pubkey}/archive",
-            axum::routing::post(identity_archive::archive),
         )
         .route("/events/{id}", get(reads::event_preview))
         .route("/members/restrictions", get(list_member_restrictions))
@@ -1206,7 +1200,8 @@ async fn community_for_host(
     Ok(tenant_for_host(state, host).await?.community())
 }
 
-async fn tenant_for_host(
+/// Resolve an explicit community host for a management request.
+pub(crate) async fn tenant_for_host(
     state: &crate::state::AppState,
     host: &str,
 ) -> Result<buzz_core::TenantContext, ApiError> {

@@ -5,8 +5,8 @@
 //! Authority is the `RELAY_OPERATOR_PUBKEYS` allowlist. The NIP-98 `u` tag
 //! must equal the configured origin plus the received path and raw query, so
 //! the signature binds `communityHost`; mutations also bind the exact body
-//! bytes. After that check each route runs the shared member-operation core. Auth refusals keep this surface's own
-//! envelope, with a `code` of `unauthorized` (401) or `not_operator` (403).
+//! bytes. Auth refusals carry a `code` of `unauthorized` (401) or
+//! `not_operator` (403).
 //! See `docs/operator-identity-archive.md`.
 
 use axum::{
@@ -19,8 +19,9 @@ use axum::{
 };
 use tower_http::limit::RequestBodyLimitLayer;
 
+use super::identity_archive::{self, ArchiveOperation};
 use super::*;
-use crate::api::admin::{self, ArchiveOperation, CommunityQuery, MemberSearchQuery};
+use crate::api::admin::{self, CommunityQuery, MemberSearchQuery};
 
 /// Same cap as the admin API: mutation bodies are a few hundred bytes.
 const BODY_LIMIT: usize = 4096;
@@ -133,7 +134,7 @@ async fn change_visibility(
         Ok(actor) => actor,
         Err(refusal) => return refusal.into_response(),
     };
-    admin::execute_identity_archive(
+    identity_archive::execute(
         &state,
         actor,
         operation,
