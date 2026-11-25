@@ -63,7 +63,12 @@ fn record_event_processing(start: std::time::Instant, outcome: &'static str) {
 }
 
 fn event_frame_for_sub(sub_id: &str, event_json: &str) -> String {
-    format!(r#"["EVENT","{}",{}]"#, sub_id, event_json)
+    // A JSON `Value` displays as JSON, so quotes and backslashes are escaped.
+    format!(
+        r#"["EVENT",{},{}]"#,
+        serde_json::Value::from(sub_id),
+        event_json
+    )
 }
 
 fn event_frame_bytes_for_sub(sub_id: &str, event_json: &str) -> Arc<Bytes> {
@@ -1592,6 +1597,15 @@ mod tests {
                 .as_ref(),
             expected.as_bytes()
         );
+    }
+
+    #[test]
+    fn fanout_event_frame_escapes_sub_id() {
+        for sub_id in [r#"quote"d"#, r"back\slash", r#"a","b"#] {
+            let frame = super::event_frame_for_sub(sub_id, r#"{"id":"abc"}"#);
+            let parsed: serde_json::Value = serde_json::from_str(&frame).expect(&frame);
+            assert_eq!(parsed, serde_json::json!(["EVENT", sub_id, {"id": "abc"}]));
+        }
     }
 
     #[test]
