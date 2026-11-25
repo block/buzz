@@ -1245,6 +1245,13 @@ async fn restricted_governance_requires_recorded_owner_admission() {
     {
         if owner_member {
             community_role(&state, &tenant, &owner, "member").await;
+        } else {
+            sqlx::query("DELETE FROM relay_members WHERE community_id=$1 AND pubkey=$2")
+                .bind(tenant.community().as_uuid())
+                .bind(owner.public_key().to_hex())
+                .execute(state.db.pool())
+                .await
+                .unwrap();
         }
         let mut configured = (*state).clone();
         std::sync::Arc::make_mut(&mut configured.config).require_relay_membership = !open;

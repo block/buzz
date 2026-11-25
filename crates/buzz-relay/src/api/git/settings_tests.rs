@@ -1128,6 +1128,7 @@ mod postgres_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
     async fn smart_git_records_the_presented_owner_before_crediting_a_role() {
         use axum::extract::FromRequestParts;
         use buzz_core::channel::MemberRole;
@@ -1244,6 +1245,7 @@ mod postgres_tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
     #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
     async fn a_restricted_land_preserves_owner_admission() {
         use axum::extract::FromRequestParts;
         use buzz_core::channel::MemberRole;
@@ -1449,6 +1451,50 @@ mod postgres_tests {
         .await;
         assert!(result.is_ok());
         guard.finish().await.unwrap();
+
+        // An admitted agent whose owner leaves the community is credited nothing.
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1,$2,'member')",
+        )
+        .bind(community.as_uuid())
+        .bind(agent.public_key().to_hex())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM relay_members WHERE community_id=$1 AND pubkey=$2")
+            .bind(community.as_uuid())
+            .bind(owner.public_key().to_hex())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let decided = std::sync::atomic::AtomicBool::new(false);
+        let guard = buzz_deletion::acquire_serving_write(&state.db, community, "owner-left")
+            .await
+            .unwrap();
+        let _ = super::super::super::land::land(
+            &state,
+            guard.lease(),
+            super::super::super::land::Change {
+                kind: "default_branch",
+                repo: &repo,
+                actor: agent.public_key().as_bytes(),
+                grant: None,
+                seen: Some("review-manifest"),
+                new: "owner-left-manifest",
+                updates: &[],
+            },
+            async |_tx, authority| {
+                decided.store(true, std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(authority.role, None, "an unadmitted owner admits no agent");
+                Ok(super::super::super::gate::Decision {
+                    verdict: Ok(()),
+                    counted: Default::default(),
+                })
+            },
+        )
+        .await;
+        guard.finish().await.unwrap();
+        assert!(decided.into_inner(), "the land must reach its decision");
     }
 } // mod postgres_tests
 
