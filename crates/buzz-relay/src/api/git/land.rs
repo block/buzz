@@ -322,7 +322,7 @@ fn admitted_role(
     open: bool,
     grant: Option<MemberRole>,
 ) -> Option<MemberRole> {
-    if !facts.admitted(open) || facts.owner.as_ref().is_some_and(|(_, o)| !o.admitted(open)) {
+    if !facts.git_admitted(open) {
         return None;
     }
     super::authority::credit(

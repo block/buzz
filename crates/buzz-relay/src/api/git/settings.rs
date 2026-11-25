@@ -363,6 +363,7 @@ async fn get_default_branch(
         auth.grant.as_ref(),
         &owner,
         repo_name,
+        !state.config.require_relay_membership,
     )
     .await?;
     let repo = super::land::coordinate(&owner, repo_name);
@@ -389,6 +390,7 @@ async fn set_default_branch(
         auth.grant.as_ref(),
         &owner,
         repo_name,
+        !state.config.require_relay_membership,
     )
     .await?;
     let request: SetDefaultBranch = serde_json::from_slice(&body).map_err(|_| {

@@ -1223,7 +1223,7 @@ mod postgres_tests {
             &super::super::super::land::coordinate(&agent.public_key().to_hex(), "repo"),
             agent.public_key().as_bytes(),
             None,
-            buzz_core::governance::GrantAction::Read,
+            !state.config.require_relay_membership,
         )
         .await
         .unwrap();
@@ -1339,7 +1339,7 @@ mod postgres_tests {
             &super::super::super::land::coordinate(&agent.public_key().to_hex(), "repo"),
             agent.public_key().as_bytes(),
             None,
-            buzz_core::governance::GrantAction::Read,
+            !state.config.require_relay_membership,
         )
         .await
         .unwrap();

@@ -798,6 +798,7 @@ pub(super) async fn authorize_git_read(
     grant: Option<&buzz_core::governance::GitGrant>,
     owner_hex: &str,
     repo_name: &str,
+    open: bool,
 ) -> Result<nostr::Event, Response> {
     fn denied() -> Response {
         (StatusCode::NOT_FOUND, "repository not found").into_response()
@@ -883,7 +884,7 @@ pub(super) async fn authorize_git_read(
         &repo,
         &caller.to_bytes(),
         grant,
-        buzz_core::governance::GrantAction::Read,
+        open,
     )
     .await
     {
@@ -1129,6 +1130,7 @@ pub async fn info_refs(
         auth.grant.as_ref(),
         &params.owner,
         repo_name,
+        !state.config.require_relay_membership,
     )
     .await?;
 
@@ -1383,6 +1385,7 @@ pub async fn upload_pack(
         auth.grant.as_ref(),
         &params.owner,
         repo_name,
+        !state.config.require_relay_membership,
     )
     .await?;
 
@@ -4551,18 +4554,34 @@ mod sec005_postgres_tests {
         // Current member: allowed.
         let member = f.member_keys.public_key();
         assert!(
-            authorize_git_read(&f.db, f.community, &member, None, &f.owner_hex, &f.repo,)
-                .await
-                .is_ok(),
+            authorize_git_read(
+                &f.db,
+                f.community,
+                &member,
+                None,
+                &f.owner_hex,
+                &f.repo,
+                true,
+            )
+            .await
+            .is_ok(),
             "current member must be allowed to read"
         );
 
         // Never-a-member caller: denied.
         let stranger = Keys::generate().public_key();
         assert!(
-            authorize_git_read(&f.db, f.community, &stranger, None, &f.owner_hex, &f.repo,)
-                .await
-                .is_err(),
+            authorize_git_read(
+                &f.db,
+                f.community,
+                &stranger,
+                None,
+                &f.owner_hex,
+                &f.repo,
+                true,
+            )
+            .await
+            .is_err(),
             "non-member must be denied"
         );
 
@@ -4572,9 +4591,17 @@ mod sec005_postgres_tests {
             .await
             .expect("self-remove");
         assert!(
-            authorize_git_read(&f.db, f.community, &member, None, &f.owner_hex, &f.repo,)
-                .await
-                .is_err(),
+            authorize_git_read(
+                &f.db,
+                f.community,
+                &member,
+                None,
+                &f.owner_hex,
+                &f.repo,
+                true,
+            )
+            .await
+            .is_err(),
             "removed member must be denied"
         );
 
@@ -4582,9 +4609,17 @@ mod sec005_postgres_tests {
         // member and must be denied too.
         let owner = f.owner_keys.public_key();
         assert!(
-            authorize_git_read(&f.db, f.community, &owner, None, &f.owner_hex, &f.repo,)
-                .await
-                .is_err(),
+            authorize_git_read(
+                &f.db,
+                f.community,
+                &owner,
+                None,
+                &f.owner_hex,
+                &f.repo,
+                true,
+            )
+            .await
+            .is_err(),
             "repo owner outside the channel must be denied (no owner bypass)"
         );
     }
@@ -4597,7 +4632,16 @@ mod sec005_postgres_tests {
         let f = setup_repo(Binding::Missing).await;
         let member = f.member_keys.public_key();
         let (status, body) = denial_parts(
-            authorize_git_read(&f.db, f.community, &member, None, &f.owner_hex, &f.repo).await,
+            authorize_git_read(
+                &f.db,
+                f.community,
+                &member,
+                None,
+                &f.owner_hex,
+                &f.repo,
+                true,
+            )
+            .await,
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
@@ -4614,7 +4658,16 @@ mod sec005_postgres_tests {
         let g = setup_repo(Binding::Malformed).await;
         let g_owner = g.owner_keys.public_key();
         let (status, body) = denial_parts(
-            authorize_git_read(&g.db, g.community, &g_owner, None, &g.owner_hex, &g.repo).await,
+            authorize_git_read(
+                &g.db,
+                g.community,
+                &g_owner,
+                None,
+                &g.owner_hex,
+                &g.repo,
+                true,
+            )
+            .await,
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
@@ -4631,7 +4684,16 @@ mod sec005_postgres_tests {
         let u = setup_repo(Binding::UnknownChannel).await;
         let u_owner = u.owner_keys.public_key();
         let (status, body) = denial_parts(
-            authorize_git_read(&u.db, u.community, &u_owner, None, &u.owner_hex, &u.repo).await,
+            authorize_git_read(
+                &u.db,
+                u.community,
+                &u_owner,
+                None,
+                &u.owner_hex,
+                &u.repo,
+                true,
+            )
+            .await,
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
@@ -4649,6 +4711,7 @@ mod sec005_postgres_tests {
                 None,
                 &f.owner_hex,
                 "no-such-repo",
+                true,
             )
             .await,
         )
@@ -4662,17 +4725,33 @@ mod sec005_postgres_tests {
         // Owner-mismatch: URL owner differs from announcement author → deny.
         let impostor_hex = Keys::generate().public_key().to_hex();
         assert!(
-            authorize_git_read(&f.db, f.community, &member, None, &impostor_hex, &f.repo,)
-                .await
-                .is_err(),
+            authorize_git_read(
+                &f.db,
+                f.community,
+                &member,
+                None,
+                &impostor_hex,
+                &f.repo,
+                true,
+            )
+            .await
+            .is_err(),
             "URL owner that never announced this repo must deny"
         );
 
         // Invalid owner hex in URL → deny (never panics).
         assert!(
-            authorize_git_read(&f.db, f.community, &member, None, "zz-not-hex", &f.repo,)
-                .await
-                .is_err(),
+            authorize_git_read(
+                &f.db,
+                f.community,
+                &member,
+                None,
+                "zz-not-hex",
+                &f.repo,
+                true,
+            )
+            .await
+            .is_err(),
             "malformed owner hex must deny"
         );
     }
@@ -4688,9 +4767,17 @@ mod sec005_postgres_tests {
         let f = setup_repo(Binding::Missing).await;
         let author = f.owner_keys.public_key();
 
-        let response = authorize_git_read(&f.db, f.community, &author, None, &f.owner_hex, &f.repo)
-            .await
-            .expect_err("unbound repo must still deny its author");
+        let response = authorize_git_read(
+            &f.db,
+            f.community,
+            &author,
+            None,
+            &f.owner_hex,
+            &f.repo,
+            true,
+        )
+        .await
+        .expect_err("unbound repo must still deny its author");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         // Guard against a future "tidy" into Json(...) or a custom
         // IntoResponse: git prints `remote:` lines only for text/plain
@@ -4718,7 +4805,16 @@ mod sec005_postgres_tests {
         // who is not the author still gets the generic body.
         let member = f.member_keys.public_key();
         let (_, body) = denial_parts(
-            authorize_git_read(&f.db, f.community, &member, None, &f.owner_hex, &f.repo).await,
+            authorize_git_read(
+                &f.db,
+                f.community,
+                &member,
+                None,
+                &f.owner_hex,
+                &f.repo,
+                true,
+            )
+            .await,
         )
         .await;
         assert_eq!(body, GENERIC_DENIAL, "remediation is author-only");
@@ -4735,9 +4831,17 @@ mod sec005_postgres_tests {
 
         let member = f.member_keys.public_key();
         assert!(
-            authorize_git_read(&f.db, f.community, &member, None, &f.owner_hex, &f.repo,)
-                .await
-                .is_ok(),
+            authorize_git_read(
+                &f.db,
+                f.community,
+                &member,
+                None,
+                &f.owner_hex,
+                &f.repo,
+                true,
+            )
+            .await
+            .is_ok(),
             "precondition: member allowed while announcement is live"
         );
 
@@ -4757,9 +4861,17 @@ mod sec005_postgres_tests {
         assert!(deleted, "precondition: a live announcement row was deleted");
 
         assert!(
-            authorize_git_read(&f.db, f.community, &member, None, &f.owner_hex, &f.repo,)
-                .await
-                .is_err(),
+            authorize_git_read(
+                &f.db,
+                f.community,
+                &member,
+                None,
+                &f.owner_hex,
+                &f.repo,
+                true,
+            )
+            .await
+            .is_err(),
             "deleted announcement must deny reads even for channel members"
         );
     }
@@ -4773,9 +4885,17 @@ mod sec005_postgres_tests {
         let f = setup_repo(Binding::Channel).await;
         let member = f.member_keys.public_key();
         assert!(
-            authorize_git_read(&f.db, f.community, &member, None, &f.owner_hex, &f.repo,)
-                .await
-                .is_ok(),
+            authorize_git_read(
+                &f.db,
+                f.community,
+                &member,
+                None,
+                &f.owner_hex,
+                &f.repo,
+                true,
+            )
+            .await
+            .is_ok(),
             "precondition: the pinned channel's member reads"
         );
 
@@ -4807,15 +4927,24 @@ mod sec005_postgres_tests {
                 None,
                 &f.owner_hex,
                 &f.repo,
+                true,
             )
             .await
             .is_err(),
             "a re-announcement must not hand the repo to another channel"
         );
         assert!(
-            authorize_git_read(&f.db, f.community, &member, None, &f.owner_hex, &f.repo,)
-                .await
-                .is_ok(),
+            authorize_git_read(
+                &f.db,
+                f.community,
+                &member,
+                None,
+                &f.owner_hex,
+                &f.repo,
+                true,
+            )
+            .await
+            .is_ok(),
             "a re-announcement must not lock the pinned channel out"
         );
     }
@@ -4847,8 +4976,17 @@ mod sec005_postgres_tests {
         for binding in [Binding::Missing, Binding::Malformed] {
             let f = setup_repo(binding).await;
             let member = f.member_keys.public_key();
-            let read =
-                || authorize_git_read(&f.db, f.community, &member, None, &f.owner_hex, &f.repo);
+            let read = || {
+                authorize_git_read(
+                    &f.db,
+                    f.community,
+                    &member,
+                    None,
+                    &f.owner_hex,
+                    &f.repo,
+                    true,
+                )
+            };
             assert!(read().await.is_err(), "nothing pinned, nothing read");
             reannounce(&f, f.channel, 5).await;
             assert!(read().await.is_ok(), "the first valid tag pins");
@@ -4862,7 +5000,17 @@ mod sec005_postgres_tests {
     async fn read_gate_pin_survives_delete_and_reannounce() {
         let f = setup_repo(Binding::Channel).await;
         let member = f.member_keys.public_key();
-        let read = || authorize_git_read(&f.db, f.community, &member, None, &f.owner_hex, &f.repo);
+        let read = || {
+            authorize_git_read(
+                &f.db,
+                f.community,
+                &member,
+                None,
+                &f.owner_hex,
+                &f.repo,
+                true,
+            )
+        };
         assert!(
             read().await.is_ok(),
             "precondition: pinned by the first read"

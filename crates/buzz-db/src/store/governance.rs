@@ -263,7 +263,7 @@ async fn repo_admin(
     open: bool,
 ) -> Result<bool> {
     let facts = crate::git_land::key_facts(tx, ch, key).await?;
-    if !admitted(&facts, open) {
+    if !facts.git_admitted(open) {
         return Ok(false);
     }
     let own_admin = admin(facts.key.channel_role.as_deref());
@@ -273,16 +273,6 @@ async fn repo_admin(
                 && live_grant_level(tx, grant, repo, owner).await? == Some(GrantAction::Manage)));
     }
     Ok(own_admin)
-}
-
-/// Same community admission as a Git land, including the recorded owner
-/// on both the membership and grant routes.
-fn admitted(facts: &crate::git_land::KeyFacts, open: bool) -> bool {
-    facts.admitted(open)
-        && facts
-            .owner
-            .as_ref()
-            .is_none_or(|(_, owner)| owner.admitted(open))
 }
 
 /// The level of the grant presented for this repository, if live: signed by
@@ -379,7 +369,7 @@ pub async fn authorize_read(
     if let Some(repo) = id.repo() {
         let ch = repo_channel(tx, repo).await?;
         let facts = crate::git_land::key_facts(tx, ch, actor).await?;
-        if !admitted(&facts, open) {
+        if !facts.git_admitted(open) {
             return Err(denied());
         }
         let own_read = reader(facts.key.channel_role.as_deref());
@@ -413,7 +403,7 @@ pub async fn authorize_read(
             return Err(denied());
         }
         let facts = crate::git_land::key_facts(tx, Uuid::nil(), actor).await?;
-        if !admitted(&facts, open) {
+        if !facts.git_admitted(open) {
             return Err(denied());
         }
     }

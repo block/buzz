@@ -73,6 +73,16 @@ impl Facts {
 }
 
 impl KeyFacts {
+    /// Git authority requires the key's admission and, when recorded, its
+    /// owner's admission on both the direct and delegated routes.
+    pub fn git_admitted(&self, open: bool) -> bool {
+        self.admitted(open)
+            && self
+                .owner
+                .as_ref()
+                .is_none_or(|(_, owner)| owner.admitted(open))
+    }
+
     /// Admitted to the community: on its own, or, for an unbanned agent,
     /// through its recorded owner's admission, as the relay admits an agent
     /// its owner vouches for. Repository authority is evaluated separately:
@@ -260,6 +270,25 @@ pub async fn rebind(tx: &mut AdmittedTx, repo: &RepoCoordinate, channel: Uuid) -
 /// is read: an owner's own owner is never locked. The owner link itself
 /// cannot move under the land, which holds admission.
 pub async fn key_facts(tx: &mut AdmittedTx, channel: Uuid, key: &[u8]) -> Result<KeyFacts> {
+    load_key_facts(tx, channel, key, true).await
+}
+
+/// Read-door snapshot of key and owner facts, without roster row locks.
+/// Unlike a land, this snapshot does not fence later membership changes.
+pub async fn key_facts_for_read(
+    tx: &mut AdmittedTx,
+    channel: Uuid,
+    key: &[u8],
+) -> Result<KeyFacts> {
+    load_key_facts(tx, channel, key, false).await
+}
+
+async fn load_key_facts(
+    tx: &mut AdmittedTx,
+    channel: Uuid,
+    key: &[u8],
+    lock_membership: bool,
+) -> Result<KeyFacts> {
     let community = tx.community();
     let owner: Option<Vec<u8>> = sqlx::query_scalar(
         "SELECT agent_owner_pubkey FROM users WHERE community_id = $1 AND pubkey = $2",
@@ -271,19 +300,24 @@ pub async fn key_facts(tx: &mut AdmittedTx, channel: Uuid, key: &[u8]) -> Result
     .flatten();
     let owner = match owner {
         Some(owner) => {
-            let facts = facts(tx, channel, &owner).await?;
+            let facts = facts(tx, channel, &owner, lock_membership).await?;
             Some((owner, facts))
         }
         None => None,
     };
     Ok(KeyFacts {
-        key: facts(tx, channel, key).await?,
+        key: facts(tx, channel, key, lock_membership).await?,
         owner,
     })
 }
 
-/// One key's facts; locks its community membership.
-async fn facts(tx: &mut AdmittedTx, channel: Uuid, key: &[u8]) -> Result<Facts> {
+/// One key's facts, optionally locking its community membership for a land.
+async fn facts(
+    tx: &mut AdmittedTx,
+    channel: Uuid,
+    key: &[u8],
+    lock_membership: bool,
+) -> Result<Facts> {
     let community = tx.community();
     let row = sqlx::query(
         "SELECT \
@@ -300,14 +334,16 @@ async fn facts(tx: &mut AdmittedTx, channel: Uuid, key: &[u8]) -> Result<Facts> 
     .bind(key)
     .fetch_one(tx.conn())
     .await?;
-    let member: Option<i32> = sqlx::query_scalar(
-        "SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = encode($2, 'hex') \
-         FOR KEY SHARE",
-    )
-    .bind(community.as_uuid())
-    .bind(key)
-    .fetch_optional(tx.conn())
-    .await?;
+    let membership_query = if lock_membership {
+        "SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = encode($2, 'hex') FOR KEY SHARE"
+    } else {
+        "SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = encode($2, 'hex')"
+    };
+    let member: Option<i32> = sqlx::query_scalar(membership_query)
+        .bind(community.as_uuid())
+        .bind(key)
+        .fetch_optional(tx.conn())
+        .await?;
     Ok(Facts {
         banned: row.try_get("banned")?,
         community_member: member.is_some(),
