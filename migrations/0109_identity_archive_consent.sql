@@ -1,5 +1,5 @@
 -- Expand the NIP-IA consent check for Operator archive.
--- Migration 0108 validates it separately from this DDL lock.
+-- Migration 0110 validates it separately from this DDL lock.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
 

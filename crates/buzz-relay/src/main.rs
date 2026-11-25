@@ -311,6 +311,11 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         push_enabled = config.push_enabled,
         "Config loaded"
     );
+    info!(
+        mode = buzz_relay::nip_fi_config::mode_name(config.nip_fi.mode),
+        enforce_percent = config.nip_fi.enforce_percent,
+        "NIP-FI config loaded"
+    );
 
     let usage_interval_secs = usage_metrics_interval_secs();
     let metrics_refresh_interval_secs =
@@ -665,7 +670,10 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                 .await
                 .map_err(|e| anyhow::anyhow!("search outbox: {e}"))?;
             info!(url = %opensearch.url, "search outbox enabled");
-            Some(buzz_search::indexer::Indexer::new(db.clone(), index))
+            Some(
+                buzz_search::indexer::Indexer::new(db.clone(), index)
+                    .with_workers(config.search_indexer_workers),
+            )
         }
         None => None,
     };

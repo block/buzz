@@ -280,6 +280,7 @@ jobs:
           /bin/bash scripts/test-mobile-carousel.sh "$device"
           /bin/bash scripts/test-mobile-member-picker.sh "$device"
           /bin/bash scripts/test-mobile-setting-menu.sh "$device"
+          /bin/bash scripts/test-mobile-create-channel-accessibility.sh "$device"
           if ! wait "$build"; then
             cat "$build_log"
             exit 1

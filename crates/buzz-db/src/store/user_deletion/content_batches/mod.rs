@@ -387,3 +387,6 @@ mod files_postgres_tests;
 
 #[cfg(test)]
 mod schedule_postgres_tests;
+
+#[cfg(test)]
+mod search_postgres_tests;

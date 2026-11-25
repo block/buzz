@@ -2424,6 +2424,99 @@ void main() {
       expect(stack.toString(), contains('_publishFromTheCaller'));
     });
 
+    test(
+      'a publish held by the rate limit keeps the stack of its caller',
+      () async {
+        final gateTimers = <_ManualTimer>[];
+        final gate = RelayRateLimitGate(
+          timerFactory: (duration, callback) {
+            final timer = _ManualTimer(duration, callback);
+            gateTimers.add(timer);
+            return timer;
+          },
+        );
+        final session = RelaySessionNotifier(rateLimitGate: gate);
+        session.debugAttachSocketForTest(_RecordingRelaySocket());
+        gate.activate(4);
+
+        final publish = _publishFromTheCaller(session);
+        gateTimers.single.fire();
+        await Future<void>.delayed(Duration.zero);
+        session.debugHandleMessage(['OK', 'event-1', false, 'invalid: bad']);
+
+        StackTrace? stack;
+        try {
+          await publish;
+        } on RelayEventRejectedException catch (_, trace) {
+          stack = trace;
+        }
+        expect(stack.toString(), contains('_publishFromTheCaller'));
+      },
+    );
+
+    test(
+      'a history request held by the rate limit keeps the stack of its caller',
+      () async {
+        final gateTimers = <_ManualTimer>[];
+        final gate = RelayRateLimitGate(
+          timerFactory: (duration, callback) {
+            final timer = _ManualTimer(duration, callback);
+            gateTimers.add(timer);
+            return timer;
+          },
+        );
+        final session = RelaySessionNotifier(rateLimitGate: gate);
+        final socket = _RecordingRelaySocket();
+        session.debugAttachSocketForTest(socket);
+        gate.activate(4);
+
+        final history = _fetchHistoryFromTheCaller(session);
+        gateTimers.single.fire();
+        await Future<void>.delayed(Duration.zero);
+        session.debugHandleMessage([
+          'CLOSED',
+          _reqs(socket).last[1] as String,
+          'restricted: not a member',
+        ]);
+
+        StackTrace? stack;
+        try {
+          await history;
+        } on RelayClosedException catch (_, trace) {
+          stack = trace;
+        }
+        expect(stack.toString(), contains('_fetchHistoryFromTheCaller'));
+      },
+    );
+
+    test('a submit held by signing keeps the stack of its caller', () async {
+      final session = RelaySessionNotifier();
+      final socket = _RecordingRelaySocket();
+      session.debugAttachSocketForTest(socket);
+      final relay = SignedEventRelay(
+        session: session,
+        nsec: nostr.Keys.generate().nsec,
+      );
+
+      final submit = _submitFromTheCaller(relay);
+      await Future<void>.delayed(Duration.zero);
+      final sent = socket.messages.single;
+      session.debugHandleMessage([
+        'OK',
+        (sent[1] as Map<String, dynamic>)['id'],
+        false,
+        'invalid: bad',
+      ]);
+
+      StackTrace? stack;
+      try {
+        await submit;
+      } on RelayEventRejectedException catch (_, trace) {
+        stack = trace;
+      }
+      expect(stack.toString(), contains('_submitFromTheCaller'));
+    });
+
     test('an unacknowledged publish is a timeout of the publish', () async {
       final session = RelaySessionNotifier();
       session.debugAttachSocketForTest(_RecordingRelaySocket());
@@ -2709,6 +2802,17 @@ class _FakeRelayConfigNotifier extends RelayConfigNotifier {
 
 Future<NostrEvent> _publishFromTheCaller(RelaySessionNotifier session) =>
     session.publish(_event());
+
+Future<List<NostrEvent>> _fetchHistoryFromTheCaller(
+  RelaySessionNotifier session,
+) => session.fetchHistory(_channelFilter);
+
+Future<NostrEvent> _submitFromTheCaller(SignedEventRelay relay) => relay.submit(
+  kind: 1,
+  content: '',
+  tags: const [],
+  onSigned: (_) => Future<void>.delayed(Duration.zero),
+);
 
 NostrEvent _event({int createdAt = 20, String id = 'event-1'}) {
   return NostrEvent(

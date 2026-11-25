@@ -23,6 +23,7 @@ use tokio::sync::broadcast;
 use tokio::time::{Duration, Instant};
 use uuid::Uuid;
 
+use crate::keepalive::Keepalive;
 use crate::topic::BUZZ_PREFIX;
 
 /// Tenant-local Redis pub/sub channel suffix for connection-control messages.
@@ -189,7 +190,7 @@ pub async fn run_conn_control_subscriber(
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
 
     loop {
-        match connect_and_subscribe(&redis_url, &broadcast_tx).await {
+        match connect_and_subscribe(&redis_url, &broadcast_tx, Keepalive::DEFAULT).await {
             Ok(()) => {
                 backoff_secs = BACKOFF_INITIAL_SECS;
                 tracing::warn!(
@@ -211,16 +212,25 @@ pub async fn run_conn_control_subscriber(
 async fn connect_and_subscribe(
     redis_url: &str,
     broadcast_tx: &broadcast::Sender<ScopedConnControl>,
+    keepalive: Keepalive,
 ) -> Result<(), redis::RedisError> {
-    let client = redis::Client::open(redis_url)?;
-    let mut conn = client.get_async_pubsub().await?;
-
-    conn.psubscribe(CONN_CONTROL_PATTERN).await?;
+    let (mut sink, mut stream) = keepalive.connect(redis_url).await?;
+    keepalive
+        .bounded(sink.psubscribe(CONN_CONTROL_PATTERN))
+        .await?;
 
     tracing::info!("Redis conn-control subscriber connected — listening on {CONN_CONTROL_PATTERN}");
 
-    let mut stream = conn.on_message();
-    while let Some(msg) = stream.next().await {
+    let heartbeat = keepalive.heartbeat(sink);
+    tokio::pin!(heartbeat);
+    loop {
+        let msg = tokio::select! {
+            msg = stream.next() => match msg {
+                Some(msg) => msg,
+                None => return Ok(()),
+            },
+            err = &mut heartbeat => return Err(err),
+        };
         let channel = msg.get_channel_name();
         let Some(community_id) = parse_conn_control_channel(channel) else {
             tracing::warn!("Received conn-control message on unexpected channel: {channel}");
@@ -252,8 +262,6 @@ async fn connect_and_subscribe(
             tracing::trace!("No conn-control receivers — message dropped");
         }
     }
-
-    Ok(())
 }
 
 // ── NIP-FI disconnect subscriber ──────────────────────────────────────────────
@@ -279,7 +287,13 @@ pub async fn run_nip_fi_disconnect_subscriber(
     channels: &'static [&'static str],
 ) {
     nip_fi_retry_loop(subscription, |confirmed| {
-        connect_and_subscribe_nip_fi(redis_url.clone(), broadcast_tx.clone(), confirmed, channels)
+        connect_and_subscribe_nip_fi(
+            redis_url.clone(),
+            broadcast_tx.clone(),
+            confirmed,
+            channels,
+            Keepalive::DEFAULT,
+        )
     })
     .await
 }
@@ -341,18 +355,25 @@ async fn connect_and_subscribe_nip_fi(
     broadcast_tx: broadcast::Sender<NipFiDisconnect>,
     confirm: NipFiConfirm,
     channels: &[&str],
+    keepalive: Keepalive,
 ) -> Result<(), redis::RedisError> {
-    let client = redis::Client::open(redis_url)?;
-    let mut conn = client.get_async_pubsub().await?;
-
+    let (mut sink, mut stream) = keepalive.connect(&redis_url).await?;
     // Returns once Redis has confirmed the subscription.
-    conn.subscribe(channels).await?;
+    keepalive.bounded(sink.subscribe(channels)).await?;
     confirm.confirmed();
 
     tracing::info!("Redis NIP-FI disconnect subscriber connected — listening on {channels:?}");
 
-    let mut stream = conn.on_message();
-    while let Some(msg) = stream.next().await {
+    let heartbeat = keepalive.heartbeat(sink);
+    tokio::pin!(heartbeat);
+    loop {
+        let msg = tokio::select! {
+            msg = stream.next() => match msg {
+                Some(msg) => msg,
+                None => return Ok(()),
+            },
+            err = &mut heartbeat => return Err(err),
+        };
         let payload: String = match msg.get_payload() {
             Ok(p) => p,
             Err(e) => {
@@ -373,8 +394,6 @@ async fn connect_and_subscribe_nip_fi(
             tracing::trace!("No NIP-FI disconnect receivers — message dropped");
         }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -632,5 +651,103 @@ mod tests {
         })
         .unwrap();
         assert!(serde_json::from_str::<NipFiDisconnect>(&good).is_ok());
+    }
+
+    mod keepalive {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        use super::*;
+        use crate::keepalive::fake_redis::{message, FakeRedis, FAST};
+
+        const BOUND: Duration = Duration::from_secs(2);
+
+        fn confirm() -> NipFiConfirm {
+            let (subscription, _) = tokio::sync::watch::channel(NipFiSubscription::default());
+            NipFiConfirm {
+                at: Arc::default(),
+                subscription: Arc::new(subscription),
+            }
+        }
+
+        #[tokio::test]
+        async fn nip_fi_subscriber_forwards_while_pong_withheld_then_drops_socket() {
+            let fake = FakeRedis::start().await;
+            fake.hold_pong.store(true, Ordering::SeqCst);
+            let (tx, mut rx) = broadcast::channel(8);
+            let sub = connect_and_subscribe_nip_fi(
+                fake.url.clone(),
+                tx.clone(),
+                confirm(),
+                &[NIP_FI_DISCONNECT_CHANNEL],
+                FAST,
+            );
+            tokio::pin!(sub);
+
+            tokio::select! {
+                () = fake.pinged.notified() => {}
+                r = &mut sub => panic!("subscriber returned before its first PING: {r:?}"),
+            }
+            let cmd = NipFiDisconnect {
+                issuer: "https://issuer.example".into(),
+                pubkey_bytes: vec![7; 32],
+                until_unix: 1_900_000_000,
+                until_unix_nanos: 0,
+                revoke_through: None,
+            };
+            let payload = encode_nip_fi_disconnect(&cmd).unwrap();
+            fake.push
+                .send(message(NIP_FI_DISCONNECT_CHANNEL, &payload))
+                .unwrap();
+            tokio::select! {
+                got = rx.recv() => assert_eq!(got.unwrap(), cmd),
+                r = &mut sub => panic!("PING pending blocked delivery: {r:?}"),
+            }
+
+            let err = tokio::time::timeout(BOUND, &mut sub)
+                .await
+                .expect("withheld PONG must end the connection")
+                .unwrap_err();
+            assert_eq!(err.kind(), redis::ErrorKind::Io);
+            tokio::time::timeout(BOUND, fake.closed.notified())
+                .await
+                .expect("old socket must be closed");
+        }
+
+        #[tokio::test]
+        async fn conn_control_subscriber_drops_socket_when_pong_withheld() {
+            let fake = FakeRedis::start().await;
+            fake.hold_pong.store(true, Ordering::SeqCst);
+            let (tx, _rx) = broadcast::channel(8);
+            let err = tokio::time::timeout(BOUND, connect_and_subscribe(&fake.url, &tx, FAST))
+                .await
+                .expect("withheld PONG must end the connection")
+                .unwrap_err();
+            assert_eq!(err.kind(), redis::ErrorKind::Io);
+            tokio::time::timeout(BOUND, fake.closed.notified())
+                .await
+                .expect("old socket must be closed");
+        }
+
+        #[tokio::test]
+        async fn nip_fi_subscriber_fails_stalled_subscribe() {
+            let fake = FakeRedis::start().await;
+            fake.hold_subscribe.store(true, Ordering::SeqCst);
+            let (tx, _rx) = broadcast::channel(8);
+            let err = tokio::time::timeout(
+                BOUND,
+                connect_and_subscribe_nip_fi(
+                    fake.url.clone(),
+                    tx,
+                    confirm(),
+                    &[NIP_FI_DISCONNECT_CHANNEL],
+                    FAST,
+                ),
+            )
+            .await
+            .expect("stalled SUBSCRIBE must end the connection")
+            .unwrap_err();
+            assert_eq!(err.kind(), redis::ErrorKind::Io);
+        }
     }
 }

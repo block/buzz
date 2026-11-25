@@ -2849,11 +2849,23 @@ void main() {
       recentMessages: [old],
       enforceHistoryLimits: true,
     );
+    final savedDir = await Directory.systemTemp.createTemp('active-saved');
+    addTearDown(() => savedDir.delete(recursive: true));
     final container = _buildContainer(
       session: session,
       overrides: [
         readStateProvider.overrideWith(_ActivityReadState.new),
         _testPubkeyProvider.overrideWith(_ActivityPubkey.new),
+        savedMessageScopeProvider.overrideWithValue((
+          communityId: 'community',
+          pubkey: _activityPk,
+        )),
+        savedMessageStoreProvider.overrideWith(
+          (ref) => SavedMessageStore(
+            root: () async => savedDir,
+            diagnostics: const NoopDiagnosticReporter(),
+          ),
+        ),
       ],
     );
     addTearDown(container.dispose);
@@ -3022,11 +3034,12 @@ void main() {
 
     // Deleting the latest post forgets the channel's activity until the next
     // list read re-reads it.
-    NostrEvent deletionOf(NostrEvent post) => NostrEvent.fromJson(
+    NostrEvent deletionOf(NostrEvent post, {int? at}) => NostrEvent.fromJson(
       signNostrEvent(
         kind: EventKind.deletion,
         content: '',
         secretKey: _activityKey,
+        createdAt: at,
         tags: [
           ['h', _channelA],
           ['e', post.id],
@@ -3051,6 +3064,131 @@ void main() {
     session.recentMessages = [old];
     await reconnect();
     expect(notifier.activityFor(_channelA), (known: true, at: old.createdAt));
+
+    // A gap read answers with its newest post. When the catch-up found that
+    // post deleted, an older one in the gap may survive, so the channel stays
+    // unknown.
+    final kept = message('kept', now - 8);
+    session.emit(kept);
+    await _waitUntil(
+      () => notifier.activityFor(_channelA).at == kept.createdAt,
+    );
+    final older = message('older', now - 7);
+    final deletedInGap = message('deletedInGap', now - 6);
+    session.recentMessages = [
+      old,
+      kept,
+      older,
+      deletedInGap,
+      deletionOf(deletedInGap),
+    ];
+    (container.read(readStateProvider.notifier) as _ActivityReadState)
+        .markReadThrough(_channelA, now - 4);
+    await reconnect();
+    expect(notifier.activityFor(_channelA).known, isFalse);
+    session.recentMessages = [old, kept, older];
+    await reconnect();
+    expect(notifier.activityFor(_channelA), (known: true, at: older.createdAt));
+
+    // So does a gap read whose signature checks fail to run.
+    final unchecked = message('unchecked', now - 5);
+    session.recentMessages = [old, kept, older, unchecked];
+    final checks = debugRunActivityChecks;
+    debugRunActivityChecks = (run) async {
+      final verified = await checks(run);
+      if (verified.contains(unchecked.id)) throw StateError('checks failed');
+      return verified;
+    };
+    try {
+      await reconnect();
+      expect(notifier.activityFor(_channelA).known, isFalse);
+    } finally {
+      debugRunActivityChecks = checks;
+    }
+    await reconnect();
+    expect(notifier.activityFor(_channelA), (
+      known: true,
+      at: unchecked.createdAt,
+    ));
+
+    // A deletion made while offline counts even when the read marker has
+    // since moved past it on another device.
+    final gone2 = message('gone2', now - 4);
+    session.emit(gone2);
+    await _waitUntil(
+      () => notifier.activityFor(_channelA).at == gone2.createdAt,
+    );
+    session.recentMessages = [old, unchecked, deletionOf(gone2, at: now - 3)];
+    (container.read(readStateProvider.notifier) as _ActivityReadState)
+        .markReadThrough(_channelA, now - 2);
+    await reconnect();
+    expect(notifier.activityFor(_channelA).known, isFalse);
+    session.recentMessages = [old, unchecked];
+    await reconnect();
+    expect(notifier.activityFor(_channelA), (
+      known: true,
+      at: unchecked.createdAt,
+    ));
+
+    // A newer post in the gap replaces the deleted one, so the channel stays
+    // known.
+    final gone3 = message('gone3', now - 4);
+    session.emit(gone3);
+    await _waitUntil(
+      () => notifier.activityFor(_channelA).at == gone3.createdAt,
+    );
+    final after = message('after', now - 3);
+    session.recentMessages = [
+      old,
+      unchecked,
+      after,
+      deletionOf(gone3, at: now - 3),
+    ];
+    await reconnect();
+    expect(notifier.activityFor(_channelA), (known: true, at: after.createdAt));
+
+    // So does a deletion in the same second as the latest post the read
+    // marker sits on.
+    final boundary = message('boundary', now - 1);
+    session.emit(boundary);
+    await _waitUntil(
+      () => notifier.activityFor(_channelA).at == boundary.createdAt,
+    );
+    session.recentMessages = [
+      old,
+      unchecked,
+      after,
+      deletionOf(boundary, at: now - 1),
+    ];
+    (container.read(readStateProvider.notifier) as _ActivityReadState)
+        .markReadThrough(_channelA, now - 1);
+    // The earlier second it reads only serves the Active head: another post's
+    // deletion there is not new, so a page being saved meanwhile still is.
+    final regular = session.recentMessages;
+    session.recentMessages = [
+      old,
+      unchecked,
+      after,
+      deletionOf(older, at: now - 1),
+    ];
+    final store = container.read(savedMessageStoreProvider);
+    final page = (channelId: _channelA, rootId: '');
+    final ticket = store.capture(
+      container.read(savedMessageScopeProvider)!,
+      page,
+    );
+    await reconnect();
+    expect(store.isCurrent(ticket), isTrue);
+    expect(notifier.activityFor(_channelA), (
+      known: true,
+      at: boundary.createdAt,
+    ));
+    session.recentMessages = regular;
+    await reconnect();
+    expect(notifier.activityFor(_channelA).known, isFalse);
+    session.recentMessages = [old, unchecked, after];
+    await reconnect();
+    expect(notifier.activityFor(_channelA), (known: true, at: after.createdAt));
 
     // A channel no Active section shows skips its gap read, and reads as
     // unknown until a catch-up while it is shown.
@@ -3222,6 +3360,107 @@ void main() {
         }
       },
     );
+  }
+
+  // Past one request's channel values, the head deletions go out on their
+  // own after the gap posts; below it, with them.
+  for (final empty in [0, 2]) {
+    test('gap posts settle Active activity even when the head deletion read '
+        'fails ($empty channels without a head)', () async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final ids = [
+        for (var i = 0; i <= kMaxExplicitChannelValues ~/ 2; i++) 'gap-$i',
+      ];
+      final heads = {
+        for (final id in ids.take(ids.length - empty))
+          id: _signedPost(now - 100, channel: id, content: id),
+      };
+      final newer = _signedPost(now - 30, channel: ids[0], content: 'newer');
+      final deletion = NostrEvent.fromJson(
+        signNostrEvent(
+          kind: EventKind.deletion,
+          content: '',
+          secretKey: _activityKey,
+          createdAt: now - 50,
+          tags: [
+            ['h', ids[1]],
+            ['e', heads[ids[1]]!.id],
+          ],
+        ).toMap(),
+      );
+      final session = _FakeRelaySession(
+        memberships: [for (final id in ids) _membership(id, _activityPk)],
+        metadata: [for (final id in ids) _meta(id: id, name: id)],
+        recentMessages: heads.values.toList(),
+        enforceHistoryLimits: true,
+      );
+      final container = _buildContainer(
+        session: session,
+        overrides: [
+          readStateProvider.overrideWith(_ActivityReadState.new),
+          _testPubkeyProvider.overrideWith(_ActivityPubkey.new),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      final notifier = container.read(channelsProvider.notifier);
+      await notifier.waitForUnreadCatchUp();
+      for (final id in ids) {
+        final shown = container.listen(
+          channelFilterActivityProvider(id),
+          (_, _) {},
+        );
+        addTearDown(shown.close);
+      }
+      Future<void> reconnect() async {
+        final batches = session.queryBatches.length;
+        session.setStatus(SessionStatus.reconnecting);
+        session.setStatus(SessionStatus.connected);
+        await _waitUntil(
+          () => session.queryBatches
+              .skip(batches)
+              .any((batch) => batch.every((filter) => filter.since != null)),
+        );
+        await notifier.waitForUnreadCatchUp();
+        await _settle();
+      }
+
+      // Read on another device while disconnected, so every channel has a gap.
+      session.recentMessages = [...heads.values, newer, deletion];
+      for (final id in ids) {
+        (container.read(readStateProvider.notifier) as _ActivityReadState)
+            .markReadThrough(id, now - 15);
+      }
+      session.headDeletionBatchError = RelayException(
+        503,
+        '{"error":"query timed out"}',
+      );
+      final before = session.queryBatches.length;
+      await reconnect();
+      expect(
+        session.queryBatches
+            .skip(before)
+            .where(
+              (batch) =>
+                  _isGapBatch(batch) ||
+                  batch.every((filter) => filter.tags.containsKey('#e')),
+            ),
+        hasLength(empty == 0 ? 2 : 1),
+      );
+      expect(notifier.activityFor(ids[0]), (known: true, at: newer.createdAt));
+      expect(notifier.activityFor(ids[1]).known, isFalse);
+      // Only a separate deletion read can fail on its own.
+      expect(notifier.activityFor(ids[2]).known, empty > 0);
+
+      // Once the deletions are read, only the deleted head stays unknown.
+      session.headDeletionBatchError = null;
+      await reconnect();
+      expect(notifier.activityFor(ids[1]).known, isFalse);
+      expect(notifier.activityFor(ids[2]), (
+        known: true,
+        at: heads[ids[2]]!.createdAt,
+      ));
+    });
   }
 
   test('live channel events update channel lastMessageAt', () async {
@@ -4697,8 +4936,7 @@ NostrEvent _signedPost(
 );
 
 bool _isGapBatch(List<NostrFilter> batch) =>
-    batch.isNotEmpty &&
-    batch.every((filter) => filter.until != null && filter.limit == 1);
+    batch.any((filter) => filter.until != null && filter.limit == 1);
 
 /// Drains pending microtasks so provider rebuilds and awaited writes land.
 Future<void> _settle() async {
@@ -4787,6 +5025,8 @@ class _FakeRelaySession extends RelaySessionNotifier {
   Object? messageBatchError;
   // Fails batches made only of the catch-up's activity gap reads.
   Object? gapBatchError;
+  // Fails a batch that only reads deletions of given posts.
+  Object? headDeletionBatchError;
   // Holds the next batch of activity gap reads.
   Completer<void>? gapBatchGate;
   Object? latestBatchError;
@@ -5180,8 +5420,16 @@ class _FakeRelaySession extends RelaySessionNotifier {
       throw RelayException(400, '{"error":"too many explicit channels"}');
     }
     if (messageBatchError case final error?) throw error;
-    if (filters.isNotEmpty &&
-        filters.every((f) => f.until != null && f.limit == 1)) {
+    if (headDeletionBatchError case final error?
+        when filters.isNotEmpty &&
+            filters.every(
+              (filter) =>
+                  filter.tags.containsKey('#e') &&
+                  filter.kinds.contains(EventKind.deletion),
+            )) {
+      throw error;
+    }
+    if (_isGapBatch(filters)) {
       if (gapBatchError case final error?) throw error;
       final gate = gapBatchGate;
       gapBatchGate = null;

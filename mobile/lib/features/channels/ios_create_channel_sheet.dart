@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../../shared/theme/theme.dart';
 import 'channel.dart';
+import 'create_channel_error.dart';
 
 /// Presents an entirely UIKit channel form; relay writes stay in Dart.
 class IosCreateChannelSheet {
@@ -36,7 +37,7 @@ class IosCreateChannelSheet {
         );
         return {'success': true};
       } catch (error) {
-        return {'error': error.toString()};
+        return {'error': createChannelErrorMessage(error)};
       }
     });
     try {

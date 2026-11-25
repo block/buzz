@@ -1,5 +1,9 @@
 part of 'channels_provider.dart';
 
+// Channels per gap-head deletion filter: half the relay's per-request `#h`
+// cap, so two such filters fit in one request.
+const _headDeletionChannels = kMaxExplicitChannelValues ~/ 2;
+
 extension _UnreadCatchUp on ChannelsNotifier {
   /// Backfills unread badges for the channels this refresh just installed.
   ///
@@ -58,16 +62,19 @@ extension _UnreadCatchUp on ChannelsNotifier {
       };
       final filters = [
         for (final channel in activeChannels)
-          for (final kinds in [
-            EventKind.channelMessageEventKinds,
-            [EventKind.deletion, EventKind.nip29DeleteEvent],
+          for (final (kinds, since) in [
+            (EventKind.channelMessageEventKinds, sinceByChannel[channel.id]!),
+            (
+              [EventKind.deletion, EventKind.nip29DeleteEvent],
+              _deletionsSince(channel.id, sinceByChannel[channel.id]!),
+            ),
           ])
             NostrFilter(
               kinds: kinds,
               tags: {
                 '#h': [channel.id],
               },
-              since: sinceByChannel[channel.id],
+              since: since,
               limit: _unreadCatchUpLimit,
             ),
       ];
@@ -140,8 +147,19 @@ extension _UnreadCatchUp on ChannelsNotifier {
       final batchDeletedIds = <String>{};
       var appliedDeletion = false;
       final activityCandidates = <NostrEvent>[];
+      // Deletions from before a channel's own window come only from
+      // [_deletionsSince], which asks for them to see whether the Active head
+      // went. They are not new to the unread state, so they only reach it.
+      final headDeletedIds = <String>{};
       for (final event in events) {
         final channelId = event.channelId;
+        if (channelId != null &&
+            event.createdAt < (sinceByChannel[channelId] ?? 0) &&
+            (event.kind == EventKind.deletion ||
+                event.kind == EventKind.nip29DeleteEvent)) {
+          headDeletedIds.addAll(_deletionTargets(event));
+          continue;
+        }
         if (channelById.containsKey(channelId) ||
             (channelId == null && event.kind == EventKind.deletion)) {
           if (_applyUnreadDeletion(event)) {
@@ -249,7 +267,10 @@ extension _UnreadCatchUp on ChannelsNotifier {
       // checked.
       gapFilters.removeWhere((id, _) => failedChannelIds.contains(id));
       deferredGaps.removeAll(failedChannelIds);
-      final coverageChanged = _activity.forgetHeads(batchDeletedIds);
+      final coverageChanged = _activity.forgetHeads({
+        ...batchDeletedIds,
+        ...headDeletedIds,
+      });
       if (recordedAtByChannel.isNotEmpty ||
           appliedDeletion ||
           coverageChanged) {
@@ -384,6 +405,13 @@ extension _UnreadCatchUp on ChannelsNotifier {
   /// Reads the newest post in each channel's [_activityGap], after the unread
   /// catch-up and apart from it, so its failure only leaves activity unknown.
   /// A failed gap is not retried: the next list read's catch-up reads it again.
+  ///
+  /// The unread catch-up asks for deletions only after the read marker, so
+  /// one made in the gap while disconnected, and read past on another
+  /// device, can still hold the activity head. This also asks for those of
+  /// the heads: with the posts when they fit in one request, otherwise once
+  /// the posts have settled, and only for the heads no gap post replaced, so
+  /// a failed deletion read never costs the posts.
   Future<void> _catchUpActivityGaps(
     RelaySessionNotifier session,
     Map<String, NostrFilter> filtersByChannel,
@@ -393,39 +421,69 @@ extension _UnreadCatchUp on ChannelsNotifier {
     int subscriptionGeneration,
   ) async {
     final channelIds = filtersByChannel.keys.toSet();
+    final heads = {
+      for (final channelId in channelIds)
+        channelId: ?_activity.latestId(channelId),
+    };
+    final since = filtersByChannel.values
+        .map((filter) => filter.since!)
+        .reduce(min);
+    final shared =
+        channelIds.length + heads.length <= kMaxExplicitChannelValues;
     final failedChannelIds = <String>{};
     List<NostrEvent>? events;
+    var headDeletions = const <NostrEvent>[];
     var authenticIds = const <String>{};
     var rejected = const <String>{};
     try {
-      events = await _fetchChannelHistoryBatch(
+      final read = await _fetchChannelHistoryBatch(
         session,
-        filtersByChannel.values.toList(),
+        [
+          ...filtersByChannel.values,
+          if (shared) ..._headDeletionFilters(heads, since),
+        ],
         operation: 'activity gap read',
         failedChannelIds: failedChannelIds,
         optional: true,
       );
-      if (events != null) {
+      if (read != null) {
+        // A deletion can carry an `h` tag too, so it must not count as a post.
+        final posts = <NostrEvent>[];
+        final deletions = <NostrEvent>[];
+        for (final event in read) {
+          (event.kind == EventKind.deletion ||
+                      event.kind == EventKind.nip29DeleteEvent
+                  ? deletions
+                  : posts)
+              .add(event);
+        }
+        events = posts;
+        headDeletions = deletions;
         (authentic: authenticIds, :rejected) = await _authenticActivityHeads(
           events,
           deletedIds,
         );
       }
     } catch (error) {
+      // Unverified, the posts read cannot settle the gaps.
+      events = null;
       debugPrint('[ChannelsNotifier] activity gap read failed: $error');
     }
     if (!_lifecycleRef.mounted ||
         _isCatchUpRetired(fence, subscriptionGeneration)) {
       return;
     }
+    final deleted = {
+      ...deletedIds,
+      ..._deletedAmong(events),
+      for (final deletion in headDeletions) ..._deletionTargets(deletion),
+    };
     var changed = false;
     for (final event in events ?? const <NostrEvent>[]) {
       final channelId = event.channelId;
       if (channelId == null ||
           !channelIds.contains(channelId) ||
-          deletedIds.contains(event.id) ||
-          _unscopedUnreadDeletedIds.contains(event.id) ||
-          _unreadDeletedIdsByChannel[channelId]?.contains(event.id) == true) {
+          deleted.contains(event.id)) {
         continue;
       }
       changed |= _activity.note(
@@ -434,15 +492,98 @@ extension _UnreadCatchUp on ChannelsNotifier {
         (event) => authenticIds.contains(event.id),
       );
     }
+    // Each gap read asks for one post, so a deleted one hides whether an
+    // older post in the gap survives.
     final failed = events == null
         ? channelIds
         : {
             ...failedChannelIds,
             ...rejected,
-            ..._deletedHeadChannels(events, authenticIds, deletedIds),
+            for (final event in events)
+              if (event.channelId case final channelId?
+                  when deleted.contains(event.id))
+                channelId,
           };
-    changed |= _activity.noteCatchUp(channelIds, failed, sentAt: sentAt);
+    // After the gap's posts, so a head they replaced stays known.
+    changed |= _activity.forgetHeads(deleted);
+    // The heads whose deletions are still unread stay unknown until they are.
+    final unprobed = shared || events == null
+        ? const <String>{}
+        : {
+            for (final MapEntry(key: channelId, value: id) in heads.entries)
+              if (!failed.contains(channelId) &&
+                  _activity.latestId(channelId) == id)
+                channelId,
+          };
+    changed |= _activity.noteCatchUp(
+      channelIds.difference(unprobed),
+      failed,
+      sentAt: sentAt,
+    );
     if (changed) _publishUnreadCatchUp(const {});
+    if (unprobed.isEmpty) return;
+
+    List<NostrEvent>? probed;
+    try {
+      probed = await _fetchChannelHistoryBatch(
+        session,
+        _headDeletionFilters({
+          for (final channelId in unprobed) channelId: heads[channelId]!,
+        }, since),
+        operation: 'activity head deletion read',
+        optional: true,
+      );
+    } catch (error) {
+      debugPrint(
+        '[ChannelsNotifier] activity head deletion read failed: $error',
+      );
+    }
+    if (!_lifecycleRef.mounted ||
+        _isCatchUpRetired(fence, subscriptionGeneration)) {
+      return;
+    }
+    final forgot = _activity.forgetHeads({
+      for (final deletion in probed ?? const <NostrEvent>[])
+        ..._deletionTargets(deletion),
+    });
+    if (forgot |
+        _activity.noteCatchUp(
+          unprobed,
+          probed == null ? unprobed : const {},
+          sentAt: sentAt,
+        )) {
+      _publishUnreadCatchUp(const {});
+    }
+  }
+
+  /// Filters for deletions of each channel's [heads] made since [since],
+  /// [_headDeletionChannels] channels per filter.
+  List<NostrFilter> _headDeletionFilters(Map<String, String> heads, int since) {
+    final entries = heads.entries.toList();
+    return [
+      for (
+        var start = 0;
+        start < entries.length;
+        start += _headDeletionChannels
+      )
+        NostrFilter(
+          kinds: const [EventKind.deletion, EventKind.nip29DeleteEvent],
+          tags: {
+            '#h': [
+              for (final head
+                  in entries.skip(start).take(_headDeletionChannels))
+                head.key,
+            ],
+            '#e': [
+              for (final head
+                  in entries.skip(start).take(_headDeletionChannels))
+                head.value,
+            ],
+          },
+          since: since,
+          limit: _unreadCatchUpLimit,
+        ),
+    ];
   }
 
   /// [_ChannelActivity.authenticHeadIds] of [events], skipping posts that are
@@ -506,10 +647,21 @@ extension _UnreadCatchUp on ChannelsNotifier {
     return max(afterRead, caughtUp.sentAt - relayCrossDeviceSkewSeconds);
   }
 
+  /// Where [channelId]'s catch-up asks for deletions. When an Active section
+  /// shows it and its latest post is from the second before [since], as when
+  /// the read marker sits on that post, the gap read is moot, so a deletion
+  /// of that post made in the same second is asked for here.
+  int _deletionsSince(String channelId, int since) =>
+      _activity.isWatched(channelId) &&
+          _activity.latestAt(channelId) == since - 1
+      ? since - 1
+      : since;
+
   /// The stretch a catch-up starting at [since] skips since the last read
   /// that covered the channel, for the Active filter: a post that arrived
   /// while disconnected and was read on another device lies there, as does one
-  /// before an unread cursor reset. The catch-up asks for its newest post.
+  /// before an unread cursor reset. The catch-up asks for its newest post,
+  /// and for deletions of the latest post known made since it began.
   /// A channel known only from a live post counts as covered at that post.
   /// Null when nothing covered the channel yet or nothing is skipped.
   ({int since, int until})? _activityGap(String channelId, int since) {

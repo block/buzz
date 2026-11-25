@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::keepalive::Keepalive;
 use crate::topic::BUZZ_PREFIX;
 
 /// Tenant-local Redis pub/sub channel suffix for cache-invalidation messages.
@@ -113,7 +114,7 @@ pub async fn run_cache_invalidation_subscriber(
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
 
     loop {
-        match connect_and_subscribe(&redis_url, &broadcast_tx).await {
+        match connect_and_subscribe(&redis_url, &broadcast_tx, Keepalive::DEFAULT).await {
             Ok(()) => {
                 backoff_secs = BACKOFF_INITIAL_SECS;
                 tracing::warn!(
@@ -137,18 +138,27 @@ pub async fn run_cache_invalidation_subscriber(
 async fn connect_and_subscribe(
     redis_url: &str,
     broadcast_tx: &broadcast::Sender<ScopedCacheInvalidation>,
+    keepalive: Keepalive,
 ) -> Result<(), redis::RedisError> {
-    let client = redis::Client::open(redis_url)?;
-    let mut conn = client.get_async_pubsub().await?;
-
-    conn.psubscribe(CACHE_INVALIDATION_PATTERN).await?;
+    let (mut sink, mut stream) = keepalive.connect(redis_url).await?;
+    keepalive
+        .bounded(sink.psubscribe(CACHE_INVALIDATION_PATTERN))
+        .await?;
 
     tracing::info!(
         "Redis cache-invalidation subscriber connected — listening on {CACHE_INVALIDATION_PATTERN}"
     );
 
-    let mut stream = conn.on_message();
-    while let Some(msg) = stream.next().await {
+    let heartbeat = keepalive.heartbeat(sink);
+    tokio::pin!(heartbeat);
+    loop {
+        let msg = tokio::select! {
+            msg = stream.next() => match msg {
+                Some(msg) => msg,
+                None => return Ok(()),
+            },
+            err = &mut heartbeat => return Err(err),
+        };
         let channel = msg.get_channel_name();
         let Some(community_id) = parse_cache_invalidation_channel(channel) else {
             tracing::warn!("Received cache-invalidation message on unexpected channel: {channel}");
@@ -180,8 +190,6 @@ async fn connect_and_subscribe(
             tracing::trace!("No cache-invalidation receivers — message dropped");
         }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -260,5 +268,28 @@ mod tests {
                 msg
             );
         }
+    }
+
+    #[tokio::test]
+    async fn subscriber_drops_socket_when_pong_withheld() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        use crate::keepalive::fake_redis::{FakeRedis, FAST};
+
+        let fake = FakeRedis::start().await;
+        fake.hold_pong.store(true, Ordering::SeqCst);
+        let (tx, _rx) = broadcast::channel(8);
+        let err = tokio::time::timeout(
+            Duration::from_secs(2),
+            connect_and_subscribe(&fake.url, &tx, FAST),
+        )
+        .await
+        .expect("withheld PONG must end the connection")
+        .unwrap_err();
+        assert_eq!(err.kind(), redis::ErrorKind::Io);
+        tokio::time::timeout(Duration::from_secs(2), fake.closed.notified())
+            .await
+            .expect("old socket must be closed");
     }
 }

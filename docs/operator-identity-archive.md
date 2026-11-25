@@ -77,7 +77,7 @@ A retry can republish the current snapshot after an earlier failure.
 
 ## Schema
 
-Migration 0107 widens the `archived_identities` consent check to accept
-`relay`, and 0108 validates it. Operator archive rows store an empty
+Migration 0109 widens the `archived_identities` consent check to accept
+`relay`, and 0110 validates it. Operator archive rows store an empty
 `request_event_id` because they originate from an HTTP action. Both migrations
 use bounded locks.

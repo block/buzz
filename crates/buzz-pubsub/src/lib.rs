@@ -27,6 +27,7 @@ pub mod cache_invalidation;
 pub mod conn_control;
 /// The shared Redis command connection.
 pub mod connection;
+mod keepalive;
 pub use connection::{
     redis_connection, RedisConnection, REDIS_CONNECT_TIMEOUT, REDIS_RESPONSE_TIMEOUT,
 };

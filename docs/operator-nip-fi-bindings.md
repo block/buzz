@@ -178,8 +178,9 @@ snapshot loads in `off`, but every `BUZZ_NIP_FI_RESOLVER_*` and
 
 Set `BUZZ_NIP_FI_MODE=shadow`. Each pod now loads the snapshot before any
 listener binds, refreshes it every 30 s, and records what enforce would decide
-without refusing anything. Shadow labels database-source records
-`community="bound"` or `"unmapped"`, never a host.
+without refusing anything in communities whose effective policy is optional;
+stored-Required and cohort communities still enforce. Shadow labels
+database-source records `community="bound"` or `"unmapped"`, never a host.
 
 - Go, held for at least a day of normal traffic:
   - `time() - buzz_nip_fi_binding_snapshot_loaded_timestamp_seconds` stays
@@ -192,15 +193,80 @@ without refusing anything. Shadow labels database-source records
     to deny; `community="unmapped"` comes only from hosts you do not serve.
   - `stage="owner"` counts as would-deny: each is an agent enforce will refuse
     for its token owner.
-- No-go: any of these fails. Return to `off` and investigate.
+- No-go: any of these fails. Stay in `shadow` with
+  `BUZZ_NIP_FI_ENFORCE_PERCENT=0` and investigate; stored-Required
+  communities stay required. Setting `mode=off` is an emergency action only:
+  it suspends NIP-FI for stored-Required communities.
+
+### Staged enforce
+
+To enforce for a growing share of communities before switching the whole relay,
+keep `BUZZ_NIP_FI_MODE=shadow` and set `BUZZ_NIP_FI_ENFORCE_PERCENT`, an integer
+from 0 to 100 (default 0). It is read once at startup, so each change is a
+rollout; a malformed or out-of-range value refuses startup.
+
+- It acts only in `shadow`. In `off` it has no effect, and `enforce` ignores it
+  because every community already enforces.
+- A community stored as Optional enforces when its bucket is below the
+  percentage. The bucket is the SHA-256 digest of the community UUID's 16
+  RFC 4122 bytes, with the digest's first 8 bytes read as a big-endian `u64`,
+  mod 100. The bucket never changes for a community, so raising the
+  percentage only adds communities, and lowering it removes the most recently
+  added ones.
+- A community stored as Required enforces at any percentage.
+- An enforcing community gets the same treatment as a stored-Required one:
+  logins without valid evidence are refused, its NIP-11 document reports
+  `requires_nip_fi: true`, and open sockets without valid evidence are closed.
+  Its stored flag does not change.
+- A required admission, stored Required or inside the cohort, is refused when
+  the receiving pod holds an active deny that covers the assertion: one for
+  the key without `revoke_through`, or one whose `revoke_through` is at or
+  after the assertion's verified `iat`. This deny does not cover an assertion
+  issued after the cutoff; other admission checks still apply. A revocation
+  closes open connections only in `enforce`; in `shadow` an open connection
+  stays until its deadline. Stored-Required communities already behave this
+  way.
+- Denies are stored in Redis and restored on restart, but a healthy pod
+  learns of new ones through best-effort pub/sub and can miss one. See
+  [Revocation during a deploy](#revocation-during-a-deploy).
+
+Raise the percentage in steps, holding each one for normal traffic.
+
+- Go: the shadow signals keep holding, the `nip-fi enforce deny` lines on log
+  target `buzz_relay::nip_fi_enforce` are only what you expect to deny, and
+  login 503s stay at their shadow baseline.
+- No-go: set `BUZZ_NIP_FI_ENFORCE_PERCENT=0` and investigate.
+
+A rollback is a full rollout too: pods run mixed percentages until it
+finishes. There is no per-community exemption, so removing one community
+means lowering the percentage to its bucket or below, which also drops every
+community in a higher bucket.
 
 ### Enforce
 
-Set `BUZZ_NIP_FI_MODE=enforce`. Watch the same signals, plus the rate of 503
-responses on login.
+Set `BUZZ_NIP_FI_MODE=enforce` and leave `BUZZ_NIP_FI_ENFORCE_PERCENT` at 100.
+It has no effect in `enforce`. Follow
+[Switching shadow → enforce](#switching-shadow--enforce) so shadow-accepted
+disconnects carry over.
+Watch the same signals, plus the rate of 503 responses on login.
 
 - Go: the shadow signals keep holding, and 503s stay at their shadow baseline.
-- No-go: logins return 503 or are refused unexpectedly. Set `mode=off` (below).
+- No-go: logins return 503 or are refused unexpectedly. Set `mode=shadow` and
+  lower `BUZZ_NIP_FI_ENFORCE_PERCENT` to the last known-good value. A mode-only
+  rollback at 100 still requires every community: it restores only the staged
+  revocation behavior, not optional admission. Stored-Required communities stay
+  required either way. Never roll back with `mode=off`: `off` also turns off
+  stored-Required enforcement. In the same rollout, unset
+  `BUZZ_NIP_FI_ACCEPT_SHADOW_DISCONNECTS` or set it to `false`: `true` is
+  invalid in `shadow` and the pods refuse to start.
+
+  Shadow pods restore active denies from both stores. Those denies still
+  reject admission for stored-Required and remaining cohort communities;
+  optional communities only record the would-deny verdict. Shadow does not
+  close existing sessions. When returning to `enforce`, set
+  `BUZZ_NIP_FI_ACCEPT_SHADOW_DISCONNECTS=true` and follow
+  [Switching shadow → enforce](#switching-shadow--enforce) again, measuring the
+  bridge-retention interval from the latest shadow pods.
 
 ### Alerts
 
@@ -230,16 +296,22 @@ added, so they usually arrive during normal growth, not at a deploy.
   (8 by default). Concurrent logins for the same host share one lookup, and a
   login waits up to 50 ms for a free slot; how many are shed depends on login
   load across distinct hosts and on lookup latency. In enforce, a shed login
-  gets 503 (`authorization_unavailable`); in shadow it
-  is only recorded as a would-deny.
+  gets 503 (`authorization_unavailable`). In shadow, a shed login for a
+  stored-Required or cohort community also gets 503; for an optional
+  community it is only recorded as a would-deny.
 
 Ways out, in order:
 
 1. Raise `BUZZ_NIP_FI_SNAPSHOT_MAX_ROWS` (up to 10,000,000) or
    `BUZZ_NIP_FI_SNAPSHOT_REFRESH_TIMEOUT_MS` (under 30,000), whichever the
    failure `reason` names, and roll out.
-2. If that cannot land quickly, set `BUZZ_NIP_FI_MODE=off`. `off` loads no
-   snapshot, so pods boot and admit as they did before NIP-FI.
+2. Emergency only, if that cannot land quickly: set `BUZZ_NIP_FI_MODE=off`.
+   `off` loads no snapshot, so pods boot and admit as they did before NIP-FI,
+   which suspends enforcement for stored-Required communities. `shadow` is
+   not a way out because it loads the snapshot too. Coming from `enforce`,
+   unset `BUZZ_NIP_FI_ACCEPT_SHADOW_DISCONNECTS` or set it to `false` in the
+   same rollout: `true` is invalid outside `enforce` and the pods refuse to
+   start.
 
 ## Revocation during a deploy
 

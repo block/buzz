@@ -2237,6 +2237,7 @@ mod route_integration_tests {
             },
         )];
         config.nip_fi = NipFiRelayConfig {
+            enforce_percent: 0,
             profile_policies: Vec::new(),
             accept_shadow_disconnects: false,
             source: Default::default(),
@@ -5120,6 +5121,7 @@ mod route_integration_tests {
                 },
             )];
             config.nip_fi = NipFiRelayConfig {
+                enforce_percent: 0,
                 profile_policies: Vec::new(),
                 accept_shadow_disconnects: false,
                 source: Default::default(),

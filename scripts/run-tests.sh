@@ -98,6 +98,12 @@ run_unit_tests() {
   run_test_step "buzz-pubsub conn_control tests" \
     cargo test -p buzz-pubsub --lib conn_control::tests:: -- --nocapture
 
+  # Pub/sub keepalive against a scripted fake Redis (infra-free). Mirrors
+  # `just test-unit`.
+  run_test_step "buzz-pubsub keepalive tests" \
+    cargo test -p buzz-pubsub --lib -- --nocapture keepalive::tests:: subscriber::tests::keepalive:: \
+      cache_invalidation::tests::subscriber_drops_socket_when_pong_withheld
+
   # Shared Redis connection timeout bounds (loopback fake peers; infra-free).
   # Mirrors `just test-unit`.
   run_test_step "buzz-pubsub connection tests" \
