@@ -61,7 +61,7 @@ pub fn render(doc: &AgentDocument, name: &str) -> Result<String, CodecError> {
     let (wake, interests, sections) = render_attention(&doc.attention)?;
     if has_heading(&doc.instructions) {
         return fail(format!(
-            "The persona prompt has a line starting with \"{}\", which the file would read as a section",
+            "The persona prompt has a \"{}\" heading naming wake ids, or an unclosed code fence, which the file would read as a section",
             HEADING.trim_end()
         ));
     }
@@ -155,7 +155,7 @@ fn render_attention(
                 };
                 if has_heading(&interest.instructions) {
                     return fail(format!(
-                        "Interest {id}'s instructions have a line starting with \"{}\"",
+                        "Interest {id}'s instructions have a \"{}\" heading naming wake ids, or an unclosed code fence",
                         HEADING.trim_end()
                     ));
                 }
@@ -442,15 +442,72 @@ fn quote_answer_keys(raw: &mut serde_yaml::Value) {
 }
 
 /// Splits the body into the persona prompt and `(heading, text)` sections.
+/// The wake ids a `## When` line names, as written, or `None` when the line
+/// is ordinary prompt text. As in the shared format: a heading with a comma
+/// names every comma-separated id; without one it names a single wake id, so
+/// `## When the build fails` stays prompt text.
+fn section_heading(line: &str) -> Option<&str> {
+    let heading = line.strip_prefix(HEADING)?.trim_end_matches([' ', '\t']);
+    if heading.is_empty() || heading.starts_with(char::is_whitespace) {
+        return None;
+    }
+    (heading.contains(',') || slug_like(heading, 40)).then_some(heading)
+}
+
+/// The fence a line opens or closes: up to three spaces, then three or more
+/// backticks or tildes.
+fn fence_marker(line: &str) -> Option<&str> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return None;
+    }
+    let rest = &line[indent..];
+    let ch = rest.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let run = rest.len() - rest.trim_start_matches(ch).len();
+    (run >= 3).then(|| &rest[..run])
+}
+
+/// Splits the body's lines into those outside and inside fenced code, the
+/// way the shared format does: a `## When` heading in a fence is prompt text.
+/// Returns each line with whether it is fenced, and whether a fence is left
+/// open at the end.
+fn fenced_lines(body: &str) -> (Vec<(&str, bool)>, bool) {
+    let mut fence: Option<&str> = None;
+    let mut lines = Vec::new();
+    for line in body.split_inclusive('\n') {
+        let bare = line.trim_end_matches(['\n', '\r']);
+        let marker = fence_marker(bare);
+        if let Some(open) = fence {
+            lines.push((line, true));
+            if let Some(close) = marker {
+                let after = &bare.trim_start_matches(' ')[close.len()..];
+                if close.starts_with(&open[..1])
+                    && close.len() >= open.len()
+                    && after.trim().is_empty()
+                {
+                    fence = None;
+                }
+            }
+        } else {
+            if let Some(open) = marker {
+                let after = &bare.trim_start_matches(' ')[open.len()..];
+                if !(open.starts_with('`') && after.contains('`')) {
+                    fence = Some(open);
+                }
+            }
+            lines.push((line, false));
+        }
+    }
+    (lines, fence.is_some())
+}
+
 fn split_sections(body: &str) -> Result<(String, Vec<(String, String)>), CodecError> {
     let mut persona = String::new();
     let mut sections: Vec<(String, String)> = Vec::new();
-    for line in body.split_inclusive('\n') {
+    for (line, fenced) in fenced_lines(body).0 {
         let bare = line.trim_end_matches(['\n', '\r']);
-        if let Some(heading) = bare.strip_prefix(HEADING) {
-            sections.push((heading.trim().to_owned(), String::new()));
-        } else if bare.trim_end() == HEADING.trim_end() {
-            return fail("A ## When heading needs at least one wake id");
+        if let Some(heading) = (!fenced).then(|| section_heading(bare)).flatten() {
+            sections.push((heading.to_owned(), String::new()));
         } else if let Some((_, text)) = sections.last_mut() {
             text.push_str(line);
         } else {
@@ -496,6 +553,9 @@ fn parse_attention(
     let mut placed = BTreeSet::new();
     for (heading, text) in &sections {
         let ids: Vec<&str> = heading.split(',').map(str::trim).collect();
+        if ids.contains(&"") {
+            return fail(format!("## When {heading} has an empty wake id"));
+        }
         let mut interest: Option<String> = None;
         for id in &ids {
             let Some(named) = wakes.get(id) else {
@@ -811,9 +871,13 @@ pub fn npub(hex: &str) -> Result<String, CodecError> {
         .map_err(|e| CodecError(format!("Could not encode an npub: {e}")))
 }
 
+/// Whether the file would read `text` differently once a section follows it:
+/// it has a `## When` heading outside fenced code, or leaves a fence open.
 fn has_heading(text: &str) -> bool {
-    text.lines()
-        .any(|line| line.trim_end() == HEADING.trim_end() || line.starts_with(HEADING))
+    let (lines, open) = fenced_lines(text);
+    open || lines.iter().any(|(line, fenced)| {
+        !fenced && section_heading(line.trim_end_matches(['\n', '\r'])).is_some()
+    })
 }
 
 /// Drops leading blank lines and trailing whitespace, keeping indentation.

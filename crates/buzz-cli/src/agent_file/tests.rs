@@ -283,6 +283,26 @@ fn export_refuses_what_the_file_cannot_express() {
 }
 
 #[test]
+fn when_headings_that_name_no_wake_ids_or_sit_in_code_stay_prompt_text() {
+    // As in squareup/agents: a heading without a comma names one wake id, and
+    // one inside fenced code is never a section.
+    let persona = "You are Triage Bot.\n\n## When the build fails\n\nSay so.\n\n```markdown\n## When morning\n```\n\n~~~~\n## When a, b\n~~~~";
+    let mut doc = live();
+    doc.instructions = persona.into();
+    let text = render(&doc, "triage-bot").unwrap();
+    assert_eq!(parse(&text).unwrap().document.instructions, persona);
+    let error = parse(&text.replace("## When weekly", "## When weekly,"))
+        .unwrap_err()
+        .0;
+    assert!(error.contains("empty wake id"), "{error}");
+
+    // A fence left open would swallow the sections after it.
+    doc.instructions = "Intro\n```\nunclosed".into();
+    let error = render(&doc, "triage-bot").unwrap_err().0;
+    assert!(error.contains("unclosed code fence"), "{error}");
+}
+
+#[test]
 fn classifier_answers_can_be_written_without_quotes() {
     let text = rendered().replace("'true': Someone", "true: Someone");
     assert_eq!(

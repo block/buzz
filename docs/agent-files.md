@@ -118,7 +118,9 @@ The body before the first `## When` heading is the persona prompt. Each
 `## When <wake ids>` section names one or more wakes, and its text is the
 instructions of the Interest those wakes feed. A wake's Interest is its
 `interest` field, or else the first wake id in its section. All the wakes in
-one section must feed the same Interest. `buzz.interests` holds an Interest's
+one section must feed the same Interest. As in the shared format, a heading
+without a comma names a single wake id, so `## When the build fails` stays
+prompt text, and a heading inside fenced code is never a section. `buzz.interests` holds an Interest's
 title, summary and pause, and the instructions of an Interest that no wake
 feeds.
 
