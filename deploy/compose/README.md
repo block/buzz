@@ -3,6 +3,10 @@
 This is the single-node/VPS deployment bundle. It is intentionally separate from
 the root `docker-compose.yml`, which remains local development infrastructure.
 
+The bundle also runs the stateless `buzz-pair-relay` sidecar. Caddy routes only
+`/pair` to that service, and `BUZZ_PAIRING_RELAY_URL` advertises the public
+WebSocket URL to desktop and mobile clients.
+
 ## Quick start
 
 ```bash
