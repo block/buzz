@@ -72,8 +72,9 @@ use crate::state::AppState;
 //
 // ## Relationship to Off and Shadow
 //
-// Off skips FI policy reads and enforcement. Shadow preserves optional-community
-// admission and enforces stored requirements. Enforce requires FI everywhere.
+// Off skips FI policy reads and enforcement. Shadow preserves admission for
+// communities whose effective policy is optional and enforces those stored
+// Required or inside the enforce-percent cohort. Enforce requires FI everywhere.
 //
 // ## What this guard checks (and does NOT check)
 //
@@ -207,7 +208,7 @@ async fn nip_fi_assertion_guard(
                 community_id: uuid::Uuid::nil(),
                 mode,
                 required: mode.enforces(),
-                stored_required: false,
+                policy_required: false,
 
                 mapped: false,
             };
@@ -238,7 +239,7 @@ async fn nip_fi_assertion_guard(
             return response;
         }
     };
-    if policy.stored_required && state.nip_fi_deny_map.is_none() {
+    if policy.policy_required && state.nip_fi_deny_map.is_none() {
         return nip_fi_unavailable(&slot);
     }
     crate::nip_fi_policy::with_policy(
@@ -2670,6 +2671,7 @@ mod tests {
         // Enforce that is the startup-race condition that must return 503 for
         // a token-carrying request.
         config.nip_fi = NipFiRelayConfig {
+            enforce_percent: 0,
             profile_policies: Vec::new(),
             accept_shadow_disconnects: false,
             source: Default::default(),
@@ -4535,6 +4537,7 @@ mod tests {
         };
 
         config.nip_fi = NipFiRelayConfig {
+            enforce_percent: 0,
             profile_policies: Vec::new(),
             accept_shadow_disconnects: false,
             source: Default::default(),

@@ -2715,7 +2715,10 @@ impl AppState {
                         }
                     };
                     let required = policy.as_ref().is_some_and(|policy| {
-                        crate::nip_fi_policy::effective(mode, policy.requires_nip_fi).enforces()
+                        self.config
+                            .nip_fi
+                            .effective_mode(policy.community_id, policy.requires_nip_fi)
+                            .enforces()
                     });
                     let outcome = if required {
                         "required"

@@ -1686,14 +1686,14 @@ mod tests {
         use crate::nip_fi_shadow::EnforcedProof;
         let mut state = (*crate::state::tests::test_state().await).clone();
         for global in [NipFiMode::Off, NipFiMode::Shadow, NipFiMode::Enforce] {
-            for stored_required in [false, true] {
+            for policy_required in [false, true] {
                 std::sync::Arc::make_mut(&mut state.config).nip_fi.mode = global;
-                let mode = global.with_requirement(stored_required);
+                let mode = global.with_requirement(policy_required);
                 let policy = crate::nip_fi_policy::Policy {
                     community_id: uuid::Uuid::new_v4(),
                     mode,
                     required: mode.enforces(),
-                    stored_required,
+                    policy_required,
                     mapped: true,
                 };
                 let recorder = metrics_util::debugging::DebuggingRecorder::new();
@@ -1750,7 +1750,7 @@ mod tests {
                 } else {
                     assert!(
                         strict.is_empty(),
-                        "{global:?} stored={stored_required}: {strict:?}"
+                        "{global:?} stored={policy_required}: {strict:?}"
                     );
                 }
             }

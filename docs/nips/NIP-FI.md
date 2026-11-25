@@ -983,10 +983,10 @@ A relay SHOULD advertise core support in NIP-11 as:
 
 A multi-community relay MAY additionally publish a host-specific top-level
 `requires_nip_fi` boolean. This expresses mandatory admission evidence, separately
-from support for the protocol. In Buzz it is the stored community requirement OR
-global enforce; capability is advertised when global mode evaluates OR that
-requirement is true. Required hosts therefore retain both existing capability
-fields and the descriptor above. Optional shadow hosts still advertise capability.
+from support for the protocol. Capability is advertised when the relay evaluates
+NIP-FI evidence for that host or the host requires it. Required hosts therefore
+retain both existing capability fields and the descriptor above; hosts that
+evaluate evidence without requiring it still advertise capability.
 Root NIP-11 and `/info` MUST agree and use `Cache-Control: no-store`. An unknown or
 non-serving Host returns generic 404; unavailable host policy returns 503.
 
