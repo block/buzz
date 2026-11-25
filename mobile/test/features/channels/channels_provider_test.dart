@@ -3022,11 +3022,12 @@ void main() {
 
     // Deleting the latest post forgets the channel's activity until the next
     // list read re-reads it.
-    NostrEvent deletionOf(NostrEvent post) => NostrEvent.fromJson(
+    NostrEvent deletionOf(NostrEvent post, {int? at}) => NostrEvent.fromJson(
       signNostrEvent(
         kind: EventKind.deletion,
         content: '',
         secretKey: _activityKey,
+        createdAt: at,
         tags: [
           ['h', _channelA],
           ['e', post.id],
@@ -3051,6 +3052,71 @@ void main() {
     session.recentMessages = [old];
     await reconnect();
     expect(notifier.activityFor(_channelA), (known: true, at: old.createdAt));
+
+    // A gap read answers with its newest post. When the catch-up found that
+    // post deleted, an older one in the gap may survive, so the channel stays
+    // unknown.
+    final kept = message('kept', now - 8);
+    session.emit(kept);
+    await _waitUntil(
+      () => notifier.activityFor(_channelA).at == kept.createdAt,
+    );
+    final older = message('older', now - 7);
+    final deletedInGap = message('deletedInGap', now - 6);
+    session.recentMessages = [
+      old,
+      kept,
+      older,
+      deletedInGap,
+      deletionOf(deletedInGap, at: now - 5),
+    ];
+    (container.read(readStateProvider.notifier) as _ActivityReadState)
+        .markReadThrough(_channelA, now - 4);
+    await reconnect();
+    expect(notifier.activityFor(_channelA).known, isFalse);
+    session.recentMessages = [old, kept, older];
+    await reconnect();
+    expect(notifier.activityFor(_channelA), (known: true, at: older.createdAt));
+
+    // So does a gap read whose signature checks fail to run.
+    final unchecked = message('unchecked', now - 5);
+    session.recentMessages = [old, kept, older, unchecked];
+    final checks = debugRunActivityChecks;
+    debugRunActivityChecks = (run) async {
+      final verified = await checks(run);
+      if (verified.contains(unchecked.id)) throw StateError('checks failed');
+      return verified;
+    };
+    try {
+      await reconnect();
+      expect(notifier.activityFor(_channelA).known, isFalse);
+    } finally {
+      debugRunActivityChecks = checks;
+    }
+    await reconnect();
+    expect(notifier.activityFor(_channelA), (
+      known: true,
+      at: unchecked.createdAt,
+    ));
+
+    // A deletion made while offline counts even when the read marker has
+    // since moved past it on another device.
+    final gone2 = message('gone2', now - 4);
+    session.emit(gone2);
+    await _waitUntil(
+      () => notifier.activityFor(_channelA).at == gone2.createdAt,
+    );
+    session.recentMessages = [old, unchecked, deletionOf(gone2, at: now - 3)];
+    (container.read(readStateProvider.notifier) as _ActivityReadState)
+        .markReadThrough(_channelA, now - 2);
+    await reconnect();
+    expect(notifier.activityFor(_channelA).known, isFalse);
+    session.recentMessages = [old, unchecked];
+    await reconnect();
+    expect(notifier.activityFor(_channelA), (
+      known: true,
+      at: unchecked.createdAt,
+    ));
 
     // A channel no Active section shows skips its gap read, and reads as
     // unknown until a catch-up while it is shown.
