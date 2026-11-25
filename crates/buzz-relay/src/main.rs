@@ -1692,8 +1692,39 @@ mod env_filter_tests {
         );
         let access = logged(otel_filter(None), || {
             tracing::warn!(target: "buzz_relay::access", "access-warn");
+            tracing::info!(target: "buzz_relay::search", "search-info");
+            tracing::info!(target: "buzz_relay::search::text", "search-text-info");
         });
         assert!(access.is_empty(), "{access}");
+        let search = logged(log_filter(None), || {
+            tracing::info!(target: "buzz_relay::search", "search-info");
+        });
+        assert!(search.contains("search-info"), "{search}");
+    }
+
+    #[test]
+    fn search_logging_turns_off_and_its_text_never_reaches_otel() {
+        let search_lines = || {
+            tracing::info!(target: "buzz_relay::search", "search-info");
+            tracing::info!(target: "buzz_relay::search::text", "search-text-info");
+        };
+        let off = logged(
+            log_filter(Some("buzz_relay=info,buzz_relay::search=off")),
+            search_lines,
+        );
+        assert!(off.is_empty(), "{off}");
+        // An operator filter that predates search logging, or one that
+        // exports search lines on purpose, still never exports search text.
+        for configured in [
+            "buzz_relay=info,buzz_relay::access=off,buzz_datastore=info",
+            "buzz_relay::search::text=info",
+            "[conn]=trace,buzz_relay=trace",
+        ] {
+            let otel = logged(otel_filter(Some(configured)), search_lines);
+            assert!(!otel.contains("search-text-info"), "{configured}: {otel}");
+        }
+        let exported = logged(otel_filter(Some("buzz_relay=info")), search_lines);
+        assert!(exported.contains("search-info"), "{exported}");
     }
 
     #[test]

@@ -33,7 +33,7 @@ use opentelemetry_otlp::ExporterBuildError;
 use opentelemetry_sdk::{resource::EnvResourceDetector, trace::SdkTracerProvider, Resource};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::{
-    filter::Targets,
+    filter::{filter_fn, FilterExt as _, Targets},
     fmt::{
         format::{Format, FormatEvent, FormatFields, Json, Writer},
         FmtContext,
@@ -185,13 +185,19 @@ where
 ///
 /// This is intentionally independent from `RUST_LOG`: changing stdout log
 /// verbosity must not remove parent spans from exported traces. Set
-/// `BUZZ_OTEL_FILTER` to override the default targets. Access lines
-/// (`buzz_relay::access`) are off by default: they already reach stdout, and
-/// exporting them again as span events would duplicate every pubkey.
-pub fn otel_filter<S>(configured: Option<&str>) -> DirectiveFilter<S> {
-    directive_filter(
-        configured.unwrap_or("buzz_relay=info,buzz_relay::access=off,buzz_datastore=info"),
-    )
+/// `BUZZ_OTEL_FILTER` to override the default targets. Access and search
+/// lines (`buzz_relay::access`, `buzz_relay::search`) are off by default:
+/// they already reach stdout, and exporting them again as span events would
+/// duplicate every pubkey. Search text (`buzz_relay::search::text`) is never
+/// exported, whatever the setting: its retention is enforced only where the
+/// operator routes stdout.
+pub fn otel_filter<S: 'static>(configured: Option<&str>) -> DirectiveFilter<S> {
+    let configured = directive_filter(configured.unwrap_or(
+        "buzz_relay=info,buzz_relay::access=off,buzz_relay::search=off,buzz_datastore=info",
+    ));
+    Box::new(configured.and(filter_fn(|metadata| {
+        metadata.target() != crate::search_log::TEXT_TARGET
+    })))
 }
 
 /// A per-layer filter built from `RUST_LOG`-style directives.

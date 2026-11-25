@@ -1002,25 +1002,32 @@ async fn handle_search_req(
         // share of each page, so continuing past short yields gives the scan a
         // chance — not a guarantee — of filling the requested limit.
         let mut emitted: u32 = 0;
+        let mut search_query = buzz_search::SearchQuery {
+            community: tenant.community(),
+            q: search_text,
+            channel_scope,
+            kinds,
+            authors,
+            since,
+            until,
+            page: 1,
+            per_page: SEARCH_PAGE_SIZE,
+            mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
+        };
+        let mut search_log = crate::search_log::SearchLog::start(
+            "ws",
+            state,
+            reader_pubkey_bytes,
+            &search_query,
+            limit,
+        );
 
         for page in 1..=MAX_SEARCH_PAGES {
             if emitted >= limit {
                 break;
             }
-
-            let search_query = buzz_search::SearchQuery {
-                community: tenant.community(),
-                q: search_text.clone(),
-                channel_scope: channel_scope.clone(),
-                kinds: kinds.clone(),
-                authors: authors.clone(),
-                since,
-                until,
-                page,
-                per_page: SEARCH_PAGE_SIZE,
-                mode: buzz_search::SearchMode::FullText,
-                sort: buzz_search::SearchSort::Relevance,
-            };
+            search_query.page = page;
 
             let search_result = match state.search.search(&search_query).await {
                 Ok(r) => r,
@@ -1035,6 +1042,7 @@ async fn handle_search_req(
                         "NIP-50 search failed"
                     );
                     access.error("search_failed");
+                    search_log.error("search_failed");
                     super::close::close_if_owner(
                         sub_id,
                         owner,
@@ -1047,6 +1055,7 @@ async fn handle_search_req(
                 }
             };
 
+            search_log.backend_hits(search_result.hits.len());
             // A short page is the last page: FTS returns up to a full page of
             // hits, so fewer than that means the result set is exhausted.
             let exhausted = search_result.hits.len() < SEARCH_PAGE_SIZE as usize;
@@ -1073,6 +1082,7 @@ async fn handle_search_req(
                         // CLOSED (not EOSE) keeps partial results from reading as complete.
                         warn!(sub_id = %sub_id, "NIP-50 batch fetch timed out");
                         access.error("query_timed_out");
+                        search_log.error("query_timed_out");
                         close_timed_out_subscription(sub_id, owner, conn, state).await;
                         return;
                     }
@@ -1087,6 +1097,7 @@ async fn handle_search_req(
                             "NIP-50 batch fetch failed"
                         );
                         access.error("database_error");
+                        search_log.error("database_error");
                         super::close::close_if_owner(
                             sub_id,
                             owner,
@@ -1178,6 +1189,7 @@ async fn handle_search_req(
                         return;
                     }
                     access.queued_one();
+                    search_log.returned(stored.event.id.to_bytes());
                     emitted += 1;
                 }
             }
@@ -1186,6 +1198,7 @@ async fn handle_search_req(
                 break;
             }
         }
+        search_log.served();
     }
 
     if super::close::send_if_owner(sub_id, owner, RelayMessage::eose(sub_id), conn).await {
@@ -2508,6 +2521,12 @@ mod tests {
         assert_eq!(lines[0]["outcome"], "error", "{}", lines[0]);
         assert_eq!(lines[0]["reason"], "search_failed", "{}", lines[0]);
         assert_eq!(lines[0]["search"], true, "{}", lines[0]);
+        // Only the first filter reached the backend, so it alone logs a search.
+        let searches = crate::search_log::test_support::lines(&out, crate::search_log::TARGET);
+        assert_eq!(searches.len(), 1, "{searches:?}");
+        assert_eq!(searches[0]["outcome"], "error", "{}", searches[0]);
+        assert_eq!(searches[0]["reason"], "search_failed", "{}", searches[0]);
+        assert_eq!(searches[0]["result_count"], 0, "{}", searches[0]);
 
         assert_eq!(
             closed_frames(&mut send_rx),
@@ -4792,6 +4811,115 @@ mod tests {
 
     mod postgres_tests {
         use super::*;
+
+        /// A WebSocket search logs one `search` line per search filter: the
+        /// searcher, backend, scope, query shape, and the ids it sent, in the
+        /// order sent. Text reaches the log only on its own target, when the
+        /// deployment set a retention. Mutations: drop `search_log.returned`
+        /// → `hit_ids` empty → RED; drop `search_log.served()` → `aborted`
+        /// → RED; log `query.q` on the search line → text check RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn ws_search_logs_shape_and_sent_hit_ids_without_text() {
+            use crate::search_log::{test_support, TARGET, TEXT_TARGET};
+            let fx = test_support::Seeded::new().await;
+            let reader = fx.reader.public_key().to_bytes();
+            let search = |state: Arc<AppState>, q: &'static str| {
+                let (tenant, channel) = (fx.tenant.clone(), fx.channel);
+                async move {
+                    let (conn, mut send_rx) = lifecycle_conn();
+                    let owner = claim_search_subscription("s", &conn, &state)
+                        .await
+                        .expect("claim");
+                    let filters = vec![Filter::new().kind(nostr::Kind::Custom(9)).search(q)];
+                    let mut access = crate::access::ReadLog::req(&conn, "s", &filters);
+                    handle_search_req(
+                        "s",
+                        owner,
+                        &filters,
+                        &[channel],
+                        &super::super::super::system_channels::NamedOnlyChannels::default(),
+                        true,
+                        &tenant,
+                        &reader,
+                        &conn,
+                        &state,
+                        None,
+                        &mut access,
+                    )
+                    .await;
+                    std::iter::from_fn(|| send_rx.try_recv().ok())
+                        .filter_map(|msg| match msg {
+                            axum::extract::ws::Message::Text(t) => {
+                                let v: serde_json::Value = serde_json::from_str(&t).ok()?;
+                                (v[0] == "EVENT").then(|| v[2]["id"].as_str().unwrap().to_owned())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                }
+            };
+
+            let (guard, out) = crate::access::tests::capture_scoped();
+            let sent = search(fx.state.clone(), "needle").await;
+            let missed = search(fx.state.clone(), "nothing matches").await;
+            drop(guard);
+            assert_eq!(sent.len(), 2, "both needles are sent");
+            assert!(missed.is_empty());
+            let lines = test_support::lines(&out, TARGET);
+            assert_eq!(lines.len(), 2, "{lines:?}");
+            let (hit, miss) = (&lines[0], &lines[1]);
+            for (field, want) in [
+                ("event", "search"),
+                ("transport", "ws"),
+                ("backend", "postgres"),
+                ("mode", "full_text"),
+                ("sort", "relevance"),
+                ("outcome", "served"),
+                ("channel_scope", "channels_or_channel_less"),
+                ("kinds", "9"),
+            ] {
+                assert_eq!(hit[field], want, "{field}: {hit}");
+            }
+            assert_eq!(hit["searcher"], fx.reader.public_key().to_hex(), "{hit}");
+            assert_eq!(hit["community"], fx.tenant.community().to_string(), "{hit}");
+            assert_eq!(hit["channel_count"], 1, "{hit}");
+            assert_eq!(hit["word_count"], 1, "{hit}");
+            assert_eq!(hit["quoted"], false, "{hit}");
+            assert_eq!(hit["has_url"], false, "{hit}");
+            assert_eq!(hit["backend_hits"], 2, "{hit}");
+            assert_eq!(hit["result_count"], 2, "{hit}");
+            assert_eq!(
+                hit["hit_ids"],
+                sent.join(","),
+                "ids in the order sent: {hit}"
+            );
+            assert_eq!(miss["outcome"], "served", "{miss}");
+            assert_eq!(miss["result_count"], 0, "{miss}");
+            assert_eq!(miss["word_count"], 2, "{miss}");
+            assert_eq!(miss["hit_ids"], "", "{miss}");
+            assert_ne!(hit["search_id"], miss["search_id"]);
+            let raw = out.raw();
+            assert!(
+                !raw.contains("needle") && !raw.contains("nothing matches"),
+                "no search text without a retention: {raw}"
+            );
+            assert!(test_support::lines(&out, TEXT_TARGET).is_empty());
+
+            let (guard, out) = crate::access::tests::capture_scoped();
+            search(fx.with_text_retention(7), "needle").await;
+            drop(guard);
+            let (lines, texts) = (
+                test_support::lines(&out, TARGET),
+                test_support::lines(&out, TEXT_TARGET),
+            );
+            assert_eq!((lines.len(), texts.len()), (1, 1), "{lines:?} {texts:?}");
+            assert_eq!(texts[0]["event"], "search_text", "{}", texts[0]);
+            assert_eq!(texts[0]["query"], "needle", "{}", texts[0]);
+            assert_eq!(texts[0]["retention_days"], 7, "{}", texts[0]);
+            assert_eq!(texts[0]["search_id"], lines[0]["search_id"]);
+            assert!(lines[0].get("query").is_none(), "{}", lines[0]);
+        }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
