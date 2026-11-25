@@ -120,6 +120,7 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "relay_invites",
     "relay_members",
     "scheduled_workflow_fires",
+    "search_backfill",
     "search_outbox",
     "thread_metadata",
     "users",
@@ -162,7 +163,6 @@ pub const PENDING_SCOPED_TABLES: &[&str] = &[
     "identity_retirement_actions",
     "identity_retirement_holds",
     "identity_retirement_workflows",
-    "search_backfill",
     "thread_heads",
 ];
 
@@ -209,6 +209,7 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "scheduled_workflow_fires",
     "workflow_runs",
     "push_wake_outbox",
+    "search_backfill",
     "search_outbox",
     "join_policy_acceptances",
     "media_uploaders",
@@ -9720,8 +9721,10 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
     }
 
     /// Once a community is fenced for deletion, admission refuses its writes
-    /// (and so its outbox rows) and claims skip it; the purge removes its
-    /// outbox rows and keeps another community's.
+    /// (and so its outbox rows), claims and backfill skip it, and its rows do
+    /// not count against the backfill bound; the purge
+    /// removes its outbox rows and backfill progress and keeps another
+    /// community's.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn search_outbox_is_fenced_and_purged() {
@@ -9760,11 +9763,56 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             }
         };
 
+        let backfill = |owner: CommunityId| {
+            let pool = db.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM search_backfill WHERE community_id = $1",
+                )
+                .bind(owner.as_uuid())
+                .fetch_one(&pool)
+                .await
+                .expect("count backfill rows")
+            }
+        };
+        let others: Vec<CommunityId> =
+            sqlx::query_scalar::<_, Uuid>("SELECT id FROM communities WHERE id <> $1")
+                .bind(community.as_uuid())
+                .fetch_all(&db.pool)
+                .await
+                .expect("other communities")
+                .into_iter()
+                .map(CommunityId::from_uuid)
+                .collect();
+        let step = crate::search_backfill::step(&db.pool, 1, &others)
+            .await
+            .expect("backfill step")
+            .expect("the community's backfill");
+        assert_eq!((step.community, step.queued), (community, 1));
+        assert_eq!(queued(community).await, 2);
+
         let token = fence_and_drain(&store, &request, &inventory).await;
         db.insert_event(community, &message("after fence"), None)
             .await
             .expect_err("a fenced community admits no writes");
-        assert_eq!(queued(community).await, 1);
+        assert_eq!(queued(community).await, 2);
+        let mut skip = others.clone();
+        skip.retain(|other| *other != bystander);
+        let step = crate::search_backfill::step(&db.pool, 10, &skip)
+            .await
+            .expect("backfill step")
+            .expect("the bystander's backfill");
+        assert_eq!(
+            step.community, bystander,
+            "backfill skips a fenced community"
+        );
+        assert_eq!(
+            crate::search_backfill::step(&db.pool, 10, &skip)
+                .await
+                .expect("backfill step"),
+            None
+        );
+        assert_eq!(backfill(community).await, 1);
         let batch = crate::search_outbox::claim_batch(&db.pool, 10, &[])
             .await
             .expect("claim")
@@ -9775,11 +9823,19 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             "claims skip a fenced community"
         );
         drop(batch);
+        // The fenced community's rows cannot drain before the purge, so they
+        // do not count against the backfill bound of the others.
+        assert_eq!(queued(bystander).await, 2);
+        assert!(crate::search_backfill::outbox_below(&db.pool, 3)
+            .await
+            .expect("outbox depth"));
 
         let deleted = store.purge_postgres(&token).await.expect("purge postgres");
-        assert_eq!(deleted.get("search_outbox"), Some(&1));
+        assert_eq!(deleted.get("search_outbox"), Some(&2));
+        assert_eq!(deleted.get("search_backfill"), Some(&1));
         assert_eq!(queued(community).await, 0);
-        assert_eq!(queued(bystander).await, 1);
+        assert_eq!(backfill(community).await, 0);
+        assert_eq!(backfill(bystander).await, 1);
     }
 
     /// Approve, claim, fence, drain and remove bindings, leaving the request

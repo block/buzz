@@ -50,7 +50,7 @@ pub(crate) async fn run_migrations_through(pool: &PgPool, target: i64) -> Result
 /// Migrations that only add a tenant table, applied after the fence
 /// retirement (0090). Append each new one here.
 #[cfg(test)]
-const TENANT_TABLE_MIGRATIONS_AFTER_FENCE_RETIREMENT: [i64; 1] = [106];
+const TENANT_TABLE_MIGRATIONS_AFTER_FENCE_RETIREMENT: [i64; 2] = [106, 107];
 
 /// Create the tenant tables added since the fence retirement, without
 /// recording their migrations. For tests that stop before the retirement but
@@ -1029,11 +1029,17 @@ mod postgres_tests {
     }
 
     /// Where `file`, a path under `schema/`, breaks docs/database.md Rules 1,
-    /// 2 and 4: only `tables/public/`, `types/`, `partitions/` and `seeds/`
-    /// hold schema files, and no file declares a trigger, function,
+    /// 2 and 4: only `tables/public/`, `types/`, `sequences/`, `partitions/`
+    /// and `seeds/` hold schema files, and no file declares a trigger, function,
     /// procedure, rule or foreign key.
     fn desired_state_file_violations(file: &str, text: &str) -> Vec<String> {
-        let allowed = ["tables/public/", "types/", "partitions/", "seeds/"];
+        let allowed = [
+            "tables/public/",
+            "types/",
+            "sequences/",
+            "partitions/",
+            "seeds/",
+        ];
         let misplaced = (file != "schema.sql" && !allowed.iter().any(|dir| file.starts_with(dir)))
             .then(|| {
                 format!(
@@ -1056,7 +1062,13 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 106);
+        assert_eq!(migrations.len(), 108);
+        assert_eq!(migrations[107].version, 108);
+        assert!(strip_sql_comments(migrations[107].sql.as_str())
+            .contains("CREATE SEQUENCE search_index_version"));
+        assert_eq!(migrations[106].version, 107);
+        assert!(strip_sql_comments(migrations[106].sql.as_str())
+            .contains("CREATE TABLE search_backfill"));
         assert_eq!(migrations[105].version, 106);
         assert!(
             strip_sql_comments(migrations[105].sql.as_str()).contains("CREATE TABLE search_outbox")
@@ -1734,6 +1746,7 @@ mod postgres_tests {
             "media_uploaders",
             "media_publications",
             "search_outbox",
+            "search_backfill",
         ];
         for table in crate::deletion::EXPECTED_SCOPED_TABLES
             .iter()
@@ -2467,6 +2480,11 @@ mod postgres_tests {
             (
                 "types/widget_kind.sql",
                 "CREATE TYPE widget_kind AS ENUM ('a');",
+                0,
+            ),
+            (
+                "sequences/widget_number.sql",
+                "CREATE SEQUENCE widget_number AS BIGINT;",
                 0,
             ),
             ("schema.sql", "\\i tables/public/widgets.sql", 0),
@@ -3527,6 +3545,7 @@ mod postgres_tests {
             "workflow_runs",
             "push_gateway_installations",
             "search_outbox",
+            "search_backfill",
         ] {
             assert_eq!(
                 columns(&desired, table).await,
@@ -4503,7 +4522,7 @@ mod postgres_tests {
             .expect_err("deletion refuses a catalog missing later tenant tables")
             .to_string();
         assert!(
-            drift.contains("(missing=search_outbox, unknown=)"),
+            drift.contains("(missing=search_backfill,search_outbox, unknown=)"),
             "deletion must accept the pre-retirement fences: {drift}"
         );
         run_migrations(&pool).await.expect("apply all migrations");
@@ -4590,7 +4609,7 @@ mod postgres_tests {
             .expect_err("deletion refuses a catalog missing later tenant tables")
             .to_string();
         assert!(
-            drift.contains("(missing=search_outbox, unknown=)"),
+            drift.contains("(missing=search_backfill,search_outbox, unknown=)"),
             "deletion must accept the catalog before the drop: {drift}"
         );
         run_migrations(&pool).await.expect("apply all migrations");

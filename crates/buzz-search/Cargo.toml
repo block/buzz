@@ -25,3 +25,6 @@ rand        = { workspace = true }
 
 [dev-dependencies]
 nostr       = { workspace = true }
+axum        = { workspace = true }
+reqwest     = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
