@@ -197,9 +197,14 @@ fn read_source(file: Option<&str>) -> Result<String, CliError> {
         None => {
             let mut buf = String::new();
             std::io::stdin()
-                .take(STDIN_MAX_BYTES)
+                .take(STDIN_MAX_BYTES + 1)
                 .read_to_string(&mut buf)
                 .map_err(|e| CliError::Other(format!("stdin read failed: {e}")))?;
+            if buf.len() as u64 > STDIN_MAX_BYTES {
+                return Err(CliError::Usage(format!(
+                    "stdin exceeds {STDIN_MAX_BYTES}-byte limit"
+                )));
+            }
             if buf.is_empty() {
                 return Err(CliError::Usage(
                     "no input: provide --file or pipe JSON to stdin".into(),
