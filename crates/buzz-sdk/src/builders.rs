@@ -2078,7 +2078,10 @@ fn dm_open(pubkeys: &[&str], include_history: bool) -> Result<EventBuilder, SdkE
 /// two or more people are refused with the exact message
 /// `needs-choice: history` and nothing changes. The client then asks whether
 /// they should see the DM's history and sends the add again, tagged `include`
-/// or untagged.
+/// or untagged. It also accepts `["history", "agents"]` on kind 41011: agents
+/// alone join this DM in place, and an add naming anyone else is refused with
+/// the exact message `invalid: only agents join this DM in place`, changing
+/// nothing.
 pub fn build_dm_add_member(
     channel_id: Uuid,
     pubkey: &str,
