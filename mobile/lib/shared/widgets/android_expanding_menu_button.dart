@@ -19,7 +19,7 @@ class AndroidExpandingMenuButton extends HookWidget {
     this.expansionBoundsContext,
     this.trigger,
     this.backgroundColor,
-    this.blurBackground = false,
+    this.dimBackground = false,
     this.width = 112,
     this.height = 56,
     this.dividerBefore = const {},
@@ -32,7 +32,7 @@ class AndroidExpandingMenuButton extends HookWidget {
   final String label;
   final Widget? trigger;
   final Color? backgroundColor;
-  final bool blurBackground;
+  final bool dimBackground;
   final double width, height;
   final Set<int> dividerBefore;
   final Map<int, String> sectionTitles;
@@ -79,7 +79,7 @@ class AndroidExpandingMenuButton extends HookWidget {
                   final captured = actions;
                   final route = _CreateMenuRoute(
                     anchor: rect,
-                    blurBackground: blurBackground,
+                    dimBackground: dimBackground,
                     backgroundColor: backgroundColor ?? context.controlSurface,
                     expansionBounds: expansionBounds,
                     label: label,
@@ -134,7 +134,7 @@ class _NewLabel extends StatelessWidget {
 class _CreateMenuRoute extends PopupRoute<int> {
   _CreateMenuRoute({
     required this.anchor,
-    required this.blurBackground,
+    required this.dimBackground,
     required this.expansionBounds,
     required this.label,
     required this.trigger,
@@ -146,7 +146,7 @@ class _CreateMenuRoute extends PopupRoute<int> {
     required this.dismissLabel,
   });
   final Rect anchor;
-  final bool blurBackground;
+  final bool dimBackground;
   final Rect? expansionBounds;
   final String label;
   final Widget trigger;
@@ -157,7 +157,8 @@ class _CreateMenuRoute extends PopupRoute<int> {
   final bool reducedMotion;
   final String dismissLabel;
   @override
-  Color? get barrierColor => null;
+  Color? get barrierColor =>
+      dimBackground ? Colors.black.withValues(alpha: 0.08) : null;
   @override
   bool get barrierDismissible => true;
   @override
@@ -223,15 +224,6 @@ class _CreateMenuRoute extends PopupRoute<int> {
         final contentOpacity = ((t - .25) / .75).clamp(0.0, 1.0);
         return Stack(
           children: [
-            if (blurBackground && t > 0)
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 4 * t, sigmaY: 4 * t),
-                    child: const SizedBox.expand(),
-                  ),
-                ),
-              ),
             Positioned.fromRect(
               rect: rect,
               child: DecoratedBox(
