@@ -1,6 +1,9 @@
 //! Both Git authorization routes at the database policy boundary.
 use super::*;
 
+#[path = "authority_lock_tests.rs"]
+mod authority_lock_postgres_tests;
+
 struct Fixture {
     db: Db,
     community: CommunityId,

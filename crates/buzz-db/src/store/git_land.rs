@@ -144,7 +144,7 @@ pub async fn hold(tx: &mut AdmittedTx, repo: &RepoCoordinate) -> Result<Option<H
 /// takes exclusively, so its rules cannot change before commit. Deleting the
 /// announcement takes no such key, but it only removes rules: a land judged
 /// under the stricter ones it removes is still allowed under what is left.
-async fn hold_announcement(tx: &mut AdmittedTx, repo: &RepoCoordinate) -> Result<()> {
+pub(crate) async fn hold_announcement(tx: &mut AdmittedTx, repo: &RepoCoordinate) -> Result<()> {
     let owner = hex::decode(&repo.owner)
         .map_err(|_| crate::DbError::InvalidData("invalid repository owner".into()))?;
     let key = crate::replaceable::event_replacement_lock_key(
@@ -160,7 +160,8 @@ async fn hold_announcement(tx: &mut AdmittedTx, repo: &RepoCoordinate) -> Result
     Ok(())
 }
 
-async fn hold_channel(tx: &mut AdmittedTx, channel: Uuid) -> Result<()> {
+/// Hold the channel's membership key and then the channel row, both shared.
+pub(crate) async fn hold_channel(tx: &mut AdmittedTx, channel: Uuid) -> Result<()> {
     let community = tx.community();
     crate::channel_members::acquire_channel_membership_lock_shared(tx.conn(), community, channel)
         .await?;

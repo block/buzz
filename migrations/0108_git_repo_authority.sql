@@ -2,7 +2,7 @@
 --
 -- The repository's name row becomes the row a land locks and swaps:
 --   authority_version  bumped by every repository-scoped authority write;
---                      a land reads it FOR SHARE, so no such write can commit
+--                      a land reads it FOR KEY SHARE, so no such write can commit
 --                      between the land's decision and its commit.
 --   channel_id         the bound channel, pinned from the first announcement
 --                      that names one; afterwards only a governed rebind

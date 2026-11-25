@@ -22,7 +22,8 @@ pub struct Prepared {
     pub state: Event,
     /// Historical state replaced by this command.
     pub previous: Option<Event>,
-    /// An exact accepted command retry: no write or new audit entry is needed.
+    /// An exact accepted command retry: the head and audit remain unchanged.
+    /// The caller's repository fence may still bump its authority version.
     pub replay: bool,
     /// Expiry of the agent's Git grant this decision relied on.
     pub valid_until: Option<i64>,
@@ -38,7 +39,8 @@ pub struct Prepared {
 //              takes FOR UPDATE, so it waits for every land in flight, and
 //              bumps `authority_version`.
 //
-// Lock order, always: community, then repo row, then anything else.
+// Lock order: community authority, repo row, announcement, admission,
+// channel membership and rows in UUID order, then the community roster rows.
 
 fn community_fence_key(community: CommunityId) -> String {
     format!("buzz_git_authority:{}", community.as_uuid())
@@ -246,7 +248,7 @@ fn admin(role: Option<&str>) -> bool {
 async fn community_admin(tx: &mut AdmittedTx, key: &[u8]) -> Result<bool> {
     let community = tx.community();
     let role: Option<String> = sqlx::query_scalar(
-        "SELECT role FROM relay_members WHERE community_id=$1 AND pubkey=encode($2,'hex')",
+        "SELECT role FROM relay_members WHERE community_id=$1 AND pubkey=encode($2,'hex') FOR SHARE",
     )
     .bind(community.as_uuid())
     .bind(key)
@@ -312,6 +314,7 @@ async fn clock(tx: &mut AdmittedTx) -> Result<u64> {
 }
 
 /// Check the current authorization under the caller's authority fences.
+/// Hold the locks that protect the signer's authority until commit.
 pub async fn authorize(
     tx: &mut AdmittedTx,
     command: &Command,
@@ -319,28 +322,55 @@ pub async fn authorize(
     grant: Option<&GitGrant>,
     open: bool,
 ) -> Result<Option<Uuid>> {
-    if command.community != *tx.community().as_uuid() {
+    let community = tx.community();
+    if command.community != *community.as_uuid() {
         return Err(denied());
     }
+    let repo = command.document.repo();
+    if let Some(repo) = repo {
+        crate::git_land::hold_announcement(tx, repo).await?;
+    }
+    // The admission lock stabilizes bans and first owner links before either
+    // key is checked or used to choose which roster rows to lock.
+    crate::relay_invite::lock_admission_shared(tx.conn(), community).await?;
     if !active(tx, actor).await? {
         return Err(denied());
     }
-    let channel = match command.document.repo() {
+    let channel = match repo {
         Some(repo) => Some(repo_channel(tx, repo).await?),
         None => None,
     };
     let allowed = match &command.document {
         DocumentId::Floor | DocumentId::Trusted | DocumentId::Labels(_) => {
-            let mut allowed = community_admin(tx, actor).await?;
             if let Some(owner) = owner(tx, actor).await? {
-                allowed &= community_admin(tx, &owner).await?;
+                // Ownership transfer takes the community row before roster
+                // rows and can update both keys. Match that order, then lock
+                // the recorded owner first, as cascading member removal does.
+                sqlx::query("SELECT 1 FROM communities WHERE id=$1 FOR SHARE")
+                    .bind(community.as_uuid())
+                    .execute(tx.conn())
+                    .await?;
+                if !community_admin(tx, &owner).await? {
+                    return Err(denied());
+                }
             }
-            allowed
+            community_admin(tx, actor).await?
         }
         DocumentId::Rules(repo) | DocumentId::Bind(repo) => {
             let current = channel.ok_or_else(denied)?;
+            let next = match command.body.body {
+                Body::Bind { channel } => Some(channel),
+                _ => None,
+            };
+            let mut channels = [current, next.unwrap_or(current)];
+            channels.sort_unstable();
+            let [first, second] = channels;
+            crate::git_land::hold_channel(tx, first).await?;
+            if first != second {
+                crate::git_land::hold_channel(tx, second).await?;
+            }
             let mut allowed = repo_admin(tx, repo, actor, current, grant, open).await?;
-            if let Body::Bind { channel: next } = command.body.body {
+            if let Some(next) = next {
                 allowed &= repo_admin(tx, repo, actor, next, None, open).await?;
             }
             allowed

@@ -273,8 +273,8 @@ impl ChannelMembershipLocks<'_> {
     }
 }
 
-/// Take the membership lock of each channel in `channels`, in that order, on
-/// a caller-owned transaction, and return the proof that holds them.
+/// Take the membership lock of each distinct channel in UUID order on a
+/// caller-owned transaction, and return the proof that holds them.
 ///
 /// These locks come first in the channel lock order (membership, then TTL,
 /// then the channel row; see `channel::lock_channel_for_settings_write`).
@@ -284,13 +284,13 @@ pub async fn lock_channel_memberships_in_transaction<'tx>(
     channels: &[Uuid],
 ) -> Result<ChannelMembershipLocks<'tx>> {
     let community_id = tx.community();
-    for channel_id in channels {
-        acquire_channel_membership_lock(tx.conn(), community_id, *channel_id).await?;
+    let mut channels = channels.to_vec();
+    channels.sort_unstable();
+    channels.dedup();
+    for &channel_id in &channels {
+        acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
     }
-    Ok(ChannelMembershipLocks {
-        tx,
-        channels: channels.to_vec(),
-    })
+    Ok(ChannelMembershipLocks { tx, channels })
 }
 
 /// Lock the channel row on a caller-owned transaction and return its

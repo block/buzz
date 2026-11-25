@@ -282,6 +282,10 @@ async fn delete_member_with_acceptances(
     expected_role: Option<&str>,
 ) -> Result<bool> {
     let community = tx.community();
+    // A governed decision locks the recorded owner before the agent. A
+    // cascade can encounter those rows in reverse order for reciprocal
+    // ownership links. Serialize with governed decisions before either row.
+    crate::governance::fence_community_exclusive(tx, community).await?;
     let locked = sqlx::query(
         "SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2 \
          AND CASE WHEN $3::text IS NULL THEN role <> 'owner' ELSE role = $3 END \
