@@ -6,10 +6,10 @@
 //! 1. Validates HMAC signature + 30s TTL (fail-closed)
 //! 2. Resolves kind:30617 → protection rules
 //! 3. Denies any protection rule it does not understand
-//! 4. Credits the pusher with its role in the bound channel
-//!    ([`super::authority::channel_role`]); nothing else grants authority.
-//!    An agent is refused unless its request carried a grant to push the
-//!    repository; the land judges that grant and binds
+//! 4. Credits the pusher with its role in the bound channel, or for an
+//!    owned agent the higher of that and its grant capped by its owner's
+//!    role ([`super::authority::channel_role`]); nothing else grants
+//!    authority. The land rechecks that grant and binds
 //! 5. Calls `buzz_core::git_perms::evaluate_push()`
 //! 6. Returns 200 (allow) or 403 (deny with reasons)
 //!
