@@ -27,8 +27,9 @@ import java.util.concurrent.TimeUnit
  *
  * If nothing has been posted after [GENERIC_AFTER_MS] the handler posts a
  * generic notification in the "Other" channel, which the result then replaces
- * silently, or removes when it finds nothing. A watchdog ends the work at
- * [WATCHDOG_MS] whatever Dart does, inside the time FCM gives a handler, and
+ * silently, or removes when it finds nothing. It stays, beside any named ones,
+ * when the result reports a message it lost track of. A watchdog ends the work
+ * at [WATCHDOG_MS] whatever Dart does, inside the time FCM gives a handler, and
  * leaves the generic notification when no result came.
  *
  * One run exists per process. A wake that arrives while it runs is passed to
@@ -195,21 +196,27 @@ internal object PushWake {
             log("dart_result")
             val notifications = (map["notifications"] as List<*>).map { WakeNotification.fromDart(it) }
             answered = true
+            if (notifications.isNotEmpty()) {
+                notifier.postConversations(notifications, silent = genericShown)
+                log("posted count=${notifications.size}")
+            }
             when {
-                notifications.isNotEmpty() -> {
-                    notifier.postConversations(notifications, silent = genericShown)
-                    log("posted count=${notifications.size}")
-                    removeGeneric()
+                // A message claimed but never returned can't be named, and no
+                // later wake finds it, so the generic notification stands in
+                // for it, beside any named ones, until the user clears it.
+                map["unreported"] == true -> {
+                    val silent = genericShown || notifications.isNotEmpty()
+                    if (notifier.keepGeneric(genericShown, silent)) genericShown = true
                 }
-                map["incomplete"] == true -> showGeneric()
+                notifications.isEmpty() && map["incomplete"] == true -> showGeneric()
                 else -> removeGeneric()
             }
         }
 
-        private fun showGeneric() {
+        private fun showGeneric(silent: Boolean = false) {
             if (genericShown) return
             genericShown = true
-            notifier.postGeneric()
+            notifier.postGeneric(silent)
         }
 
         /** Also clears the generic notification an earlier run left behind. */

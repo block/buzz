@@ -131,6 +131,7 @@ class PushWakeResult {
     required this.notifications,
     this.failedCommunityIds = const [],
     this.interrupted = false,
+    this.unreported = false,
   });
 
   /// Every eligible unshown message, newest first, within the caps.
@@ -143,6 +144,12 @@ class PushWakeResult {
   /// Whether a pass failed before it could look anywhere, so the wake can't
   /// say which communities it missed.
   final bool interrupted;
+
+  /// Whether a claim was still running when the wake stopped waiting for it.
+  /// If it wins, its message is recorded as shown but was never returned, so
+  /// no later wake finds it, and the caller shows its generic notification
+  /// beside any others. Unlike [incomplete], a retry can't recover it.
+  final bool unreported;
 
   /// Whether the wake could not look everywhere. With no [notifications] the
   /// caller shows its generic notification, so the wake is never silent.
@@ -265,6 +272,13 @@ Future<PushWakeResult> resolvePushWake({
     await Future.wait(
       run.claims,
     ).timeout(_claimGrace, onTimeout: () => const []);
+    // Read with the claimed snapshot below, with no await between: a claim
+    // that finishes after this point is not returned, so it is unreported.
+    // A message with nothing to show would not be returned anyway. Its body
+    // is formatted only here, so claims that answer in time never pay for it.
+    final unreported = run.claiming.values.any(
+      (event) => notificationBody(event.content).isNotEmpty,
+    );
     for (final community in eligible) {
       if (!run.done.contains(community.id)) run.failed.add(community.id);
     }
@@ -276,6 +290,7 @@ Future<PushWakeResult> resolvePushWake({
     return PushWakeResult(
       notifications: capPushWakeNotifications(run.notifications),
       failedCommunityIds: run.failed.toSet().toList()..sort(),
+      unreported: unreported,
     );
   } finally {
     timer.cancel();
@@ -294,6 +309,10 @@ class _WakeRun {
   final failed = <String>[];
   final done = <String>{};
   final claims = <Future<void>>[];
+
+  /// The message each community is claiming now, until its claim answers.
+  /// A community claims one message at a time.
+  final claiming = <String, NostrEvent>{};
 
   /// What each community running now has claimed so far, which is returned if
   /// the wake ends before the community does.
@@ -523,12 +542,19 @@ Future<void> _resolveCommunity(
       // A claim that fails (storage full, say) ends this community's run.
       // The messages claimed before it are returned, since they are already
       // recorded as shown, and the community is reported as incomplete.
+      final bool won;
+      run.claiming[community.id] = event;
       try {
-        if (!await store.claim(community.id, event.id, createdAt)) continue;
+        won = await store.claim(community.id, event.id, createdAt);
       } on Object {
         complete = false;
         break;
+      } finally {
+        // Nothing awaits between here and adding the message to `claimed`,
+        // so a claim the wake has stopped waiting for is still counted.
+        run.claiming.remove(community.id);
       }
+      if (!won) continue;
       final body = notificationBody(event.content);
       // A message with no text (only markup) has nothing to show, but it is
       // recorded so it is not looked at again.
