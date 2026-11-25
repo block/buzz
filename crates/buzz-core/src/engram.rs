@@ -487,6 +487,13 @@ pub fn event_builder(
     Ok(
         EventBuilder::new(Kind::Custom(KIND_AGENT_ENGRAM as u16), ciphertext)
             .tags(tags)
+            // The NIP-AE envelope requires exactly one `p` tag carrying the
+            // owner address, and the owner may be the author itself.
+            // rust-nostr drops `p` tags that match the author unless the
+            // builder opts in, which left a self-owned write with no `p` tag
+            // at all and the relay rejected it ("agent-engram event must have
+            // exactly one `p` tag (got 0)").
+            .allow_self_tagging()
             .custom_created_at(nostr::Timestamp::from(created_at)),
     )
 }
@@ -639,6 +646,10 @@ pub struct Listing {
     pub event_id: String,
     /// `created_at` of the current head.
     pub created_at: u64,
+    /// Pubkey of the agent that authored the current head.
+    pub author: String,
+    /// Owner pubkey the current head is addressed to (its `p` tag).
+    pub owner: String,
 }
 
 #[cfg(test)]
@@ -866,6 +877,36 @@ mod tests {
         .unwrap();
         assert_eq!(decoded_agent, decoded);
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn event_builder_keeps_the_owner_p_tag_for_a_self_addressed_write() {
+        // The NIP-AE envelope requires exactly one `p` tag carrying the owner
+        // address, and the owner may be the author. rust-nostr strips `p`
+        // tags that match the author unless the builder opts in, so without
+        // that opt-in a self-owned write carries no `p` tag at all and the
+        // relay refuses it.
+        let agent = keys_from_hex(SECKEY_A);
+        let other = keys_from_hex(SECKEY_O);
+        for owner in [agent.public_key(), other.public_key()] {
+            let event = build_event(
+                &agent,
+                &owner,
+                &Body::Memory {
+                    slug: "mem/example".into(),
+                    value: Some("owner-addressing-control".into()),
+                },
+                1_700_000_000,
+            )
+            .unwrap();
+            let p_values: Vec<String> = event
+                .tags
+                .iter()
+                .filter(|tag| tag.kind().to_string() == "p")
+                .filter_map(|tag| tag.content().map(str::to_owned))
+                .collect();
+            assert_eq!(p_values, vec![owner.to_hex()]);
+        }
     }
 
     #[test]
