@@ -108,7 +108,7 @@ buzz gifs share --slug <slug>                 # report selection to provider Rec
 # Paste the `cdn_url` from a search result directly into messages send --content
 
 # Custom emoji in messages
-# buzz messages send scans outgoing content for :shortcode: patterns and
+# buzz messages send and buzz messages edit scan outgoing content for :shortcode: patterns and
 # automatically attaches NIP-30 ["emoji", shortcode, url] tags from the
 # workspace palette — identical to the desktop composer behavior.
 
