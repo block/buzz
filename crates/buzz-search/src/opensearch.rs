@@ -148,11 +148,31 @@ impl SearchIndex {
     }
 
     /// Create the versioned index behind the alias unless the alias exists.
-    /// Returns whether this call created it.
+    /// Returns whether this call created it. For tests and tools: the
+    /// indexer clears the backfill progress between `missing` and `create`.
     pub async fn ensure(&self) -> Result<bool, SearchError> {
-        if self.alias_exists().await? {
+        if !self.missing().await? {
             return Ok(false);
         }
+        self.create().await
+    }
+
+    /// Whether the cluster answers that neither the alias nor the versioned
+    /// index exists. Any other answer is an error, so a cluster that fails
+    /// or throttles a lookup is never taken for one that lost the index.
+    pub(crate) async fn missing(&self) -> Result<bool, SearchError> {
+        if self.exists(&self.alias).await? {
+            return Ok(false);
+        }
+        if self.exists(&self.index).await? {
+            return Err(SearchError::Engine("index exists without its alias".into()));
+        }
+        Ok(true)
+    }
+
+    /// Create the versioned index with its alias. Returns whether this call
+    /// created it: false when another relay created it first.
+    pub(crate) async fn create(&self) -> Result<bool, SearchError> {
         let response = self
             .client
             .indices()
@@ -165,7 +185,7 @@ impl SearchIndex {
         if response.status_code().as_u16() == 400 {
             let body: Value = response.json().await.map_err(transport_error)?;
             if body["error"]["type"] == "resource_already_exists_exception" {
-                if self.alias_exists().await? {
+                if self.exists(&self.alias).await? {
                     return Ok(false);
                 }
                 return Err(SearchError::Engine("index exists without its alias".into()));
@@ -175,15 +195,21 @@ impl SearchIndex {
         checked(response).await.map(|_| true)
     }
 
-    async fn alias_exists(&self) -> Result<bool, SearchError> {
+    /// Whether `name`, an index or alias, exists: true on 200, false on 404,
+    /// an error on any other status.
+    async fn exists(&self, name: &str) -> Result<bool, SearchError> {
         let response = self
             .client
             .indices()
-            .exists(IndicesExistsParts::Index(&[&self.alias]))
+            .exists(IndicesExistsParts::Index(&[name]))
             .send()
             .await
             .map_err(transport_error)?;
-        Ok(response.status_code().is_success())
+        match response.status_code().as_u16() {
+            200 => Ok(true),
+            404 => Ok(false),
+            status => Err(SearchError::Engine(format!("HTTP {status}"))),
+        }
     }
 
     /// How long ago the versioned index was created, by the cluster's

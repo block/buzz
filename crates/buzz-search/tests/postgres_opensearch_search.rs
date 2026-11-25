@@ -814,14 +814,37 @@ async fn stored_messages_are_backfilled_newest_first_and_resume() {
     index.delete().await.expect("delete index");
 }
 
+/// Wait until `count` messages of `community` match `q`, while the index
+/// may still be missing.
+async fn wait_until_found(
+    index: &SearchIndex,
+    service: &SearchService,
+    community: CommunityId,
+    q: &str,
+    count: usize,
+) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            // Fails until the indexer has created the index.
+            if index.refresh().await.is_ok() && find(service, community, q).await.len() == count {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("every stored message becomes searchable");
+}
+
 /// The lease holder starts backfilling on its own once OpenSearch is
 /// configured, and again into an index it recreates after the old one went
-/// away.
+/// away, also when the relay stopped just before or just after creating it.
 #[tokio::test]
 #[ignore = "requires Postgres and OpenSearch"]
 async fn the_indexer_backfills_on_its_own() {
     let db = unsynced_db().await;
-    let (index, _) = sync_index().await;
+    let (index, prefix) = sync_index().await;
+    let proxy = Proxy::start().await;
     let community = search_suite::mk_community(db.pool(), "auto.example").await;
     let keys = Keys::generate();
     for n in 0..5 {
@@ -836,25 +859,18 @@ async fn the_indexer_backfills_on_its_own() {
     search_outbox::enable(db.pool())
         .await
         .expect("enable outbox");
-    let indexer = tokio::spawn(
-        Indexer::new(db.clone(), index.clone())
-            .with_batch_size(2)
-            .with_backfill_bound(2)
-            .with_new_index_settle(Duration::ZERO)
-            .run(),
-    );
+    let start = || {
+        tokio::spawn(
+            Indexer::new(db.clone(), proxy.index(&prefix))
+                .with_batch_size(2)
+                .with_backfill_bound(2)
+                .with_new_index_settle(Duration::ZERO)
+                .run(),
+        )
+    };
+    let mut indexer = start();
     let service = SearchService::with_opensearch(db.pool().clone(), index.clone());
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            index.refresh().await.expect("refresh");
-            if find(&service, community, "autoword").await.len() == 5 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .expect("every stored message becomes searchable");
+    wait_until_found(&index, &service, community, "autoword", 5).await;
     let progress = buzz_db::search_backfill::progress(db.pool())
         .await
         .expect("progress");
@@ -862,19 +878,110 @@ async fn the_indexer_backfills_on_its_own() {
 
     // The index goes away while the backfill is complete.
     index.delete().await.expect("delete index");
+    wait_until_found(&index, &service, community, "autoword", 5).await;
+
+    // The relay stops once before its create reaches the cluster, and once
+    // right after the cluster created the index. Each time the restarted
+    // relay backfills every message into the new index.
+    for create in [Create::Refuse, Create::Lose] {
+        let (done, stopped) = tokio::sync::oneshot::channel();
+        proxy.set_create(create(done)).await;
+        index.delete().await.expect("delete index");
+        tokio::time::timeout(Duration::from_secs(30), stopped)
+            .await
+            .expect("the indexer creates the index")
+            .expect("create signal");
+        indexer.abort();
+        let _ = indexer.await;
+        indexer = start();
+        wait_until_found(&index, &service, community, "autoword", 5).await;
+    }
+    indexer.abort();
+    index.delete().await.expect("delete index");
+}
+
+/// While a new index is backfilled, no community reports a complete
+/// backfill, including one whose progress was already cleared, as by an
+/// operator's `DELETE FROM search_backfill` before deleting the index.
+#[tokio::test]
+#[ignore = "requires Postgres and OpenSearch"]
+async fn no_community_reports_a_complete_backfill_while_it_runs_again() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let scrape = recorder.handle();
+    // The test runtime has one thread, so the spawned indexer records here.
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    // What a scrape reports for the community, if anything.
+    let complete = |community: CommunityId| {
+        let series = format!("buzz_search_backfill_complete{{community=\"{community}\"}} ");
+        scrape
+            .render()
+            .lines()
+            .find_map(|line| line.strip_prefix(series.as_str()).map(str::to_owned))
+    };
+
+    let db = unsynced_db().await;
+    let (index, prefix) = sync_index().await;
+    let proxy = Proxy::start().await;
+    let keys = Keys::generate();
+    let mut communities = Vec::new();
+    for host in ["first.example", "second.example"] {
+        let community = search_suite::mk_community(db.pool(), host).await;
+        for n in 0..3 {
+            db.insert_event(
+                community,
+                &message_at(&keys, &format!("gaugeword {n}"), -n),
+                None,
+            )
+            .await
+            .expect("insert");
+        }
+        communities.push(community);
+    }
+    search_outbox::enable(db.pool())
+        .await
+        .expect("enable outbox");
+    let indexer = tokio::spawn(
+        Indexer::new(db.clone(), proxy.index(&prefix))
+            .with_batch_size(2)
+            .with_backfill_bound(2)
+            .with_new_index_settle(Duration::ZERO)
+            .run(),
+    );
     tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            // Fails until the indexer has created the index again.
-            if index.refresh().await.is_ok()
-                && find(&service, community, "autoword").await.len() == 5
-            {
-                break;
-            }
+        while !(communities
+            .iter()
+            .all(|community| complete(*community).as_deref() == Some("1"))
+            && search_outbox::depth(db.pool()).await.expect("depth") == 0)
+        {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
     .await
-    .expect("every stored message is backfilled into the new index");
+    .expect("both backfills complete and are indexed");
+
+    // Rebuild, holding the first write into the new index: the first
+    // community's first batch is queued, the second's not yet.
+    let (arrived, held) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    proxy
+        .set(Bulk::Hold {
+            arrived,
+            release: released,
+        })
+        .await;
+    sqlx::query("DELETE FROM search_backfill")
+        .execute(db.pool())
+        .await
+        .expect("clear backfill progress");
+    index.delete().await.expect("delete index");
+    tokio::time::timeout(Duration::from_secs(30), held)
+        .await
+        .expect("the indexer writes into the new index")
+        .expect("hold signal");
+    for community in &communities {
+        assert_eq!(complete(*community).as_deref(), Some("0"), "{community}");
+    }
+    let _ = release.send(());
     indexer.abort();
     index.delete().await.expect("delete index");
 }
@@ -906,18 +1013,36 @@ enum Bulk {
     },
 }
 
+/// What the proxy does with the next index creation, signalling the
+/// sender once it is done.
+enum Create {
+    /// Answer HTTP 503 without creating the index, as when the relay stops
+    /// before its create reaches the cluster.
+    Refuse(tokio::sync::oneshot::Sender<()>),
+    /// Create the index, then answer HTTP 503, as when the relay stops
+    /// right after the cluster created it.
+    Lose(tokio::sync::oneshot::Sender<()>),
+}
+
 /// An HTTP proxy in front of the test cluster that can throttle or hold
-/// bulk requests.
+/// bulk requests, and refuse or lose an index creation.
 struct Proxy {
     url: String,
     bulk: std::sync::Arc<tokio::sync::Mutex<Bulk>>,
+    create: std::sync::Arc<tokio::sync::Mutex<Option<Create>>>,
     server: tokio::task::JoinHandle<()>,
 }
 
 impl Proxy {
     async fn start() -> Self {
         let bulk = std::sync::Arc::new(tokio::sync::Mutex::new(Bulk::Pass));
-        let state = (bulk.clone(), reqwest::Client::new(), opensearch_url());
+        let create = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let state = (
+            bulk.clone(),
+            create.clone(),
+            reqwest::Client::new(),
+            opensearch_url(),
+        );
         let app = axum::Router::new()
             .fallback(proxy_request)
             .with_state(state);
@@ -928,7 +1053,12 @@ impl Proxy {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve proxy");
         });
-        Self { url, bulk, server }
+        Self {
+            url,
+            bulk,
+            create,
+            server,
+        }
     }
 
     /// The index behind this proxy, using `prefix`.
@@ -944,6 +1074,10 @@ impl Proxy {
     async fn set(&self, bulk: Bulk) {
         *self.bulk.lock().await = bulk;
     }
+
+    async fn set_create(&self, create: Create) {
+        *self.create.lock().await = Some(create);
+    }
 }
 
 impl Drop for Proxy {
@@ -954,18 +1088,40 @@ impl Drop for Proxy {
 
 type ProxyState = (
     std::sync::Arc<tokio::sync::Mutex<Bulk>>,
+    std::sync::Arc<tokio::sync::Mutex<Option<Create>>>,
     reqwest::Client,
     String,
 );
 
+fn unavailable() -> axum::response::Response {
+    axum::response::Response::builder()
+        .status(503)
+        .body(axum::body::Body::empty())
+        .expect("unavailable response")
+}
+
 async fn proxy_request(
-    axum::extract::State((bulk, client, upstream)): axum::extract::State<ProxyState>,
+    axum::extract::State((bulk, create, client, upstream)): axum::extract::State<ProxyState>,
     request: axum::extract::Request,
 ) -> axum::response::Response {
     let (parts, body) = request.into_parts();
     let body = axum::body::to_bytes(body, usize::MAX)
         .await
         .expect("request body");
+    // An index creation is a PUT of the index name alone.
+    let creates =
+        parts.method == axum::http::Method::PUT && parts.uri.path().matches('/').count() == 1;
+    let mut lost = None;
+    if creates {
+        match create.lock().await.take() {
+            None => {}
+            Some(Create::Refuse(done)) => {
+                let _ = done.send(());
+                return unavailable();
+            }
+            Some(Create::Lose(done)) => lost = Some(done),
+        }
+    }
     if parts.uri.path().ends_with("/_bulk") {
         let action = std::mem::replace(&mut *bulk.lock().await, Bulk::Pass);
         match action {
@@ -994,6 +1150,11 @@ async fn proxy_request(
         forward = forward.header("content-type", content_type);
     }
     let response = forward.send().await.expect("forward to OpenSearch");
+    if let Some(done) = lost {
+        assert!(response.status().is_success(), "the index is created");
+        let _ = done.send(());
+        return unavailable();
+    }
     let mut builder = axum::response::Response::builder().status(response.status().as_u16());
     if let Some(content_type) = response.headers().get("content-type") {
         builder = builder.header("content-type", content_type);

@@ -72,8 +72,9 @@ pub async fn progress(pool: &PgPool) -> Result<Vec<(CommunityId, bool)>> {
 }
 
 /// Forget every community's backfill progress, so each is backfilled again
-/// from its newest event, and return how many rows were removed. For a new,
-/// empty index: the progress described the index it replaces. Deleting rows
+/// from its newest event, and return how many rows were removed. Before
+/// creating a new, empty index: the progress described the index it
+/// replaces. Deleting rows
 /// needs no community admission: it only removes rows that a community
 /// deletion's purge removes too.
 pub async fn reset(pool: &PgPool) -> Result<u64> {
