@@ -1,6 +1,6 @@
 import { snapshotUnresolvedEditMentionPubkeys } from "@/features/messages/lib/draftMentionRefs";
 import {
-  AgentMentionAuthorizationError,
+  agentMentionFailureMessage,
   type MentionRevalidationOptions,
 } from "@/features/messages/lib/agentMentionRevalidation";
 import type { QueuedMediaAttachment } from "@/features/messages/lib/backgroundMediaUploadStore";
@@ -191,8 +191,8 @@ export async function submitMessageEdit({
           await finishEdit(uploaded, signal);
         } catch (error) {
           restoreDraft();
-          if (error instanceof AgentMentionAuthorizationError)
-            setUploadError(error.message);
+          const mentionFailure = agentMentionFailureMessage(error);
+          if (mentionFailure) setUploadError(mentionFailure);
         } finally {
           setDeferredUploadPending(false);
         }
@@ -214,7 +214,7 @@ export async function submitMessageEdit({
     await finishEdit([]);
   } catch (error) {
     restoreDraft();
-    if (error instanceof AgentMentionAuthorizationError)
-      setUploadError(error.message);
+    const mentionFailure = agentMentionFailureMessage(error);
+    if (mentionFailure) setUploadError(mentionFailure);
   }
 }
