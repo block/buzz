@@ -130,7 +130,10 @@ _ComposerVoiceNote _useComposerVoiceNote({
     }
     availabilityCheck.value = null;
     dictating.value = transcribe;
-    if (attachments.value.isNotEmpty) {
+    // Dictation only adds text, so only a voice note's preview blocks it.
+    if (attachments.value.any(
+      (item) => !transcribe || item.kind == _PendingAttachmentKind.voiceNote,
+    )) {
       uploadError.value = 'A voice note must be the only attachment.';
       return;
     }
@@ -162,7 +165,6 @@ _ComposerVoiceNote _useComposerVoiceNote({
     }
     if (!context.mounted || availabilityCheck.value != request) return;
     availabilityCheck.value = null;
-    if (controller.text.isNotEmpty) return;
     if (!available) {
       uploadError.value =
           'Dictation isn’t available on this device or language.';

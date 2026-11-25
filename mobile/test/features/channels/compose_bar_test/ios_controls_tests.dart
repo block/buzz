@@ -174,6 +174,39 @@ void iosControlsTests() {
           null,
         );
   });
+  testWidgets('Dictate inside a draft appends the transcript', (tester) async {
+    final speech = _ComposerSpeech()..available = true;
+    final files = _ComposerSpeechFiles();
+    await tester.pumpWidget(
+      _buildComposeBar(
+        uploadService: _FakeVoiceNoteUploadService(),
+        voiceNoteRecorderFactory: _FakeVoiceNoteRecorder.new,
+        overrides: [
+          composerTranscriptionFilesProvider.overrideWithValue(files),
+          deviceTranscriptionProvider.overrideWithValue(() => speech),
+        ],
+        onSend: (_, _, {mediaTags = const []}) async {},
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Message'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'First thought.');
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Send'), findsOneWidget);
+    await tester.tap(find.byTooltip('Dictate'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('voice-note-recorder')), findsOneWidget);
+    await tester.tap(find.byTooltip('Stop recording'));
+    await tester.pump();
+    speech.result.complete('Second thought.');
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'First thought. Second thought.',
+    );
+    await tester.pumpWidget(const SizedBox.shrink());
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
   testWidgets(
     'microphone keeps recording controls and inserts a retryable transcript',
     (tester) async {
@@ -1055,7 +1088,12 @@ void iosControlsTests() {
     expect(bubbleBounds.bottom - fieldBounds.bottom, closeTo(10, 0.5));
     expect(find.byTooltip('Send'), findsOneWidget);
     expect(find.byTooltip('Emoji'), findsOneWidget);
-    expect(find.byTooltip('Dictate'), findsNothing);
+    // Dictate moves into the capsule beside Emoji rather than disappearing.
+    expect(find.byTooltip('Dictate'), findsOneWidget);
+    expect(
+      tester.getRect(find.byTooltip('Dictate')).right,
+      lessThanOrEqualTo(tester.getRect(composer).right),
+    );
     await tester.enterText(find.byType(TextField), '');
     await tester.pumpAndSettle();
     expect(find.byTooltip('Send'), findsNothing);

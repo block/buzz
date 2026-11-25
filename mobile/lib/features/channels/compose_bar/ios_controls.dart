@@ -61,12 +61,18 @@ class _IosComposerControls extends StatelessWidget {
   );
 }
 
-class _IosEmptyComposerActions extends StatelessWidget {
-  const _IosEmptyComposerActions({
+/// Actions inside the iOS text capsule. Once Send takes the outer circle,
+/// Dictate moves in here, so dictating more into a draft stays one tap.
+class _IosInlineComposerActions extends StatelessWidget {
+  const _IosInlineComposerActions({
     required this.onEmoji,
+    required this.onDictate,
     required this.enabled,
   });
   final VoidCallback onEmoji;
+
+  /// Null while the outer circle is still Dictate.
+  final VoidCallback? onDictate;
   final bool enabled;
 
   @override
@@ -74,7 +80,11 @@ class _IosEmptyComposerActions extends StatelessWidget {
     child: Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        for (final action in [('Emoji', BuzzIcons.smilePlus, onEmoji)])
+        for (final action in [
+          ('Emoji', BuzzIcons.smilePlus, onEmoji),
+          if (onDictate case final dictate?)
+            ('Dictate', BuzzIcons.mic, dictate),
+        ])
           SizedBox(
             width: 28,
             height: 28,

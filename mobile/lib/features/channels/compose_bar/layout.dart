@@ -108,6 +108,9 @@ class _ComposeBarLayout extends HookWidget {
             : context.colors.onSurfaceVariant,
       ),
     );
+    // Send takes the outer iOS circle; Dictate then moves into the capsule.
+    final showSend =
+        hasDraft || attachments.isNotEmpty || hasPendingUploads || isSending;
     final hasVoiceNoteAttachment = attachments.any(
       (attachment) => attachment.kind == _PendingAttachmentKind.voiceNote,
     );
@@ -147,7 +150,11 @@ class _ComposeBarLayout extends HookWidget {
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 Expanded(child: _buildTextField(context)),
-                _IosEmptyComposerActions(onEmoji: onEmoji, enabled: !readOnly),
+                _IosInlineComposerActions(
+                  onEmoji: onEmoji,
+                  onDictate: showSend ? onVoiceNote : null,
+                  enabled: !readOnly,
+                ),
               ],
             ),
           )
@@ -215,8 +222,9 @@ class _ComposeBarLayout extends HookWidget {
                   ),
                 ),
                 if (keyboardToolbar) ...[
-                  _IosEmptyComposerActions(
+                  _IosInlineComposerActions(
                     onEmoji: onEmoji,
+                    onDictate: showSend ? onVoiceNote : null,
                     enabled: !readOnly,
                   ),
                 ] else ...[
@@ -403,11 +411,7 @@ class _ComposeBarLayout extends HookWidget {
           return iosComposer;
         }
         return _IosComposerControls(
-          showSend:
-              controller.text.isNotEmpty ||
-              attachments.isNotEmpty ||
-              hasPendingUploads ||
-              isSending,
+          showSend: showSend,
           isSending: isSending,
           canSend: canSend && !hasPendingUploads && !readOnly,
           enabled: !readOnly,
