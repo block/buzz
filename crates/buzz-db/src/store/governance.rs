@@ -341,7 +341,7 @@ pub async fn authorize(
             let current = channel.ok_or_else(denied)?;
             let mut allowed = repo_admin(tx, repo, actor, current, grant, open).await?;
             if let Body::Bind { channel: next } = command.body.body {
-                allowed &= repo_admin(tx, repo, actor, next, grant, open).await?;
+                allowed &= repo_admin(tx, repo, actor, next, None, open).await?;
             }
             allowed
         }

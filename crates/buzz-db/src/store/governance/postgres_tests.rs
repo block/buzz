@@ -200,7 +200,7 @@ impl Fixture {
         [read, receipts, writes[0], writes[1]]
     }
 
-    async fn prepared(&self, grant: Option<&GitGrant>, bind: bool) -> Prepared {
+    async fn prepare(&self, grant: Option<&GitGrant>, bind: bool) -> Result<Prepared> {
         let (id, body) = if bind {
             (
                 DocumentId::Bind(self.repo.clone()),
@@ -231,8 +231,7 @@ impl Fixture {
         let prepared = self
             .db
             .prepare_governance_command(&mut tx, &event, grant, &self.owner, true)
-            .await
-            .expect("prepare");
+            .await;
         tx.rollback().await.expect("rollback");
         prepared
     }
@@ -261,7 +260,13 @@ async fn membership_and_delegation_independently_authorize_repo_documents() {
     // A narrower, expired or unrelated grant cannot revoke independent admin.
     for grant in [&read, &expired, &wrong_repo] {
         f.check(Some(grant), true, true).await;
-        assert_eq!(f.prepared(Some(grant), false).await.valid_until, None);
+        assert_eq!(
+            f.prepare(Some(grant), false)
+                .await
+                .expect("rules")
+                .valid_until,
+            None
+        );
     }
     // Removing membership leaves only delegation, capped by the owner.
     f.role(f.channel, &f.agent, None).await;
@@ -274,7 +279,10 @@ async fn membership_and_delegation_independently_authorize_repo_documents() {
         .await;
     f.check(Some(&manage), true, true).await;
     assert_eq!(
-        f.prepared(Some(&manage), false).await.valid_until,
+        f.prepare(Some(&manage), false)
+            .await
+            .expect("delegated rules")
+            .valid_until,
         manage.before.map(|at| at as i64)
     );
     for grant in [&expired, &wrong_repo] {
@@ -290,21 +298,58 @@ async fn membership_and_delegation_independently_authorize_repo_documents() {
     f.role(f.channel, &f.owner, None).await;
     f.check(Some(&wildcard), false, false).await;
 
-    // Bind requires both channels; expiry matters when either uses delegation.
-    f.role(f.channel, &f.agent, Some("admin")).await;
-    f.role(f.next, &f.owner, Some("admin")).await;
-    assert_eq!(
-        f.prepared(Some(&manage), true).await.valid_until,
-        manage.before.map(|at| at as i64)
-    );
-    f.role(f.next, &f.agent, Some("admin")).await;
-    assert_eq!(f.prepared(Some(&expired), true).await.valid_until, None);
-
     // Owner bans override both routes, including the agent's independent role.
+    f.role(f.channel, &f.agent, Some("admin")).await;
     sqlx::query("INSERT INTO community_bans (community_id,pubkey,banned,actor_pubkey) VALUES ($1,$2,true,$2)")
         .bind(f.community.as_uuid()).bind(f.owner.public_key().as_bytes())
         .execute(f.db.pool()).await.expect("ban");
     f.check(Some(&manage), false, false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn rebind_requires_direct_destination_admin_and_allows_delegated_source_admin() {
+    let f = Fixture::new().await;
+    f.role(f.channel, &f.agent, Some("admin")).await;
+    f.role(f.next, &f.owner, Some("admin")).await;
+    let manage = f.grant(GrantAction::Manage);
+    let mut wildcard = manage.clone();
+    wildcard.repo = None;
+    for grant in [&manage, &wildcard] {
+        assert!(
+            matches!(
+                f.prepare(Some(grant), true).await,
+                Err(DbError::AccessDenied(_))
+            ),
+            "destination admin must be held directly with {grant:?}"
+        );
+    }
+
+    f.role(f.channel, &f.agent, None).await;
+    f.role(f.channel, &f.owner, Some("admin")).await;
+    f.role(f.next, &f.agent, Some("admin")).await;
+    assert!(matches!(
+        f.prepare(None, true).await,
+        Err(DbError::AccessDenied(_))
+    ));
+    assert_eq!(
+        f.prepare(Some(&manage), true)
+            .await
+            .expect("delegated source with direct destination")
+            .valid_until,
+        manage.before.map(|at| at as i64)
+    );
+
+    f.role(f.channel, &f.agent, Some("admin")).await;
+    let mut expired = manage;
+    expired.before = Some(Timestamp::now().as_secs() - 1);
+    assert_eq!(
+        f.prepare(Some(&expired), true)
+            .await
+            .expect("direct admin of both channels")
+            .valid_until,
+        None
+    );
 }
 
 #[tokio::test]
