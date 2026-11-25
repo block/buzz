@@ -171,21 +171,17 @@ HTTP API.
 - Both methods require request-specific NIP-98 (exact host-derived URL/method,
   timestamp, signature, shared fail-closed replay check). POST also requires a
   payload hash. Reusable Smart HTTP credentials are insufficient.
-- GET requires current membership of the channel bound by the current 30617
-  announcement. POST additionally requires a non-archived channel and the repo
-  author, a named maintainer, or the recorded human owner of an agent-authored
-  repo. Push permission, channel admin status and project membership alone do
-  not grant management. Relay admission and signer/attested-owner bans apply.
-- An agent may inherit management from a verified NIP-OA owner who is also a
-  current channel member and manager. Kind-restricted credentials cannot grant
-  this HTTP authority (there is no event kind); temporal restrictions still
-  apply. Direct signer authority does not depend on an optional owner's channel
-  membership. A stored agent-owner relationship is an ownership lookup, not a
-  live delegation credential.
-- Authorization is **admission-time**: later membership/maintainer removal,
-  rebinding or archival does not cancel an already admitted write. This is
-  narrower than the vision's instantaneous-revocation aspiration. The shared
-  serving-write lease separately fences community deletion through the write.
+- GET requires read access to the repository's bound channel: membership, or
+  an owned agent's live read grant capped by its owner's role.
+- POST is a governed land (`api/git/land.rs`): it needs credited admin in the
+  bound channel, either as a channel admin or as an owned agent with a live
+  manage grant capped by an owner who is one. The channel must not be
+  archived. Relay admission and the signer's and recorded owner's bans apply.
+- Authorization is judged **at commit**, under the land's locks, in the same
+  transaction that moves the pointer and writes the receipt. A membership
+  removal, rebind, archive or grant expiry that commits first refuses the
+  change. The shared serving-write lease separately fences community deletion
+  through the write.
 
 GET returns `{branch, head, manifest}`. POST accepts only
 `{branch, expected_manifest}` (maximum 4096 bytes) and returns the same snapshot
