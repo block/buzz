@@ -15,18 +15,19 @@
 //!    claim ([`super::command_replay`]), then commit the slot (both-or-neither).
 //! 7. Return [`CommandResult`].
 //!
-//! Fail-closed: any failure inserts no deny entry, closes no session and
-//! publishes nothing.  A failure after step 6's shared claim may leave that
-//! claim in place until its TTL (a guard error whose `SET` reply was lost, or a
-//! process stopped between claim and commit); that is fail closed, since a
-//! retry is then denied.
+//! Fail-closed: a rejected command inserts no deny entry, closes no session
+//! and publishes nothing.  A guard error is an unknown outcome: the shared
+//! claim and durable deny may already be written (a lost reply), so a retry
+//! of the same command may be refused as a replay and the issuer sends a
+//! fresh command.  A process stopped between claim and local commit leaves
+//! the durable deny for the next restore.
 
 use chrono::{DateTime, Utc};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use nostr::PublicKey;
 use serde_json::{Map, Value};
 
-use super::command_replay::CommandReplayGuard;
+use super::command_replay::{ClaimOutcome, CommandClaim, CommandReplayGuard};
 use super::config::{
     IssuerPolicy, IssuerRegistry, MAX_JTI_BYTES, MAX_SUBJECT_BYTES, MAX_TOKEN_BYTES,
 };
@@ -262,17 +263,19 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
     /// * `body_pubkey`    — the `pubkey` field parsed from the JSON body.
     /// * `replay`         — the shared command replay guard.
     ///
-    /// Order: authenticate, reserve a local slot, claim `(iss, jti)` in the
-    /// shared guard, then commit the slot.  A full deny set fails before the
-    /// shared claim, so `DenySetFull` never consumes the command and it can be
-    /// retried.  A replayed or failed claim, or a cancelled future, drops the
-    /// local slot; the commit after a successful claim cannot fail.
+    /// Order: authenticate, reserve a local slot, then in one shared step
+    /// check replay and the issuer's shared capacity and, only if both pass,
+    /// claim `(iss, jti)` and record the deny entry durably; then commit the
+    /// slot.  A full deny set (local or shared) writes nothing, so
+    /// `DenySetFull` never consumes the command and it can be retried.  A
+    /// replayed or failed claim, or a cancelled future, drops the local slot;
+    /// the commit after a successful claim cannot fail.
     ///
-    /// A claim can still remain without a local deny entry when Redis applied
-    /// it but its reply was lost (`AuthorizationUnavailable`), or when the
-    /// process stops between claim and commit.  That inserts no deny entry,
-    /// closes no session and publishes nothing; it fails closed, since a retry
-    /// is denied until the claim's TTL.
+    /// When the shared step applied but its reply was lost
+    /// (`AuthorizationUnavailable`), or the process stops between claim and
+    /// commit, the claim and the durable deny entry remain without a local
+    /// one.  The entry reaches pods at their next restore; a retry of the
+    /// same command is a replay, so the issuer sends a fresh command.
     pub async fn verify(
         &self,
         token: &str,
@@ -286,16 +289,19 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
         let reservation = self.reserve(&cmd, now)?;
         // Cover the command's remaining validity plus this pod's skew, so a
         // pod whose clock trails still sees the claim; the guard floors this.
-        match replay
-            .try_claim(
-                &cmd.issuer,
-                &cmd.jti,
-                claim_ttl_secs(cmd.effective_expiry, now, cmd.skew_seconds),
-            )
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => return Err(CommandError::AuthorizationDenied),
+        let claim = CommandClaim {
+            issuer: &cmd.issuer,
+            jti: &cmd.jti,
+            ttl_secs: claim_ttl_secs(cmd.effective_expiry, now, cmd.skew_seconds),
+            target: &cmd.target_pubkey,
+            until: cmd.until,
+            capacity: cmd.capacity,
+            now,
+        };
+        match replay.try_claim(claim).await {
+            Ok(ClaimOutcome::Claimed) => {}
+            Ok(ClaimOutcome::Replay) => return Err(CommandError::AuthorizationDenied),
+            Ok(ClaimOutcome::Full) => return Err(CommandError::DenySetFull),
             Err(_) => return Err(CommandError::AuthorizationUnavailable),
         }
         Ok(Self::commit(&cmd, reservation))
@@ -479,6 +485,7 @@ impl<S: IssuerKeySource + Clone> CommandVerifier<S> {
             effective_expiry: exp.min(iat_plus_cmd_age),
             until,
             skew_seconds: base_policy.skew_seconds(),
+            capacity: cmd_policy.deny_set_capacity(),
         })
     }
 
@@ -517,6 +524,7 @@ struct AuthenticatedCommand {
     effective_expiry: DateTime<Utc>,
     until: DateTime<Utc>,
     skew_seconds: u64,
+    capacity: usize,
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -1372,6 +1380,7 @@ mod tests {
     enum Claim {
         Accept,
         Replay,
+        Full,
         Fail,
         Hang,
     }
@@ -1398,12 +1407,12 @@ mod tests {
     impl CommandReplayGuard for ScriptedGuard {
         fn try_claim<'a>(
             &'a self,
-            _issuer: &'a str,
-            _jti: &'a str,
-            _ttl_secs: u64,
+            _claim: CommandClaim<'a>,
         ) -> std::pin::Pin<
             Box<
-                dyn std::future::Future<Output = Result<bool, crate::error::AuthError>> + Send + 'a,
+                dyn std::future::Future<Output = Result<ClaimOutcome, crate::error::AuthError>>
+                    + Send
+                    + 'a,
             >,
         > {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1412,12 +1421,21 @@ mod tests {
                 // Yield once so concurrent verifies interleave at the claim.
                 tokio::task::yield_now().await;
                 match claim {
-                    Claim::Accept => Ok(true),
-                    Claim::Replay => Ok(false),
+                    Claim::Accept => Ok(ClaimOutcome::Claimed),
+                    Claim::Replay => Ok(ClaimOutcome::Replay),
+                    Claim::Full => Ok(ClaimOutcome::Full),
                     Claim::Fail => Err(crate::error::AuthError::Internal("simulated".into())),
                     Claim::Hang => std::future::pending().await,
                 }
             })
+        }
+
+        fn load_denies<'a>(
+            &'a self,
+            _issuer: &'a str,
+            _now: DateTime<Utc>,
+        ) -> crate::nip_fi::LoadDenies<'a> {
+            Box::pin(async { Ok(Vec::new()) })
         }
     }
 
@@ -1494,6 +1512,7 @@ mod tests {
         let cv = one_slot_verifier();
         for (claim, expected) in [
             (Claim::Replay, CommandError::AuthorizationDenied),
+            (Claim::Full, CommandError::DenySetFull),
             (Claim::Fail, CommandError::AuthorizationUnavailable),
         ] {
             let target = target_key();

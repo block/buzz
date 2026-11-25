@@ -73,7 +73,7 @@ Future<T?> showBuzzModalBottomSheet<T>({
   // complete surface treatment. Standard utility sheets use the quieter page
   // canvas and promote their controls onto the base app surface.
   final sheetTheme = backgroundColor == null
-      ? utilitySurfaceThemeData(theme)
+      ? utilitySheetThemeData(theme)
       : theme;
   final surfaceColor =
       backgroundColor ??

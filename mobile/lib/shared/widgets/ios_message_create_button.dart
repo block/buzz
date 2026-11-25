@@ -37,6 +37,7 @@ class IosMessageCreateButton extends HookConsumerWidget {
     this.enabled = true,
     this.selectedIndex,
     this.eagerGestures = true,
+    this.consumeOutsideTap = false,
     this.deferMenuActions = true,
     this.showIconWithLabel = false,
     this.onMenuVisibilityChanged,
@@ -69,6 +70,7 @@ class IosMessageCreateButton extends HookConsumerWidget {
 
   /// Capture gestures immediately; disable for rows inside a scroll view.
   final bool eagerGestures;
+  final bool consumeOutsideTap;
 
   /// Wait for menu dismissal before actions that navigate to another route.
   final bool deferMenuActions;
@@ -156,6 +158,7 @@ class IosMessageCreateButton extends HookConsumerWidget {
       'showIconWithLabel': showIconWithLabel,
       'accessibilityLabel': accessibilityLabel,
       'menu': menu,
+      'fixedMenuOrder': mergingNavigation,
       'deferMenuActions': deferMenuActions,
     };
     // Keep one handler per channel. Replacing this effect on enabled changes
@@ -215,6 +218,9 @@ class IosMessageCreateButton extends HookConsumerWidget {
       width: width,
       height: height,
       child: UiKitView(
+        key: mergingNavigation
+            ? ValueKey((navigationAxis, width, height))
+            : null,
         viewType: 'buzz/navigation_glass',
         gestureRecognizers: {
           if (eagerGestures)
@@ -223,6 +229,7 @@ class IosMessageCreateButton extends HookConsumerWidget {
         creationParams: {
           ...content,
           'plain': plain,
+          'consumeOutsideTap': consumeOutsideTap,
           'fillWidth': fillWidth,
           'buttonCenterX': trailingIconSlotWidth == null
               ? width / 2
@@ -236,7 +243,9 @@ class IosMessageCreateButton extends HookConsumerWidget {
               navigationAxis == Axis.horizontal &&
               DuoToolbarScope.maybeOf(context)?.strip != null,
           'verticalNavigation': navigationAxis == Axis.vertical,
-          'controlSize': mergingNavigation ? 56.0 : height,
+          'controlSize': mergingNavigation && navigationAxis == Axis.vertical
+              ? width
+              : height,
           'hitTargetWidth': width,
           'hitTargetHeight': height,
           'brightness': brightness.name,

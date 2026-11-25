@@ -1,6 +1,7 @@
 part of '../channels_page.dart';
 
 class _ChannelsBody extends StatelessWidget {
+  final GlobalKey? optionsKey;
   final Widget? soloSliver;
   final VoidCallback? onInbox;
   final List<Channel>? channels;
@@ -17,6 +18,7 @@ class _ChannelsBody extends StatelessWidget {
 
   const _ChannelsBody({
     this.soloSliver,
+    this.optionsKey,
     required this.onInbox,
     required this.channels,
     required this.channelsAsync,
@@ -97,34 +99,16 @@ class _ChannelsBody extends StatelessWidget {
               // later and retains its community and profile controls.
               hitTestBehavior: HitTestBehavior.translucent,
               slivers: [
-                SliverToBoxAdapter(child: SizedBox(height: barHeight)),
-                const SliverToBoxAdapter(child: _ReadStateSyncNotice()),
-                if (onInbox != null)
-                  SliverPadding(
-                    padding: const EdgeInsets.only(top: Grid.twelve),
-                    sliver: SliverToBoxAdapter(child: inbox),
-                  ),
-                usesPinnedGradient
-                    ? _SliverChannelsList(
-                        channels: loadedChannels,
-                        currentPubkey: currentPubkey,
-                        onSelectChannel: onSelectChannel,
-                        soloSliver: soloSliver,
-                      )
-                    : DecoratedSliver(
-                        decoration: BoxDecoration(
-                          color: context.colors.surface,
-                          borderRadius: const BorderRadius.vertical(
-                            top: Radius.circular(Radii.dialog),
-                          ),
-                        ),
-                        sliver: _SliverChannelsList(
-                          channels: loadedChannels,
-                          currentPubkey: currentPubkey,
-                          onSelectChannel: onSelectChannel,
-                          soloSliver: soloSliver,
-                        ),
-                      ),
+                _SliverChannelsList(
+                  optionsKey: optionsKey,
+                  headerHeight: barHeight,
+                  inbox: onInbox == null ? null : inbox,
+                  usesPinnedGradient: usesPinnedGradient,
+                  channels: loadedChannels,
+                  currentPubkey: currentPubkey,
+                  onSelectChannel: onSelectChannel,
+                  soloSliver: soloSliver,
+                ),
                 SliverToBoxAdapter(
                   child: SizedBox(height: MediaQuery.paddingOf(context).bottom),
                 ),
@@ -167,13 +151,22 @@ class _SliverChannelsList extends HookConsumerWidget {
 
   /// Home's Solo chats, rendered at the Solo section's place in the order.
   /// Without it, Solo chats stay out of this list.
+  final GlobalKey? optionsKey;
   final Widget? soloSliver;
 
+  final bool usesPinnedGradient;
+  final double headerHeight;
+  final Widget? inbox;
+
   const _SliverChannelsList({
+    required this.usesPinnedGradient,
+    required this.headerHeight,
+    this.inbox,
     required this.channels,
     required this.currentPubkey,
     required this.onSelectChannel,
     this.soloSliver,
+    this.optionsKey,
   });
 
   @override
@@ -251,6 +244,9 @@ class _SliverChannelsList extends HookConsumerWidget {
     final sortState = ref.watch(channelSortProvider);
     final filters = ref.watch(channelFilterProvider);
     useListenable(filters);
+    final display = optionsKey == null
+        ? const MessagesDisplay()
+        : ref.watch(messagesDisplayProvider);
     final selectedChannel = useState<String?>(null);
     final clock = useState(0);
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -259,14 +255,16 @@ class _SliverChannelsList extends HookConsumerWidget {
     var nextExpiry = 0;
     for (final MapEntry(key: id, value: key) in sectionKeyOf.entries) {
       final group = sidebarGroupKey(key);
-      if (filters?.store.modeFor(group) != ChannelFilterMode.active) continue;
+      if (display.modeFor(filters?.store, group) != ChannelFilterMode.active) {
+        continue;
+      }
       final evidence = ref.watch(channelFilterActivityProvider(id));
       activity[id] = evidence;
       // Solo uses the same evidence and handles its own row expiry.
       if (key == 'solo') continue;
       final at = evidence.asData?.value;
       if (at == null) continue;
-      final expiry = at + filters!.store.windowFor(group);
+      final expiry = at + display.windowFor(filters?.store, group);
       if (expiry > now && (nextExpiry == 0 || expiry < nextExpiry)) {
         nextExpiry = expiry;
       }
@@ -354,22 +352,28 @@ class _SliverChannelsList extends HookConsumerWidget {
               .setSortModeFor(groupKey, mode, liveSectionIds: liveSectionIds)
         : null;
 
-    final sectionExpandedStates = useState<Map<String, bool>>({});
+    final collapseProvider = collapsedSectionsProvider(
+      ref.watch(collapsedSectionKeyProvider),
+    );
+    final collapsed = ref.watch(collapseProvider);
+    bool sectionExpanded(String key) => !collapsed.contains(key);
 
-    bool sectionExpanded(String key) =>
-        sectionExpandedStates.value[key] ?? true;
-
-    void toggleSection(String key) {
-      sectionExpandedStates.value = {
-        ...sectionExpandedStates.value,
-        key: !sectionExpanded(key),
-      };
+    Future<void> toggleSection(String key) async {
+      try {
+        await ref.read(collapseProvider.notifier).toggle(key);
+      } catch (_) {
+        if (context.mounted) {
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            const SnackBar(content: Text('Could not save sidebar preference.')),
+          );
+        }
+      }
     }
 
     bool visible(String group, Channel channel) {
       final evidence = activity[channel.id];
       return channelMatchesFilter(
-        mode: filters?.store.modeFor(group) ?? ChannelFilterMode.all,
+        mode: display.modeFor(filters?.store, group),
         unread: isSoloRow(channel)
             ? soloUnreadIds.contains(channel.id)
             : rowUnreadChannelIds.contains(channel.id) ||
@@ -377,8 +381,7 @@ class _SliverChannelsList extends HookConsumerWidget {
         activitySeconds: evidence?.asData?.value,
         activityKnown: evidence?.asData != null,
         nowSeconds: now,
-        windowSeconds:
-            filters?.store.windowFor(group) ?? defaultActiveWindowSeconds,
+        windowSeconds: display.windowFor(filters?.store, group),
         selected: selectedChannel.value == channel.id,
       );
     }
@@ -397,13 +400,12 @@ class _SliverChannelsList extends HookConsumerWidget {
         teamId,
       _ => null,
     };
-    Widget row(Channel channel, String key) => isSoloRow(channel)
-        ? Padding(
+    Widget row(Channel channel, String key, [VoidCallback? onTap]) =>
+        isSoloRow(channel)
+        ? SoloChatTile(
             key: ValueKey(channel.id),
-            padding: const EdgeInsets.symmetric(
-              horizontal: Grid.gutter - Grid.xxs,
-            ),
-            child: SoloChatTile(channel: channel),
+            channel: channel,
+            onTap: onTap,
           )
         : _ChannelTile(
             key: ValueKey(channel.id),
@@ -413,7 +415,7 @@ class _SliverChannelsList extends HookConsumerWidget {
             hasAttention: attentionChannelIds.contains(channel.id),
             isMuted: mutedChannelIds.contains(channel.id),
             currentPubkey: currentPubkey,
-            onTap: () => openFilteredChannel(channel),
+            onTap: onTap ?? () => openFilteredChannel(channel),
             sectionId: key.startsWith('group:') ? teamIdOf(key) : null,
           );
 
@@ -438,6 +440,7 @@ class _SliverChannelsList extends HookConsumerWidget {
             );
       },
       onDelete: () async {
+        final account = ref.read(mobileSectionOrderKeyProvider);
         final confirmed = await showBuzzDialog<bool>(
           context: context,
           builder: (_) => AlertDialog(
@@ -464,6 +467,7 @@ class _SliverChannelsList extends HookConsumerWidget {
         // section and its saved filter then both stay.
         if (confirmed == true &&
             context.mounted &&
+            ref.read(mobileSectionOrderKeyProvider) == account &&
             ref.read(channelSectionsProvider).editable) {
           // Local section removal must work without filter-read/write
           // authority. Cleanup is optional for this never-reused ID.
@@ -485,11 +489,39 @@ class _SliverChannelsList extends HookConsumerWidget {
       },
     );
 
+    void openChat(Channel channel) {
+      if (!context.mounted) return;
+      isSoloRow(channel)
+          ? openConversationPane(
+              context,
+              channel.id,
+              (_) => ChannelDetailPage(
+                channel: channel,
+                personalChat: channel.isPersonalChat(
+                  currentPubkey,
+                  legacySoloIds,
+                ),
+              ),
+            )
+          : openFilteredChannel(channel);
+    }
+
+    Widget buildDetail(Channel channel) => isSoloRow(channel)
+        ? ChannelDetailPage(
+            channel: channel,
+            personalChat: channel.isPersonalChat(currentPubkey, legacySoloIds),
+          )
+        : ChannelDetailPage(
+            channel: channel,
+            placement: ChannelRoutePlacement.ordinary,
+          );
+
     Widget? sectionFor(String key) {
       final rows = buckets[key] ?? const <Channel>[];
       final group = sidebarGroupKey(key);
-      ChannelSortMode mode() => sortState.sortModeFor(group);
+      ChannelSortMode mode() => display.sort ?? sortState.sortModeFor(group);
       if (key == 'solo') return soloSliver;
+      final previewLimit = display.limitFor(filters?.store, group);
       if (key == 'starred' || key == 'channels' || key == 'dms') {
         if (key == 'starred' && rows.isEmpty) return null;
         return _ChannelSection(
@@ -508,7 +540,9 @@ class _SliverChannelsList extends HookConsumerWidget {
               ? dmChannels
               : sortChannelsForList(rows, mode()),
           isVisible: (c) => visible(group, c),
-          buildRow: (c) => row(c, key),
+          buildRow: (c, [onTap]) => row(c, key, onTap),
+          buildDetail: buildDetail,
+          previewLimit: previewLimit,
           emptyLabel: switch (key) {
             'channels' => 'No stream channels yet',
             'dms' => 'No direct messages yet',
@@ -527,15 +561,49 @@ class _SliverChannelsList extends HookConsumerWidget {
         section: section,
         channels: sortChannelsForList(rows, mode()),
         isVisible: (c) => visible(group, c),
-        buildRow: (c) => row(c, key),
-        expanded: sectionExpanded(section.id),
-        onToggle: () => toggleSection(section.id),
+        buildRow: (c, [onTap]) => row(c, key, onTap),
+        buildDetail: buildDetail,
+        previewLimit: previewLimit,
+        expanded: sectionExpanded(key),
+        onToggle: () => toggleSection(key),
         edits: team == null ? null : editsFor(team, section.id),
         sortMode: mode(),
         onSortModeChange: sortSetter(group),
       );
     }
 
+    final pinned = soloSliver == null
+        ? null
+        : ref.watch(channelPinsProvider).store.channels;
+    final pins = [
+      ...soloChannels,
+      ...visibleChannels,
+    ].where((c) => pinned?[c.id]?.enabled == true).toList();
+    final pinsCard = soloSliver != null && pins.isNotEmpty
+        ? _HomePinsSection(
+            pins: pins,
+            onLongPress: (channel) {
+              if (isSoloRow(channel)) {
+                SoloChatTile.showActions(context, channel, currentPubkey);
+                return;
+              }
+              final key = sectionKeyOf[channel.id];
+              showChannelDetailsSheet(
+                context: context,
+                channel: channel,
+                currentPubkey: currentPubkey,
+                isUnread:
+                    unreadChannelIds.contains(channel.id) ||
+                    attentionChannelIds.contains(channel.id),
+                sectionId: key != null && key.startsWith('group:')
+                    ? teamIdOf(key)
+                    : null,
+              );
+            },
+            currentPubkey: currentPubkey,
+            onOpen: openChat,
+          )
+        : null;
     final keys = layout.sectionKeys.where((key) => key != 'forums').toList();
     final orderKey = ref.watch(mobileSectionOrderKeyProvider);
     final saved = orderKey == null
@@ -543,11 +611,11 @@ class _SliverChannelsList extends HookConsumerWidget {
         : ref.watch(mobileSectionOrderProvider(orderKey)).value ??
               const <String>[];
     final labels = <String, String>{};
-    final sections = <Widget>[];
+    final sections = <Widget>[?pinsCard];
     for (final key in resolveMobileSectionOrder(keys, saved)) {
       final section = sectionFor(key);
-      if (section == null) continue;
-      sections.add(section);
+      if (section == null && key != 'starred') continue;
+      if (section != null) sections.add(section);
       labels[key] = switch (key) {
         'starred' => 'Starred',
         'solo' => 'Solo',
@@ -557,23 +625,80 @@ class _SliverChannelsList extends HookConsumerWidget {
       };
     }
     final empty = sectionKeyOf.isEmpty && layout.sections.isEmpty;
+    // Align the start of the flat list with the bottom of the expanded
+    // native title. The first section spacer then sits below the title.
+    final nativeMessages =
+        optionsKey != null && defaultTargetPlatform == TargetPlatform.iOS;
+    final noticeVisible = readState.syncFailed || readState.syncUnsupported;
+    final headingInset =
+        nativeMessages && inbox == null && !noticeVisible && sections.isNotEmpty
+        ? 25.0 - Grid.xxs
+        : 0.0;
     final inventory = SliverMainAxisGroup(
       slivers: [
         if (empty) ...[
+          if (pinsCard != null) _homeBucket(context, pinsCard),
           ?soloSliver,
           const SliverToBoxAdapter(child: _EmptyState()),
         ] else
           for (final (index, section) in sections.indexed) ...[
             if (index > 0)
               const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
-            section,
+            if (soloSliver != null) _homeBucket(context, section) else section,
           ],
       ],
     );
-    final content = _ActivityRecovery(activity: activity, child: inventory);
+    Widget content = _ActivityRecovery(activity: activity, child: inventory);
+    if (optionsKey != null) {
+      if (showMessagesLayoutBounds) {
+        content = DecoratedSliver(
+          position: DecorationPosition.foreground,
+          decoration: _MessagesAlignmentGuides(
+            inset: MessagesSectionOptions.messagesGutter(context),
+          ),
+          sliver: content,
+        );
+      }
+      content = MessagesSectionOptions(key: optionsKey, child: content);
+    }
+    content = SliverMainAxisGroup(
+      slivers: [
+        SliverToBoxAdapter(
+          child: SizedBox(
+            height: (headerHeight - headingInset).clamp(0.0, headerHeight),
+          ),
+        ),
+        const SliverToBoxAdapter(child: _ReadStateSyncNotice()),
+        if (inbox != null)
+          SliverPadding(
+            padding: const EdgeInsets.only(top: Grid.twelve),
+            sliver: SliverToBoxAdapter(child: inbox),
+          ),
+        if (usesPinnedGradient)
+          content
+        else
+          DecoratedSliver(
+            decoration: BoxDecoration(
+              color: context.colors.surface,
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(Radii.dialog),
+              ),
+            ),
+            sliver: content,
+          ),
+      ],
+    );
     if (orderKey == null) return content;
     return SectionOrderScope(
       labels: labels,
+      sectionIds: {
+        for (final key in labels.keys.where((k) => k.startsWith('group:')))
+          key: ?teamIdOf(key),
+      },
+      edit: (key, section, remove) async {
+        final actions = editsFor(section, key.substring(6));
+        await (remove ? actions.onDelete : actions.onRename)();
+      },
       defaultOrder: keys,
       storageKey: orderKey,
       child: content,

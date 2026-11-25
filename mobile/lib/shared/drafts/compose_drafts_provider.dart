@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -351,6 +352,29 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
   void remove(String key) {
     if (!state.any((d) => d.key == key)) return;
     _persist([...state.where((d) => d.key != key)]);
+  }
+
+  /// Bind late delivery to the submitted store and complete draft snapshot.
+  VoidCallback cleanupAfterSend(String key) {
+    final scope = _prefsKey;
+    final config = ref.read(relayConfigProvider);
+    final pubkey = ref.read(myPubkeyProvider) ?? 'anon';
+    final submitted = draftFor(key);
+    return () {
+      if (submitted == null || !ref.mounted) return;
+      final selected = scope == _prefsKey;
+      final drafts = selected ? state : _readStore(config, pubkey);
+      final current = drafts.where((draft) => draft.key == key).firstOrNull;
+      if (current == null ||
+          jsonEncode(current.toJson()) != jsonEncode(submitted.toJson())) {
+        return;
+      }
+      if (selected) {
+        remove(key);
+      } else {
+        unawaited(_write(scope, drafts.where((d) => d.key != key).toList()));
+      }
+    };
   }
 
   /// Read text and selected identities from the same persisted snapshot.

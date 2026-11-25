@@ -96,17 +96,18 @@ impl Fixture {
             .bind(count).bind(content).execute(&self.pool).await.unwrap();
     }
     async fn reply(&self, n: usize) -> Event {
-        let reply = event(
-            &self.keys,
-            self.channel,
-            9,
+        self.reply_to(
+            &self.root,
             &format!("reply {n}"),
-            Some(&self.root),
             self.root.created_at.as_secs() + n as u64,
-        );
+        )
+        .await
+    }
+    async fn reply_to(&self, root: &Event, content: &str, at: u64) -> Event {
+        let reply = event(&self.keys, self.channel, 9, content, Some(root), at);
         let ts = chrono::DateTime::from_timestamp(reply.created_at.as_secs() as i64, 0).unwrap();
         let root_ts =
-            chrono::DateTime::from_timestamp(self.root.created_at.as_secs() as i64, 0).unwrap();
+            chrono::DateTime::from_timestamp(root.created_at.as_secs() as i64, 0).unwrap();
         self.state
             .db
             .insert_event_with_thread_metadata(
@@ -117,9 +118,9 @@ impl Fixture {
                     event_id: &reply.id.to_bytes(),
                     event_created_at: ts,
                     channel_id: self.channel,
-                    parent_event_id: Some(&self.root.id.to_bytes()),
+                    parent_event_id: Some(&root.id.to_bytes()),
                     parent_event_created_at: Some(root_ts),
-                    root_event_id: Some(&self.root.id.to_bytes()),
+                    root_event_id: Some(&root.id.to_bytes()),
                     root_event_created_at: Some(root_ts),
                     depth: 1,
                     broadcast: false,
@@ -128,6 +129,27 @@ impl Fixture {
             .await
             .unwrap();
         reply
+    }
+    /// Store `event` as historical data that reached the store another way
+    /// would be: ingest's clock check and the store's channel-event floor
+    /// refuse backdated events.
+    async fn insert_raw(&self, event: &Event) {
+        sqlx::query(
+            "INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at,channel_id) \
+             VALUES ($1,$2,$3,to_timestamp($4),$5,$6,$7,$8,now(),$9)",
+        )
+        .bind(self.community.as_uuid())
+        .bind(event.id.to_bytes().to_vec())
+        .bind(event.pubkey.to_bytes().to_vec())
+        .bind(event.created_at.as_secs() as f64)
+        .bind(event.kind.as_u16() as i32)
+        .bind(serde_json::to_value(&event.tags).unwrap())
+        .bind(&event.content)
+        .bind(event.sig.serialize().to_vec())
+        .bind(self.channel)
+        .execute(&self.pool)
+        .await
+        .unwrap();
     }
     async fn aux(&self, kind: u16, target: &Event, channel: Option<Uuid>) -> Event {
         let aux = event(
@@ -638,4 +660,65 @@ async fn torn_deletions_still_cancel_live_targets_in_both_windows() {
             );
         }
     }
+}
+
+/// Both thread aux hops read from one day before the root (always a target;
+/// the rows are replies): a reaction and a delete-of-reaction inside that
+/// bound come back, ones dated more than a day before it do not. The only
+/// reply is two days newer than the root, so anchoring on the replies alone
+/// drops the in-bound events. Mutation: drop `since: aux_since` → the
+/// out-of-bound events return → RED; drop the root from the bound → the
+/// in-bound events vanish → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thread_window_aux_hops_read_from_a_day_before_the_root() {
+    let f = Fixture::new().await;
+    let day = 86_400;
+    let reply = f.reply(2 * day as usize).await;
+    let root_at = f.root.created_at.as_secs();
+    let backdated = |kind: u16, target: &Event, at: u64| {
+        event(&f.keys, f.channel, kind, "aux", Some(target), at)
+    };
+    let reaction_in = backdated(7, &f.root, root_at - day + 60);
+    let reaction_out = backdated(7, &reply, root_at - day - 60);
+    let delete_in = backdated(5, &reaction_in, root_at - day + 120);
+    let delete_out = backdated(5, &reaction_in, root_at - day - 120);
+    for aux in [&reaction_in, &reaction_out, &delete_in, &delete_out] {
+        f.insert_raw(aux).await;
+    }
+    let page = f.query(&f.filter()).await;
+    let all = ids(&page, None);
+    let has = |event: &Event| all.contains(&event.id.to_hex().as_str());
+    assert!(has(&reply), "window row: {page}");
+    assert!(has(&reaction_in), "hop 1 inside the bound: {page}");
+    assert!(has(&delete_in), "hop 2 inside the bound: {page}");
+    assert!(!has(&reaction_out), "hop 1 past the bound: {page}");
+    assert!(!has(&delete_out), "hop 2 past the bound: {page}");
+}
+
+/// An ancient root anchors the thread aux bound at its own time, not at the
+/// wall clock or its recent replies: a reaction from the root's own time and
+/// the deletion of that reaction come back. Mutation: anchor on `Utc::now()`,
+/// or drop the root from the bound → both vanish → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thread_window_aux_bound_follows_an_ancient_root() {
+    let f = Fixture::new().await;
+    let now = f.root.created_at.as_secs();
+    let root_at = now - 60 * 86_400;
+    let root = event(&f.keys, f.channel, 9, "ancient root", None, root_at);
+    f.insert_raw(&root).await;
+    let reply = f.reply_to(&root, "recent reply", now).await;
+    let reaction = event(&f.keys, f.channel, 7, "aux", Some(&root), root_at + 60);
+    let delete = event(&f.keys, f.channel, 5, "aux", Some(&reaction), root_at + 120);
+    f.insert_raw(&reaction).await;
+    f.insert_raw(&delete).await;
+    let mut filter = f.filter();
+    filter["#e"] = json!([root.id.to_hex()]);
+    let page = f.query(&filter).await;
+    let all = ids(&page, None);
+    let has = |event: &Event| all.contains(&event.id.to_hex().as_str());
+    assert!(has(&reply), "window row: {page}");
+    assert!(has(&reaction), "hop 1 at the root's time: {page}");
+    assert!(has(&delete), "hop 2 at the root's time: {page}");
 }

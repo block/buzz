@@ -93,7 +93,7 @@ class _MentionSuggestions extends StatelessWidget {
               visualDensity: VisualDensity.compact,
               title: Text(
                 'Could not search community people.',
-                style: context.textTheme.bodySmall?.copyWith(
+                style: messageCaptionTextStyle.copyWith(
                   color: context.colors.error,
                 ),
               ),
@@ -124,7 +124,7 @@ class _MentionSuggestions extends StatelessWidget {
                 // public key for unnamed ones so the compact-npub label
                 // doesn't render `N` for everyone.
                 candidate.initial,
-                style: context.textTheme.labelMedium?.copyWith(
+                style: messageCaptionTextStyle.copyWith(
                   color: context.colors.onPrimaryContainer,
                   fontWeight: FontWeight.w600,
                 ),
@@ -136,7 +136,9 @@ class _MentionSuggestions extends StatelessWidget {
                 Flexible(
                   child: Text(
                     name,
-                    style: context.textTheme.titleSmall,
+                    style: bodyLargeTextStyle.copyWith(
+                      fontWeight: FontWeight.w500,
+                    ),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
@@ -190,7 +192,7 @@ abstract final class _MentionSuggestionInfo {
 
     if (!candidate.isAgent && !isAdmin && detail == null) return null;
 
-    final style = context.textTheme.labelSmall?.copyWith(
+    final style = messageBylineTextStyle.copyWith(
       color: context.colors.onSurfaceVariant,
     );
 
@@ -212,9 +214,7 @@ abstract final class _MentionSuggestionInfo {
             ),
             child: Text(
               'admin',
-              style: style?.copyWith(
-                color: context.colors.onSecondaryContainer,
-              ),
+              style: style.copyWith(color: context.colors.onSecondaryContainer),
             ),
           ),
         if (detail != null) ...[
@@ -242,11 +242,86 @@ List<Channel> filterChannels(List<Channel> channels, String? query) {
       .toList();
 }
 
-class _ChannelSuggestions extends StatelessWidget {
-  final List<Channel> suggestions;
-  final void Function(Channel) onSelect;
+typedef _EmojiChoice = ({String code, String text, String? url});
 
-  const _ChannelSuggestions({
+// Enough rows to scroll through without ranking the whole catalog into a list.
+const _emojiSuggestionLimit = 50;
+
+final _emojiToken = RegExp(r'(?:^|[\s(\[{]):([a-zA-Z0-9_+-]{2,64})$');
+
+final _emojiSuffix = RegExp(r'[a-zA-Z0-9_+-]*:?');
+
+String? _emojiQuery(TextEditingValue value) {
+  final caret = value.selection;
+  if (!caret.isValid || !caret.isCollapsed || caret.end > value.text.length) {
+    return null;
+  }
+  return _emojiToken.firstMatch(value.text.substring(0, caret.end))?.group(1);
+}
+
+Widget _emojiSuggestionPreview(BuildContext context, _EmojiChoice entry) =>
+    entry.url == null
+    ? ExcludeSemantics(
+        child: Text(entry.text, style: const TextStyle(fontSize: 26)),
+      )
+    : _CachedCustomEmojiPreview(
+        shortcode: entry.code,
+        url: entry.url!,
+        size: 26,
+      );
+
+/// A custom emoji in the suggestion list, drawn only from bytes another
+/// surface already downloaded. Typing a shortcode starts no image request: an
+/// emoji not seen yet shows the placeholder. The row's label already reads
+/// the shortcode, so the preview adds nothing for screen readers.
+class _CachedCustomEmojiPreview extends ConsumerWidget {
+  final String shortcode;
+  final String url;
+  final double size;
+
+  const _CachedCustomEmojiPreview({
+    required this.shortcode,
+    required this.url,
+    required this.size,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final bytes = ref.watch(customEmojiBytesCacheProvider).lookup(url);
+    return ExcludeSemantics(
+      child: bytes == null
+          ? CustomEmojiPlaceholder(shortcode: shortcode, size: size)
+          : Image.memory(
+              bytes,
+              width: size,
+              height: size,
+              cacheWidth: (size * MediaQuery.devicePixelRatioOf(context))
+                  .ceil(),
+              fit: BoxFit.contain,
+              filterQuality: FilterQuality.medium,
+            ),
+    );
+  }
+}
+
+class _ComposerSearchSuggestions<T> extends StatelessWidget {
+  final Key surfaceKey;
+  final List<T> suggestions;
+  final void Function(T) onSelect;
+
+  final Widget Function(BuildContext, T) leading;
+  final String Function(T) label;
+  final TextStyle? labelStyle;
+  final double horizontalTitleGap;
+  final bool singleLineLabel;
+
+  const _ComposerSearchSuggestions({
+    required this.surfaceKey,
+    required this.leading,
+    required this.label,
+    this.labelStyle,
+    this.horizontalTitleGap = 0,
+    this.singleLineLabel = false,
     required this.suggestions,
     required this.onSelect,
   });
@@ -254,7 +329,7 @@ class _ChannelSuggestions extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      key: const ValueKey('channel-suggestions-popover'),
+      key: surfaceKey,
       type: MaterialType.card,
       color: _ComposerGlassScope.of(context)
           ? Colors.transparent
@@ -272,21 +347,22 @@ class _ChannelSuggestions extends StatelessWidget {
           itemCount: suggestions.length,
           separatorBuilder: (_, _) => const SizedBox.shrink(),
           itemBuilder: (context, index) {
-            final channel = suggestions[index];
+            final item = suggestions[index];
             return ListTile(
               dense: true,
               visualDensity: VisualDensity.compact,
-              horizontalTitleGap: 0,
+              horizontalTitleGap: horizontalTitleGap,
               leading: SizedBox.square(
                 dimension: 36,
-                child: Icon(
-                  BuzzIcons.hash,
-                  size: 20,
-                  color: context.colors.onSurfaceVariant,
-                ),
+                child: Center(child: leading(context, item)),
               ),
-              title: Text(channel.name, style: context.textTheme.bodyLarge),
-              onTap: () => _runComposerAction(() => onSelect(channel)),
+              title: Text(
+                label(item),
+                style: labelStyle ?? bodyLargeTextStyle,
+                maxLines: singleLineLabel ? 1 : null,
+                overflow: singleLineLabel ? TextOverflow.ellipsis : null,
+              ),
+              onTap: () => _runComposerAction(() => onSelect(item)),
             );
           },
         ),

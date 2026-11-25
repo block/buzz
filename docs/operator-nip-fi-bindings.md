@@ -241,6 +241,97 @@ Ways out, in order:
 2. If that cannot land quickly, set `BUZZ_NIP_FI_MODE=off`. `off` loads no
    snapshot, so pods boot and admit as they did before NIP-FI.
 
+## Revocation during a deploy
+
+An accepted `POST /api/nip-fi/disconnect` is written to Redis before the relay
+answers 200, and each entry expires at its `until`. A pod that starts, or that
+loses its Redis subscription, restores every active entry before it admits a
+NIP-FI assertion again. Until then it refuses every assertion-bearing
+connection, so a key revoked just before a deploy can't come back in on a
+fresh pod.
+
+What this covers, and what it does not:
+
+- **Covered:** pod restarts, and a pod that loses its Redis subscription or
+  falls behind on it.
+- **Not covered:** a pod that stays healthy still learns of a disconnect only
+  through live pub/sub, which is best effort. If a publication never reaches
+  it, that pod neither closes the target's open sessions nor refuses the
+  target at its own admission check until its next restore.
+- **Not covered:** losing Redis data. Run Redis with a non-evicting
+  `maxmemory-policy` of `noeviction`, with persistence if you need
+  revocations to survive a Redis restart. Every deny key carries an expiry,
+  so any `volatile-*` policy can evict it.
+- **Redis down at startup:** if Redis is completely unreachable at boot, the
+  relay exits before it binds, and the process supervisor restarts it. If
+  Redis is reachable but the restore fails, the pod runs and refuses
+  assertion-bearing connections with `503` (authorization unavailable) until
+  it has restored. Watch `buzz_nip_fi_deny_restore_failures_total{reason}`.
+- **Unreadable deny record:** `reason="unreadable"` means Redis answered but
+  a stored deny record could not be decoded: its field is not a hex pubkey,
+  or its value is not exactly `secs:nanos`. The pod still applies the
+  issuer's other records and closes their sessions, but stays closed until the
+  record is removed. The warning log names the record. Find it in the
+  issuer's deny hash, `buzz:nip-fi:deny-until:<sha256(issuer) hex>`
+  (`buzz:nip-fi:shadow-deny-until:…` in shadow mode), with `HGETALL`, then
+  `HDEL` that field. The pod retries on its own. Removing the record drops
+  that revocation, so send the disconnect again if it is still needed.
+- **Deny set over capacity on a pod:** if a revocation this pod receives does
+  not fit its `deny_set_capacity`, the pod closes admission the same way and
+  restores until its active entries fit.
+
+### Disconnect responses
+
+- `403` is a replay: this command's `jti` was already used.
+- `503 deny set full` means the issuer's shared deny set is full. Nothing was
+  recorded, so the same command can be retried.
+- `503 authorization unavailable` after a Redis error means the outcome is
+  unknown. If Redis applied the command before the reply was lost, the deny is
+  already stored and its `jti` is used up, so a retry returns `403`. Send a
+  freshly signed command to get a `200`.
+
+### Capacity
+
+`deny_set_capacity` applies to each issuer across all pods, not per pod. If a
+restore doesn't fit a pod's map, the pod stays closed and
+`buzz_nip_fi_deny_restore_failures_total{reason="capacity"}` increases. This
+can happen during the shadow → enforce switch below, when an enforce pod
+restores both stores. To recover, either:
+
+- raise `deny_set_capacity` to at least the sum of the issuer's live entries
+  and roll out; or
+- wait for entries to expire (at most one assertion lifetime). The pod retries
+  the restore on its own.
+
+Count live entries for an issuer with
+`ZCOUNT buzz:nip-fi:deny:<sha256(iss)> (<now_ms> +inf` and
+`ZCOUNT buzz:nip-fi:shadow-deny:<sha256(iss)> (<now_ms> +inf`, where
+`<sha256(iss)>` is the lowercase hex SHA-256 of the exact issuer URI.
+
+### Switching shadow → enforce
+
+Shadow pods write their accepts under `buzz:nip-fi:shadow-deny:*`, and enforce
+pods normally never read them. For the deploy that switches modes, the bridge
+setting `BUZZ_NIP_FI_ACCEPT_SHADOW_DISCONNECTS=true` makes enforce pods also
+subscribe to and restore shadow accepts. It gives disconnects accepted by
+shadow pods real effect on enforce pods, so keep the issuer configuration
+identical across the switch.
+
+Let `L` be the largest `maximum_assertion_age_seconds + skew_seconds` across
+configured issuers.
+
+1. Deploy this relay version while still in `shadow`.
+2. Wait until the last pod of the previous version has been gone for at least
+   `L`. Older versions keep accepts only in memory, so this wait lets those
+   expire before anything relies on the store.
+3. Deploy `BUZZ_NIP_FI_MODE=enforce` with
+   `BUZZ_NIP_FI_ACCEPT_SHADOW_DISCONNECTS=true`.
+4. Keep the setting until both hold:
+   - the last shadow pod has been gone for at least `L`;
+   - `ZCOUNT buzz:nip-fi:shadow-deny:<sha256(iss)> (<now_ms> +inf` is `0` for
+     every configured issuer.
+5. Deploy without the setting.
+
 ## Assertion policy ID change
 
 This release changes every verified assertion's policy ID once, on purpose.

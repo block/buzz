@@ -5,6 +5,7 @@ Future<void> _sendTextOnlyDraft({
   required _MarkdownEditingController controller,
   required ObjectRef<int> draftRevision,
   required int submittedDraftRevision,
+  required VoidCallback cleanupStoredDraft,
   required FocusNode focusNode,
   required VoidCallback clearComposer,
   required Future<void> Function() addMentionedNonMembers,
@@ -19,16 +20,18 @@ Future<void> _sendTextOnlyDraft({
   int? clearedDraftRevision;
 
   void restoreClearedDraft() {
+    final text = clearedDraftText;
+    final mentions = clearedDraftMentions;
     if (!context.mounted ||
-        clearedDraftText == null ||
-        clearedDraftMentions == null ||
+        text == null ||
+        mentions == null ||
         clearedDraftRevision == null ||
         draftRevision.value != clearedDraftRevision) {
       return;
     }
     controller.replaceDraft(
-      clearedDraftText,
-      mentions: clearedDraftMentions,
+      text,
+      mentions: mentions,
       mentionsInvalid: clearedDraftMentionsInvalid,
     );
     focusNode.requestFocus();
@@ -45,20 +48,30 @@ Future<void> _sendTextOnlyDraft({
       );
       return;
     }
-    // Clear before optimistic insertion so the outgoing row and draft never
-    // appear simultaneously during the send transition.
-    if (context.mounted) {
+    void clearSubmittedDraft() {
+      if (!context.mounted || draftRevision.value != submittedDraftRevision) {
+        return;
+      }
       clearedDraftText = controller.value;
       clearedDraftMentions = controller.bindings;
       clearedDraftMentionsInvalid = controller.mentionsInvalid;
       clearComposer();
       clearedDraftRevision = draftRevision.value;
     }
-    await onSend(
-      payload.content,
-      outgoing.pubkeys,
-      mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
+
+    await ComposerSendOrigin.uponLocalInsertion(
+      clearSubmittedDraft,
+      () => onSend(
+        payload.content,
+        outgoing.pubkeys,
+        mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
+      ),
     );
+    // A send destination without an optimistic timeline clears on success.
+    if (clearedDraftRevision == null) {
+      clearSubmittedDraft();
+      if (clearedDraftRevision == null) cleanupStoredDraft();
+    }
   } on ActiveCommunityChangedError {
     restoreClearedDraft();
     _reportSendCancelledByCommunitySwitch(messenger);

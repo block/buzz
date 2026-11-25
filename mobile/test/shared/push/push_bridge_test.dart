@@ -180,6 +180,25 @@ void main() {
     },
   );
 
+  test('a community that opted out enrolls nothing', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    final methods = <String>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          methods.add(call.method);
+          return null;
+        });
+
+    final grant = await enrollBuzzPush(
+      'wss://relay.example/',
+      'https://gateway.example/',
+      stillWanted: () => false,
+    );
+
+    expect(grant, isNull);
+    expect(methods, isEmpty);
+  });
+
   test('a gateway reply the app cannot read is reported and still fails '
       'enrollment', () async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
@@ -459,6 +478,33 @@ void main() {
       ),
     );
   });
+
+  test(
+    'pulls a cold-start notification response from native Android',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_channel, (call) async {
+            expect(call.method, 'takePendingNotificationResponse');
+            return {
+              'eventId': 'b' * 64,
+              'communityId': 'community-id',
+              'channelId': '123e4567-e89b-42d3-a456-426614174000',
+            };
+          });
+
+      await syncPendingBuzzPushNotificationResponse();
+
+      expect(
+        pendingPushNotificationLink.value,
+        MessageDeepLink(
+          communityId: 'community-id',
+          channelId: '123e4567-e89b-42d3-a456-426614174000',
+          messageId: 'b' * 64,
+        ),
+      );
+    },
+  );
 }
 
 Map<String, Object> _grantMap(String endpointGrant) => {

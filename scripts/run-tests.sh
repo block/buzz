@@ -109,6 +109,11 @@ run_unit_tests() {
     cargo test -p buzz-pubsub --lib -- --exact --nocapture \
       tests::queue_full_retain_does_not_wait_and_schedules_reconciliation
 
+  # NIP-FI deny-store keys and `until` rounding (infra-free). Mirrors
+  # `just test-unit`.
+  run_test_step "buzz-pubsub NIP-FI deny store tests" \
+    cargo test -p buzz-pubsub --lib nip_fi_command_replay::tests:: -- --nocapture
+
   run_test_step "buzz-voice tests" \
     cargo test -p buzz-voice --lib -- --nocapture
 

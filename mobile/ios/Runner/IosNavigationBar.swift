@@ -171,6 +171,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private var paneTitle: UIView?
   private var titleInsetLeft: CGFloat = 0
   private var titleInsetRight: CGFloat = 0
+  private var leadingTitleRowTop: CGFloat?
+  private var leadingTitleTopPadding: CGFloat = 24
   private var alignCollapsedTitleToLeading = false
   private var alwaysFrosted = false
   private var backdropOnly = false
@@ -180,6 +182,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private let compactTitle = UILabel()
   private let compactTitleContainer = UIStackView()
   private let compactTitleMask = CALayer()
+  private var externalExpandedTitle = false
   private var titleColor = UIColor.label
   private var largeTitleOpacity: CGFloat = -1
   private var measuredWidth: CGFloat = 0
@@ -241,7 +244,11 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       }
       result(nil)
     }
-    configure(args as? [String: Any] ?? [:])
+    let initial = args as? [String: Any] ?? [:]
+    if let depth = initial["initialScrollOffset"] as? NSNumber, depth.doubleValue.isFinite {
+      offset = min(max(0, depth.doubleValue), Self.maxTrackedDepth)
+    }
+    configure(initial)
     #if canImport(UIKit, _version: 9127.0.85)
     if #available(iOS 27.1, *), standaloneControl || floatingTitle != nil || backdropOnly {
       container.addInteraction(UIHingeInteraction { [weak self] _, _ in
@@ -305,8 +312,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     // controls live in the side rail. Flutter still reserves a 44-point row
     // plus 24 points of breathing room. Give expanded titles that same space.
     let compact = (metrics?["compactHeight"] as? CGFloat) ?? 44
-    let paneTitleClearance = alignCollapsedTitleToLeading
-      ? max(44, compact) + 24 - compact : 0
+    let paneTitleClearance = alignCollapsedTitleToLeading && leadingTitleRowTop == nil
+      ? max(44, compact) + leadingTitleTopPadding - compact : 0
     // UIKit can place controls beside Duo's corner status region. Applying
     // Flutter's full-width top inset here pushes them down a second row.
     let requiredTop = portraitHeader != nil
@@ -369,9 +376,10 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       title.frame = CGRect(x: alignCollapsedTitleToLeading
                            ? navigation.navigationBar.layoutMargins.left
                            : center - size.width / 2,
-                           y: alignCollapsedTitleToLeading
-                             ? flutterSafeTop + 24 + (44 - size.height) / 2
-                             : (container.bounds.height - size.height) / 2,
+                           y: leadingTitleRowTop.map { $0 + (44 - size.height) / 2 }
+                             ?? (alignCollapsedTitleToLeading
+                               ? flutterSafeTop + leadingTitleTopPadding + (44 - size.height) / 2
+                               : (container.bounds.height - size.height) / 2),
                            width: size.width, height: size.height)
       title.layoutIfNeeded()
     }
@@ -518,6 +526,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     portraitTopPadding = CGFloat((args["portraitTopPadding"] as? NSNumber)?.doubleValue ?? 0)
     paneTitle?.removeFromSuperview()
     paneTitle = nil
+    leadingTitleRowTop = args["leadingTitleRowTop"] as? CGFloat
+    leadingTitleTopPadding = (args["leadingTitleTopPadding"] as? NSNumber)?.doubleValue ?? 24
     alignCollapsedTitleToLeading = args["alignCollapsedTitleToLeading"] as? Bool == true
     headerLeading?.removeFromSuperview()
     headerTrailing?.removeFromSuperview()
@@ -572,7 +582,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     navigation.view.accessibilityElementsHidden = backdropOnly
     let largeTitle = args["largeTitle"] as? Bool == true
     alwaysFrosted = args["alwaysFrosted"] as? Bool == true
+    let prefersSoftTopEdge = args["prefersSoftTopEdge"] as? Bool == true
     if #available(iOS 26.0, *) {
+      usesSystemScrollEdge = prefersSoftTopEdge
       if #available(iOS 27.0, *) {
         // All headers use the same native soft scroll edge. Custom titles
         // also retain material, like large titles, when embedding clips it.
@@ -586,15 +598,15 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     // edge while the large-title inset is collapsing.
     // Keep the graduated material throughout that transition so partial
     // scrolling never leaves the title and status area unprotected.
-    // Explicitly positioned controls hide the navigation view, including
-    // UIKit's scroll edge. Keep our graduated blur behind those controls.
-    material.isHidden = usesSystemScrollEdge && !largeTitle && !inlinePortrait
-      && args["centerTitleInPane"] as? Bool != true && !backdropOnly
+    material.isHidden = usesSystemScrollEdge && !inlinePortrait && (prefersSoftTopEdge ||
+      (!largeTitle && args["centerTitleInPane"] as? Bool != true && !backdropOnly))
     // Let the native fade extend past the bar without enlarging its hit area.
     // The mirrored content is transparent and the bottom edge is hidden.
     container.clipsToBounds = !usesSystemScrollEdge
     // Title, avatar and loading updates must not reset the blur appearance.
-    if appearanceColor != color || appearanceUsesSystemScrollEdge != usesSystemScrollEdge {
+    let externalTitle = args["externalExpandedTitle"] as? Bool == true
+    if appearanceColor != color || appearanceUsesSystemScrollEdge != usesSystemScrollEdge || externalExpandedTitle != externalTitle {
+      externalExpandedTitle = externalTitle
       let appearance = UINavigationBarAppearance()
       if usesSystemScrollEdge {
         appearance.configureWithDefaultBackground()
@@ -602,7 +614,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
         appearance.configureWithTransparentBackground()
       }
       appearance.titleTextAttributes = [.foregroundColor: color]
-      appearance.largeTitleTextAttributes = [.foregroundColor: color]
+      appearance.largeTitleTextAttributes = [.foregroundColor: externalTitle ? UIColor.clear : color]
       bar.standardAppearance = appearance
       bar.scrollEdgeAppearance = appearance
       bar.compactAppearance = appearance
@@ -620,7 +632,10 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     floatingTitle?.removeFromSuperview()
     floatingTitle = nil
     let item = content.navigationItem
-    item.title = args["title"] as? String
+    let title = args["title"] as? String
+    // Keep the actual title for UIKit's layout and the compact label.
+    // The external expanded label owns the visible ink while at rest.
+    item.title = largeTitle && (alignCollapsedTitleToLeading || leadingTitleRowTop != nil) && titleIsCollapsed == true ? "" : title
     if let subtitle = args["subtitle"] as? String {
       let button = NavigationTitleView(title: item.title, subtitle: subtitle, color: color, maximumWidth: titleMaxWidth)
       button.accessibilityIdentifier = "channel-navigation-title"
@@ -660,7 +675,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       }
       refreshBar.setRefreshing(args["titleRefreshing"] as? Bool == true)
     } else if largeTitle {
-      compactTitle.text = item.title
+      compactTitle.text = title
       compactTitle.font = .preferredFont(forTextStyle: .headline)
       compactTitle.adjustsFontForContentSizeCategory = true
       compactTitle.textColor = color
@@ -670,10 +685,22 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       compactTitle.layer.mask = compactTitleMask
       if compactTitle.superview == nil { compactTitleContainer.addArrangedSubview(compactTitle) }
       compactTitleContainer.frame.size = compactTitle.intrinsicContentSize
-      if alignCollapsedTitleToLeading {
+      if alignCollapsedTitleToLeading || leadingTitleRowTop != nil {
         // Duo's list title fades in place: the compact label uses the same
         // leading margin as UIKit's expanded title, rather than recentering.
-        item.titleView = UIView()
+        if leadingTitleRowTop != nil {
+          // Reserve the cover's native control row while its visible label
+          // sits beside the Flutter actions. An empty view collapses the row.
+          let spacer = UILabel()
+          spacer.text = title
+          spacer.font = compactTitle.font
+          spacer.textColor = .clear
+          spacer.isAccessibilityElement = false
+          spacer.sizeToFit()
+          item.titleView = spacer
+        } else {
+          item.titleView = UIView()
+        }
         compactTitleContainer.translatesAutoresizingMaskIntoConstraints = true
         paneTitle = compactTitleContainer
         container.addSubview(compactTitleContainer)
@@ -701,6 +728,14 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       }
       item.title = nil
       if let paneTitle { container.addSubview(paneTitle) }
+    }
+    if #available(iOS 26.0, *), prefersSoftTopEdge,
+       let edgeTitle = floatingTitle ?? paneTitle ?? item.titleView,
+       !edgeTitle.interactions.contains(where: { $0 is UIScrollEdgeElementContainerInteraction }) {
+      let interaction = UIScrollEdgeElementContainerInteraction()
+      interaction.scrollView = content.scrollView
+      interaction.edge = .top
+      edgeTitle.addInteraction(interaction)
     }
     item.largeTitleDisplayMode = bar.prefersLargeTitles ? .always : .never
     trackedAvatar = nil
@@ -828,11 +863,18 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     titleIsCollapsed = collapsed
     UIView.performWithoutAnimation {
       if navigation.navigationBar.prefersLargeTitles {
+        if alignCollapsedTitleToLeading || leadingTitleRowTop != nil {
+          // UIKit can reveal its expanded label while a sheet changes the
+          // presenting view's safe area. Keep its line height for measurement,
+          // but give the compact label sole ownership of the collapsed text.
+          let title = collapsed ? "" : compactTitle.text
+          if content.navigationItem.title != title { content.navigationItem.title = title }
+        }
         // Fade the actual text throughout the last part of the gesture. A
         // snapshot transition of the platform view gets clipped by Flutter's
         // shrinking header and can still look like a one-frame title switch.
         let progress = min(1, max(0, (offset - collapseRange * 0.35) / (collapseRange * 0.65)))
-        let opacity = 1 - progress
+        let opacity: CGFloat = externalExpandedTitle ? 0 : 1 - progress
         if abs(largeTitleOpacity - opacity) > 0.001 {
           largeTitleOpacity = opacity
           for appearance in [navigation.navigationBar.standardAppearance,
