@@ -764,6 +764,19 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
+    // NIP-WH deliveries are ephemeral-range, but the generic ephemeral path
+    // below would broadcast one to every subscriber. Only HTTP intake takes them.
+    if kind_u32 == buzz_core::kind::KIND_WEBHOOK_DELIVERY {
+        reject("invalid");
+        write.ok(
+            &conn,
+            &event_id_hex,
+            false,
+            "restricted: webhook deliveries are accepted only over HTTP",
+        );
+        return;
+    }
+
     // Observer frames and ephemeral kinds return before ingest, so they take
     // the ban / timeout write-block here. Persistent kinds get the same check
     // in ingest, and so does NIP-43 leave (28936), which is ephemeral-range but

@@ -2634,6 +2634,14 @@ async fn ingest_event_inner(
         return Err(IngestError::Rejected("restricted: relay-only kind".into()));
     }
 
+    // NIP-WH deliveries come only from a configured ingress gateway. Intake is
+    // not enabled yet, so no signer is one.
+    if kind_u32 == buzz_core::kind::KIND_WEBHOOK_DELIVERY {
+        return Err(IngestError::Rejected(
+            "restricted: not an authorized webhook ingress".into(),
+        ));
+    }
+
     // Share the event with the verify task via Arc instead of deep-cloning it
     // (tags + up to 256 KB of content). spawn_blocking only needs 'static, not
     // ownership; once it completes its Arc is dropped, so try_unwrap returns

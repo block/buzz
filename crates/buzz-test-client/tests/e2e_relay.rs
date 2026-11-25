@@ -242,6 +242,55 @@ async fn test_client_submitted_nip_ia_archive_snapshots_are_rejected() {
     assert_relay_only_snapshot_rejected(&keys, 13_535, archived).await;
 }
 
+/// NIP-WH: a client cannot forge a relay-signed webhook record, and a
+/// delivery is refused on both transports until a gateway key is configured.
+/// Over WebSocket the ephemeral path would otherwise broadcast it.
+#[tokio::test]
+#[ignore]
+async fn test_client_submitted_webhook_records_and_deliveries_are_rejected() {
+    let keys = Keys::generate();
+    create_test_channel(&keys).await;
+    let integration = Tag::parse(["integration", "0f4c1a52-7d3e-4b8a-9c61-2e5f8d7a1b30"]).unwrap();
+    assert_relay_only_snapshot_rejected(&keys, 40_701, integration).await;
+
+    let delivery = EventBuilder::new(Kind::Custom(20_701), "{}")
+        .tags([
+            Tag::parse(["integration", "0f4c1a52-7d3e-4b8a-9c61-2e5f8d7a1b30"]).unwrap(),
+            Tag::parse(["t", "provider:github"]).unwrap(),
+            Tag::parse(["delivery", "d-1"]).unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .expect("sign delivery");
+    let mut ws = BuzzTestClient::connect(&relay_url(), &keys)
+        .await
+        .expect("connect");
+    let ok = ws
+        .send_event(delivery.clone())
+        .await
+        .expect("submit via websocket");
+    assert!(!ok.accepted);
+    assert_eq!(
+        ok.message,
+        "restricted: webhook deliveries are accepted only over HTTP"
+    );
+    ws.disconnect().await.expect("disconnect");
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&delivery).unwrap())
+        .send()
+        .await
+        .expect("submit via HTTP");
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body = response.text().await.expect("read HTTP rejection");
+    assert!(
+        body.contains("restricted: not an authorized webhook ingress"),
+        "{body}"
+    );
+}
+
 /// Submit a `kind` snapshot signed by `keys` over WebSocket and HTTP and
 /// assert that both transports reject it as a relay-only kind.
 async fn assert_relay_only_snapshot_rejected(keys: &Keys, kind: u16, tag: Tag) {

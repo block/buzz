@@ -152,3 +152,61 @@ async fn webhook_subscriptions_need_channel_admins() {
     let delete = f.subscription(&f.owner, f.private, d, "delete", Some(&to_private), "");
     f.accepted(&f.owner, &delete).await;
 }
+
+/// Deliveries come only from an ingress gateway over HTTP, and records only
+/// from the relay. WebSocket must refuse a delivery before its generic
+/// ephemeral path broadcasts it to subscribers.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn clients_cannot_submit_webhook_deliveries_or_records() {
+    let f = Fixture::new().await;
+    let delivery = EventBuilder::new(Kind::Custom(20701), r#"{"version":1}"#)
+        .tags([
+            Tag::parse(["integration", INTEGRATION]).unwrap(),
+            Tag::parse(["t", "provider:github"]).unwrap(),
+            Tag::parse(["delivery", "d-1"]).unwrap(),
+        ])
+        .sign_with_keys(&f.owner)
+        .unwrap();
+
+    let auth = crate::connection::AuthState::Authenticated(buzz_auth::AuthContext {
+        pubkey: f.owner.public_key(),
+        scopes: vec![],
+        channel_ids: None,
+        auth_method: buzz_auth::AuthMethod::Nip42,
+        agent_owner_pubkey: None,
+    });
+    let (mut conn, mut send_rx) = crate::connection::tests::test_conn_with_auth(auth);
+    Arc::get_mut(&mut conn).unwrap().tenant =
+        buzz_core::TenantContext::resolved(f.community, f.host.clone());
+    crate::handlers::event::handle_event(delivery.clone(), conn, f.state.clone()).await;
+    let axum::extract::ws::Message::Text(text) = send_rx.try_recv().unwrap() else {
+        panic!("expected an OK frame");
+    };
+    let ack: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        ack,
+        json!([
+            "OK",
+            delivery.id.to_hex(),
+            false,
+            "restricted: webhook deliveries are accepted only over HTTP"
+        ])
+    );
+
+    let refused = f.refused(&f.owner, &delivery).await;
+    assert!(
+        refused.contains("restricted: not an authorized webhook ingress"),
+        "{refused}"
+    );
+
+    let record = EventBuilder::new(Kind::Custom(40701), "{}")
+        .tags([
+            Tag::parse(["h", &f.home.to_string()]).unwrap(),
+            Tag::parse(["integration", INTEGRATION]).unwrap(),
+        ])
+        .sign_with_keys(&f.owner)
+        .unwrap();
+    let refused = f.refused(&f.owner, &record).await;
+    assert!(refused.contains("restricted"), "{refused}");
+}

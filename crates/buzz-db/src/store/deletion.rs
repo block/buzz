@@ -164,6 +164,8 @@ pub const PENDING_SCOPED_TABLES: &[&str] = &[
     "identity_retirement_workflows",
     "search_backfill",
     "thread_heads",
+    "webhook_deliveries",
+    "webhook_records",
 ];
 
 /// Tenant tables an expand migration may add between a deletion's approval
@@ -184,6 +186,8 @@ pub const APPROVAL_FORWARD_TABLES: &[&str] = &[
     "search_backfill",
     "search_outbox",
     "thread_heads",
+    "webhook_deliveries",
+    "webhook_records",
 ];
 
 /// Control-plane tables with community provenance that the tenant purge does
