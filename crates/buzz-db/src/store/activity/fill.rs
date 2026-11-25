@@ -1,0 +1,603 @@
+//! Repair on read: shared rows that are missing, behind the event log, or
+//! name a deleted message are rebuilt from stored history before they are
+//! returned. A first page and a `since` read check every row of the person's
+//! list; a read of named rows checks those rows.
+
+use buzz_core::CommunityId;
+use sqlx::{PgConnection, Row as _};
+use uuid::Uuid;
+
+use super::{
+    model::{FILL_SCAN, HORIZON_SECONDS, PREVIEW_CHARS},
+    writer::{channel_merge_sql, not_future, thread_merge_sql},
+};
+use crate::{observability, store::personal_read::ELIGIBLE_KINDS, Db, Result};
+
+/// Rows rebuilt per transaction.
+const FILL_BATCH: usize = 64;
+/// Most channels, and most threads, one read finds wanting. A bound on the
+/// query, far above what one person has; time is what limits the rebuild.
+const MAX_WANTING: i64 = 4096;
+/// How long one read spends rebuilding. A batch that starts within it
+/// finishes; rows not reached are served as stored (a conversation without
+/// its preview, placed by its creation time) and the next read continues.
+const REBUILD_BUDGET: std::time::Duration = std::time::Duration::from_millis(2500);
+/// Most of a person's live threads one read checks, most recently engaged
+/// first.
+const MAX_THREAD_PROBES: i64 = 512;
+/// Rebuilds running at once in one relay process, and how long a read waits
+/// for a turn. Rebuilding takes writer connections that message writes need
+/// more.
+const REPAIRS_AT_ONCE: usize = 4;
+const REPAIR_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Channels and threads [`Db::warm_activity`] reads per step, and how often
+/// it tries a batch that lost a row to a concurrent write.
+const WARM_PAGE: i64 = 1024;
+const WARM_ATTEMPTS: u8 = 4;
+/// The span of history one step of the thread pass covers.
+const WARM_WINDOW_HOURS: i64 = 24;
+
+/// How long after its signed time an event may still arrive. Ingest refuses
+/// an event signed more than 900 s from the relay's clock
+/// (`MAX_TIMESTAMP_DRIFT_SECS` in `buzz-relay`'s ingest handler).
+///
+/// The one known exception is a moderation notice: the relay signs it with
+/// its outbox row's time, so a notice retried or delayed by an outage can
+/// arrive later than this. Repair can miss such a notice only when its
+/// hand-off to the writer was lost too.
+const LATE_ARRIVAL: &str = "interval '900 seconds'";
+
+/// A channel row `h` of channel `c` that is missing, behind the log, or names
+/// a deleted message or edit. "Behind" is one index probe, pruned to the
+/// partitions after `seen_at`: is any stored event newer than the row
+/// accounts for? A second probe covers the last [`LATE_ARRIVAL`] before
+/// `seen_at`: did a message that could be the head arrive after the head? It
+/// finds a message signed at or before `seen_at` whose hand-off was lost. It
+/// looks only at the newest [`FILL_SCAN`] events, the ones a rebuild reads, so
+/// it costs at most that many rows and a rebuild always clears it.
+fn channel_wanting() -> String {
+    format!(
+        "(h.channel_id IS NULL
+    OR EXISTS (SELECT 1 FROM events n
+        WHERE n.community_id = c.community_id AND n.channel_id = c.id
+            AND n.created_at > COALESCE(h.seen_at, '-infinity')
+            AND n.created_at <= clock_timestamp())
+    OR EXISTS (SELECT 1 FROM (
+            SELECT id, created_at, received_at, kind, deleted_at, tags FROM events
+            WHERE community_id = c.community_id AND channel_id = c.id
+                AND created_at > h.seen_at - {LATE_ARRIVAL}
+            ORDER BY created_at DESC, id LIMIT {FILL_SCAN}
+        ) n
+        LEFT JOIN thread_metadata tm ON tm.community_id = c.community_id
+            AND tm.event_created_at = n.created_at AND tm.event_id = n.id
+        WHERE n.received_at > COALESCE(h.head_received_at, '-infinity')
+            AND n.kind IN ({kinds}) AND n.deleted_at IS NULL
+            AND (tm.depth IS NULL OR tm.depth = 0 OR (tm.depth = 1 AND tm.broadcast))
+            AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(n.tags) AS tag
+                WHERE tag->>0 = 'audience' AND tag->>1 = 'agents'))
+    OR (h.head_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM events e
+        WHERE e.community_id = h.community_id AND e.created_at = h.head_created_at
+            AND e.id = h.head_id AND e.deleted_at IS NULL))
+    OR (h.head_edit_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM events e
+        WHERE e.community_id = h.community_id AND e.created_at = h.head_edit_at
+            AND e.id = h.head_edit_id AND e.deleted_at IS NULL)))",
+        kinds = eligible_sql(),
+    )
+}
+
+/// A thread row `h` of thread `root` in `channel` (community `$1`) that is
+/// missing, behind the log, or names a deleted reply: the channel checks of
+/// [`channel_wanting`], over the thread's replies (the newest [`FILL_SCAN`]
+/// of them for the arrival probe, as a rebuild reads).
+fn thread_wanting(root: &str, channel: &str) -> String {
+    format!(
+        "(h.root_id IS NULL
+    OR EXISTS (SELECT 1 FROM thread_metadata n
+        WHERE n.community_id = $1 AND n.root_event_id = {root}
+            AND n.event_created_at > COALESCE(h.seen_at, '-infinity')
+            AND n.event_created_at <= clock_timestamp())
+    OR EXISTS (SELECT 1 FROM (
+            SELECT event_id, event_created_at FROM thread_metadata
+            WHERE community_id = $1 AND root_event_id = {root}
+                AND event_created_at > h.seen_at - {LATE_ARRIVAL}
+            ORDER BY event_created_at DESC, event_id LIMIT {FILL_SCAN}
+        ) n
+        JOIN events e ON e.community_id = $1 AND e.created_at = n.event_created_at
+            AND e.id = n.event_id
+        WHERE e.received_at > COALESCE(h.activity_at, '-infinity')
+            AND e.kind IN ({kinds}) AND e.deleted_at IS NULL AND e.channel_id = {channel})
+    OR (h.activity_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM events e
+        WHERE e.community_id = $1 AND e.created_at = h.activity_created_at
+            AND e.id = h.activity_id AND e.deleted_at IS NULL)))",
+        kinds = eligible_sql(),
+    )
+}
+
+/// [`ELIGIBLE_KINDS`] as an SQL list. Constants, so safe to inline.
+fn eligible_sql() -> String {
+    ELIGIBLE_KINDS.map(|kind| kind.to_string()).join(", ")
+}
+
+/// What [`Db::warm_activity`] rebuilt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Warmed {
+    /// Conversation rows rebuilt.
+    pub channels: u64,
+    /// Thread rows rebuilt.
+    pub threads: u64,
+    /// Rows left as they were because their batch kept failing. A read
+    /// rebuilds them, and so does another run.
+    pub skipped: u64,
+}
+
+/// Shared rows a read found wanting.
+#[derive(Debug, Default)]
+pub(super) struct Wanting {
+    pub(super) channels: Vec<Uuid>,
+    /// `(channel, thread root)`.
+    pub(super) threads: Vec<(Uuid, Vec<u8>)>,
+}
+
+impl Wanting {
+    pub(super) fn is_empty(&self) -> bool {
+        self.channels.is_empty() && self.threads.is_empty()
+    }
+}
+
+/// The person's joined channels and listed threads whose shared row is missing,
+/// behind the log, or names a deleted message. `only_*` restrict the check to
+/// named rows.
+pub(super) async fn wanting(
+    conn: &mut PgConnection,
+    community: CommunityId,
+    actor: &[u8; 32],
+    only_channels: Option<&[Uuid]>,
+    only_roots: Option<&[Vec<u8>]>,
+) -> Result<Wanting> {
+    let mut wanting = Wanting::default();
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"SELECT c.id FROM channel_members cm
+            JOIN channels c ON c.community_id = cm.community_id AND c.id = cm.channel_id
+            LEFT JOIN channel_heads h ON h.community_id = c.community_id AND h.channel_id = c.id
+            WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.removed_at IS NULL
+                AND c.deleted_at IS NULL
+                AND ($3::uuid[] IS NULL OR c.id = ANY($3))
+                AND {wanting}
+            ORDER BY c.id LIMIT $4"#,
+        wanting = channel_wanting(),
+    )))
+    .bind(community.as_uuid())
+    .bind(actor.as_slice())
+    .bind(only_channels)
+    .bind(MAX_WANTING)
+    .fetch_all(&mut *conn)
+    .await?;
+    for row in rows {
+        wanting.channels.push(row.try_get("id")?);
+    }
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"SELECT f.channel_id, f.root_id FROM (
+                SELECT f.channel_id, f.root_id FROM personal_read_frontiers f
+                WHERE f.community_id = $1 AND f.actor = $2 AND f.root_id <> ''::bytea
+                    AND (f.state <> 'default' OR f.marked_unread
+                        OR f.engaged_at >= clock_timestamp() - make_interval(secs => $5))
+                    AND ($3::bytea[] IS NULL OR f.root_id = ANY($3))
+                ORDER BY f.engaged_at DESC NULLS LAST LIMIT $6
+            ) f
+            JOIN channel_members cm ON cm.community_id = $1 AND cm.channel_id = f.channel_id
+                AND cm.pubkey = $2 AND cm.removed_at IS NULL
+            LEFT JOIN thread_heads h ON h.community_id = $1 AND h.root_id = f.root_id
+            WHERE {wanting}
+            ORDER BY f.channel_id, f.root_id LIMIT $4"#,
+        wanting = thread_wanting("f.root_id", "f.channel_id"),
+    )))
+    .bind(community.as_uuid())
+    .bind(actor.as_slice())
+    .bind(only_roots)
+    .bind(MAX_WANTING)
+    .bind(HORIZON_SECONDS as f64)
+    .bind(MAX_THREAD_PROBES)
+    .fetch_all(&mut *conn)
+    .await?;
+    for row in rows {
+        wanting
+            .threads
+            .push((row.try_get("channel_id")?, row.try_get("root_id")?));
+    }
+    Ok(wanting)
+}
+
+impl Db {
+    /// Rebuild the rows a read found wanting. Best effort and bounded: when
+    /// it cannot run or fails, the read serves what is stored (a deleted
+    /// message is never returned) and the next read tries again.
+    pub(super) async fn repair_activity(&self, community: CommunityId, wanting: &Wanting) {
+        static REPAIRS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(REPAIRS_AT_ONCE);
+        let deadline = tokio::time::Instant::now() + REBUILD_BUDGET;
+        let repaired = match tokio::time::timeout(REPAIR_WAIT, REPAIRS.acquire()).await {
+            // A batch still running at the deadline is abandoned and rolls
+            // back, so a slow statement cannot outlast the budget.
+            Ok(Ok(_turn)) => {
+                match tokio::time::timeout_at(deadline, self.rebuild(community, wanting, deadline))
+                    .await
+                {
+                    Ok(rebuilt) => rebuilt.map_err(|error| error.to_string()),
+                    Err(_) => Ok(false),
+                }
+            }
+            _ => Err("no turn".to_owned()),
+        };
+        match repaired {
+            Ok(true) => {}
+            Ok(false) => {
+                metrics::counter!("buzz_db_activity_repairs_unfinished_total").increment(1);
+            }
+            Err(error) => {
+                metrics::counter!("buzz_db_activity_repairs_skipped_total").increment(1);
+                tracing::debug!(%error, %community, "activity rows not rebuilt");
+            }
+        }
+    }
+
+    /// Each batch is its own admitted transaction. Returns whether every row
+    /// was rebuilt before `deadline`.
+    async fn rebuild(
+        &self,
+        community: CommunityId,
+        wanting: &Wanting,
+        deadline: tokio::time::Instant,
+    ) -> Result<bool> {
+        for batch in wanting.channels.chunks(FILL_BATCH) {
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            let mut tx = self.begin_repair(community).await?;
+            // Take every row first, creating missing ones, in channel order.
+            // An edit stored from here on waits for this transaction, and
+            // one stored before is visible to the scan.
+            sqlx::query(
+                "INSERT INTO channel_heads AS h (community_id, channel_id, updated_at) \
+                 SELECT $1, c.id, clock_timestamp() \
+                 FROM unnest($2::uuid[]) AS c(id) ORDER BY c.id \
+                 ON CONFLICT (community_id, channel_id) DO UPDATE \
+                    SET updated_at = h.updated_at",
+            )
+            .bind(community.as_uuid())
+            .bind(batch)
+            .execute(tx.conn())
+            .await?;
+            // Only while the row still names the deleted head or edit: a
+            // message stored since then, or another reader, already replaced
+            // it. An edit can only be newer, so a deleted one clears the head
+            // and the fill installs it again with its latest live edit, or
+            // with none.
+            sqlx::query(
+                "UPDATE channel_heads h SET head_id = NULL, head_created_at = NULL, \
+                    head_received_at = NULL, head_pubkey = NULL, head_text = NULL, \
+                    head_edit_at = NULL, head_edit_id = NULL, updated_at = clock_timestamp() \
+                 WHERE h.community_id = $1 AND h.channel_id = ANY($2) AND h.head_id IS NOT NULL \
+                    AND (NOT EXISTS (SELECT 1 FROM events e \
+                        WHERE e.community_id = $1 AND e.created_at = h.head_created_at \
+                            AND e.id = h.head_id AND e.deleted_at IS NULL) \
+                    OR (h.head_edit_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM events e \
+                        WHERE e.community_id = $1 AND e.created_at = h.head_edit_at \
+                            AND e.id = h.head_edit_id AND e.deleted_at IS NULL)))",
+            )
+            .bind(community.as_uuid())
+            .bind(batch)
+            .execute(tx.conn())
+            .await?;
+            fill_channels(tx.conn(), community, batch).await?;
+            tx.commit().await?;
+        }
+        for batch in wanting.threads.chunks(FILL_BATCH) {
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            let (channels, roots): (Vec<Uuid>, Vec<Vec<u8>>) = batch.iter().cloned().unzip();
+            let mut tx = self.begin_repair(community).await?;
+            sqlx::query(
+                "INSERT INTO thread_heads AS h (community_id, root_id, channel_id, updated_at) \
+                 SELECT $1, t.root, t.channel, clock_timestamp() \
+                 FROM unnest($2::uuid[], $3::bytea[]) AS t(channel, root) \
+                 WHERE EXISTS (SELECT 1 FROM channels c \
+                    WHERE c.community_id = $1 AND c.id = t.channel) \
+                 ORDER BY t.root \
+                 ON CONFLICT (community_id, root_id) DO UPDATE SET updated_at = h.updated_at",
+            )
+            .bind(community.as_uuid())
+            .bind(&channels)
+            .bind(&roots)
+            .execute(tx.conn())
+            .await?;
+            sqlx::query(
+                "UPDATE thread_heads h SET activity_at = NULL, activity_id = NULL, \
+                    activity_created_at = NULL, activity_pubkey = NULL, activity_text = NULL, \
+                    updated_at = clock_timestamp() \
+                 WHERE h.community_id = $1 AND h.root_id = ANY($2) AND h.activity_id IS NOT NULL \
+                    AND NOT EXISTS (SELECT 1 FROM events e \
+                        WHERE e.community_id = $1 AND e.created_at = h.activity_created_at \
+                            AND e.id = h.activity_id AND e.deleted_at IS NULL)",
+            )
+            .bind(community.as_uuid())
+            .bind(&roots)
+            .execute(tx.conn())
+            .await?;
+            fill_threads(tx.conn(), community, &channels, &roots).await?;
+            tx.commit().await?;
+        }
+        Ok(true)
+    }
+
+    /// Build the shared rows a first read would otherwise rebuild: every
+    /// conversation's, and that of every thread with a reply within the
+    /// horizon. An operator runs it once, after the relays that keep the rows
+    /// up to date are deployed and before clients read the list.
+    ///
+    /// It only rebuilds rows that are missing or unverified, in the batches a
+    /// read uses, so it is safe to run while the relay serves and to run
+    /// again: a second run continues where a failed one stopped.
+    pub async fn warm_activity(&self, community: CommunityId) -> Result<Warmed> {
+        let mut warmed = Warmed::default();
+        let mut after: Option<Uuid> = None;
+        loop {
+            let channels: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT c.id FROM channels c \
+                 LEFT JOIN channel_heads h ON h.community_id = c.community_id \
+                    AND h.channel_id = c.id \
+                 WHERE c.community_id = $1 AND c.deleted_at IS NULL \
+                    AND ($2::uuid IS NULL OR c.id > $2) AND {wanting} \
+                 ORDER BY c.id LIMIT $3",
+                wanting = channel_wanting(),
+            )))
+            .bind(community.as_uuid())
+            .bind(after)
+            .bind(WARM_PAGE)
+            .fetch_all(&self.pool)
+            .await?;
+            let Some(last) = channels.last().copied() else {
+                break;
+            };
+            after = Some(last);
+            let skipped = self.warm(community, &channels, &[]).await?;
+            warmed.channels += channels.len() as u64 - skipped;
+            warmed.skipped += skipped;
+        }
+        // Threads by the time of their replies, one window of history at a
+        // step, so no step reads more than a window of the reply index.
+        let now: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT now()")
+            .fetch_one(&self.pool)
+            .await?;
+        let mut from = now - chrono::Duration::seconds(HORIZON_SECONDS);
+        while from < now {
+            let to = (from + chrono::Duration::hours(WARM_WINDOW_HOURS)).min(now);
+            let mut after: Option<Vec<u8>> = None;
+            loop {
+                let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "SELECT DISTINCT ON (tm.root_event_id) tm.channel_id, tm.root_event_id \
+                     FROM thread_metadata tm \
+                     LEFT JOIN thread_heads h ON h.community_id = $1 \
+                        AND h.root_id = tm.root_event_id \
+                     WHERE tm.community_id = $1 AND tm.event_created_at >= $2 \
+                        AND tm.event_created_at < $3 AND tm.depth >= 1 \
+                        AND tm.root_event_id IS NOT NULL \
+                        AND ($4::bytea IS NULL OR tm.root_event_id > $4) \
+                        AND {wanting} \
+                     ORDER BY tm.root_event_id LIMIT $5",
+                    wanting = thread_wanting("tm.root_event_id", "tm.channel_id"),
+                )))
+                .bind(community.as_uuid())
+                .bind(from)
+                .bind(to)
+                .bind(after.as_deref())
+                .bind(WARM_PAGE)
+                .fetch_all(&self.pool)
+                .await?;
+                let threads = rows
+                    .iter()
+                    .map(|row| Ok((row.try_get("channel_id")?, row.try_get("root_event_id")?)))
+                    .collect::<Result<Vec<(Uuid, Vec<u8>)>>>()?;
+                let Some((_, last)) = threads.last().cloned() else {
+                    break;
+                };
+                after = Some(last);
+                let skipped = self.warm(community, &[], &threads).await?;
+                warmed.threads += threads.len() as u64 - skipped;
+                warmed.skipped += skipped;
+            }
+            from = to;
+        }
+        Ok(warmed)
+    }
+
+    /// Rebuild rows for [`Db::warm_activity`], a read's batch at a time, and
+    /// return how many were skipped. A batch can lose a row to the background
+    /// writer for a moment, so it is tried again; one that keeps failing is
+    /// counted and left for a read, so it cannot stop the run or a rerun.
+    async fn warm(
+        &self,
+        community: CommunityId,
+        channels: &[Uuid],
+        threads: &[(Uuid, Vec<u8>)],
+    ) -> Result<u64> {
+        let batches = channels
+            .chunks(FILL_BATCH)
+            .map(|batch| Wanting {
+                channels: batch.to_vec(),
+                threads: Vec::new(),
+            })
+            .chain(threads.chunks(FILL_BATCH).map(|batch| Wanting {
+                channels: Vec::new(),
+                threads: batch.to_vec(),
+            }));
+        let mut skipped = 0;
+        for wanting in batches {
+            let mut attempt = 1;
+            loop {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+                match self.rebuild(community, &wanting, deadline).await {
+                    Ok(true) => break,
+                    result if attempt < WARM_ATTEMPTS => {
+                        if let Err(error) = result {
+                            tracing::debug!(%error, attempt, "activity warm batch failed");
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            250 * u64::from(attempt),
+                        ))
+                        .await;
+                        attempt += 1;
+                    }
+                    result => {
+                        let rows = (wanting.channels.len() + wanting.threads.len()) as u64;
+                        tracing::warn!(error = ?result.err(), rows, "activity warm batch skipped");
+                        skipped += rows;
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(skipped)
+    }
+
+    /// Opens and drops the transaction every repair write runs in, for the
+    /// admission test.
+    #[cfg(test)]
+    pub(super) async fn begin_repair_for_test(&self, community: CommunityId) -> Result<()> {
+        self.begin_repair(community).await.map(drop)
+    }
+
+    async fn begin_repair(&self, community: CommunityId) -> Result<crate::AdmittedTx> {
+        let mut tx = crate::begin_community_write_transaction(
+            &self.pool,
+            community,
+            observability::WriterOperation::SubscriptionHistory,
+        )
+        .await?;
+        sqlx::raw_sql(
+            "SET LOCAL statement_timeout = '5000ms'; SET LOCAL lock_timeout = '500ms'; \
+             SET LOCAL jit = off",
+        )
+        .execute(tx.conn())
+        .await?;
+        Ok(tx)
+    }
+}
+
+fn eligible() -> Vec<i32> {
+    ELIGIBLE_KINDS.to_vec()
+}
+
+/// Merge each channel's stored history into its row and record how far the
+/// log was read. The caller holds the rows, and this is its own statement, so
+/// its snapshot sees every edit and deletion committed before they were taken.
+async fn fill_channels(
+    conn: &mut PgConnection,
+    community: CommunityId,
+    channels: &[Uuid],
+) -> Result<()> {
+    let sql = format!(
+        r#"INSERT INTO channel_heads AS h (community_id, channel_id, head_id, head_created_at,
+                head_received_at, head_pubkey, head_text, head_edit_at, head_edit_id, seen_at,
+                updated_at)
+            SELECT $1, c.id, t.id, t.created_at, t.received_at, t.pubkey, left(COALESCE(edit.content, t.content), $5), edit.created_at, edit.id,
+                newest.created_at, clock_timestamp()
+            FROM unnest($2::uuid[]) AS c(id)
+            LEFT JOIN LATERAL (
+                SELECT created_at FROM events
+                WHERE community_id = $1 AND channel_id = c.id
+                ORDER BY created_at DESC LIMIT 1
+            ) newest ON true
+            LEFT JOIN LATERAL (
+                SELECT recent.id, recent.created_at, recent.received_at, recent.pubkey,
+                    recent.content
+                FROM (
+                    SELECT id, created_at, received_at, pubkey, kind, deleted_at, tags, content
+                    FROM events
+                    WHERE community_id = $1 AND channel_id = c.id
+                    ORDER BY created_at DESC, id LIMIT $4
+                ) recent
+                LEFT JOIN thread_metadata tm ON tm.community_id = $1
+                    AND tm.event_created_at = recent.created_at AND tm.event_id = recent.id
+                WHERE recent.kind = ANY($3) AND recent.deleted_at IS NULL
+                    AND (tm.depth IS NULL OR tm.depth = 0 OR (tm.depth = 1 AND tm.broadcast))
+                    AND NOT EXISTS (
+                        SELECT 1 FROM jsonb_array_elements(recent.tags) AS tag
+                        WHERE tag->>0 = 'audience' AND tag->>1 = 'agents')
+                ORDER BY recent.received_at DESC, recent.id LIMIT 1
+            ) t ON true
+            LEFT JOIN LATERAL (
+                SELECT content, created_at, id FROM events
+                WHERE community_id = $1 AND channel_id = c.id AND kind = 40003
+                    AND deleted_at IS NULL AND {target} = t.id
+                ORDER BY created_at DESC, id DESC LIMIT 1
+            ) edit ON t.id IS NOT NULL
+            ORDER BY c.id
+            {merge}"#,
+        merge = channel_merge_sql(
+            &not_future("EXCLUDED.seen_at"),
+            &not_future("EXCLUDED.seen_at")
+        ),
+        target = crate::store::media::MEDIA_EDIT_TARGET_SQL,
+    );
+    sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(community.as_uuid())
+        .bind(channels)
+        .bind(eligible())
+        .bind(FILL_SCAN)
+        .bind(PREVIEW_CHARS as i32)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// The same for threads: the newest stored reply. A
+/// thread row shows a reply as stored; edits are not applied to it.
+async fn fill_threads(
+    conn: &mut PgConnection,
+    community: CommunityId,
+    channels: &[Uuid],
+    roots: &[Vec<u8>],
+) -> Result<()> {
+    let sql = format!(
+        r#"INSERT INTO thread_heads AS h (community_id, root_id, channel_id, activity_at,
+                activity_id, activity_created_at, activity_pubkey, activity_text,
+                seen_at, updated_at)
+            SELECT $1, t.root, t.channel, a.received_at, a.id, a.created_at, a.pubkey,
+                left(a.content, $6), newest.event_created_at, clock_timestamp()
+            FROM unnest($2::uuid[], $3::bytea[]) AS t(channel, root)
+            LEFT JOIN LATERAL (
+                SELECT event_created_at FROM thread_metadata
+                WHERE community_id = $1 AND root_event_id = t.root
+                ORDER BY event_created_at DESC LIMIT 1
+            ) newest ON true
+            LEFT JOIN LATERAL (
+                SELECT e.id, e.created_at, e.received_at, e.pubkey, e.content FROM (
+                    SELECT event_id, event_created_at FROM thread_metadata
+                    WHERE community_id = $1 AND root_event_id = t.root
+                    ORDER BY event_created_at DESC, event_id LIMIT $5
+                ) recent
+                JOIN events e ON e.community_id = $1 AND e.created_at = recent.event_created_at
+                    AND e.id = recent.event_id
+                WHERE e.kind = ANY($4) AND e.deleted_at IS NULL AND e.channel_id = t.channel
+                ORDER BY e.received_at DESC, e.id LIMIT 1
+            ) a ON true
+            WHERE EXISTS (SELECT 1 FROM channels c WHERE c.community_id = $1 AND c.id = t.channel)
+            ORDER BY t.root
+            {merge}"#,
+        merge = thread_merge_sql(
+            &not_future("EXCLUDED.seen_at"),
+            &not_future("EXCLUDED.seen_at")
+        ),
+    );
+    sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(community.as_uuid())
+        .bind(channels)
+        .bind(roots)
+        .bind(eligible())
+        .bind(FILL_SCAN)
+        .bind(PREVIEW_CHARS as i32)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}

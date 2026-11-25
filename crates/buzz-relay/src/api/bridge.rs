@@ -7902,8 +7902,8 @@ pub(crate) mod postgres_tests {
     // Keep each route independent so the unfixed adapter fails both tests.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn nip_fi_buzz_v1_sidebar_wire_contract() {
-        buzz_v1_wire_contract("GET", "/buzz/v1/me/sidebar?limit=1", b"").await;
+    async fn nip_fi_buzz_v1_activity_wire_contract() {
+        buzz_v1_wire_contract("GET", "/buzz/v1/me/activity?limit=1", b"").await;
     }
 
     #[tokio::test]
@@ -8009,7 +8009,7 @@ pub(crate) mod postgres_tests {
 
     /// The owner of an agent's verified token decides HTTP admission, and
     /// every refusal is NIP-FI's fixed denial on `/query` (bridge),
-    /// `/buzz/v1/me/sidebar` and git `info/refs`: an owner other than the stored one, a banned
+    /// `/buzz/v1/me/activity` and git `info/refs`: an owner other than the stored one, a banned
     /// owner, and a failed owner-link write. The body never shows which step
     /// refused or that a stored owner exists.
     /// Mutations: return the relay's own body for token-owner refusals in
@@ -8109,8 +8109,8 @@ pub(crate) mod postgres_tests {
                 ),
                 (
                     "GET",
-                    "/buzz/v1/me/sidebar",
-                    "/buzz/v1/me/sidebar",
+                    "/buzz/v1/me/activity",
+                    "/buzz/v1/me/activity",
                     b"".as_slice(),
                 ),
                 // Git signs the repository root, not the request path.
@@ -8346,8 +8346,8 @@ pub(crate) mod postgres_tests {
                 ("HEAD", format!("/media/{sha}.png"), None, vec![]),
                 (
                     "GET",
-                    "/buzz/v1/me/sidebar".into(),
-                    Some("/buzz/v1/me/sidebar".into()),
+                    "/buzz/v1/me/activity".into(),
+                    Some("/buzz/v1/me/activity".into()),
                     vec![],
                 ),
                 (
@@ -8454,7 +8454,7 @@ pub(crate) mod postgres_tests {
     }
 
     /// The fresh ban reread after the shared membership check also answers a
-    /// verified agent token with NIP-FI's fixed denial, on `/buzz/v1/me/sidebar`
+    /// verified agent token with NIP-FI's fixed denial, on `/buzz/v1/me/activity`
     /// and git `default-branch` settings. The shared check passes; then, at
     /// the reread, the agent is banned or the pool is closed.
     /// Mutations: return the legacy response for token-bearing requests from
@@ -8517,7 +8517,7 @@ pub(crate) mod postgres_tests {
                 });
 
                 let path = match route {
-                    "buzz_v1" => "/buzz/v1/me/sidebar".to_owned(),
+                    "buzz_v1" => "/buzz/v1/me/activity".to_owned(),
                     _ => format!("/git/{}/repo/default-branch", owner.public_key().to_hex()),
                 };
                 let url = format!("https://{host}{path}");
@@ -8849,10 +8849,13 @@ pub(crate) mod postgres_tests {
             // A blocked intent applies to no channel, so no row is refreshed.
             assert_eq!(
                 body.as_ref(),
-                br#"{"channels":[],"outcomes":[{"status":"blocked"}]}"#
+                br#"{"outcomes":[{"status":"blocked"}],"rows":[]}"#
             );
         } else {
-            assert_eq!(value, serde_json::json!({"channels":[],"next_cursor":null}));
+            assert_eq!(value["rows"], serde_json::json!([]));
+            assert_eq!(value["removed"], serde_json::json!([]));
+            assert_eq!(value["next"], serde_json::Value::Null);
+            assert_eq!(value["reset"], false);
         }
 
         for case in [

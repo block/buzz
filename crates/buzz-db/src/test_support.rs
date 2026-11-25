@@ -393,6 +393,39 @@ pub(crate) async fn insert_historical_event_with_thread_metadata(
     .expect("fixture thread metadata");
 }
 
+/// Stand in for each [`EXPECTED_SCOPED_TABLES`] entry that a later migration
+/// creates, in a database pinned to an older schema.
+///
+/// Deletion's catalog check is an exact set, so a pinned schema lacks the
+/// tables a later expand migration adds. In production a release only meets
+/// such a schema after an earlier one listed those tables in
+/// [`PENDING_SCOPED_TABLES`]; a test pinned to an old schema to exercise
+/// something else stands each one up bare instead, as the pending-table tests
+/// do. Only for tests that never migrate further: the migration that creates
+/// a stood-in table would fail. Call it after
+/// `create_tenant_tables_added_after_fence_retirement`, which creates the
+/// later tables whose migration only adds a table.
+///
+/// [`EXPECTED_SCOPED_TABLES`]: crate::deletion::EXPECTED_SCOPED_TABLES
+/// [`PENDING_SCOPED_TABLES`]: crate::deletion::PENDING_SCOPED_TABLES
+pub(crate) async fn stand_in_later_expected_tables(pool: &sqlx::PgPool) {
+    for table in crate::deletion::EXPECTED_SCOPED_TABLES {
+        let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+            .bind(format!("public.{table}"))
+            .fetch_one(pool)
+            .await
+            .expect("look up expected table");
+        if !exists {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "CREATE TABLE public.{table} (community_id UUID NOT NULL)"
+            )))
+            .execute(pool)
+            .await
+            .expect("stand in for a later table");
+        }
+    }
+}
+
 /// Move a community fixture into a deletion lifecycle state the way the
 /// executor does. Retain transaction-scoped executor GUCs for older catalogs
 /// with a tombstone guard and fixtures that also write through universal fences.

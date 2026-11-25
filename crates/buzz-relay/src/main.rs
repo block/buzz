@@ -361,6 +361,9 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         anyhow::anyhow!("DB connection failed: {e}")
     })?;
     step.finish();
+    // Activity rows serve only `/buzz/v1`: while it is off, messages leave
+    // them alone and the writer takes no serving-pool connections.
+    buzz_db::activity::set_writer_enabled(config.buzz_v1_enabled);
     if db.has_read_pool() {
         info!("Postgres connected (writer + lazy read replica pool)");
         // Reader-down at boot must not crash or block the relay; this warn-only
@@ -1546,6 +1549,11 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             }
         }
     }
+    // Nothing is being stored any more. Write the activity rows still held
+    // in memory, so a restart does not leave them to be rebuilt on read.
+    if !buzz_db::activity::flush_pending(ACTIVITY_FLUSH_TIMEOUT).await {
+        tracing::warn!("activity rows still unwritten at shutdown");
+    }
     state.community_revalidator_cancel.cancel();
     concurrency_limits_cancel.cancel();
     state.dependency_sampler_cancel.cancel();
@@ -2048,6 +2056,12 @@ async fn run_periodic_until_cancelled<Tick, TickFuture>(
 /// terminal-flush and peer-wait budgets then apply only to sockets whose
 /// teardown reaches those stages.
 const GRACEFUL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long shutdown waits for the activity rows still in memory to be
+/// written, once serving has stopped. A write is retried every 25 ms, eight
+/// times, so this covers every retry with room for a slow database. It runs
+/// after the drain above, inside the grace period's headroom.
+const ACTIVITY_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 async fn serve(
     router: axum::Router,

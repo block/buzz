@@ -1056,7 +1056,22 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 106);
+        assert_eq!(migrations.len(), 109);
+        assert_eq!(migrations[108].version, 109);
+        assert!(migrations[108]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN imported_at TIMESTAMPTZ"));
+        assert_eq!(migrations[107].version, 108);
+        assert!(migrations[107]
+            .sql
+            .as_str()
+            .contains("idx_event_mentions_pubkey_received"));
+        assert_eq!(migrations[106].version, 107);
+        assert!(migrations[106]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE thread_heads"));
         assert_eq!(migrations[105].version, 106);
         assert!(
             strip_sql_comments(migrations[105].sql.as_str()).contains("CREATE TABLE search_outbox")
@@ -1734,6 +1749,8 @@ mod postgres_tests {
             "media_uploaders",
             "media_publications",
             "search_outbox",
+            "channel_heads",
+            "thread_heads",
         ];
         for table in crate::deletion::EXPECTED_SCOPED_TABLES
             .iter()
@@ -3050,12 +3067,47 @@ mod postgres_tests {
             .sql
             .as_str();
         assert!(through_message.contains("DROP COLUMN threads_through_timestamp"));
+        // 0107 adds the activity columns and lets a frontier have no position.
+        let activity = MIGRATOR
+            .iter()
+            .find(|m| m.version == 107)
+            .expect("activity migration")
+            .sql
+            .as_str();
+        assert!(activity.contains("ALTER COLUMN through_timestamp DROP NOT NULL"));
+        assert!(activity.contains("ADD COLUMN engaged_at TIMESTAMPTZ"));
+        let account_seq_column = "seq bigint not null default 0, ";
+        // 0109 records when the NIP-RS read state was carried over.
+        let account_imported_column = "imported_at timestamptz, ";
+        assert!(MIGRATOR
+            .iter()
+            .find(|m| m.version == 109)
+            .expect("per-message read migration")
+            .sql
+            .as_str()
+            .contains("ALTER TABLE personal_read_accounts ADD COLUMN imported_at TIMESTAMPTZ"));
+        let frontier_columns = "state text not null default 'default' \
+            check (state in ('default', 'muted')), \
+            marked_unread boolean not null default false, \
+            seq bigint not null default 0, engaged_at timestamptz, ";
         for (table, definition) in personal.tables {
             // `without_foreign_keys` also normalizes spacing, so apply it to both.
             let in_schema = schema.tables.get(&table).map(|schema_definition| {
                 let schema_definition = without_foreign_keys(schema_definition);
                 if table == "personal_read_accounts" {
-                    schema_definition.replacen(started_at_column, "", 1)
+                    schema_definition
+                        .replacen(started_at_column, "", 1)
+                        .replacen(account_seq_column, "", 1)
+                        .replacen(account_imported_column, "", 1)
+                } else if table == "personal_read_frontiers" {
+                    assert!(schema_definition.contains(frontier_columns));
+                    schema_definition
+                        .replacen(frontier_columns, "", 1)
+                        .replacen(
+                            "through_timestamp timestamptz, ",
+                            "through_timestamp timestamptz not null, ",
+                            1,
+                        )
                 } else {
                     schema_definition
                 }
@@ -3524,6 +3576,11 @@ mod postgres_tests {
             "communities",
             "entity_deletion_stage_history",
             "user_deletion_fences",
+            "channel_heads",
+            "thread_heads",
+            "personal_read_accounts",
+            "personal_read_frontiers",
+            "event_mentions",
             "workflow_runs",
             "push_gateway_installations",
             "search_outbox",
@@ -4503,7 +4560,7 @@ mod postgres_tests {
             .expect_err("deletion refuses a catalog missing later tenant tables")
             .to_string();
         assert!(
-            drift.contains("(missing=search_outbox, unknown=)"),
+            drift.contains("(missing=channel_heads,search_outbox,thread_heads, unknown=)"),
             "deletion must accept the pre-retirement fences: {drift}"
         );
         run_migrations(&pool).await.expect("apply all migrations");
@@ -4590,7 +4647,7 @@ mod postgres_tests {
             .expect_err("deletion refuses a catalog missing later tenant tables")
             .to_string();
         assert!(
-            drift.contains("(missing=search_outbox, unknown=)"),
+            drift.contains("(missing=channel_heads,search_outbox,thread_heads, unknown=)"),
             "deletion must accept the catalog before the drop: {drift}"
         );
         run_migrations(&pool).await.expect("apply all migrations");

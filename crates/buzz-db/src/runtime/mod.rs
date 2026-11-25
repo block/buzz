@@ -1,4 +1,5 @@
 mod admitted_tx;
+pub(crate) use admitted_tx::Arrival;
 mod cold_start;
 mod connection_observability;
 mod history_reads;
@@ -109,15 +110,40 @@ pub(crate) async fn insert_mentions_in_transaction(
     }
 
     // Multi-row INSERT ... ON CONFLICT DO NOTHING, chunked to stay under
-    // Postgres's 65,535 bind-parameter statement cap (6 binds per row caps a
-    // single statement at ~10.9k rows). Relay-signed kind 39002 rosters carry
+    // Postgres's 65,535 bind-parameter statement cap (8 binds per row caps a
+    // single statement at ~8.1k rows). Relay-signed kind 39002 rosters carry
     // one p-tag per channel member and can exceed that. The caller owns the
     // transaction so all chunks share its commit boundary.
     const MENTION_INSERT_CHUNK_ROWS: usize = 5_000;
+    // Arrival and thread root as the event's insert recorded them on this
+    // transaction; for an event stored earlier, as stored. Never this
+    // moment: an activity read orders and counts mentions by arrival.
+    let (received_at, root_id): (Option<DateTime<Utc>>, Option<Vec<u8>>) =
+        match tx.arrival(event_id_bytes) {
+            Some(arrival) => (
+                Some(arrival.received_at),
+                arrival.root.map(|root| root.to_vec()),
+            ),
+            None => sqlx::query_as(
+                "SELECT e.received_at, CASE WHEN tm.depth >= 1 THEN tm.root_event_id END \
+                 FROM events e LEFT JOIN thread_metadata tm ON tm.community_id = e.community_id \
+                    AND tm.event_created_at = e.created_at AND tm.event_id = e.id \
+                 WHERE e.community_id = $1 AND e.created_at = $2 AND e.id = $3",
+            )
+            .bind(community_id.as_uuid())
+            .bind(created_at)
+            .bind(event_id_bytes.as_slice())
+            .fetch_optional(tx.conn())
+            .await?
+            .map_or((None, None), |(at, root): (DateTime<Utc>, _)| {
+                (Some(at), root)
+            }),
+        };
     for chunk in valid_pubkeys.chunks(MENTION_INSERT_CHUNK_ROWS) {
         let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
             "INSERT INTO event_mentions \
-             (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) ",
+             (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind, \
+              received_at, root_id) ",
         );
 
         qb.push_values(chunk, |mut b, pubkey| {
@@ -126,7 +152,9 @@ pub(crate) async fn insert_mentions_in_transaction(
                 .push_bind(event_id_bytes.as_slice())
                 .push_bind(created_at)
                 .push_bind(channel_id)
-                .push_bind(kind as i32);
+                .push_bind(kind as i32)
+                .push_bind(received_at)
+                .push_bind(root_id.as_deref());
         });
 
         qb.push(" ON CONFLICT DO NOTHING");
