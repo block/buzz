@@ -672,6 +672,17 @@ class IosNavigationBar extends HookConsumerWidget {
         channel.value = MethodChannel('$viewType/$id');
       },
     );
+    final portraitCluster = DmHeaderCluster(
+      key: portraitKey,
+      count: titleAvatars.length,
+      builder: (i, size) => DmHeaderPortrait(
+        imageUrl: titleAvatars[i].imageUrl,
+        isAgent: titleAvatars[i].avatarIsAgent,
+        initial: titleAvatars[i].avatarInitial ?? '?',
+        size: size,
+        standalone: titleAvatars.length == 1 && !inlinePortrait,
+      ),
+    );
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -710,29 +721,24 @@ class IosNavigationBar extends HookConsumerWidget {
                                 : null,
                           );
                         },
-                  child: hidePortrait(
-                    TickerMode(
-                      enabled: !freezeSettingsPortrait && !hideSettingsSource,
-                      child: _HeaderCaptureBoundary(
-                        key: portraitCaptureKey,
-                        onPaint: hideSettingsSource
-                            ? onHiddenPortraitPainted
-                            : null,
-                        child: DmHeaderCluster(
-                          key: portraitKey,
-                          count: titleAvatars.length,
-                          builder: (i, size) => DmHeaderPortrait(
-                            imageUrl: titleAvatars[i].imageUrl,
-                            isAgent: titleAvatars[i].avatarIsAgent,
-                            initial: titleAvatars[i].avatarInitial ?? '?',
-                            size: size,
-                            standalone:
-                                titleAvatars.length == 1 && !inlinePortrait,
+                  child:
+                      portraitCaptureKey == null &&
+                          !hideSettingsSource &&
+                          !freezeSettingsPortrait
+                      ? portraitCluster
+                      : hidePortrait(
+                          TickerMode(
+                            enabled:
+                                !freezeSettingsPortrait && !hideSettingsSource,
+                            child: _HeaderCaptureBoundary(
+                              key: portraitCaptureKey,
+                              onPaint: hideSettingsSource
+                                  ? onHiddenPortraitPainted
+                                  : null,
+                              child: portraitCluster,
+                            ),
                           ),
                         ),
-                      ),
-                    ),
-                  ),
                 ),
               ),
             ),

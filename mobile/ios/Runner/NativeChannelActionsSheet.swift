@@ -19,6 +19,21 @@ final class NativeChannelActionsSheetCoordinator: NSObject, UIAdaptivePresentati
   private var contentReady = false
   private var needsContentUpdate = false
 
+  // The Duo cover reports the phone idiom even when it exposes no fold strip.
+  private static let supportsChatSettingsZoom: Bool = {
+    guard UIDevice.current.userInterfaceIdiom == .phone else { return false }
+    #if targetEnvironment(simulator)
+    let model = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"]
+    #else
+    var system = utsname()
+    guard uname(&system) == 0 else { return false }
+    let model: String? = withUnsafeBytes(of: &system.machine) {
+      String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self)
+    }
+    #endif
+    return model?.hasPrefix("iPhone") == true && model != "iPhone19,4"
+  }()
+
   init(messenger: FlutterBinaryMessenger, parentViewController: UIViewController?) {
     self.messenger = messenger
     channel = FlutterMethodChannel(name: "buzz/channel_actions_sheet", binaryMessenger: messenger)
@@ -26,6 +41,10 @@ final class NativeChannelActionsSheetCoordinator: NSObject, UIAdaptivePresentati
     super.init()
     channel.setMethodCallHandler { [weak self] call, result in
       guard let self else { result(nil); return }
+      if call.method == "supportsChatSettingsZoom" {
+        result(Self.supportsChatSettingsZoom)
+        return
+      }
       guard let data = call.arguments as? [String: Any], let request = data["session"] as? String else {
         result(FlutterError(code: "invalid_arguments", message: "Missing channel actions session", details: nil)); return
       }
@@ -57,6 +76,10 @@ final class NativeChannelActionsSheetCoordinator: NSObject, UIAdaptivePresentati
         }
         result(nil)
       case "present":
+        if data["zoomSource"] != nil && !Self.supportsChatSettingsZoom {
+          result(FlutterMethodNotImplemented)
+          return
+        }
         guard self.pending == nil else { result(FlutterError(code: "busy", message: "Channel actions are already open", details: nil)); return }
         var presenter = self.parent ?? UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
           .filter { $0.activationState == .foregroundActive }.flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController

@@ -16907,15 +16907,34 @@ void main() {
       });
     }
 
-    for (final participants in [
-      const ['self', 'alice'],
-      const ['self', 'alice', 'bob'],
+    for (final (participants, supportsZoom) in [
+      for (final enabled in [true, false]) ...[
+        (const ['self', 'alice'], enabled),
+        (const ['self', 'alice', 'bob'], enabled),
+      ],
     ]) {
       testWidgets(
-        'native DM title opens conversation details for ${participants.length} members',
+        'native DM title opens conversation details for ${participants.length} members (phone zoom: $supportsZoom)',
         (tester) async {
           debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
           addTearDown(() => debugDefaultTargetPlatformOverride = null);
+          const actions = MethodChannel('buzz/channel_actions_sheet');
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            actions,
+            (call) async {
+              if (call.method == 'supportsChatSettingsZoom') {
+                return supportsZoom;
+              }
+              if (!supportsZoom) {
+                fail('Unexpected native settings call: ${call.method}');
+              }
+              throw MissingPluginException();
+            },
+          );
+          addTearDown(
+            () => tester.binding.defaultBinaryMessenger
+                .setMockMethodCallHandler(actions, null),
+          );
           final dm = Channel(
             id: _channelId,
             name: 'DM',
@@ -17012,17 +17031,24 @@ void main() {
             ),
             findsOneWidget,
           );
-          expect(
-            tester
-                .widget<DmHeaderCluster>(
-                  find.descendant(
-                    of: find.byType(ChannelDetailsPage),
-                    matching: find.byType(DmHeaderCluster),
-                  ),
-                )
-                .count,
-            participants.length - 1,
-          );
+          if (supportsZoom) {
+            expect(
+              tester
+                  .widget<DmHeaderCluster>(
+                    find.descendant(
+                      of: find.byType(ChannelDetailsPage),
+                      matching: find.byType(DmHeaderCluster),
+                    ),
+                  )
+                  .count,
+              participants.length - 1,
+            );
+          } else {
+            expect(
+              find.byKey(const ValueKey('dm-details-avatar')),
+              participants.length == 2 ? findsOneWidget : findsNothing,
+            );
+          }
           expect(
             find.byKey(const ValueKey('channel-details-members-card')),
             participants.length == 2 ? findsNothing : findsOneWidget,
@@ -17033,7 +17059,6 @@ void main() {
         },
       );
     }
-
     testWidgets(
       'native channel header opens settings and leaves Huddle in the menu',
       (tester) async {

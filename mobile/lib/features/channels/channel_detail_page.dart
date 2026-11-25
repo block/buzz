@@ -670,8 +670,8 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       );
     }
 
-    final iosSettingsZoom =
-        !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+    final zoomSupport = useMemoized(supportsChatSettingsZoom);
+    final iosSettingsZoom = useFuture(zoomSupport).data == true;
     final headerKey = useMemoized(GlobalKey.new);
     final portraitCaptureKey = useMemoized(GlobalKey.new);
     final freezeSettingsPortrait = useState(false);
@@ -706,6 +706,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     }
 
     Future<void> openChannelDetails([Rect? bounds]) async {
+      if (!iosSettingsZoom) bounds = null;
       if (iosSettingsZoom && openingDetails.value) return;
       openingDetails.value = iosSettingsZoom;
       try {
@@ -895,7 +896,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                           timeline.isShowingPreview)) ||
                   messagesNotifier.isCatchingUp,
         onNativeTitlePressed: openChannelDetails,
-        portraitCaptureKey: portraitCaptureKey,
+        portraitCaptureKey: iosSettingsZoom ? portraitCaptureKey : null,
         onHiddenPortraitPainted: refreshHiddenPortrait,
         hideSettingsSource: hideSettingsSource.value,
         freezeSettingsPortrait: freezeSettingsPortrait.value,

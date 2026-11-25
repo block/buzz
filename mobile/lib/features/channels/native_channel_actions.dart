@@ -22,6 +22,20 @@ class _ChannelSheetRow extends StatelessWidget {
 }
 
 const _channelActionsBridge = MethodChannel('buzz/channel_actions_sheet');
+Future<bool> supportsChatSettingsZoom() async {
+  if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return false;
+  try {
+    return await _channelActionsBridge.invokeMethod<bool>(
+          'supportsChatSettingsZoom',
+        ) ??
+        false;
+  } on MissingPluginException {
+    return false;
+  } on PlatformException {
+    return false;
+  }
+}
+
 int _channelActionsSession = 0;
 
 class _NativeChannelActions extends HookConsumerWidget {
