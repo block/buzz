@@ -7,8 +7,7 @@ const maxCallSiteFrames = 64;
 /// [callSite] cut to its [maxCallSiteFrames] innermost frames. The cut is made
 /// only when the stack is first formatted, so an error its caller discards
 /// costs no formatting.
-StackTrace trimCallSite(StackTrace callSite) =>
-    callSite is _TrimmedCallSite ? callSite : _TrimmedCallSite(callSite);
+StackTrace trimCallSite(StackTrace callSite) => _TrimmedCallSite(callSite);
 
 final class _TrimmedCallSite implements StackTrace {
   _TrimmedCallSite(this._callSite);

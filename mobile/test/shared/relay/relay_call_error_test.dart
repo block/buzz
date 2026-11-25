@@ -159,6 +159,17 @@ void main() {
       );
     });
 
+    test('is formatted only when read, and only once', () async {
+      final callSite = _CountingStackTrace(maxCallSiteFrames + 36);
+
+      final trace = await completedWith(callSite);
+      expect(callSite.formats, 0);
+
+      trace.toString();
+      expect(frames(trace), maxCallSiteFrames);
+      expect(callSite.formats, 1);
+    });
+
     test('is kept whole when it is short', () async {
       final shallow = _stackFromDepth(3);
 
@@ -169,3 +180,19 @@ void main() {
 
 StackTrace _stackFromDepth(int depth) =>
     depth == 0 ? StackTrace.current : _stackFromDepth(depth - 1);
+
+final class _CountingStackTrace implements StackTrace {
+  _CountingStackTrace(this._lines);
+
+  final int _lines;
+  int formats = 0;
+
+  @override
+  String toString() {
+    formats++;
+    return List.generate(
+      _lines,
+      (i) => '#$i frame$i (file.dart:$i)',
+    ).join('\n');
+  }
+}
