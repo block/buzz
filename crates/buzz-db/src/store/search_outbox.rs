@@ -99,11 +99,11 @@ pub async fn enable(pool: &PgPool) -> Result<()> {
 /// search index is maintained, and return whether it is on. For processes
 /// other than the relay that change searchable events (account deletion),
 /// which have no OpenSearch address of their own.
-pub async fn enable_if_indexed(pool: &PgPool) -> Result<bool> {
+pub async fn enable_if_indexed(conn: &mut sqlx::PgConnection) -> Result<bool> {
     if ENABLED.load(Ordering::Relaxed) {
         return Ok(true);
     }
-    let maintained = index_maintained(pool).await?;
+    let maintained = index_maintained(conn).await?;
     if maintained {
         ENABLED.store(true, Ordering::Relaxed);
     }
@@ -116,13 +116,13 @@ pub async fn enable_if_indexed(pool: &PgPool) -> Result<bool> {
 /// both tables are empty, as they are before the first backfill and after an
 /// operator resets it. A deployment that never had an indexer has none of
 /// the three, so nothing is queued that no one would drain.
-pub(crate) async fn index_maintained(pool: &PgPool) -> Result<bool> {
+pub(crate) async fn index_maintained(conn: &mut sqlx::PgConnection) -> Result<bool> {
     let tables: bool = sqlx::query_scalar(
         "SELECT to_regclass('public.search_outbox') IS NOT NULL \
                 AND to_regclass('public.search_backfill') IS NOT NULL \
                 AND to_regclass('public.search_index_version') IS NOT NULL",
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await?;
     if !tables {
         return Ok(false);
@@ -132,7 +132,7 @@ pub(crate) async fn index_maintained(pool: &PgPool) -> Result<bool> {
                 OR EXISTS (SELECT 1 FROM search_outbox) \
                 OR EXISTS (SELECT 1 FROM search_backfill)",
     )
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await?)
 }
 

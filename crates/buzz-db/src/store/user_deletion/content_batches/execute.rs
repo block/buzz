@@ -31,10 +31,6 @@ impl UserDeletionStore {
         writer: &mut impl Write,
         stage: Option<(&EntityLease, Uuid)>,
     ) -> Result<ContentBatchSummary> {
-        // This runs outside the relay (`buzz-admin user-deletions`), where
-        // nothing else turns the outbox on: without it, scrubbed and erased
-        // messages would keep their documents in the search index.
-        crate::search_outbox::enable_if_indexed(&self.pool).await?;
         // A private one-connection pool pins the temporary worklist's session
         // while allowing each batch to own an admitted transaction. It never
         // returns temporary tables or session settings to the serving pool.
@@ -150,6 +146,11 @@ pub(super) async fn execute_owned_batch(
         .await?;
     crate::deletion::guard_community_write(&mut tx, crate::CommunityId::from_uuid(community))
         .await?;
+    // This runs outside the relay (`buzz-admin user-deletions`), where nothing
+    // else turns the outbox on. An indexer marks the database before it reads
+    // any message, and its reads wait for this lock, so checking here, per
+    // batch, also covers an indexer that starts mid-job.
+    crate::search_outbox::enable_if_indexed(&mut tx).await?;
     ownership::recheck(&mut tx, options, start).await?;
     if let Some((lease, stage_id)) = stage {
         let request = crate::store::entity_deletion::lock_owned(&mut tx, lease).await?;

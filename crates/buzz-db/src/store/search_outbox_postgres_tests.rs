@@ -242,12 +242,13 @@ async fn disabled_outbox_queues_nothing() {
 async fn the_index_counts_as_maintained_once_a_relay_enabled_it() {
     let db = connect().await;
     let pool = db.pool();
-    assert!(!search_outbox::index_maintained(pool)
+    let mut conn = pool.acquire().await.expect("connect");
+    assert!(!search_outbox::index_maintained(&mut conn)
         .await
         .expect("read before enabling"));
     // Mutation: drop the sequence check from index_maintained → RED.
     search_outbox::enable(pool).await.expect("enable outbox");
-    assert!(search_outbox::index_maintained(pool)
+    assert!(search_outbox::index_maintained(&mut conn)
         .await
         .expect("read after enabling"));
 }
