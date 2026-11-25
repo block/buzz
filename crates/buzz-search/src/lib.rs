@@ -29,6 +29,7 @@
 //! filters on the community first. A query bound to community
 //! A cannot return events stored under community B, by construction.
 
+mod aws_credentials;
 #[doc(hidden)]
 pub mod cancel;
 /// Search error types.

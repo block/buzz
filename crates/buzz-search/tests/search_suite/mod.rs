@@ -121,6 +121,7 @@ pub async fn test_index() -> SearchIndex {
         url: std::env::var("BUZZ_TEST_OPENSEARCH_URL")
             .unwrap_or_else(|_| "http://localhost:9200".to_string()),
         basic_auth: None,
+        aws_sigv4: None,
         index_prefix: format!("test-{}-", Uuid::new_v4().simple()),
     })
     .expect("OpenSearch client");

@@ -306,7 +306,8 @@ pub struct Config {
     pub storage_usage_delivery_url: Option<url::Url>,
 
     /// OpenSearch cluster for message search (`BUZZ_OPENSEARCH_URL`, with
-    /// optional `BUZZ_OPENSEARCH_USERNAME` and `BUZZ_OPENSEARCH_PASSWORD`).
+    /// optional `BUZZ_OPENSEARCH_USERNAME` and `BUZZ_OPENSEARCH_PASSWORD`, or
+    /// `BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE` and `BUZZ_OPENSEARCH_AWS_REGION`).
     /// When set, admitted messages are queued in the search outbox and the
     /// indexer keeps the index up to date; searches still use Postgres.
     pub opensearch: Option<buzz_search::opensearch::OpenSearchConfig>,
@@ -1042,6 +1043,17 @@ impl Config {
             parse_bool("BUZZ_OPENSEARCH_PREVIEW", false)?,
         )
         .map_err(ConfigError::InvalidValue)?;
+        let aws_region = match optional_utf8_env("AWS_REGION")? {
+            Some(region) if !region.trim().is_empty() => Some(region),
+            _ => optional_utf8_env("AWS_DEFAULT_REGION")?,
+        };
+        let opensearch = with_opensearch_aws_sigv4(
+            opensearch,
+            optional_utf8_env("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE")?,
+            optional_utf8_env("BUZZ_OPENSEARCH_AWS_REGION")?,
+            aws_region,
+        )
+        .map_err(ConfigError::InvalidValue)?;
         let search_indexer_workers =
             parse_search_indexer_workers(optional_utf8_env("BUZZ_SEARCH_INDEXER_WORKERS")?)
                 .map_err(ConfigError::InvalidValue)?;
@@ -1734,8 +1746,53 @@ fn parse_opensearch_config(
     Ok(Some(buzz_search::opensearch::OpenSearchConfig {
         url: parsed.to_string(),
         basic_auth,
+        aws_sigv4: None,
         index_prefix: buzz_search::opensearch::DEFAULT_INDEX_PREFIX.to_string(),
     }))
+}
+
+/// Add AWS SigV4 request signing to the OpenSearch settings.
+/// `BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE` turns it on and names the signing
+/// service: `es` for a managed domain, `aoss` for a Serverless collection.
+/// The region is `BUZZ_OPENSEARCH_AWS_REGION`, or else the AWS environment's
+/// own (`aws_region`). Empty values count as unset.
+///
+/// Signing replaces basic auth, so the two together are refused, as is
+/// signing without a region.
+fn with_opensearch_aws_sigv4(
+    opensearch: Option<buzz_search::opensearch::OpenSearchConfig>,
+    service: Option<String>,
+    region: Option<String>,
+    aws_region: Option<String>,
+) -> Result<Option<buzz_search::opensearch::OpenSearchConfig>, String> {
+    let set = |value: Option<String>| {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let (service, region) = (set(service), set(region));
+    let Some(service) = service else {
+        if region.is_some() {
+            return Err(
+                "BUZZ_OPENSEARCH_AWS_REGION needs BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE".into(),
+            );
+        }
+        return Ok(opensearch);
+    };
+    let Some(mut opensearch) = opensearch else {
+        return Err("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE needs BUZZ_OPENSEARCH_URL".into());
+    };
+    if !matches!(service.as_str(), "es" | "aoss") {
+        return Err("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE must be es (a managed domain) or aoss (a Serverless collection)".into());
+    }
+    if opensearch.basic_auth.is_some() {
+        return Err("set BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE or BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD, not both".into());
+    }
+    let Some(region) = region.or(set(aws_region)) else {
+        return Err("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE needs a region: set BUZZ_OPENSEARCH_AWS_REGION or AWS_REGION".into());
+    };
+    opensearch.aws_sigv4 = Some(buzz_search::opensearch::AwsSigV4 { service, region });
+    Ok(Some(opensearch))
 }
 
 #[cfg(test)]
@@ -1807,6 +1864,73 @@ mod tests {
             assert!(
                 parse_opensearch_config(url.clone(), username, password, true).is_err(),
                 "{url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn opensearch_aws_sigv4_is_off_by_default_and_validated() {
+        let some = |value: &str| Some(value.to_string());
+        let cluster = |username: Option<String>, password: Option<String>| {
+            parse_opensearch_config(some("https://search.example.org"), username, password, true)
+                .unwrap()
+        };
+        let signing = |config: Option<buzz_search::opensearch::OpenSearchConfig>| {
+            config.and_then(|config| config.aws_sigv4)
+        };
+
+        let unsigned =
+            with_opensearch_aws_sigv4(cluster(None, None), None, some(" "), some("us-east-1"));
+        assert_eq!(signing(unsigned.unwrap()), None);
+        let basic = with_opensearch_aws_sigv4(
+            cluster(some("relay"), some("secret")),
+            None,
+            None,
+            some("us-east-1"),
+        );
+        assert!(basic.unwrap().unwrap().basic_auth.is_some());
+
+        for (service, region, aws_region, expected) in [
+            ("aoss", some("eu-west-1"), some("us-east-1"), "eu-west-1"),
+            ("es", None, some("us-east-1"), "us-east-1"),
+        ] {
+            let signed =
+                with_opensearch_aws_sigv4(cluster(None, None), some(service), region, aws_region);
+            let signed = signing(signed.unwrap()).unwrap();
+            assert_eq!(
+                (signed.service.as_str(), signed.region.as_str()),
+                (service, expected)
+            );
+        }
+
+        for (opensearch, service, region, aws_region, why) in [
+            (cluster(None, None), some("aoss"), None, None, "no region"),
+            (
+                cluster(None, None),
+                some("s3"),
+                some("us-east-1"),
+                None,
+                "unknown service",
+            ),
+            (
+                cluster(some("relay"), some("secret")),
+                some("aoss"),
+                some("us-east-1"),
+                None,
+                "with basic auth",
+            ),
+            (None, some("aoss"), some("us-east-1"), None, "no URL"),
+            (
+                cluster(None, None),
+                None,
+                some("us-east-1"),
+                None,
+                "region without service",
+            ),
+        ] {
+            assert!(
+                with_opensearch_aws_sigv4(opensearch, service, region, aws_region).is_err(),
+                "{why}"
             );
         }
     }

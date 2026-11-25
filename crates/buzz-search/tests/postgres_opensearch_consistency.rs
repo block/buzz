@@ -144,6 +144,7 @@ impl Proxy {
         SearchIndex::new(&OpenSearchConfig {
             url: self.url.clone(),
             basic_auth: None,
+            aws_sigv4: None,
             index_prefix: prefix.into(),
         })
         .expect("proxied client")
@@ -1402,6 +1403,7 @@ async fn run(db: &Db, seed: u64, ops: usize) -> Result<RunReport, Vec<String>> {
     let direct = SearchIndex::new(&OpenSearchConfig {
         url: opensearch_url(),
         basic_auth: None,
+        aws_sigv4: None,
         index_prefix: prefix.clone(),
     })
     .expect("client");

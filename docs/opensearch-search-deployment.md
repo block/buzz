@@ -8,8 +8,26 @@ messages stored before it was set. Searches still run on Postgres.
 | --- | --- |
 | `BUZZ_OPENSEARCH_URL` | HTTP(S) cluster URL without credentials, query or fragment. Unset turns indexing off. |
 | `BUZZ_OPENSEARCH_USERNAME`, `BUZZ_OPENSEARCH_PASSWORD` | Optional basic auth. Set both or neither. |
+| `BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE` | Optional AWS SigV4 request signing, for Amazon OpenSearch Service: `es` for a managed domain, `aoss` for a Serverless collection. Unset turns signing off. Not combined with basic auth. |
+| `BUZZ_OPENSEARCH_AWS_REGION` | Region to sign for. Defaults to `AWS_REGION`, then `AWS_DEFAULT_REGION`. Signing needs one of them. |
 | `BUZZ_SEARCH_INDEXER_WORKERS` | Indexer workers on the relay that holds the lease: 1 to 32, default 1. Each holds one connection from `BUZZ_DB_POOL_SIZE` for the length of a bulk request, so leave the pool room for them. |
 | `BUZZ_OPENSEARCH_PREVIEW` | Required with the URL for now, because deleting a community leaves its messages in the index. Use it only on relays without real data. |
+
+## AWS request signing
+
+With signing on, the relay takes credentials from the standard AWS chain:
+environment variables, the shared profile, a web identity token, then the
+container or instance role. It reloads them before they expire, and static
+keys every 15 minutes, so role credentials and a key changed in the shared
+profile are picked up without a restart. The identity needs HTTP access to
+the domain or, for Serverless, a data access policy on the collection and its
+`buzz-*` indexes plus `aoss:APIAccessAll`.
+
+When a load fails, the relay logs only the kind of error. For the cause, add
+`aws_config=warn` to `RUST_LOG`. That output can include what a
+`credential_process` helper printed, so make sure the helper prints no
+secrets. A helper should also bound its own run time: the relay gives up on a
+load that takes too long but does not stop a helper that hangs.
 
 ## Rollout order
 

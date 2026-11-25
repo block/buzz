@@ -89,6 +89,7 @@ async fn sync_index() -> (SearchIndex, String) {
     let index = SearchIndex::new(&OpenSearchConfig {
         url: opensearch_url(),
         basic_auth: None,
+        aws_sigv4: None,
         index_prefix: prefix.clone(),
     })
     .expect("OpenSearch client");
@@ -268,6 +269,7 @@ async fn admission_queues_while_opensearch_is_unreachable() {
     let unreachable = SearchIndex::new(&OpenSearchConfig {
         url: "http://127.0.0.1:9".into(),
         basic_auth: None,
+        aws_sigv4: None,
         index_prefix: "unreachable-".into(),
     })
     .expect("client");
@@ -321,6 +323,7 @@ async fn a_failed_bulk_item_keeps_only_its_own_row() {
     let index = SearchIndex::new(&OpenSearchConfig {
         url: opensearch_url(),
         basic_auth: None,
+        aws_sigv4: None,
         index_prefix: prefix.clone(),
     })
     .expect("client");
@@ -1069,6 +1072,7 @@ impl Proxy {
         SearchIndex::new(&OpenSearchConfig {
             url: self.url.clone(),
             basic_auth: None,
+            aws_sigv4: None,
             index_prefix: prefix.into(),
         })
         .expect("proxied client")
