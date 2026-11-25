@@ -2767,6 +2767,14 @@ async fn handle_bridge_search(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let mut events: Vec<Value> = Vec::new();
     let mut seen_ids: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    // Searches that finished, served only once the whole response is: a
+    // later filter's failure means the searcher got none of them.
+    let mut finished: Vec<crate::search_log::SearchLog> = Vec::new();
+    let fail_finished = |finished: &mut Vec<crate::search_log::SearchLog>| {
+        finished
+            .iter_mut()
+            .for_each(|log| log.error("other_filter_failed"));
+    };
 
     for (raw, filter) in raw_filters.iter().zip(filters) {
         let search_mode = extract_search_mode(raw);
@@ -2845,11 +2853,14 @@ async fn handle_bridge_search(
             sort: extract_search_sort(raw),
         };
 
-        let search_result = state
-            .search
-            .search(&search_query)
-            .await
-            .map_err(|e| search_read_error("search error", &e))?;
+        let mut search_log =
+            crate::search_log::SearchLog::start("http", state, pubkey_bytes, &search_query, limit);
+        let search_result = state.search.search(&search_query).await.map_err(|e| {
+            search_log.error("search_failed");
+            fail_finished(&mut finished);
+            search_read_error("search error", &e)
+        })?;
+        search_log.backend_hits(search_result.hits.len());
 
         // Fetch full events by exact hit keys. Hit ids are already raw 32-byte
         // arrays from the FTS layer — no hex decode.
@@ -2860,6 +2871,8 @@ async fn handle_bridge_search(
             .collect();
 
         if hit_keys.is_empty() {
+            search_log.stop_clock();
+            finished.push(search_log);
             continue;
         }
 
@@ -2867,7 +2880,15 @@ async fn handle_bridge_search(
             .db
             .get_events_by_ids_at_routed("bridge_search_hydrate", tenant.community(), &hit_keys)
             .await
-            .map_err(|e| db_read_error("search fetch error", &e))?;
+            .map_err(|e| {
+                search_log.error(if e.is_statement_cancelled() {
+                    "query_timed_out"
+                } else {
+                    "database_error"
+                });
+                fail_finished(&mut finished);
+                db_read_error("search fetch error", &e)
+            })?;
 
         // Build lookup map to preserve FTS ordering.
         let event_map: std::collections::HashMap<[u8; 32], &buzz_core::StoredEvent> = stored_events
@@ -2899,10 +2920,16 @@ async fn handle_bridge_search(
             }
             if let Ok(v) = serde_json::to_value(&stored.event) {
                 events.push(v);
+                search_log.returned(*id_array);
             }
         }
+        search_log.stop_clock();
+        finished.push(search_log);
     }
 
+    finished
+        .iter_mut()
+        .for_each(crate::search_log::SearchLog::served);
     Ok(Json(Value::Array(events)))
 }
 
@@ -3565,6 +3592,138 @@ pub(crate) mod postgres_tests {
             .expect("sign auth event")
             .id
             .to_bytes()
+    }
+
+    /// `/query` search logs one `search` line per search filter, with its
+    /// page, query shape and the ids it returned in response order; a search
+    /// with no matches logs `result_count` 0 and is still `served`. When a
+    /// later filter fails, the searcher gets none of the results, so the
+    /// filter that finished logs `other_filter_failed`, not `served`; a
+    /// request dropped mid-search logs `aborted`.
+    /// Mutations: drop the final `served` loop → `aborted` → RED; drop
+    /// `search_log.returned` → `hit_ids` empty → RED; drop the search-error
+    /// `fail_finished` call → `served` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn bridge_search_logs_shape_and_returned_hit_ids() {
+        use crate::search_log::{test_support, TARGET};
+        let fx = test_support::Seeded::new().await;
+        let raw_filters = vec![
+            serde_json::json!({"kinds": [9], "search": "needle", "search_sort": "newest", "limit": 1}),
+            serde_json::json!({"kinds": [9], "search": "\"needle\" https://example.org/x"}),
+        ];
+        let filters: Vec<nostr::Filter> = raw_filters
+            .iter()
+            .map(|raw| serde_json::from_value(raw.clone()).expect("filter"))
+            .collect();
+        let reader = fx.reader.public_key();
+
+        let (guard, out) = crate::access::tests::capture_scoped();
+        let Json(body) = handle_bridge_search(
+            &fx.state,
+            &raw_filters,
+            &filters,
+            &[fx.channel],
+            &crate::handlers::system_channels::NamedOnlyChannels::default(),
+            &fx.tenant,
+            &reader.to_hex(),
+            &reader.to_bytes(),
+        )
+        .await
+        .expect("search");
+        drop(guard);
+
+        let returned: Vec<&str> = body
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|e| e["id"].as_str().expect("id"))
+            .collect();
+        assert_eq!(returned.len(), 1, "limit 1: {body}");
+        let lines = test_support::lines(&out, TARGET);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        let (hit, miss) = (&lines[0], &lines[1]);
+        assert_eq!(hit["transport"], "http", "{hit}");
+        assert_eq!(hit["sort"], "newest", "{hit}");
+        assert_eq!(hit["page"], 1, "{hit}");
+        assert_eq!(hit["limit"], 1, "{hit}");
+        assert_eq!(hit["outcome"], "served", "{hit}");
+        assert_eq!(hit["result_count"], 1, "{hit}");
+        assert_eq!(hit["hit_ids"], returned[0], "{hit}");
+        assert_eq!(hit["searcher"], reader.to_hex(), "{hit}");
+        assert_eq!(miss["outcome"], "served", "{miss}");
+        assert_eq!(miss["result_count"], 0, "{miss}");
+        assert_eq!(miss["backend_hits"], 0, "{miss}");
+        assert_eq!(miss["word_count"], 2, "{miss}");
+        assert_eq!(miss["quoted"], true, "{miss}");
+        assert_eq!(miss["has_url"], true, "{miss}");
+        assert!(!out.raw().contains("needle"), "{}", out.raw());
+
+        // Runs the real handler over `raw_filters`, dropping it unfinished
+        // when `drop_after_one_poll`, and returns its result (if it finished)
+        // and what it logged.
+        let run = |raw_filters: Vec<Value>, drop_after_one_poll: bool| {
+            let fx = &fx;
+            async move {
+                let filters: Vec<nostr::Filter> = raw_filters
+                    .iter()
+                    .map(|raw| serde_json::from_value(raw.clone()).expect("filter"))
+                    .collect();
+                let (guard, out) = crate::access::tests::capture_scoped();
+                let (reader_hex, reader_bytes) = (reader.to_hex(), reader.to_bytes());
+                let channels = [fx.channel];
+                let named_only = crate::handlers::system_channels::NamedOnlyChannels::default();
+                let search = handle_bridge_search(
+                    &fx.state,
+                    &raw_filters,
+                    &filters,
+                    &channels,
+                    &named_only,
+                    &fx.tenant,
+                    &reader_hex,
+                    &reader_bytes,
+                );
+                let result = if drop_after_one_poll {
+                    // A zero timeout polls the search once, then drops it.
+                    let timed_out = tokio::time::timeout(std::time::Duration::ZERO, search).await;
+                    assert!(timed_out.is_err(), "the search finished in one poll");
+                    None
+                } else {
+                    Some(search.await.map(|_| ()))
+                };
+                drop(guard);
+                (result, test_support::lines(&out, TARGET))
+            }
+        };
+
+        // Postgres rejects a `since` past its last representable timestamp,
+        // so the second filter fails after the first has finished.
+        let (result, lines) = run(
+            vec![
+                serde_json::json!({"kinds": [9], "search": "needle"}),
+                serde_json::json!({"kinds": [9], "search": "needle", "since": 100_000_000_000_000_u64}),
+            ],
+            false,
+        )
+        .await;
+        assert!(matches!(result, Some(Err(_))), "{result:?}");
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        let (failed, finished): (Vec<_>, Vec<_>) =
+            lines.iter().partition(|line| line["since"].is_u64());
+        let (failed, finished) = (failed[0], finished[0]);
+        assert_eq!(finished["outcome"], "error", "{finished}");
+        assert_eq!(finished["reason"], "other_filter_failed", "{finished}");
+        assert_eq!(finished["result_count"], 2, "{finished}");
+        assert_eq!(failed["outcome"], "error", "{failed}");
+        assert_eq!(failed["reason"], "search_failed", "{failed}");
+
+        let (_, lines) = run(
+            vec![serde_json::json!({"kinds": [9], "search": "needle"})],
+            true,
+        )
+        .await;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["outcome"], "aborted", "{}", lines[0]);
     }
 
     #[test]

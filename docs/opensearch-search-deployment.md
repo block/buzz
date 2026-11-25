@@ -41,6 +41,9 @@ psql -c 'SELECT count(*), min(created_at) FROM search_outbox'
 The index holds the words of every indexed message, DMs included, so anyone
 who can query the cluster can search them. Limit cluster access to the relays.
 
+To compare backends before and after a switch, use the per-search log lines
+described in [search-logging.md](search-logging.md).
+
 If you stream Postgres changes through logical replication, leave
 `search_outbox` out of the publication. Its rows are short-lived queue
 entries.

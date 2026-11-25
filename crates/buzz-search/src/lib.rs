@@ -104,6 +104,15 @@ impl SearchService {
         }
     }
 
+    /// The engine answering [`SearchService::search`], as logged:
+    /// `"postgres"` or `"opensearch"`.
+    pub fn backend_name(&self) -> &'static str {
+        match self.backend {
+            Backend::Postgres => "postgres",
+            Backend::OpenSearch(_) => "opensearch",
+        }
+    }
+
     /// Execute a community-scoped message search.
     pub async fn search(&self, query: &SearchQuery) -> Result<SearchResult, SearchError> {
         match &self.backend {

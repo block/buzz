@@ -311,6 +311,12 @@ pub struct Config {
     /// indexer keeps the index up to date; searches still use Postgres.
     pub opensearch: Option<buzz_search::opensearch::OpenSearchConfig>,
 
+    /// `BUZZ_SEARCH_LOG_QUERY_TEXT_RETENTION_DAYS`: how many days a
+    /// deployment keeps logged search text. Set, each search also logs its
+    /// text on `buzz_relay::search::text` stamped with this value; unset (the
+    /// default) logs no search text. See `docs/search-logging.md`.
+    pub search_log_query_text_retention_days: Option<u32>,
+
     /// Allow NIP-OA owner attestation for relay membership.
     ///
     /// When `true` and `require_relay_membership` is also `true`, agents
@@ -1036,6 +1042,10 @@ impl Config {
             parse_bool("BUZZ_OPENSEARCH_PREVIEW", false)?,
         )
         .map_err(ConfigError::InvalidValue)?;
+        let search_log_query_text_retention_days = parse_search_text_retention(optional_utf8_env(
+            "BUZZ_SEARCH_LOG_QUERY_TEXT_RETENTION_DAYS",
+        )?)
+        .map_err(ConfigError::InvalidValue)?;
         if !operator_listener_delivery_urls.is_empty() && relay_operator_api_origin.is_none() {
             error!(
                 "BUZZ_OPERATOR_LISTENERS is set but RELAY_OPERATOR_API_ORIGIN is not — operator-listener registration requests will reject every request until RELAY_OPERATOR_API_ORIGIN is set"
@@ -1586,6 +1596,7 @@ impl Config {
             operator_listener_delivery_urls,
             storage_usage_delivery_url,
             opensearch,
+            search_log_query_text_retention_days,
             allow_nip_oa_auth,
             klipy,
             media,
@@ -1658,6 +1669,20 @@ fn optional_utf8_env(name: &str) -> Result<Option<String>, ConfigError> {
         Err(error) => Err(ConfigError::InvalidValue(format!(
             "{name} must be valid UTF-8: {error}"
         ))),
+    }
+}
+
+/// Parse `BUZZ_SEARCH_LOG_QUERY_TEXT_RETENTION_DAYS`: a whole number of days,
+/// at least 1. Unset or empty logs no search text.
+fn parse_search_text_retention(raw: Option<String>) -> Result<Option<u32>, String> {
+    let Some(raw) = raw.filter(|raw| !raw.trim().is_empty()) else {
+        return Ok(None);
+    };
+    match raw.trim().parse::<u32>() {
+        Ok(days) if days > 0 => Ok(Some(days)),
+        _ => Err(format!(
+            "BUZZ_SEARCH_LOG_QUERY_TEXT_RETENTION_DAYS must be a whole number of days, at least 1: {raw:?}"
+        )),
     }
 }
 
@@ -3255,6 +3280,25 @@ mod tests {
             !config.huddle_audio_available,
             "BUZZ_HUDDLE_AUDIO_AVAILABLE=false must disable huddle audio (multi-pod deployments)"
         );
+    }
+
+    #[test]
+    fn search_text_retention_is_off_unless_a_positive_day_count() {
+        for (raw, want) in [
+            (None, Ok(None)),
+            (Some(""), Ok(None)),
+            (Some(" 7 "), Ok(Some(7))),
+            (Some("0"), Err(())),
+            (Some("-1"), Err(())),
+            (Some("7d"), Err(())),
+            (Some("true"), Err(())),
+        ] {
+            assert_eq!(
+                parse_search_text_retention(raw.map(str::to_owned)).map_err(|_| ()),
+                want,
+                "{raw:?}"
+            );
+        }
     }
 
     #[test]
