@@ -960,14 +960,15 @@ async fn no_community_reports_a_complete_backfill_while_it_runs_again() {
     .expect("both backfills complete and are indexed");
 
     // Rebuild, holding the first write into the new index: the first
-    // community's first batch is queued, the second's not yet.
+    // community's first batch is queued, the second's not yet. The hold
+    // starts with the create, so a pass before the index delete passes.
     let (arrived, held) = tokio::sync::oneshot::channel();
     let (release, released) = tokio::sync::oneshot::channel();
     proxy
-        .set(Bulk::Hold {
+        .set_create(Create::Then(Bulk::Hold {
             arrived,
             release: released,
-        })
+        }))
         .await;
     sqlx::query("DELETE FROM search_backfill")
         .execute(db.pool())
@@ -1022,6 +1023,8 @@ enum Create {
     /// Create the index, then answer HTTP 503, as when the relay stops
     /// right after the cluster created it.
     Lose(tokio::sync::oneshot::Sender<()>),
+    /// Create the index, and apply this to the bulk requests that follow.
+    Then(Bulk),
 }
 
 /// An HTTP proxy in front of the test cluster that can throttle or hold
@@ -1120,6 +1123,7 @@ async fn proxy_request(
                 return unavailable();
             }
             Some(Create::Lose(done)) => lost = Some(done),
+            Some(Create::Then(next)) => *bulk.lock().await = next,
         }
     }
     if parts.uri.path().ends_with("/_bulk") {
