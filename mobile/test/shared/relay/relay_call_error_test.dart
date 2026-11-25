@@ -130,4 +130,103 @@ void main() {
       expect(error.duration, const Duration(seconds: 8));
     });
   });
+
+  group('the stack an escaped error carries', () {
+    List<String> lines(StackTrace trace) =>
+        trace.toString().trimRight().split('\n');
+    const gap = '<asynchronous suspension>';
+
+    Future<StackTrace> completedWith(StackTrace callSite) async {
+      final completer = Completer<void>();
+      completer.completeErrorAt(Exception('late'), callSite);
+      try {
+        await completer.future;
+      } catch (_, trace) {
+        return trace;
+      }
+      throw StateError('the completer did not fail');
+    }
+
+    test('is cut to the innermost $maxCallSiteFrames lines', () async {
+      final deep = _stackFromDepth(maxCallSiteFrames * 3);
+      final deepLines = lines(deep);
+      expect(deepLines.indexOf(gap), greaterThan(maxCallSiteFrames));
+
+      final trace = await completedWith(deep);
+
+      expect(lines(trace), [...deepLines.take(maxCallSiteFrames), gap]);
+    });
+
+    // A stack whose kept lines hold no async gap gets one after them, so
+    // Sentry's parser reads it as a VM stack without first trying other
+    // formats. A gap it already keeps needs none: a second one would parse as
+    // an extra frame.
+    for (final (gapLine, appended) in [
+      (null, true),
+      (30, false),
+      (maxCallSiteFrames, false),
+      (maxCallSiteFrames + 1, true),
+      (maxCallSiteFrames + 40, true),
+    ]) {
+      test('with its first gap on line $gapLine '
+          '${appended ? 'gets one after the cut' : 'gets no other'}', () async {
+        final callSite = _TextStackTrace(
+          List.generate(
+            maxCallSiteFrames + 60,
+            (i) => i + 1 == gapLine ? gap : '#$i frame$i (file.dart:$i)',
+          ),
+        );
+
+        expect(lines(await completedWith(callSite)), [
+          ...callSite.lines.take(maxCallSiteFrames),
+          if (appended) gap,
+        ]);
+      });
+    }
+
+    test('is formatted only when read, and only once', () async {
+      final callSite = _CountingStackTrace(maxCallSiteFrames + 36);
+
+      final trace = await completedWith(callSite);
+      expect(callSite.formats, 0);
+
+      trace.toString();
+      expect(lines(trace), hasLength(maxCallSiteFrames + 1));
+      expect(callSite.formats, 1);
+    });
+
+    test('is kept whole when it is short', () async {
+      final shallow = _stackFromDepth(3);
+
+      expect((await completedWith(shallow)).toString(), shallow.toString());
+    });
+  });
+}
+
+StackTrace _stackFromDepth(int depth) =>
+    depth == 0 ? StackTrace.current : _stackFromDepth(depth - 1);
+
+final class _CountingStackTrace implements StackTrace {
+  _CountingStackTrace(this._lines);
+
+  final int _lines;
+  int formats = 0;
+
+  @override
+  String toString() {
+    formats++;
+    return List.generate(
+      _lines,
+      (i) => '#$i frame$i (file.dart:$i)',
+    ).join('\n');
+  }
+}
+
+final class _TextStackTrace implements StackTrace {
+  _TextStackTrace(this.lines);
+
+  final List<String> lines;
+
+  @override
+  String toString() => '${lines.join('\n')}\n';
 }

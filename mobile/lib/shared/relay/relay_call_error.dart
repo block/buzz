@@ -1,5 +1,47 @@
 import 'dart:async';
 
+/// The most lines of a call site's stack that an error carries, counting
+/// `<asynchronous suspension>` gaps and any symbolication header. Sentry parses
+/// a whole stack synchronously and has no cap of its own.
+const maxCallSiteFrames = 64;
+
+/// The line the Dart VM writes for an async gap in a stack.
+const _asyncGap = '<asynchronous suspension>';
+
+/// [callSite] cut to its [maxCallSiteFrames] innermost lines. The cut is made
+/// only when the stack is first formatted, so an error its caller discards
+/// costs no formatting.
+StackTrace trimCallSite(StackTrace callSite) => _TrimmedCallSite(callSite);
+
+final class _TrimmedCallSite implements StackTrace {
+  _TrimmedCallSite(this._callSite);
+
+  final StackTrace _callSite;
+
+  late final String _text = () {
+    final text = _callSite.toString();
+    final lines = text.trimRight().split('\n');
+    if (lines.length <= maxCallSiteFrames) return text;
+    final kept = lines.take(maxCallSiteFrames).toList();
+    // stack_trace's `Chain.parse`, which Sentry uses, reads a VM stack
+    // directly only when it holds a gap line; without one it first tries
+    // other formats with whole-text regex scans. When the kept lines hold no
+    // gap, one after them keeps that fast path; a trailing gap adds no frame.
+    if (!kept.contains(_asyncGap)) kept.add(_asyncGap);
+    return '${kept.join('\n')}\n';
+  }();
+
+  @override
+  String toString() => _text;
+}
+
+extension RelayCallSiteCompleter<T> on Completer<T> {
+  /// Completes with [error] and the trimmed stack of the call that made this
+  /// completer, for errors that a timer or a socket callback completes later.
+  void completeErrorAt(Object error, StackTrace callSite) =>
+      completeError(error, trimCallSite(callSite));
+}
+
 /// The relay call an error came from.
 enum RelayCall {
   /// An EVENT sent over the socket and acknowledged with OK.

@@ -328,6 +328,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    final callSite = StackTrace.current;
     final generation = _contextGeneration;
     if (_rateLimitGate.isActive) await _rateLimitGate.wait();
     if (_disposed || generation != _contextGeneration) {
@@ -335,7 +336,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     }
     final subId = _nextSubId('h');
     final completer = Completer<List<NostrEvent>>();
-
     final timer = Timer(timeout, () {
       final sub = _historySubscriptions.remove(subId);
       if (sub != null && !sub.completer.isCompleted) {
@@ -353,6 +353,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       completer: completer,
       timeout: timer,
       startedAt: _now(),
+      callSite: callSite,
     );
     _historySubscriptions[subId] = subscription;
 
@@ -458,6 +459,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     Duration timeout = const Duration(seconds: 8),
     Future<bool> Function()? mayPublish,
   }) async {
+    final callSite = StackTrace.current;
     final generation = _connectionGeneration;
     if (_rateLimitGate.isActive) await _rateLimitGate.wait();
     bool connected() => _isActiveConnection(generation) && _socketConnected;
@@ -465,7 +467,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     if ((mayPublish != null && !await mayPublish()) || !connected()) {
       throw StateError('Event no longer wanted');
     }
-
     final completer = Completer<NostrEvent>();
     final timer = Timer(timeout, () {
       final pending = _pendingEvents.remove(event.id);
@@ -483,6 +484,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       completer: completer,
       timeout: timer,
       startedAt: _now(),
+      callSite: callSite,
     );
 
     _socket?.send(['EVENT', event.toJson()]);
@@ -938,7 +940,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     if (closedClass == RelayClosedClass.terminal &&
         !isRelayDeadlineError(message)) {
       if (readyCompleter != null && !readyCompleter.isCompleted) {
-        readyCompleter.completeError(
+        readyCompleter.completeErrorAt(
           RelayClosedException(RelayCall.subscribe, message),
           liveSub.callSite,
         );

@@ -6,11 +6,12 @@ class _HistorySubscription {
   final Timer timeout;
   final DateTime startedAt;
 
-  /// Where the call was made. Errors completed later, from a timer or a
-  /// socket callback, carry it, so an escaped error's stack reaches the caller.
-  final StackTrace callSite = StackTrace.current;
+  /// Where the call was made, before any wait. Errors completed later, from a
+  /// timer or a socket callback, carry it, so an escaped error's stack reaches
+  /// the caller.
+  final StackTrace callSite;
 
-  void fail(Object error) => completer.completeError(error, callSite);
+  void fail(Object error) => completer.completeErrorAt(error, callSite);
 
   void timedOut(Duration timeout) => fail(
     RelayTimeoutException(
@@ -27,6 +28,7 @@ class _HistorySubscription {
     required this.completer,
     required this.timeout,
     required this.startedAt,
+    required this.callSite,
   });
 }
 
@@ -97,11 +99,12 @@ class _PendingEvent {
   final Timer timeout;
   final DateTime startedAt;
 
-  /// Where the call was made. Errors completed later, from a timer or a
-  /// socket callback, carry it, so an escaped error's stack reaches the caller.
-  final StackTrace callSite = StackTrace.current;
+  /// Where the call was made, before any wait. Errors completed later, from a
+  /// timer or a socket callback, carry it, so an escaped error's stack reaches
+  /// the caller.
+  final StackTrace callSite;
 
-  void fail(Object error) => completer.completeError(error, callSite);
+  void fail(Object error) => completer.completeErrorAt(error, callSite);
 
   void timedOut(String eventId, Duration timeout) => fail(
     RelayAckTimeoutError(
@@ -114,6 +117,7 @@ class _PendingEvent {
     required this.completer,
     required this.timeout,
     required this.startedAt,
+    required this.callSite,
   });
 }
 
