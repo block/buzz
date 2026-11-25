@@ -18,15 +18,31 @@ fn db_error(error: buzz_db::DbError) -> IngestError {
 
 /// The Git grant an event carries, as a Git door proves one: a tag that
 /// verifies as neither kind is refused.
-fn grant(event: &Event) -> Result<Option<buzz_core::governance::GitGrant>, IngestError> {
-    crate::api::relay_members::git_owner(
+async fn grant(
+    tenant: &TenantContext,
+    state: &AppState,
+    event: &Event,
+) -> Result<Option<buzz_core::governance::GitGrant>, IngestError> {
+    use crate::api::relay_members::{link_agent_owner, OwnerLink, OWNER_MISMATCH};
+    let (owner, grant) = crate::api::relay_members::git_owner(
         &event.pubkey,
         super::auth::extract_auth_tag_json(event).as_deref(),
         Some(event.created_at.as_secs()),
         None,
     )
-    .map(|(_, grant)| grant)
-    .map_err(|refusal| IngestError::AuthFailed(refusal.into()))
+    .map_err(|refusal| IngestError::AuthFailed(refusal.into()))?;
+    if let Some(owner) = owner {
+        match link_agent_owner(state, tenant, &event.pubkey, &owner).await {
+            OwnerLink::Linked => {}
+            OwnerLink::Conflict => return Err(IngestError::AuthFailed(OWNER_MISMATCH.into())),
+            OwnerLink::Unavailable => {
+                return Err(IngestError::Internal(
+                    "error: owner link unavailable".into(),
+                ))
+            }
+        }
+    }
+    Ok(grant)
 }
 
 pub(super) async fn apply(
@@ -35,12 +51,12 @@ pub(super) async fn apply(
     event: &Event,
 ) -> Result<(), IngestError> {
     let command = Command::parse(event).map_err(IngestError::Rejected)?;
-    let grant = grant(event)?;
     if command.community != *tenant.community().as_uuid() {
         return Err(IngestError::AuthFailed(
             "restricted: command community mismatch".into(),
         ));
     }
+    let grant = grant(tenant, state, event).await?;
     let mut tx = state
         .db
         .begin_event_write_transaction(tenant.community())
@@ -85,7 +101,13 @@ pub(super) async fn evidence(
     state: &AppState,
     event: &Event,
 ) -> Result<(), IngestError> {
-    let grant = grant(event)?;
+    let evidence = buzz_core::governance::Evidence::parse(event).map_err(IngestError::Rejected)?;
+    if evidence.community != *tenant.community().as_uuid() {
+        return Err(IngestError::AuthFailed(
+            "restricted: evidence community mismatch".into(),
+        ));
+    }
+    let grant = grant(tenant, state, event).await?;
     let mut tx = state
         .db
         .begin_event_write_transaction(tenant.community())

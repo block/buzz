@@ -1308,3 +1308,76 @@ async fn restricted_governance_requires_recorded_owner_admission() {
         }
     }
 }
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn evidence_records_verified_owner_and_refuses_owner_switch() {
+    let (state, tenant, agent, subject) = fixture().await;
+    let owner = Keys::generate();
+    let approval = |owner: &Keys| {
+        let tag = buzz_sdk::nip_oa::compute_auth_tag(owner, &agent.public_key(), "").unwrap();
+        let parts: Vec<String> = serde_json::from_str(&tag).unwrap();
+        subject
+            .builder()
+            .unwrap()
+            .tags([Tag::parse(parts).unwrap()])
+            .sign_with_keys(&agent)
+            .unwrap()
+    };
+    // A signed statement for a different community must not mint an owner here.
+    let wrong_subject = Evidence {
+        community: uuid::Uuid::new_v4(),
+        ..subject.clone()
+    };
+    let tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "").unwrap();
+    let parts: Vec<String> = serde_json::from_str(&tag).unwrap();
+    let wrong_tenant = wrong_subject
+        .builder()
+        .unwrap()
+        .tags([Tag::parse(parts).unwrap()])
+        .sign_with_keys(&agent)
+        .unwrap();
+    assert!(ingest_event(&state, &tenant, wrong_tenant, auth(&agent))
+        .await
+        .is_err());
+    assert!(
+        state
+            .db
+            .get_agent_channel_policy(tenant.community(), agent.public_key().as_bytes())
+            .await
+            .unwrap()
+            .and_then(|(_, owner)| owner)
+            .is_none(),
+        "cross-community evidence must not record an owner"
+    );
+
+    let event = approval(&owner);
+    ingest_event(&state, &tenant, event.clone(), auth(&agent))
+        .await
+        .unwrap();
+    let policy = state
+        .db
+        .get_agent_channel_policy(tenant.community(), agent.public_key().as_bytes())
+        .await
+        .unwrap();
+    assert_eq!(
+        policy.and_then(|(_, owner)| owner),
+        Some(owner.public_key().to_bytes().to_vec()),
+        "verified evidence owner must be available to the land's reviewer classification"
+    );
+    ingest_event(&state, &tenant, event, auth(&agent))
+        .await
+        .unwrap();
+    let switched = approval(&Keys::generate());
+    assert!(
+        ingest_event(&state, &tenant, switched.clone(), auth(&agent))
+            .await
+            .is_err()
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE community_id=$1 AND action='git_evidence' AND object_id=$2")
+        .bind(tenant.community().as_uuid()).bind(switched.id.to_hex()).fetch_one(state.db.pool()).await.unwrap();
+    assert_eq!(
+        count, 0,
+        "refused owner switch must not leave accepted evidence"
+    );
+}
