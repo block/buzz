@@ -84,6 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             rate_limiter: Arc::new(RateLimiter::new(c.rate_limit_per_minute)),
             now: chrono::Utc::now,
             accepting: accepting.clone(),
+            public_scheme: c.public_scheme,
         },
         Some(metrics_handle),
     );

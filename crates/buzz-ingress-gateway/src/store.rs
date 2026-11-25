@@ -1,5 +1,6 @@
 //! Durable gateway state behind a trait, so the HTTP surface is tested against
 //! an in-memory reference store and production runs on Postgres.
+use crate::config::RelayScheme;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -313,6 +314,16 @@ pub struct IntegrationView {
 }
 
 impl IntegrationView {
+    /// URL the provider must deliver webhooks to for this integration.
+    pub fn delivery_url(&self, scheme: RelayScheme) -> String {
+        format!(
+            "{}://{}/webhooks/{}",
+            scheme.as_str(),
+            self.community_host,
+            self.id
+        )
+    }
+
     /// Project an integration and its currently verifying secrets at `now`.
     pub fn new(
         integration: &Integration,

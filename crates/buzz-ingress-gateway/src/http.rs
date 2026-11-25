@@ -1,5 +1,6 @@
 //! HTTP surface: the public webhook listener and the private router that
 //! serves the management API, health probes, and metrics.
+use crate::config::RelayScheme;
 use crate::intake::RateLimiter;
 use crate::secrets::SecretKeyring;
 use crate::store::Store;
@@ -33,6 +34,8 @@ pub struct AppState {
     pub now: fn() -> DateTime<Utc>,
     /// Cleared on shutdown so readiness fails before listeners drain.
     pub accepting: Arc<AtomicBool>,
+    /// Scheme used when reporting an integration's `delivery_url`.
+    pub public_scheme: RelayScheme,
 }
 
 /// Intake bounds that shape the public router.
