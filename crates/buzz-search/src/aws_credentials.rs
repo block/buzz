@@ -136,7 +136,17 @@ impl<P: ProvideCredentials> CachedCredentials<P> {
         // that queued behind a slow load must not each start another.
         let until =
             |expiry: SystemTime| expiry.duration_since(SystemTime::now()).unwrap_or_default();
+        // A credential helper can hand out a set whose expiry has passed. It
+        // signs nothing, so it counts as a failed load and is not asked for
+        // again on every request.
+        let arrived_expired = matches!(
+            &loaded,
+            Ok(Ok(credentials)) if credentials.expiry().is_some_and(|expiry| until(expiry).is_zero())
+        );
         let error = match loaded {
+            Ok(Ok(_)) if arrived_expired => {
+                CredentialsError::provider_error("the credentials loaded had already expired")
+            }
             Ok(Ok(credentials)) => {
                 let wait = match credentials.expiry().map(until) {
                     Some(left) => left
@@ -154,7 +164,11 @@ impl<P: ProvideCredentials> CachedCredentials<P> {
         };
         // Only the kind of error is logged. Its causes can carry the output
         // of a credential helper, which may hold secrets.
-        tracing::warn!(%error, "loading AWS credentials for OpenSearch failed");
+        tracing::warn!(
+            %error,
+            arrived_expired,
+            "loading AWS credentials for OpenSearch failed"
+        );
         // A failed reload is no reason to stop while the old set still works.
         // Without one, requests fail at once until the next load is due.
         let wait = match valid.as_ref().and_then(Credentials::expiry).map(until) {
@@ -187,11 +201,12 @@ mod tests {
 
     use super::*;
 
-    /// Succeeds `successes` times with hour-long credentials, then fails,
-    /// counting the loads.
+    /// Succeeds `successes` times with credentials that expire at `expiry`,
+    /// then fails, counting the loads.
     #[derive(Debug)]
     struct Source {
         successes: usize,
+        expiry: SystemTime,
         loads: AtomicUsize,
     }
 
@@ -206,7 +221,7 @@ mod tests {
                     format!("access-{load}"),
                     "secret",
                     None,
-                    Some(SystemTime::now() + Duration::from_secs(3600)),
+                    Some(self.expiry),
                     "test",
                 ))
             } else {
@@ -216,8 +231,13 @@ mod tests {
     }
 
     fn cache(successes: usize) -> CachedCredentials<Source> {
+        cache_expiring(successes, SystemTime::now() + Duration::from_secs(3600))
+    }
+
+    fn cache_expiring(successes: usize, expiry: SystemTime) -> CachedCredentials<Source> {
         CachedCredentials::new(Source {
             successes,
+            expiry,
             loads: AtomicUsize::new(0),
         })
     }
@@ -251,6 +271,14 @@ mod tests {
     #[tokio::test]
     async fn a_failed_first_load_is_not_repeated_per_request() {
         let cached = cache(0);
+        assert_eq!(access_key(&cached).await, None);
+        assert_eq!(access_key(&cached).await, None);
+        assert_eq!(cached.source.loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn credentials_that_arrive_expired_are_not_reloaded_per_request() {
+        let cached = cache_expiring(usize::MAX, SystemTime::now() - Duration::from_secs(60));
         assert_eq!(access_key(&cached).await, None);
         assert_eq!(access_key(&cached).await, None);
         assert_eq!(cached.source.loads.load(Ordering::SeqCst), 1);

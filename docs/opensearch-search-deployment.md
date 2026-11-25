@@ -25,7 +25,8 @@ the domain or, for Serverless, a data access policy on the collection and its
 When a load fails, the relay logs only the kind of error. For the cause, add
 `aws_config=warn` to `RUST_LOG`. That output can include what a
 `credential_process` helper printed, so make sure the helper prints no
-secrets.
+secrets. A helper should also bound its own run time: the relay gives up on a
+load that takes too long but does not stop a helper that hangs.
 
 ## Rollout order
 
