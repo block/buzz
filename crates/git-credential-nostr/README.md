@@ -67,3 +67,6 @@ git ──stdin──▶ git-credential-nostr ──stdout──▶ git
 | `useHttpPath` | `credential.useHttpPath` is not set | `git config --global credential.useHttpPath true` |
 | Empty output / no auth | git version is older than 2.46 | Upgrade git |
 | `clock skew` / auth rejected | System clock is off by more than 60 s | Sync your system clock (`ntpdate`, `timedatectl`) |
+| Instant `401` on large push | Git switched to chunked encoding; NIP-98 auth can't replay | `git config --global http.postBuffer 536870912` |
+| `413` / pack limit message | Pack exceeds relay `BUZZ_GIT_MAX_PACK_BYTES` | Split history, raise the limit on a self-hosted relay, or ask the hosted operator |
+| TLS abort / broken pipe mid-upload | Often a proxy + abrupt body-limit enforcement | Apply the postBuffer fix above; current relays should return a clear `413` instead |
