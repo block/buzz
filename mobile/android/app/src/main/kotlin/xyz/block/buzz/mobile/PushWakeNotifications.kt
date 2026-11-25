@@ -181,7 +181,7 @@ internal class WakeNotifier(private val context: Context) {
                     if (silent) NotificationCompat.GROUP_ALERT_SUMMARY else NotificationCompat.GROUP_ALERT_ALL,
                 )
                 .build()
-            manager.notify(tag, CONVERSATION_ID, notification)
+            AgeRestriction.unlessRestricted { manager.notify(tag, CONVERSATION_ID, notification) }
         }
     }
 
@@ -193,18 +193,15 @@ internal class WakeNotifier(private val context: Context) {
                 ?: throw IllegalStateException("No launch intent"),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        manager.notify(
-            GENERIC_TAG,
-            GENERIC_ID,
-            NotificationCompat.Builder(context, OTHER_CHANNEL)
-                .setSmallIcon(R.drawable.ic_stat_buzz)
-                .setContentTitle(context.getString(R.string.app_name))
-                .setContentText(context.getString(R.string.notification_new_activity))
-                .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-                .setAutoCancel(true)
-                .setContentIntent(tap)
-                .build(),
-        )
+        val notification = NotificationCompat.Builder(context, OTHER_CHANNEL)
+            .setSmallIcon(R.drawable.ic_stat_buzz)
+            .setContentTitle(context.getString(R.string.app_name))
+            .setContentText(context.getString(R.string.notification_new_activity))
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setAutoCancel(true)
+            .setContentIntent(tap)
+            .build()
+        AgeRestriction.unlessRestricted { manager.notify(GENERIC_TAG, GENERIC_ID, notification) }
     }
 
     fun cancelGeneric() = manager.cancel(GENERIC_TAG, GENERIC_ID)

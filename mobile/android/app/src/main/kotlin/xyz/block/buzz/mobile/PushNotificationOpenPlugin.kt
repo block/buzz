@@ -1,6 +1,8 @@
 package xyz.block.buzz.mobile
 
+import android.content.Context
 import android.content.Intent
+import androidx.core.app.NotificationManagerCompat
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodChannel
 
@@ -10,8 +12,11 @@ import io.flutter.plugin.common.MethodChannel
  *
  * A tap that starts the app is held until Dart asks for it, since its handler
  * isn't installed yet. A tap while the app runs is delivered at once.
+ *
+ * The same channel carries the age gate's purge and restore, as on iOS.
  */
-internal class PushNotificationOpenPlugin(messenger: BinaryMessenger) {
+internal class PushNotificationOpenPlugin(context: Context, messenger: BinaryMessenger) {
+    private val notifications = NotificationManagerCompat.from(context.applicationContext)
     private val channel = MethodChannel(messenger, "buzz/push")
     private var pending: Map<String, String>? = null
 
@@ -21,6 +26,14 @@ internal class PushNotificationOpenPlugin(messenger: BinaryMessenger) {
                 "takePendingNotificationResponse" -> {
                     result.success(pending)
                     pending = null
+                }
+                "purgeAgeRestrictedNotifications" -> {
+                    AgeRestriction.restrict(notifications::cancelAll)
+                    result.success(null)
+                }
+                "restoreAgeRestrictedNotifications" -> {
+                    AgeRestriction.release()
+                    result.success(null)
                 }
                 else -> result.notImplemented()
             }
