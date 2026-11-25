@@ -255,7 +255,7 @@ async fn test_client_submitted_webhook_records_and_deliveries_are_rejected() {
 
     let delivery = EventBuilder::new(Kind::Custom(20_701), "{}")
         .tags([
-            Tag::parse(["e", "0f4c1a52-7d3e-4b8a-9c61-2e5f8d7a1b30"]).unwrap(),
+            Tag::parse(["integration", "0f4c1a52-7d3e-4b8a-9c61-2e5f8d7a1b30"]).unwrap(),
             Tag::parse(["t", "provider:github"]).unwrap(),
             Tag::parse(["delivery", "d-1"]).unwrap(),
         ])

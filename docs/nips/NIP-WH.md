@@ -112,7 +112,7 @@ A delivery carries one provider webhook from the ingress gateway to the relay of
   "pubkey": "<ingress gateway pubkey>",
   "created_at": 1700000000, // When the gateway received the webhook
   "tags": [
-    ["e", "<integration UUID>"],
+    ["integration", "<integration UUID>"],
     ["t", "provider:<provider>"],
     ["delivery", "<provider delivery ID>"]
   ],
@@ -128,6 +128,8 @@ type DeliveryContent = {
   payload: unknown    // The provider's JSON body
 }
 ```
+
+A delivery has exactly one of each of these tags. The integration ID is a UUID, so it uses the `integration` tag that subscriptions and records use, not `e`, which [NIP-01](01.md) reserves for event IDs.
 
 The gateway signs a delivery once and sends the same event on every retry, so its ID stays the same. It sends it with HTTP `POST /events` and a [NIP-98](98.md) header signed by the same key.
 

@@ -81,8 +81,10 @@ pub fn build_call_event(keys: &Keys, delivery: &ClaimedDelivery) -> Result<Event
     .map_err(|_| BuildError::Payload)?;
     let created_at = u64::try_from(delivery.received_at.timestamp()).unwrap_or(0);
     Ok(EventBuilder::new(WEBHOOK_CALL_KIND, content)
+        // A UUID, not an event ID, so not an `e` tag (NIP-01 gives `e` one
+        // meaning across kinds). Subscriptions and records use the same name.
         .tag(Tag::custom(
-            TagKind::e(),
+            TagKind::custom("integration"),
             [delivery.integration_id.to_string()],
         ))
         .tag(Tag::hashtag(format!(
@@ -270,7 +272,8 @@ mod tests {
         assert_eq!(a.kind, WEBHOOK_CALL_KIND);
         assert_eq!(a.created_at.as_secs(), t0().timestamp() as u64);
         let tags: Vec<Vec<String>> = a.tags.iter().map(|t| t.clone().to_vec()).collect();
-        assert!(tags.contains(&vec!["e".to_owned(), Uuid::nil().to_string()]));
+        assert!(tags.contains(&vec!["integration".to_owned(), Uuid::nil().to_string()]));
+        assert!(!tags.iter().any(|t| t[0] == "e"));
         assert!(tags.contains(&vec!["t".to_owned(), "provider:github".to_owned()]));
         assert!(tags.contains(&vec!["delivery".to_owned(), "d-1".to_owned()]));
         let content: serde_json::Value = serde_json::from_str(&a.content).unwrap();
