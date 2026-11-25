@@ -130,4 +130,42 @@ void main() {
       expect(error.duration, const Duration(seconds: 8));
     });
   });
+
+  group('the stack an escaped error carries', () {
+    int frames(StackTrace trace) => trace.toString().trim().split('\n').length;
+
+    Future<StackTrace> completedWith(StackTrace callSite) async {
+      final completer = Completer<void>();
+      completer.completeErrorAt(Exception('late'), callSite);
+      try {
+        await completer.future;
+      } catch (_, trace) {
+        return trace;
+      }
+      throw StateError('the completer did not fail');
+    }
+
+    test('is cut to the innermost $maxCallSiteFrames frames', () async {
+      final deep = _stackFromDepth(maxCallSiteFrames * 3);
+      expect(frames(deep), greaterThan(maxCallSiteFrames));
+
+      final trace = await completedWith(deep);
+
+      expect(frames(trace), maxCallSiteFrames);
+      expect(
+        deep.toString(),
+        startsWith(trace.toString().trimRight()),
+        reason: 'the cut keeps the frames nearest the call',
+      );
+    });
+
+    test('is kept whole when it is short', () async {
+      final shallow = _stackFromDepth(3);
+
+      expect(await completedWith(shallow), same(shallow));
+    });
+  });
 }
+
+StackTrace _stackFromDepth(int depth) =>
+    depth == 0 ? StackTrace.current : _stackFromDepth(depth - 1);

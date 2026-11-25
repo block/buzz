@@ -1,5 +1,23 @@
 import 'dart:async';
 
+/// The most frames of a call site that an error carries. Sentry parses a whole
+/// stack synchronously and has no cap of its own.
+const maxCallSiteFrames = 64;
+
+/// [callSite] cut to its [maxCallSiteFrames] innermost frames.
+StackTrace trimCallSite(StackTrace callSite) {
+  final lines = callSite.toString().trimRight().split('\n');
+  if (lines.length <= maxCallSiteFrames) return callSite;
+  return StackTrace.fromString('${lines.take(maxCallSiteFrames).join('\n')}\n');
+}
+
+extension RelayCallSiteCompleter<T> on Completer<T> {
+  /// Completes with [error] and the trimmed stack of the call that made this
+  /// completer, for errors that a timer or a socket callback completes later.
+  void completeErrorAt(Object error, StackTrace callSite) =>
+      completeError(error, trimCallSite(callSite));
+}
+
 /// The relay call an error came from.
 enum RelayCall {
   /// An EVENT sent over the socket and acknowledged with OK.
