@@ -1,6 +1,7 @@
 //! Real Git journeys for channel membership and delegated access.
 //!
-//! Run against an isolated open relay (NIP-OA enabled) and its Postgres/S3:
+//! Run against an isolated open or members-only relay (NIP-OA enabled) and
+//! its Postgres/S3:
 //! `DATABASE_URL=… BUZZ_E2E_GIT_COMMUNITY_ID=… RELAY_HTTP_URL=… GIT_CREDENTIAL_NOSTR_BIN=…
 //! cargo test -p buzz-test-client --test e2e_git git_membership_or_grant -- --ignored --nocapture`.
 //! As with the other Git e2es, configure the relay's `BUZZ_S3_*` settings.
@@ -198,12 +199,28 @@ async fn git_membership_or_grant() {
         sqlx::PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL required"))
             .await
             .unwrap();
-    sqlx::query("INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, 'owner')")
-        .bind(community)
-        .bind(owner.public_key().to_hex())
-        .execute(&pool)
-        .await
-        .unwrap();
+    // Admit every key to the community so the journey runs unchanged on a
+    // members-only relay; the Git door checks community admission before the
+    // repository. The outside owner never joins the repo's channel, and
+    // admission alone gives no channel role, so each case still turns on its
+    // channel membership or grant. Admitting the agents directly also makes
+    // `banned-owner` refuse because of the owner's ban, not its own admission.
+    for (keys, role) in [
+        (&owner, "owner"),
+        (&outside_owner, "member"),
+        (&member_agent, "member"),
+        (&outsider_agent, "member"),
+        (&grant_agent, "member"),
+        (&person, "member"),
+    ] {
+        sqlx::query("INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, $3)")
+            .bind(community)
+            .bind(keys.public_key().to_hex())
+            .bind(role)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
 
     let base = relay_http_url();
     let mut ws_url = url::Url::parse(&base).unwrap();
