@@ -1144,6 +1144,15 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     }
     info!("operator-listener registration cleanup started");
 
+    // Intake and the worker share one switch: with no gateway key, nothing is
+    // queued and queued deliveries wait.
+    if state.config.webhook.ingress_pubkeys.is_empty() {
+        info!("NIP-WH webhook deliveries disabled by BUZZ_WEBHOOK_INGRESS_PUBKEYS");
+    } else {
+        tokio::spawn(buzz_relay::webhook_worker::run(Arc::clone(&state)));
+        info!("NIP-WH webhook subscription worker started");
+    }
+
     if let Some(url) = state.config.storage_usage_delivery_url.clone() {
         tokio::spawn(buzz_relay::storage_usage_delivery::run_delivery_worker(
             Arc::clone(&state),

@@ -190,6 +190,17 @@ type RecordContent = {
 
 A relay publishes at most one record per delivery and subscription, even when it retries. A relay MUST reject a record from a client. Clients MUST ignore a record the relay's `self` key ([NIP-11](11.md)) did not sign.
 
+### Publishing
+
+For each delivery, the relay evaluates every current subscription of the delivery's community that names its integration:
+
+1. A subscription whose current revision's signer is not an owner or admin of its home channel is skipped (see [Evaluating](#evaluating)).
+2. The filter runs, then the transform if there is one. A relay bounds each evaluation's loop iterations, time and transform output. A revision that does not parse or compile, an evaluation error, or a limit exceeded fails that subscription only, with no record.
+3. A filter that returns `false` publishes nothing.
+4. A match publishes a record, unless the channel is missing, deleted or archived.
+
+The record's `created_at` is when the relay published it. Each subscription is evaluated with its revision current at that moment, so a retry after an edit uses the edited revision, and `subscription_revision` names the one used.
+
 Records are read like other channel events:
 
 ```json
@@ -206,6 +217,8 @@ Add `"#t": ["subscription:<d>"]` for one subscription.
 | Expression size | 4096 bytes |
 | Expression depth | 64 levels |
 | Delivery content | 256 KiB |
+| Evaluation | relay-defined (Buzz: 10 000 loop iterations, 20 ms) |
+| Transform result | relay-defined (Buzz: 64 KiB of JSON) |
 | Delivery age | relay-configured (Buzz default 72 hours); at most 900 s in the future |
 | `delivery` tag | 1 to 256 bytes |
 | Provider name | 64 bytes |

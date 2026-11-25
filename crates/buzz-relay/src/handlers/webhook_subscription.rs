@@ -33,11 +33,13 @@ pub(crate) async fn check(event: &Event, envelope: &ArtifactEnvelope) -> Result<
     if envelope.op == ArtifactOp::Delete {
         return Ok(());
     }
-    let (filter, transform) = parse(event)?;
+    let (filter, transform) = programs(event).map_err(rejected)?;
     check_cel(filter, transform).await
 }
 
-fn parse(event: &Event) -> Result<(String, Option<String>), IngestError> {
+/// A revision's filter and transform sources, or why its `integration` tag or
+/// content is not valid. The worker reads revisions with this too.
+pub(crate) fn programs(event: &Event) -> Result<(String, Option<String>), String> {
     let mut integrations = event
         .tags
         .iter()
@@ -46,20 +48,19 @@ fn parse(event: &Event) -> Result<(String, Option<String>), IngestError> {
     match (integrations.next(), integrations.next()) {
         (Some([_, id]), None) => {
             buzz_core::artifact::canonical_uuid(id)
-                .map_err(|error| rejected(format!("invalid: integration tag: {error}")))?;
+                .map_err(|error| format!("invalid: integration tag: {error}"))?;
         }
         _ => {
-            return Err(rejected(
-                "invalid: webhook subscription requires exactly one integration tag with one value",
-            ))
+            return Err(
+                "invalid: webhook subscription requires exactly one integration tag with one value"
+                    .into(),
+            )
         }
     }
     let content: Content = serde_json::from_str(&event.content)
-        .map_err(|error| rejected(format!("invalid: webhook subscription content: {error}")))?;
+        .map_err(|error| format!("invalid: webhook subscription content: {error}"))?;
     if content.version != 1 {
-        return Err(rejected(
-            "invalid: unsupported webhook subscription version",
-        ));
+        return Err("invalid: unsupported webhook subscription version".into());
     }
     Ok((content.filter, content.transform))
 }
@@ -109,8 +110,8 @@ mod tests {
         let upper = id.to_uppercase();
         let valid = r#"{"version":1,"filter":"true"}"#;
         let one: &[&[&str]] = &[&["integration", id]];
-        assert!(parse(&event(one, valid)).is_ok());
-        assert!(parse(&event(
+        assert!(programs(&event(one, valid)).is_ok());
+        assert!(programs(&event(
             one,
             r#"{"version":1,"filter":"true","transform":"{}"}"#
         ))
@@ -164,7 +165,7 @@ mod tests {
                 "unknown field `name`",
             ),
         ] {
-            let Err(IngestError::Rejected(message)) = parse(&event(tags, content)) else {
+            let Err(message) = programs(&event(tags, content)) else {
                 panic!("{content} with {tags:?} was accepted");
             };
             assert!(message.contains(reason), "{message}");
