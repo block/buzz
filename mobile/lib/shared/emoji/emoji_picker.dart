@@ -254,9 +254,14 @@ class _EmojiPickerContent extends HookConsumerWidget {
                     headerActionSize -
                     Grid.xxs,
                 height: headerActionSize,
-                child: _EmojiSearchField(
-                  controller: searchController,
-                  padding: EdgeInsets.zero,
+                // Keep the header's control style off the field's clear
+                // button.
+                child: IconButtonTheme(
+                  data: IconButtonTheme.of(context),
+                  child: _EmojiSearchField(
+                    controller: searchController,
+                    padding: EdgeInsets.zero,
+                  ),
                 ),
               ),
             ),
