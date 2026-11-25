@@ -11,6 +11,11 @@
 //! if the epoch it observed before its read is still current. A later caller
 //! therefore reads afresh instead of taking a pre-invalidation answer from the
 //! cache or from a shared in-flight read.
+//!
+//! A cache built with a [`Fallback`] also answers a read that fails with a
+//! database error from a recent entry its fallback accepts, for up to the
+//! fallback's grace past `max_age`. A successful read always wins, and an
+//! invalidation drops the entries a fallback would serve.
 
 use std::future::Future;
 use std::hash::Hash;
@@ -25,6 +30,17 @@ struct Entry<V> {
     read_at: Instant,
 }
 
+/// Which entries a [`FencedCache`] may serve when a read fails with a database
+/// error, and for how long past its `max_age`.
+pub(crate) struct Fallback<V> {
+    /// How long past `max_age` an accepted entry is still served.
+    pub(crate) grace: Duration,
+    /// Whether an entry's value may be served on a failed read.
+    pub(crate) accepts: fn(&V) -> bool,
+    /// The counter of failed reads answered from an entry.
+    pub(crate) served: &'static str,
+}
+
 /// A bounded read cache whose fills are fenced by invalidation.
 pub(crate) struct FencedCache<K, V> {
     entries: moka::sync::Cache<K, Entry<V>>,
@@ -36,6 +52,7 @@ pub(crate) struct FencedCache<K, V> {
     max_age: Duration,
     hits: &'static str,
     misses: &'static str,
+    fallback: Option<Fallback<V>>,
 }
 
 impl<K, V> FencedCache<K, V>
@@ -51,15 +68,44 @@ where
         capacity: u64,
         max_age: Duration,
         shared_read_wait: Duration,
-        (hits, misses): (&'static str, &'static str),
+        counters: (&'static str, &'static str),
     ) -> Self {
+        Self::build(capacity, max_age, shared_read_wait, counters, None)
+    }
+
+    /// [`Self::new`], also answering a failed read from an entry `fallback`
+    /// accepts while it is younger than `max_age` plus the fallback's grace.
+    pub(crate) fn with_fallback(
+        capacity: u64,
+        max_age: Duration,
+        shared_read_wait: Duration,
+        counters: (&'static str, &'static str),
+        fallback: Fallback<V>,
+    ) -> Self {
+        Self::build(
+            capacity,
+            max_age,
+            shared_read_wait,
+            counters,
+            Some(fallback),
+        )
+    }
+
+    fn build(
+        capacity: u64,
+        max_age: Duration,
+        shared_read_wait: Duration,
+        (hits, misses): (&'static str, &'static str),
+        fallback: Option<Fallback<V>>,
+    ) -> Self {
+        let kept_for = max_age + fallback.as_ref().map_or(Duration::ZERO, |f| f.grace);
         Self {
-            // Readers use an entry only for `max_age` after its read began,
-            // which is never later than its insert; the TTL just reclaims
-            // memory.
+            // Readers use an entry only for `max_age` (or a fallback's grace
+            // past it) after its read began, which is never later than its
+            // insert; the TTL just reclaims memory.
             entries: moka::sync::Cache::builder()
                 .max_capacity(capacity)
-                .time_to_live(max_age)
+                .time_to_live(kept_for)
                 .support_invalidation_closures()
                 .build(),
             reads: SharedReads::new(capacity, shared_read_wait),
@@ -67,6 +113,7 @@ where
             max_age,
             hits,
             misses,
+            fallback,
         }
     }
 
@@ -83,8 +130,43 @@ where
             .map(|entry| entry.value)
     }
 
+    /// `error` unless it is a database error and the fallback accepts `key`'s
+    /// entry, which is then served while younger than `max_age` plus grace.
+    fn fall_back(&self, key: &K, error: buzz_db::DbError) -> Result<V, buzz_db::DbError> {
+        let Some(fallback) = &self.fallback else {
+            return Err(error);
+        };
+        if !matches!(error, buzz_db::DbError::Sqlx(_)) {
+            return Err(error);
+        }
+        let Some(entry) = self.entries.get(key).filter(|entry| {
+            entry.read_at.elapsed() < self.max_age + fallback.grace
+                && (fallback.accepts)(&entry.value)
+        }) else {
+            return Err(error);
+        };
+        metrics::counter!(fallback.served).increment(1);
+        tracing::warn!(%error, "read failed; serving the last accepted cached answer");
+        Ok(entry.value)
+    }
+
+    /// Publishes `read` as `key`'s entry unless an invalidation since
+    /// `observed` fenced it.
+    fn publish(&self, key: K, observed: u64, read: &buzz_db::ReadAt<V>) {
+        let epoch = self.lock();
+        if *epoch == observed {
+            self.entries.insert(
+                key,
+                Entry {
+                    value: read.value.clone(),
+                    read_at: read.read_at,
+                },
+            );
+        }
+    }
+
     /// `key`'s value from the cache while it is fresh, else from `read`.
-    /// Errors are not cached.
+    /// Errors are not cached; a failed read may fall back (see [`Fallback`]).
     ///
     /// The first concurrent miss reads; the rest wait for it and use its
     /// entry. A waiter whose leader failed, was cancelled, was fenced by an
@@ -109,21 +191,31 @@ where
             return Ok(value);
         }
         metrics::counter!(self.misses).increment(1);
+        self.get_fresh(key, read).await
+    }
+
+    /// `key`'s value from `read`, never from a fresh entry, published as the
+    /// entry unless an invalidation fenced it. A failed read may fall back
+    /// (see [`Fallback`]).
+    pub(crate) async fn get_fresh<Read, ReadFuture>(
+        &self,
+        key: K,
+        read: Read,
+    ) -> Result<V, buzz_db::DbError>
+    where
+        Read: FnOnce() -> ReadFuture,
+        ReadFuture: Future<Output = Result<buzz_db::ReadAt<V>, buzz_db::DbError>>,
+    {
         // Observed before the read checks out its connection, so a read that
         // could predate an invalidation always sees a newer epoch.
         let observed = *self.lock();
-        let read = read().await?;
-        let epoch = self.lock();
-        if *epoch == observed {
-            self.entries.insert(
-                key,
-                Entry {
-                    value: read.value.clone(),
-                    read_at: read.read_at,
-                },
-            );
+        match read().await {
+            Ok(read) => {
+                self.publish(key, observed, &read);
+                Ok(read.value)
+            }
+            Err(error) => self.fall_back(&key, error),
         }
-        Ok(read.value)
     }
 
     /// Drops `key`'s entry and fences every fill begun before this.
@@ -355,6 +447,125 @@ mod tests {
             .expect("read");
         assert!(filled, "the caller still gets its own read");
         assert!(cache.entry(&3).is_none(), "the fenced fill is not cached");
+    }
+
+    const GRACE: Duration = Duration::from_secs(60);
+
+    /// Accepts `true`, standing for an unrestricted row.
+    fn cache_with_fallback() -> FencedCache<u8, bool> {
+        FencedCache::with_fallback(
+            16,
+            MAX_AGE,
+            Duration::from_secs(5),
+            (
+                "test_fenced_cache_hits_total",
+                "test_fenced_cache_misses_total",
+            ),
+            Fallback {
+                grace: GRACE,
+                accepts: |value| *value,
+                served: "test_fenced_cache_fallback_served_total",
+            },
+        )
+    }
+
+    fn pool_timeout() -> Result<buzz_db::ReadAt<bool>, buzz_db::DbError> {
+        Err(buzz_db::DbError::Sqlx(sqlx::Error::PoolTimedOut))
+    }
+
+    /// A read that fails with a database error, through `get` (past an
+    /// expired entry) and `get_fresh` alike, is answered from an accepted
+    /// entry younger than the max age plus grace, and only then.
+    /// Mutations: serve a rejected value, drop the age check, fall back on a
+    /// non-database error, or skip the fallback in either path → RED.
+    #[tokio::test]
+    async fn a_failed_read_falls_back_only_to_a_recent_accepted_entry() {
+        let just_inside = MAX_AGE + GRACE - Duration::from_secs(1);
+        let cases = [
+            (Some((true, just_inside)), true, Some(true)),
+            (Some((true, MAX_AGE + GRACE)), true, None),
+            (Some((false, MAX_AGE)), true, None),
+            (None, true, None),
+            (Some((true, MAX_AGE)), false, None),
+        ];
+        for (seeded, database_error, served) in cases {
+            for fresh in [false, true] {
+                let cache = cache_with_fallback();
+                if let Some((value, age)) = seeded {
+                    cache.seed_read_at(1, value, Instant::now() - age);
+                }
+                let read = || async move {
+                    if database_error {
+                        pool_timeout()
+                    } else {
+                        Err(buzz_db::DbError::AuthEventRejected)
+                    }
+                };
+                let answer = if fresh {
+                    cache.get_fresh(1, read).await
+                } else {
+                    cache.get(1, read).await
+                };
+                assert_eq!(
+                    answer.ok(),
+                    served,
+                    "seeded {seeded:?}, database error {database_error}, fresh {fresh}",
+                );
+            }
+        }
+    }
+
+    /// A successful read wins over an accepted entry, an invalidation drops
+    /// the entry a fallback would serve, and a cache without a fallback
+    /// still fails closed.
+    /// Mutation: fall back before reading, keep entries past invalidation,
+    /// or give `new` a fallback → RED.
+    #[tokio::test]
+    async fn a_successful_read_wins_and_invalidation_drops_the_fallback() {
+        let fallback = cache_with_fallback();
+        fallback.seed_read_at(1, true, Instant::now() - MAX_AGE);
+        let read = fallback.get_fresh(1, || async { read_at(false) }).await;
+        assert_eq!(read.ok(), Some(false), "the read's answer is served");
+        assert!(
+            fallback
+                .get_fresh(1, || async { pool_timeout() })
+                .await
+                .is_err(),
+            "the read replaced the accepted entry",
+        );
+
+        fallback.seed(1, true);
+        fallback.invalidate(&1);
+        assert!(fallback
+            .get_fresh(1, || async { pool_timeout() })
+            .await
+            .is_err());
+
+        let strict = cache();
+        strict.seed_read_at(1, true, Instant::now() - MAX_AGE);
+        assert!(strict.get(1, || async { pool_timeout() }).await.is_err());
+    }
+
+    /// `get_fresh` reads past a fresh entry and publishes its read, unless an
+    /// invalidation during the read fenced it.
+    /// Mutation: serve the fresh entry, skip the publish, or skip its epoch
+    /// check → RED.
+    #[tokio::test]
+    async fn get_fresh_reads_past_the_entry_and_publishes_unless_fenced() {
+        let cache = cache_with_fallback();
+        cache.seed(1, true);
+        let read = cache.get_fresh(1, || async { read_at(false) }).await;
+        assert_eq!(read.ok(), Some(false));
+        assert_eq!(cache.entry(&1).map(|(value, _)| value), Some(false));
+
+        let read = cache
+            .get_fresh(2, || async {
+                cache.invalidate(&9);
+                read_at(true)
+            })
+            .await;
+        assert_eq!(read.ok(), Some(true), "the caller still gets its read");
+        assert!(cache.entry(&2).is_none(), "the fenced read is not cached");
     }
 
     #[tokio::test]

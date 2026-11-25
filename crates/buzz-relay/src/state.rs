@@ -1401,6 +1401,21 @@ pub const MEMBER_CHANNELS_MAX_AGE: std::time::Duration = std::time::Duration::fr
 /// so this bounds only a pod that misses that best-effort notification.
 pub const RESTRICTION_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How long past [`RESTRICTION_CACHE_MAX_AGE`] a pod still serves a cached
+/// row that shows no ban or timeout when the database read that would replace
+/// it fails (see [`AppState::restriction_cache`]). A successful read always
+/// wins, a row with a ban or timeout is never served this way, and every
+/// restriction write and every disconnect of a pubkey drops the community's
+/// rows.
+///
+/// Security bound: on a pod that misses a ban's invalidation and disconnect
+/// while its database reads fail, the banned user can still be admitted there
+/// (HTTP, a publish or a new socket) for the max age plus this (70 s today)
+/// after the row last read for them. A socket admitted that way stays open,
+/// like any socket on a pod that missed the ban's disconnect, and its writes
+/// are refused once that bound passes.
+pub const RESTRICTION_FALLBACK_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// How long a pod serves a cached host → community mapping after the
 /// database read that produced it began, at its connection checkout (see
 /// [`AppState::tenant_host_cache`]).
@@ -1664,8 +1679,11 @@ pub struct AppState {
     /// on every pod and fences reads in flight, so a cached reader sees the
     /// change at once unless its pod misses the notification; the max age
     /// bounds that.
-    /// Socket admission and moderation-command actors read fresh: a grant that
-    /// outlives the bound must not rest on a cached verdict.
+    /// Socket admission reads fresh ([`Self::restriction_state_fresh`]) and
+    /// refills the entry; moderation-command actors read the database
+    /// directly. When a read fails with a database error, a row that shows no
+    /// ban or timeout is served for [`RESTRICTION_FALLBACK_GRACE`] past the max
+    /// age, counted by `buzz_restriction_fallback_served_total`.
     pub(crate) restriction_cache: Arc<
         crate::fenced_cache::FencedCache<
             (CommunityId, Vec<u8>),
@@ -1970,7 +1988,7 @@ impl AppState {
                     .build(),
             ),
             community_active: Arc::new(crate::community_active::new_cache(shared_read_wait)),
-            restriction_cache: Arc::new(crate::fenced_cache::FencedCache::new(
+            restriction_cache: Arc::new(crate::fenced_cache::FencedCache::with_fallback(
                 100_000,
                 RESTRICTION_CACHE_MAX_AGE,
                 shared_read_wait,
@@ -1978,6 +1996,11 @@ impl AppState {
                     "buzz_restriction_cache_hits_total",
                     "buzz_restriction_cache_misses_total",
                 ),
+                crate::fenced_cache::Fallback {
+                    grace: RESTRICTION_FALLBACK_GRACE,
+                    accepts: |row| *row == buzz_db::moderation::RestrictionState::default(),
+                    served: "buzz_restriction_fallback_served_total",
+                },
             )),
             tenant_host_cache: Arc::new(crate::host_cache::HostCache::new()),
             tenant_host_reads: Arc::new(crate::shared_reads::SharedReads::new(
@@ -2156,7 +2179,8 @@ impl AppState {
     /// for [`RESTRICTION_CACHE_MAX_AGE`] after the read that produced it
     /// checked out its connection. For per-request gates (HTTP requests,
     /// publishes, ephemeral pulses) whose grant ends with the request. Errors
-    /// are not cached; concurrent misses for one pubkey share a read.
+    /// are not cached; concurrent misses for one pubkey share a read. A failed
+    /// read serves a recent unrestricted row ([`RESTRICTION_FALLBACK_GRACE`]).
     pub async fn restriction_state_cached(
         &self,
         community_id: CommunityId,
@@ -2164,6 +2188,22 @@ impl AppState {
     ) -> Result<buzz_db::moderation::RestrictionState, buzz_db::DbError> {
         self.restriction_cache
             .get((community_id, pubkey.to_vec()), || {
+                self.db
+                    .moderation_restriction_state_read_at(community_id, pubkey)
+            })
+            .await
+    }
+
+    /// `moderation_restriction_state` read from the database and kept in
+    /// [`Self::restriction_cache`], for socket admission. A failed read serves
+    /// a recent unrestricted row ([`RESTRICTION_FALLBACK_GRACE`]).
+    pub async fn restriction_state_fresh(
+        &self,
+        community_id: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<buzz_db::moderation::RestrictionState, buzz_db::DbError> {
+        self.restriction_cache
+            .get_fresh((community_id, pubkey.to_vec()), || {
                 self.db
                     .moderation_restriction_state_read_at(community_id, pubkey)
             })
@@ -2370,6 +2410,9 @@ impl AppState {
         reason: &str,
         unowned_only: bool,
     ) -> usize {
+        // Before the socket scan, so a socket bound after it cannot be admitted
+        // on a restriction row the ban's own invalidation has not dropped yet.
+        self.invalidate_restrictions_local(community);
         self.conn_manager
             .disconnect_pubkey(community, pubkey, event_id, reason, unowned_only)
             + self
@@ -4117,6 +4160,96 @@ pub(crate) mod tests {
                 .sum()
         }
 
+        /// Once Postgres stops answering, a user whose last read showed no
+        /// restriction is still served that row by socket admission and, past
+        /// the max age, by the per-request gate, until the grace runs out; a
+        /// banned user is refused. Each read goes through the real query.
+        /// Mutations: drop the fallback, serve a banned row, let socket
+        /// admission skip its refill, or drop the grace bound → RED.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres"]
+        async fn a_failed_restriction_read_serves_only_a_recent_clear_row() {
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let _recorder = metrics::set_default_local_recorder(&recorder);
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .unwrap();
+            let state = test_state_with_database_pool(pool.clone()).await;
+            let host = format!("restriction-fallback-{}.local", Uuid::new_v4());
+            let community = state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .unwrap()
+                .id;
+            let (clear, banned) = (vec![7u8; 32], vec![8u8; 32]);
+            state
+                .db
+                .ban_community_member(community, &banned, &[9u8; 32], None, None)
+                .await
+                .unwrap();
+            let unrestricted = buzz_db::moderation::RestrictionState::default();
+            assert_eq!(
+                state
+                    .restriction_state_fresh(community, &clear)
+                    .await
+                    .unwrap(),
+                unrestricted
+            );
+            assert!(
+                state
+                    .restriction_state_fresh(community, &banned)
+                    .await
+                    .unwrap()
+                    .banned
+            );
+
+            pool.close().await;
+            assert_eq!(
+                state
+                    .restriction_state_fresh(community, &clear)
+                    .await
+                    .unwrap(),
+                unrestricted,
+                "socket admission serves the row its last read stored",
+            );
+            assert!(state
+                .restriction_state_fresh(community, &banned)
+                .await
+                .is_err());
+            let key = (community, clear.clone());
+            let past = |age| {
+                state.restriction_cache.seed_read_at(
+                    key.clone(),
+                    unrestricted.clone(),
+                    Instant::now() - age,
+                )
+            };
+            past(RESTRICTION_CACHE_MAX_AGE);
+            assert_eq!(
+                state
+                    .restriction_state_cached(community, &clear)
+                    .await
+                    .unwrap(),
+                unrestricted,
+                "an expired clear row is served within the grace",
+            );
+            past(RESTRICTION_CACHE_MAX_AGE + RESTRICTION_FALLBACK_GRACE);
+            assert!(state
+                .restriction_state_cached(community, &clear)
+                .await
+                .is_err());
+            assert!(state
+                .restriction_state_fresh(community, &clear)
+                .await
+                .is_err());
+            assert_eq!(
+                counted(&snapshotter, "buzz_restriction_fallback_served_total"),
+                2
+            );
+        }
+
         /// Concurrent misses on each cache that bounds staleness from its
         /// read, queued behind a held pool connection for longer than the
         /// cache's max age, share one read, and its entry still lands fresh:
@@ -5830,9 +5963,12 @@ pub(crate) mod tests {
     /// A restriction drop, local or received from another pod, drops every
     /// cached row in its community, so the pod's next HTTP request or write
     /// rereads the restriction, including an agent whose owner changed.
-    /// Rows in other communities stay.
+    /// Rows in other communities stay. A pubkey's disconnect, local or from
+    /// another pod, drops them too, so a socket bound after its scan cannot be
+    /// admitted on a fallback row the ban's invalidation has not reached yet.
     /// Mutation: drop the `Restrictions` arm from `apply_cache_invalidation`,
-    /// or scope the drop to nothing → RED.
+    /// drop the restriction drop from `disconnect_pubkey_local`, or scope the
+    /// drop to nothing → RED.
     #[tokio::test]
     async fn restriction_invalidation_drops_the_community_rows() {
         let state =
@@ -5857,6 +5993,9 @@ pub(crate) mod tests {
         for invalidate in [
             &(|| state.invalidate_restrictions(&tenant)) as &dyn Fn(),
             &|| state.apply_cache_invalidation(community, CacheInvalidation::Restrictions),
+            &|| {
+                state.disconnect_pubkey_local(community, &owner, &"0".repeat(64), "banned", false);
+            },
         ] {
             seed();
             invalidate();
