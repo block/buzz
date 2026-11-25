@@ -140,8 +140,8 @@ Serverless. Postgres finds it as soon as it is stored.
 The index name carries its mapping version (`buzz-messages-v2`), and a relay
 never writes into an index of another version: if the alias `buzz-messages`
 points elsewhere, every indexing pass fails and the outbox grows. To move to
-a new version, keep `search.backend` at `0`, delete the old index and run
-`DELETE FROM search_backfill`. The relay creates the new index and backfills
+a new version, keep `search.backend` at `0` and delete the old index. The
+relay creates the new index, clears the backfill progress and backfills
 every community again.
 
 If `buzz_search_index_rejected_total` rises, investigate the rejection and
