@@ -5348,7 +5348,9 @@ void main() {
       await tester.pumpAndSettle();
       expect(
         tester.widget<Text>(find.text('Add members')).style,
-        Theme.of(tester.element(addRow)).textTheme.bodyLarge,
+        sheetActionTextStyle.copyWith(
+          color: tester.element(addRow).colors.onSurface,
+        ),
       );
       expect(
         tester.getTopLeft(addRow).dy,
@@ -5629,7 +5631,9 @@ void main() {
       expect(seeAllRow, findsOneWidget);
       expect(
         tester.widget<Text>(find.text('See all')).style,
-        Theme.of(tester.element(seeAllRow)).textTheme.bodyLarge,
+        sheetActionTextStyle.copyWith(
+          color: tester.element(seeAllRow).colors.onSurface,
+        ),
       );
       expect(
         find.descendant(of: seeAllRow, matching: find.text('7 members')),

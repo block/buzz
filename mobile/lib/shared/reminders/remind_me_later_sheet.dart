@@ -81,7 +81,7 @@ void showRemindMeLaterSheet({
                   children: [
                     for (final preset in reminderTimePresets)
                       ListTile(
-                        leading: const Icon(BuzzIcons.clock),
+                        leading: const AppListRowIcon(BuzzIcons.clock),
                         title: Text(preset.label),
                         onTap: () {
                           Navigator.of(sheetContext).pop();
@@ -93,7 +93,7 @@ void showRemindMeLaterSheet({
                 SheetActionSection(
                   children: [
                     ListTile(
-                      leading: const Icon(BuzzIcons.calendarClock),
+                      leading: const AppListRowIcon(BuzzIcons.calendarClock),
                       title: const Text('Pick a date & time'),
                       onTap: () async {
                         final navigator = Navigator.of(sheetContext);

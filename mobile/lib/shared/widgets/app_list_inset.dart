@@ -9,10 +9,20 @@ class AppListInset extends InheritedWidget {
     super.key,
     required this.horizontal,
     this.iconColumnWidth,
+    this.sheetActions = false,
     required super.child,
   });
 
+  final bool sheetActions;
   final double horizontal;
+
+  static TextStyle? titleStyleOf(BuildContext context) =>
+      context
+              .dependOnInheritedWidgetOfExactType<AppListInset>()
+              ?.sheetActions ==
+          true
+      ? sheetActionTextStyle.copyWith(color: context.colors.onSurface)
+      : context.textTheme.bodyLarge;
   final double? iconColumnWidth;
 
   static double? iconWidthOf(BuildContext context) => context
@@ -25,6 +35,21 @@ class AppListInset extends InheritedWidget {
 
   @override
   bool updateShouldNotify(AppListInset oldWidget) =>
+      oldWidget.sheetActions != sheetActions ||
       oldWidget.horizontal != horizontal ||
       oldWidget.iconColumnWidth != iconColumnWidth;
+}
+
+/// Centers an action glyph in the same column as a channel settings row.
+class AppListRowIcon extends StatelessWidget {
+  const AppListRowIcon(this.icon, {super.key, this.color});
+
+  final IconData icon;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: AppListInset.iconWidthOf(context),
+    child: Icon(icon, size: 22, color: color),
+  );
 }

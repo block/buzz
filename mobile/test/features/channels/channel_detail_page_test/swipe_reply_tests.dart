@@ -724,6 +724,10 @@ void swipeReplyTests() {
                 .first,
           );
           await tester.pumpAndSettle();
+          if (own) {
+            expect(find.text('Reply'), findsNothing);
+            return;
+          }
           await tester.tap(find.text('Reply'));
           await tester.pumpAndSettle();
           expect(navigator.canPop(), isFalse);

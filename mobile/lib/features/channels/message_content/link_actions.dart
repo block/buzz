@@ -259,7 +259,7 @@ void _showLinkActions(
                     children: [
                       if (onOpen != null)
                         ListTile(
-                          leading: const Icon(BuzzIcons.externalLink),
+                          leading: const AppListRowIcon(BuzzIcons.externalLink),
                           title: const Text('Open link'),
                           onTap: () {
                             Navigator.of(sheetContext).pop();
@@ -267,7 +267,7 @@ void _showLinkActions(
                           },
                         ),
                       ListTile(
-                        leading: const Icon(BuzzIcons.copy),
+                        leading: const AppListRowIcon(BuzzIcons.copy),
                         title: const Text('Copy link'),
                         onTap: () {
                           Navigator.of(sheetContext).pop();
@@ -281,7 +281,7 @@ void _showLinkActions(
                         },
                       ),
                       ListTile(
-                        leading: const Icon(BuzzIcons.share2),
+                        leading: const AppListRowIcon(BuzzIcons.share2),
                         title: const Text('Share link'),
                         onTap: () {
                           final renderBox =

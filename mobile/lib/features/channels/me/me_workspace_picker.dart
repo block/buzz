@@ -13,7 +13,6 @@ import '../../../shared/widgets/frosted_app_bar.dart';
 import '../../../shared/widgets/modal_presentation.dart';
 import '../../../shared/widgets/app_list.dart';
 import '../../../shared/widgets/app_list_card.dart';
-import '../../../shared/theme/theme.dart';
 
 /// The workspace control shared by draft and existing Solo conversations.
 ({
@@ -115,8 +114,7 @@ useMeWorkspace(
               color: Colors.transparent,
               child: SafeArea(
                 child: SingleChildScrollView(
-                  child: AppListCard(
-                    verticalPadding: Grid.twelve,
+                  child: AppListCard.sheet(
                     children: [
                       AppListRow(
                         title: 'No Workspace',

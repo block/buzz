@@ -6,6 +6,17 @@ import 'text_theme.dart';
 const _fontFamily = 'Inter';
 const _messageLetterSpacing = -0.45;
 
+final sheetActionTextStyle = messageBodyTextStyle.copyWith(
+  fontSize: 16,
+  height: 21 / 16,
+);
+
+final compactSheetActionTextStyle = sheetActionTextStyle.copyWith(
+  fontSize: 14,
+  fontWeight: FontWeight.w500,
+  height: 17.5 / 14,
+);
+
 /// Avatar size for full channel and thread messages.
 const messageAvatarSize = 36.0;
 

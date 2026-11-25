@@ -455,6 +455,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
       },
     );
     final organizationCard = AppListCard(
+      sheetActions: true,
       iconColumnWidth: Grid.md,
       verticalPadding: _channelDetailsSectionPadding,
       children: [
@@ -468,6 +469,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
       ],
     );
     final channelActionsCard = AppListCard(
+      sheetActions: true,
       key: const ValueKey('channel-details-channel-card'),
       iconColumnWidth: aligned ? Grid.md : null,
       verticalPadding: _channelDetailsSectionPadding,
@@ -532,6 +534,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
       ),
     );
     final membersCard = AppListCard(
+      sheetActions: true,
       key: const ValueKey('channel-details-members-card'),
       label: solo ? null : memberLabel,
       dividerIndent: Grid.xs + memberSize + Grid.xs,
@@ -553,7 +556,12 @@ class ChannelDetailsPage extends HookConsumerWidget {
                 color: context.colors.onSurfaceVariant,
               ),
             ),
-            title: Text('Add members', style: context.textTheme.bodyLarge),
+            title: Text(
+              'Add members',
+              style: sheetActionTextStyle.copyWith(
+                color: context.colors.onSurface,
+              ),
+            ),
             trailing: const _ChannelDetailsChevron(),
             onTap: openAddMembers,
             verticalPadding: memberPadding,
@@ -590,7 +598,12 @@ class ChannelDetailsPage extends HookConsumerWidget {
             AppListRowRaw(
               key: const ValueKey('channel-details-members-row'),
               leading: SizedBox.square(dimension: memberSize),
-              title: Text('See all', style: context.textTheme.bodyLarge),
+              title: Text(
+                'See all',
+                style: sheetActionTextStyle.copyWith(
+                  color: context.colors.onSurface,
+                ),
+              ),
               trailing: const _ChannelDetailsChevron(),
               onTap: openMembers,
               verticalPadding: memberPadding,
@@ -607,6 +620,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
         canUnarchive ||
         canDelete;
     final lifecycleCard = AppListCard(
+      sheetActions: true,
       key: const ValueKey('channel-details-lifecycle-card'),
       iconColumnWidth: aligned ? Grid.md : null,
       verticalPadding: _channelDetailsSectionPadding,
@@ -915,6 +929,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
           (sheetSoloSettings?.call(renameRow, (settings) => settings) ??
               soloSettings?.call(renameRow) ??
               AppListCard(
+                sheetActions: true,
                 iconColumnWidth: Grid.md,
                 verticalPadding: _channelDetailsSectionPadding,
                 children: [renameRow],
@@ -923,6 +938,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
         if (solo || regularChannel) channelActionsCard,
         if (showHuddle)
           AppListCard(
+            sheetActions: true,
             iconColumnWidth: Grid.md,
             verticalPadding: _channelDetailsSectionPadding,
             children: [ChannelHuddleRow(channel: resolvedChannel)],

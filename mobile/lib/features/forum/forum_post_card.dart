@@ -280,7 +280,7 @@ class ForumPostCard extends HookConsumerWidget {
             child: SheetActionSection(
               children: [
                 ListTile(
-                  leading: const Icon(BuzzIcons.copy),
+                  leading: const AppListRowIcon(BuzzIcons.copy),
                   title: const Text('Copy text'),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
@@ -289,7 +289,7 @@ class ForumPostCard extends HookConsumerWidget {
                 ),
                 if (isOwn && onDelete != null)
                   ListTile(
-                    leading: Icon(
+                    leading: AppListRowIcon(
                       BuzzIcons.trash2,
                       color: sheetContext.colors.error,
                     ),
