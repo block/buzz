@@ -540,6 +540,126 @@ async fn announcement_must_name_the_pin() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL"]
+async fn concurrent_announcements_cannot_disagree_with_the_first_pin() {
+    use buzz_db::replaceable::ParameterizedReplacePrecondition;
+    use std::time::Duration;
+
+    let (state, tenant, keys, subject) = fixture().await;
+    let repo: RepoCoordinate = subject.repo.parse().unwrap();
+    assert_eq!(
+        pin(&state, &tenant, &repo).await,
+        None,
+        "legacy unpinned row"
+    );
+    let first_channel = create_channel(&state, &tenant, &keys, &[]).await;
+    let second_channel = create_channel(&state, &tenant, &keys, &[]).await;
+    let now = nostr::Timestamp::now().as_secs();
+    let first = announce(&keys, &repo.name, Some(&first_channel.to_string()), now + 5);
+    let second = announce(
+        &keys,
+        &repo.name,
+        Some(&second_channel.to_string()),
+        now + 6,
+    );
+
+    // Take the real replacement lock without inserting an event. The first
+    // launch waits there, and the second must wait on that lock or the first
+    // writer's repository row lock. The old preflight lets both reach storage
+    // before either can pin its channel.
+    let holder_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&crate::test_support::database_url())
+        .await
+        .unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&holder_pool)
+        .await
+        .unwrap();
+    let holder_db = buzz_db::Db::from_pool(holder_pool);
+    let mut holder = holder_db
+        .begin_event_write_transaction(tenant.community())
+        .await
+        .unwrap();
+    holder_db
+        .replace_parameterized_event_in_transaction(
+            &mut holder,
+            &first,
+            &repo.name,
+            None,
+            ParameterizedReplacePrecondition::ExactReplayOnly,
+        )
+        .await
+        .unwrap();
+    let launch = |event| {
+        let state = state.clone();
+        let tenant = tenant.clone();
+        let auth = auth(&keys);
+        tokio::spawn(async move { ingest_event(&state, &tenant, event, auth).await })
+    };
+    let first_id = first.id;
+    let first_task = launch(first);
+    let pool = state.db.pool();
+    let wait_for_writers = |count| async move {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let blocked: i64 = sqlx::query_scalar(
+                    "WITH RECURSIVE waiting(pid) AS (
+                       SELECT $1::int
+                       UNION
+                       SELECT l.pid FROM pg_locks l JOIN waiting w
+                         ON w.pid = ANY(pg_blocking_pids(l.pid)) WHERE NOT l.granted
+                     ) SELECT count(*) FROM waiting WHERE pid <> $1",
+                )
+                .bind(holder_pid)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+                if blocked >= count {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("announcement writers wait for the held replacement lock");
+    };
+    wait_for_writers(1).await;
+    let second_task = launch(second);
+    wait_for_writers(2).await;
+    holder.rollback().await.unwrap();
+
+    let (first, second) = tokio::time::timeout(Duration::from_secs(5), async {
+        (first_task.await.unwrap(), second_task.await.unwrap())
+    })
+    .await
+    .expect("announcement writers finish");
+    assert!(first.unwrap().accepted);
+    let pinned = pin(&state, &tenant, &repo).await;
+    let (head_id, tags): (Vec<u8>, serde_json::Value) = sqlx::query_as(
+        "SELECT id, tags FROM events WHERE community_id = $1 AND pubkey = $2
+           AND kind = 30617 AND d_tag = $3 AND deleted_at IS NULL
+         ORDER BY created_at DESC, id ASC LIMIT 1",
+    )
+    .bind(tenant.community().as_uuid())
+    .bind(keys.public_key().as_bytes())
+    .bind(&repo.name)
+    .fetch_one(state.db.pool())
+    .await
+    .unwrap();
+    assert!(
+        matches!(second, Err(super::ingest::IngestError::Rejected(ref message))
+            if message.contains(&first_channel.to_string())),
+        "the second announcement must be rejected by the first pin: {:?}, pin={pinned:?}, tags={tags}",
+        second.map(|result| result.message),
+    );
+    assert_eq!(pinned, Some(first_channel));
+    assert_eq!(head_id, first_id.as_bytes());
+    let tags: Vec<Vec<String>> = serde_json::from_value(tags).unwrap();
+    assert!(tags.contains(&vec!["buzz-channel".into(), first_channel.to_string()]));
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
 async fn channel_tags_protect() {
     let (state, tenant, keys, subject) = fixture().await;
     community_role(&state, &tenant, &keys, "admin").await;

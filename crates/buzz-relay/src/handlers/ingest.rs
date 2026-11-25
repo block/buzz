@@ -1852,39 +1852,6 @@ const PROJECT_METADATA_TAG_MAX_LEN: usize = 256;
 const PROJECT_SINGLETON_METADATA_TAGS: [&str; 4] =
     ["name", "description", "buzz-channel", "buzz-visibility"];
 
-/// Refuse a kind:30617 whose binding is not its repository's pinned channel.
-async fn check_announced_pin(
-    tenant: &TenantContext,
-    state: &AppState,
-    event: &nostr::Event,
-) -> Result<(), IngestError> {
-    let Some(name) = event.tags.identifier() else {
-        return Ok(());
-    };
-    let repo = buzz_core::governance::RepoCoordinate {
-        owner: event.pubkey.to_hex(),
-        name: name.to_string(),
-    };
-    let pinned = state
-        .db
-        .git_repo_channel(tenant.community(), &repo, None)
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: database error: {}", e.kind())))?;
-    match (
-        pinned,
-        crate::api::git::binding::resolve_repo_binding(event),
-    ) {
-        (Some(pin), crate::api::git::binding::RepoBinding::Bound(channel)) if pin == channel => {
-            Ok(())
-        }
-        (Some(pin), _) => Err(IngestError::Rejected(format!(
-            "invalid: repository is bound to channel {pin}; announce that buzz-channel, \
-             or move it with a governed bind first"
-        ))),
-        (None, _) => Ok(()),
-    }
-}
-
 /// The kind segment every project member coordinate must carry: a project groups
 /// repository *announcements*, so a coordinate naming any other kind (notably
 /// kind:30618 repository state) is malformed.
@@ -3352,13 +3319,6 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // A pinned repository's announcement must name its pin: only a governed
-    // bind moves it, so a tag that disagrees would mislead every reader of the
-    // tag while granting nothing.
-    if kind_u32 == KIND_GIT_REPO_ANNOUNCEMENT {
-        check_announced_pin(tenant, state, &event).await?;
-    }
-
     // A kind:9007 must carry the new channel's id in its `h` tag. It creates
     // its channel when it is stored, in the same transaction (see the storage
     // dispatch below).
@@ -3704,6 +3664,7 @@ async fn ingest_event_inner(
     };
     let mut dm_snapshots = Vec::new();
     let mut message = String::new();
+    let mut repo_reservation = None;
     let (stored_event, was_inserted) = if let Some(create) = channel_create.as_ref() {
         let creator = event.pubkey.to_bytes();
         let channel = buzz_db::channel::NewChannel {
@@ -3835,6 +3796,39 @@ async fn ingest_event_inner(
             .replace_addressable_event(tenant.community(), &event, channel_id)
             .await
             .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?
+    } else if kind_u32 == KIND_GIT_REPO_ANNOUNCEMENT {
+        use crate::api::git::binding::{resolve_repo_binding, RepoBinding};
+
+        let repo_id = buzz_db::event::extract_d_tag(&event).unwrap_or_default();
+        if !super::side_effects::validate_repo_id(&repo_id) {
+            return Err(IngestError::Rejected(
+                "invalid: repository identifier must be 1–64 letters, digits, dots, underscores \
+                 or hyphens, with no leading dot, '..', or '.git' suffix"
+                    .into(),
+            ));
+        }
+        let announced = match resolve_repo_binding(&event) {
+            RepoBinding::Bound(channel) => Some(channel),
+            RepoBinding::NotBound | RepoBinding::Broken => None,
+        };
+        let (stored, inserted, reserved) = state
+            .db
+            .store_git_repo_announcement(
+                tenant.community(),
+                &event,
+                &repo_id,
+                announced,
+                i64::from(state.config.git_max_repos_per_pubkey),
+            )
+            .await
+            .map_err(|e| match e {
+                buzz_db::DbError::GitAnnouncementRejected(reason) => {
+                    IngestError::Rejected(format!("invalid: {reason}"))
+                }
+                _ => IngestError::Internal(format!("error: {}", e.kind())),
+            })?;
+        repo_reservation = Some(reserved);
+        (stored, inserted)
     } else if is_parameterized_replaceable(kind_u32) {
         // NIP-33 parameterized replaceable — keyed by (kind, pubkey, d_tag).
         let d_tag = buzz_db::event::extract_d_tag(&event).unwrap_or_default();
@@ -3952,9 +3946,8 @@ async fn ingest_event_inner(
         || kind_u32 == KIND_NIP29_EDIT_METADATA
         || kind_u32 == KIND_SOLO_MEMBER_ROLE;
     if !persisted_atomically && crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
-        if let Err(e) =
-            crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
-                .await
+        use super::side_effects::handle_side_effects;
+        if let Err(e) = handle_side_effects(tenant, kind_u32, &event, state, repo_reservation).await
         {
             // error!, not warn!: the event was accepted but its side effects
             // (channel creation, git repo seeding, …) did not run — the relay

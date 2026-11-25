@@ -3542,11 +3542,19 @@ mod track_c_tests {
         };
         let announce_state = Arc::clone(&state);
         let announce_tenant = tenant.clone();
+        let repo_id = repo.clone();
         let announce = tokio::spawn(async move {
-            let result = crate::handlers::side_effects::handle_git_repo_announcement_inner(
+            let (_, inserted, reserved) = announce_state
+                .db
+                .store_git_repo_announcement(announce_tenant.community(), &event, &repo_id, None, 1)
+                .await
+                .expect("store announcement");
+            assert!(inserted && reserved);
+            let result = crate::handlers::side_effects::seed_repo_announcement(
                 &announce_tenant,
                 &event,
                 &announce_state,
+                reserved,
                 &hooks,
             )
             .await;
