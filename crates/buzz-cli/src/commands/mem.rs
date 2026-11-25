@@ -228,11 +228,16 @@ async fn fetch_head(
 }
 
 /// `buzz mem ls` — list non-tombstoned memory entries.
+///
+/// The listing excludes the `core` profile by specification (NIP-AE: `core`
+/// is the agent identity surface, not a listed entry). Pass `--include-core`
+/// to see it anyway.
 pub async fn cmd_ls(
     client: &BuzzClient,
     owner_flag: Option<&str>,
     agent_flag: Option<&str>,
     json: bool,
+    include_core: bool,
 ) -> Result<(), CliError> {
     let (agent, owner, their_pubkey) = resolve_reader(client, owner_flag, agent_flag)?;
 
@@ -279,19 +284,10 @@ pub async fn cmd_ls(
         let Some((_, body)) = members.into_iter().find(|(e, _)| e.id == head.id) else {
             continue;
         };
-        // Drop tombstones and the core entry (per spec: listing excludes core).
-        match &body {
-            Body::Core { .. } => continue,
-            Body::Memory { value: None, .. } => continue,
-            Body::Memory { slug, .. } => {
-                listings.push(Listing {
-                    slug: slug.clone(),
-                    event_id: head.id.to_hex(),
-                    created_at: head.created_at.as_secs(),
-                    author: head.pubkey.to_hex(),
-                    owner: owner.to_hex(),
-                });
-            }
+        // Drop tombstones. The `core` entry is excluded by spec (listing
+        // excludes core) unless the operator asked for it explicitly.
+        if let Some(entry) = listing_entry(&body, &head, &owner, include_core) {
+            listings.push(entry);
         }
     }
     listings.sort_by(|a, b| a.slug.cmp(&b.slug));
@@ -306,6 +302,35 @@ pub async fn cmd_ls(
         }
     }
     Ok(())
+}
+
+/// The listing entry for a head, or `None` when the head is not listed.
+///
+/// A tombstone is never listed. The `core` profile is excluded by
+/// specification — `core` is the agent identity surface, not a listed entry —
+/// unless `include_core` is set.
+fn listing_entry(
+    body: &Body,
+    head: &nostr::Event,
+    owner: &PublicKey,
+    include_core: bool,
+) -> Option<Listing> {
+    match body {
+        Body::Core { .. } => {
+            if !include_core {
+                return None;
+            }
+        }
+        Body::Memory { value: None, .. } => return None,
+        Body::Memory { .. } => {}
+    }
+    Some(Listing {
+        slug: body.slug().to_string(),
+        event_id: head.id.to_hex(),
+        created_at: head.created_at.as_secs(),
+        author: head.pubkey.to_hex(),
+        owner: owner.to_hex(),
+    })
 }
 
 /// The JSON shape of `buzz mem get --json`: the value plus the provenance of
@@ -787,7 +812,139 @@ pub async fn cmd_patch(
     Ok(())
 }
 
+/// One visible copy of a slug: which owner key it is addressed to, which
+/// event is its head, and whether that head is already a tombstone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SlugCopy {
+    /// The owner (the `p` tag) this copy is addressed to.
+    owner: PublicKey,
+    /// Event id of the head.
+    event_id: String,
+    /// `created_at` of the head.
+    created_at: u64,
+    /// `true` when the head is already a tombstone.
+    tombstoned: bool,
+}
+
+/// Enumerate every copy of `slug` this seat can see, across owner keys.
+///
+/// The `d` tag of an engram is derived from the conversation key of the
+/// writer and the owner it is addressed to, so the same slug under two
+/// owner keys is two separate slots. A delete that only writes one tombstone
+/// leaves the other copy readable — so the delete has to see every copy first.
+///
+/// Only copies this seat authored are visible (the relay admits an engram
+/// filter for the authoring agent or the addressed owner), so this is the
+/// complete set of copies this seat can tombstone.
+async fn enumerate_slug_copies(
+    client: &BuzzClient,
+    agent: &PublicKey,
+    slug: &str,
+) -> Result<Vec<SlugCopy>, CliError> {
+    let filter = serde_json::json!({
+        "kinds": [KIND_AGENT_ENGRAM],
+        "authors": [agent.to_hex()],
+        "limit": 5000,
+    });
+    let raw = client.query(&filter).await?;
+    let events = parse_events(&raw)?;
+
+    // The owner keys this seat has ever addressed an engram to.
+    let mut owners: Vec<PublicKey> = Vec::new();
+    for ev in &events {
+        if ev.verify().is_err() {
+            continue;
+        }
+        let Some(owner) = ev
+            .tags
+            .iter()
+            .find(|t| t.kind().to_string() == "p")
+            .and_then(|t| t.content())
+            .and_then(|v| PublicKey::from_hex(v).ok())
+        else {
+            continue;
+        };
+        if !owners.contains(&owner) {
+            owners.push(owner);
+        }
+    }
+
+    let mut copies = Vec::new();
+    for owner in owners {
+        // The `d` tag for this slug under this owner key.
+        let d = client.credentials().engram_d_tag(&owner, slug).await?;
+        let members: Vec<nostr::Event> = events
+            .iter()
+            .filter(|ev| {
+                ev.tags
+                    .iter()
+                    .find(|t| t.kind().to_string() == "d")
+                    .and_then(|t| t.content())
+                    .map(|v| v == d)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        let Some(head) = select_head(members) else {
+            continue;
+        };
+        // Agent-side read: the peer for decryption is the owner.
+        let body = open_engram(client, &head, agent, &owner, &owner).await?;
+        let Some(body) = body else { continue };
+        if body.slug() != slug {
+            continue;
+        }
+        copies.push(SlugCopy {
+            owner,
+            event_id: head.id.to_hex(),
+            created_at: head.created_at.as_secs(),
+            tombstoned: body.is_tombstone(),
+        });
+    }
+    Ok(copies)
+}
+
+/// The delete plan for a set of visible copies of one slug.
+///
+/// `targets` are the copies to tombstone. `others` are the live copies that
+/// stay readable — only non-empty when the delete was scoped to one owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeletePlan {
+    targets: Vec<SlugCopy>,
+    others: Vec<SlugCopy>,
+}
+
+/// Plan a delete over the visible copies of a slug.
+///
+/// Without a scope, every live copy is a target: a delete that leaves a
+/// readable copy behind reads as a delete and is not one. With a scope, only
+/// the copies under that owner are targeted and the surviving copies under
+/// other owners are named.
+fn plan_delete(copies: &[SlugCopy], scope: Option<&PublicKey>) -> DeletePlan {
+    let live: Vec<SlugCopy> = copies.iter().filter(|c| !c.tombstoned).cloned().collect();
+    match scope {
+        None => DeletePlan {
+            targets: live,
+            others: Vec::new(),
+        },
+        Some(owner) => DeletePlan {
+            targets: live.iter().filter(|c| &c.owner == owner).cloned().collect(),
+            others: live.iter().filter(|c| &c.owner != owner).cloned().collect(),
+        },
+    }
+}
+
 /// `buzz mem rm <slug>` — publish a tombstone (`value: null`).
+///
+/// A slug can exist as several copies — one per owner key it was written
+/// under — because the engram `d` tag is derived per (writer, owner) pair.
+/// This command enumerates every copy the seat can see first: with no
+/// `--owner` it tombstones all of them, so a delete does not leave a
+/// readable copy behind. With `--owner` the delete is scoped to that owner
+/// and any surviving copy under another owner is named on stderr.
 ///
 /// `rm core` writes a tombstone-shaped body, but a core tombstone has no
 /// well-defined semantics in NIP-AE (the spec only defines tombstones for
@@ -805,28 +962,90 @@ pub async fn cmd_rm(
             "core cannot be tombstoned; overwrite it with `buzz mem set core ''` instead".into(),
         ));
     }
-    let owner = resolve_owner(client, owner_flag)?;
+    let agent_pubkey = client.public_key();
+
+    // Enumerate BEFORE writing anything: if the enumeration fails, nothing
+    // is deleted and the operator is not told a delete happened.
+    let copies = enumerate_slug_copies(client, &agent_pubkey, &slug).await?;
+    let scope = match owner_flag {
+        Some(flag) => Some(
+            PublicKey::from_hex(flag)
+                .map_err(|e| CliError::Usage(format!("--owner must be a 64-hex pubkey: {e}")))?,
+        ),
+        None => None,
+    };
+    let plan = plan_delete(&copies, scope.as_ref());
+    let targets = plan.targets;
+    let others = plan.others;
+
+    if !others.is_empty() {
+        eprintln!(
+            "warning: {} live copy/copies of {slug} under other owner key(s) remain and were NOT deleted: {}",
+            others.len(),
+            others
+                .iter()
+                .map(|c| c.owner.to_hex())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    if targets.is_empty() {
+        if owner_flag.is_some() {
+            return Err(CliError::NotFound(format!("not found: {slug}")));
+        }
+        // No live copy anywhere. Preserve the historical behaviour of writing
+        // a tombstone against the resolved owner so the operation stays
+        // idempotent, and say plainly that nothing was live.
+        let owner = resolve_owner(client, owner_flag)?;
+        let body = Body::Memory {
+            slug: slug.clone(),
+            value: None,
+        };
+        let created_at = engram::monotonic_created_at(now_secs(), None);
+        let event = seal_engram(client, &owner, &body, created_at).await?;
+        let id = event.id.to_hex();
+        submit_engram(client, event).await?;
+        eprintln!(
+            "tombstoned {slug} (event {id}, created_at {created_at}); no live copy was found"
+        );
+        return Ok(());
+    }
+
     let body = Body::Memory {
         slug: slug.clone(),
         value: None,
     };
-    let agent_pubkey = client.public_key();
-    let (head, _) = fetch_head(client, &agent_pubkey, &owner, &slug).await?;
-    let prior_created_at = head.map(|e| e.created_at.as_secs());
-    let created_at = engram::monotonic_created_at(now_secs(), prior_created_at);
-
-    let event = seal_engram(client, &owner, &body, created_at).await?;
-    let id = event.id.to_hex();
-    submit_engram(client, event).await?;
-    eprintln!("tombstoned {slug} (event {id}, created_at {created_at})");
+    for copy in &targets {
+        let created_at = engram::monotonic_created_at(now_secs(), Some(copy.created_at));
+        let event = seal_engram(client, &copy.owner, &body, created_at).await?;
+        let id = event.id.to_hex();
+        submit_engram(client, event).await?;
+        eprintln!(
+            "tombstoned {slug} under owner {} (event {id}, created_at {created_at})",
+            copy.owner.to_hex()
+        );
+    }
     Ok(())
 }
 
 pub async fn dispatch(cmd: crate::MemCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::MemCmd;
     match cmd {
-        MemCmd::Ls { owner, agent, json } => {
-            cmd_ls(client, owner.as_deref(), agent.as_deref(), json).await
+        MemCmd::Ls {
+            owner,
+            agent,
+            json,
+            include_core,
+        } => {
+            cmd_ls(
+                client,
+                owner.as_deref(),
+                agent.as_deref(),
+                json,
+                include_core,
+            )
+            .await
         }
         MemCmd::Get {
             slug,
@@ -981,7 +1200,7 @@ mod tests {
             .unwrap();
         let client = BuzzClient::new(relay, credentials).unwrap();
 
-        cmd_ls(&client, Some(&owner.to_hex()), None, true)
+        cmd_ls(&client, Some(&owner.to_hex()), None, true, false)
             .await
             .unwrap();
         assert_eq!(
@@ -1042,6 +1261,144 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["author"], agent.public_key().to_hex());
         assert_eq!(parsed["owner"], agent.public_key().to_hex());
+    }
+
+    /// The listing excludes `core` by specification, and `--include-core`
+    /// makes it visible. A tombstone is never listed either way.
+    #[test]
+    fn the_listing_excludes_core_unless_it_is_asked_for() {
+        let agent = nostr::Keys::generate();
+        let owner = nostr::Keys::generate().public_key();
+        let core = engram::build_event(
+            &agent,
+            &owner,
+            &Body::Core {
+                profile: "p".into(),
+            },
+            1_700_000_000,
+        )
+        .unwrap();
+        assert!(listing_entry(
+            &Body::Core {
+                profile: "p".into()
+            },
+            &core,
+            &owner,
+            false
+        )
+        .is_none());
+        let entry = listing_entry(
+            &Body::Core {
+                profile: "p".into(),
+            },
+            &core,
+            &owner,
+            true,
+        )
+        .expect("core is listed when asked for");
+        assert_eq!(entry.slug, "core");
+        assert_eq!(entry.event_id, core.id.to_hex());
+        assert_eq!(entry.owner, owner.to_hex());
+
+        let tombstone = engram::build_event(
+            &agent,
+            &owner,
+            &Body::Memory {
+                slug: "mem/a".into(),
+                value: None,
+            },
+            1_700_000_000,
+        )
+        .unwrap();
+        assert!(listing_entry(
+            &Body::Memory {
+                slug: "mem/a".into(),
+                value: None
+            },
+            &tombstone,
+            &owner,
+            true
+        )
+        .is_none());
+    }
+
+    /// The `d` tag of an engram is derived per (writer, owner) pair, so the
+    /// same slug written under two owner keys is two separate slots with two
+    /// different `d` tags. A tombstone under one owner key therefore cannot
+    /// address the copy under the other — which is why the delete has to
+    /// enumerate every owner key first.
+    #[test]
+    fn the_same_slug_under_two_owners_is_two_separate_slots() {
+        let agent = nostr::Keys::generate();
+        let owner_a = nostr::Keys::generate().public_key();
+        let owner_b = nostr::Keys::generate().public_key();
+        let body = Body::Memory {
+            slug: "mem/a".into(),
+            value: Some("v".into()),
+        };
+        let a = engram::build_event(&agent, &owner_a, &body, 1_700_000_000).unwrap();
+        let b = engram::build_event(&agent, &owner_b, &body, 1_700_000_000).unwrap();
+        let d_of = |ev: &nostr::Event| {
+            ev.tags
+                .iter()
+                .find(|t| t.kind().to_string() == "d")
+                .and_then(|t| t.content())
+                .unwrap()
+                .to_string()
+        };
+        assert_ne!(d_of(&a), d_of(&b));
+        assert_ne!(a.id.to_hex(), b.id.to_hex());
+    }
+
+    fn copy(owner: PublicKey, tombstoned: bool) -> SlugCopy {
+        SlugCopy {
+            owner,
+            event_id: "e".repeat(64),
+            created_at: 1_700_000_000,
+            tombstoned,
+        }
+    }
+
+    /// A delete without a scope tombstones EVERY live copy: a delete that
+    /// leaves a readable copy behind reads as a delete and is not one.
+    #[test]
+    fn an_unscoped_delete_tombstones_every_live_copy() {
+        let a = nostr::Keys::generate().public_key();
+        let b = nostr::Keys::generate().public_key();
+        let copies = vec![copy(a, false), copy(b, false), copy(a, true)];
+        let plan = plan_delete(&copies, None);
+        assert_eq!(plan.targets.len(), 2);
+        assert_eq!(plan.others.len(), 0);
+        let mut owners: Vec<String> = plan.targets.iter().map(|c| c.owner.to_hex()).collect();
+        owners.sort();
+        let mut expected = vec![a.to_hex(), b.to_hex()];
+        expected.sort();
+        assert_eq!(owners, expected);
+    }
+
+    /// A scoped delete targets only that owner and NAMES the copies that
+    /// stay readable, so the operator is never told a delete was complete
+    /// while a copy survived.
+    #[test]
+    fn a_scoped_delete_names_the_copies_that_survive() {
+        let a = nostr::Keys::generate().public_key();
+        let b = nostr::Keys::generate().public_key();
+        let copies = vec![copy(a, false), copy(b, false)];
+        let plan = plan_delete(&copies, Some(&a));
+        assert_eq!(plan.targets.len(), 1);
+        assert_eq!(plan.targets[0].owner, a);
+        assert_eq!(plan.others.len(), 1);
+        assert_eq!(plan.others[0].owner, b);
+    }
+
+    /// An already-tombstoned copy is not a target — deleting it again would
+    /// publish a second tombstone for nothing.
+    #[test]
+    fn a_tombstoned_copy_is_not_a_delete_target() {
+        let a = nostr::Keys::generate().public_key();
+        let plan = plan_delete(&[copy(a, true)], None);
+        assert!(plan.targets.is_empty());
+        assert!(plan.others.is_empty());
     }
 
     #[test]

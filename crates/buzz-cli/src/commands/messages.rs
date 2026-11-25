@@ -118,12 +118,48 @@ async fn resolve_channel_id(client: &BuzzClient, event_id: &str) -> Result<Uuid,
     channel_id_from_event(event_id, &event)
 }
 
+/// A visible `@Name` that could not be resolved to a single channel member, so
+/// no `p` tag was added for it.
+///
+/// The publish still succeeds — an explicit `--mention` (or nostr URI) is
+/// enough to authorize the message — but the name text in the body then
+/// notifies nobody. That loss must not be silent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SkippedMention {
+    /// The display name as it appeared in the message body (without `@`).
+    pub name: String,
+    /// The candidate pubkeys for that name, when there were any.
+    pub candidates: Vec<String>,
+    /// Why the name could not be resolved.
+    pub reason: SkippedMentionReason,
+}
+
+/// Why a visible `@Name` was dropped instead of resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SkippedMentionReason {
+    /// The name matched no current channel member.
+    NoCandidate,
+    /// The name matched more than one current channel member.
+    Ambiguous,
+}
+
+impl SkippedMentionReason {
+    /// The human-readable reason, carried in the warning.
+    fn as_str(self) -> &'static str {
+        match self {
+            SkippedMentionReason::NoCandidate => "no current channel member has this display name",
+            SkippedMentionReason::Ambiguous => "the display name is shared by several members",
+        }
+    }
+}
+
 fn resolve_names_to_pubkeys(
     names: &[String],
     name_to_pubkeys: &std::collections::HashMap<String, Vec<String>>,
     has_explicit_mentions: bool,
-) -> Result<Vec<String>, CliError> {
+) -> Result<(Vec<String>, Vec<SkippedMention>), CliError> {
     let mut resolved = Vec::new();
+    let mut skipped = Vec::new();
     for name in names {
         match name_to_pubkeys
             .get(name)
@@ -131,13 +167,21 @@ fn resolve_names_to_pubkeys(
             .unwrap_or_default()
         {
             [pubkey] => resolved.push(pubkey.clone()),
-            [] if has_explicit_mentions => {}
+            [] if has_explicit_mentions => skipped.push(SkippedMention {
+                name: name.clone(),
+                candidates: Vec::new(),
+                reason: SkippedMentionReason::NoCandidate,
+            }),
             [] => {
                 return Err(CliError::Usage(format!(
                     "mention '@{name}' does not match a current channel member; retry with --mention <pubkey>"
                 )))
             }
-            _ if has_explicit_mentions => {}
+            candidates if has_explicit_mentions => skipped.push(SkippedMention {
+                name: name.clone(),
+                candidates: candidates.to_vec(),
+                reason: SkippedMentionReason::Ambiguous,
+            }),
             candidates => {
                 return Err(CliError::Usage(format!(
                     "mention '@{name}' is ambiguous; candidates: {}. Retry with --mention <pubkey>",
@@ -146,7 +190,27 @@ fn resolve_names_to_pubkeys(
             }
         }
     }
-    Ok(resolved)
+    Ok((resolved, skipped))
+}
+
+/// Warn on stderr about every visible mention that was dropped because it
+/// could not be resolved to exactly one channel member.
+///
+/// A published mention that notifies nobody must not be silent.
+fn warn_skipped_mentions(skipped: &[SkippedMention]) {
+    for s in skipped {
+        let candidates = if s.candidates.is_empty() {
+            String::new()
+        } else {
+            format!("; candidates: {}", s.candidates.join(", "))
+        };
+        eprintln!(
+            "warning: mention '@{}' was published without notifying anyone — {} (no p tag added){}",
+            s.name,
+            s.reason.as_str(),
+            candidates
+        );
+    }
 }
 
 /// Resolve mention text against the channel membership snapshot.
@@ -159,25 +223,26 @@ async fn resolve_content_mentions(
     channel_id: &str,
     content: &str,
     has_explicit_mentions: bool,
-) -> Result<(Vec<String>, Vec<String>), CliError> {
+) -> Result<(MemberRoster, Vec<String>), CliError> {
     let stripped = strip_code_regions(content);
     if !stripped.contains('@') && !has_explicit_mentions {
-        return Ok((vec![], vec![]));
+        return Ok((MemberRoster::default(), vec![]));
     }
 
     let members_filter = serde_json::json!({
         "kinds": [39002],
         "#d": [channel_id],
-        "limit": 1,
+        "limit": 5,
     });
-    let member_pubkeys = fetch_member_pubkeys(client, &members_filter)
+    let roster = fetch_member_roster(client, &members_filter)
         .await
         .ok_or_else(|| {
             CliError::Other("could not load channel membership for mention preflight".into())
         })?;
+    let member_pubkeys = roster.pubkeys.clone();
 
     if !stripped.contains('@') {
-        return Ok((member_pubkeys, vec![]));
+        return Ok((roster, vec![]));
     }
 
     let profiles_filter = serde_json::json!({
@@ -221,8 +286,10 @@ async fn resolve_content_mentions(
 
     let known_refs: Vec<&str> = display_names.iter().map(String::as_str).collect();
     let names = extract_at_mentions_with_known(&stripped, &known_refs);
-    let resolved = resolve_names_to_pubkeys(&names, &name_to_pubkeys, has_explicit_mentions)?;
-    Ok((member_pubkeys, resolved))
+    let (resolved, skipped) =
+        resolve_names_to_pubkeys(&names, &name_to_pubkeys, has_explicit_mentions)?;
+    warn_skipped_mentions(&skipped);
+    Ok((roster, resolved))
 }
 
 fn normalize_explicit_mentions(values: &[String]) -> Result<Vec<String>, CliError> {
@@ -299,34 +366,136 @@ async fn fetch_events(
     parsed.as_array().cloned()
 }
 
-/// Extract member pubkeys (the `p` tag values) from a single 39002 event.
-async fn fetch_member_pubkeys(
+/// A parsed kind-39002 channel roster event.
+///
+/// The roster is the CLI's membership authority for mention preflight. This
+/// struct keeps the provenance of that authority (which event, when, how many
+/// events the relay offered) and every `p` tag that could NOT be read as a
+/// member, so a refusal can be diagnosed from its own error instead of by
+/// guesswork.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct MemberRoster {
+    /// Member pubkeys, canonicalised to lowercase hex.
+    pubkeys: Vec<String>,
+    /// `p` tag values that could not be parsed as a hex pubkey. These are
+    /// absent from `pubkeys`: a roster entry written in npub form (or any
+    /// other malformed value) vanishes from the membership set, which can
+    /// turn a valid mention into a false refusal.
+    dropped_p_tags: Vec<String>,
+    /// Relay event id of the 39002 event this roster came from.
+    event_id: Option<String>,
+    /// Relay `created_at` of that event.
+    created_at: Option<i64>,
+    /// How many kind-39002 events the relay returned for this channel.
+    events_seen: usize,
+}
+
+/// Pick the roster event of record from the kind-39002 events a relay returned.
+///
+/// The relay may hold more than one kind-39002 event for a channel. The
+/// newest (by `created_at`, then by id) is the roster of record; the count of
+/// events seen is reported separately so a duplicate is visible rather than
+/// silent. Split out as a pure helper so the selection rule is testable
+/// without a relay.
+fn newest_roster_event(events: &[serde_json::Value]) -> Option<&serde_json::Value> {
+    events.iter().max_by(|a, b| {
+        let key = |e: &serde_json::Value| {
+            (
+                e.get("created_at")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(i64::MIN),
+                e.get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            )
+        };
+        key(a).cmp(&key(b))
+    })
+}
+
+/// Extract the member roster from the newest kind-39002 event returned.
+async fn fetch_member_roster(
     client: &BuzzClient,
     filter: &serde_json::Value,
-) -> Option<Vec<String>> {
+) -> Option<MemberRoster> {
     let events = fetch_events(client, filter).await?;
-    Some(parse_member_pubkeys(events.first()?))
+    let events_seen = events.len();
+    let newest = newest_roster_event(&events)?;
+    let mut roster = parse_member_roster(newest);
+    roster.events_seen = events_seen;
+    Some(roster)
+}
+
+/// Parse a kind 39002 roster event into a `MemberRoster`.
+///
+/// Filters and canonicalizes via `nostr::PublicKey::from_hex` — matching
+/// MCP's typed-Nostr behavior so both surfaces accept exactly the same
+/// pubkeys. A `p` tag whose value is not valid hex is NOT dropped silently:
+/// it is recorded in `dropped_p_tags` so it can be surfaced.
+fn parse_member_roster(event: &serde_json::Value) -> MemberRoster {
+    let mut roster = MemberRoster {
+        event_id: event.get("id").and_then(|v| v.as_str()).map(str::to_string),
+        created_at: event.get("created_at").and_then(|v| v.as_i64()),
+        ..Default::default()
+    };
+    let Some(tags) = event.get("tags").and_then(|t| t.as_array()) else {
+        return roster;
+    };
+    for tag in tags {
+        let Some(arr) = tag.as_array() else { continue };
+        if arr.first().and_then(|v| v.as_str()) != Some("p") {
+            continue;
+        }
+        let Some(value) = arr.get(1).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        match PublicKey::from_hex(value) {
+            Ok(pk) => roster.pubkeys.push(pk.to_hex()),
+            Err(_) => roster.dropped_p_tags.push(value.to_string()),
+        }
+    }
+    roster
 }
 
 /// Parse member pubkeys from a kind 39002 event JSON value.
 ///
-/// Filters and canonicalizes via `nostr::PublicKey::from_hex` — matching
-/// MCP's typed-Nostr behavior so both surfaces accept exactly the same
-/// pubkeys. Pure helper, split out for testing.
+/// Retained as the canonicalizing helper for the roster tests; callers that
+/// need the provenance of the roster (or the list of unreadable `p` tags) use
+/// `parse_member_roster`.
+#[cfg(test)]
 fn parse_member_pubkeys(event: &serde_json::Value) -> Vec<String> {
-    let Some(tags) = event.get("tags").and_then(|t| t.as_array()) else {
-        return vec![];
-    };
-    tags.iter()
-        .filter_map(|t| {
-            let arr = t.as_array()?;
-            if arr.first()?.as_str()? != "p" {
-                return None;
-            }
-            let pk = arr.get(1)?.as_str()?;
-            PublicKey::from_hex(pk).ok().map(|k| k.to_hex())
-        })
-        .collect()
+    parse_member_roster(event).pubkeys
+}
+
+/// Build the refusal payload for mentions that are not in the roster.
+///
+/// The payload carries, besides the offending pubkeys, the identity of the
+/// roster event that was read and the roster itself: a refusal must be
+/// diagnosable from its own error.
+fn missing_members_error(
+    channel_id: &str,
+    missing: Vec<String>,
+    roster: &MemberRoster,
+) -> CliError {
+    let mut payload = serde_json::json!({
+        "message": "mentioned pubkeys are not channel members; add them explicitly before retrying",
+        "missing_member_pubkeys": missing,
+        "add_member_command": format!("buzz channels add-member --channel {channel_id} --pubkey <pubkey> --role <member|bot>"),
+    });
+    if let Some(event_id) = &roster.event_id {
+        payload["membership_event_id"] = serde_json::Value::String(event_id.clone());
+    }
+    if let Some(created_at) = roster.created_at {
+        payload["membership_event_created_at"] = serde_json::Value::from(created_at);
+    }
+    payload["membership_roster_snapshot"] = serde_json::Value::from(roster.pubkeys.clone());
+    payload["membership_roster_event_count"] = serde_json::Value::from(roster.events_seen);
+    if !roster.dropped_p_tags.is_empty() {
+        payload["membership_roster_dropped_p_tags"] =
+            serde_json::Value::from(roster.dropped_p_tags.clone());
+    }
+    CliError::Usage(payload.to_string())
 }
 
 pub async fn cmd_get_messages(
@@ -700,20 +869,21 @@ pub async fn cmd_send_message(
     // Uniquely resolvable member names still add their own p-tags; callers must supply
     // every intended identity whose visible label cannot be resolved uniquely.
     let has_explicit_mentions = !explicit_mentions.is_empty() || !uri_pubkeys.is_empty();
-    let (member_pubkeys, auto_resolved) =
+    let (roster, auto_resolved) =
         resolve_content_mentions(client, &p.channel_id, &p.content, has_explicit_mentions).await?;
     let mention_pubkeys = merge_message_mentions(&explicit_mentions, &uri_pubkeys, &auto_resolved)?;
 
-    let missing = missing_members(&mention_pubkeys, &member_pubkeys);
+    if !roster.dropped_p_tags.is_empty() {
+        eprintln!(
+            "warning: channel roster event {} carries {} unreadable p tag(s); those members are absent from the membership set",
+            roster.event_id.as_deref().unwrap_or("unknown"),
+            roster.dropped_p_tags.len(),
+        );
+    }
+
+    let missing = missing_members(&mention_pubkeys, &roster.pubkeys);
     if !missing.is_empty() {
-        return Err(CliError::Usage(
-            serde_json::json!({
-                "message": "mentioned pubkeys are not channel members; add them explicitly before retrying",
-                "missing_member_pubkeys": missing,
-                "add_member_command": format!("buzz channels add-member --channel {} --pubkey <pubkey> --role <member|bot>", p.channel_id),
-            })
-            .to_string(),
-        ));
+        return Err(missing_members_error(&p.channel_id, missing, &roster));
     }
 
     // Upload files and build imeta tags
@@ -1209,6 +1379,98 @@ fn parse_kinds(list: &str) -> Result<Vec<u16>, CliError> {
 
 #[cfg(test)]
 mod tests {
+    /// A roster event whose `p` tags mix one valid pubkey, one npub-form value
+    /// and one malformed value.
+    fn roster_event_fixture() -> serde_json::Value {
+        serde_json::json!({
+            "id": "d".repeat(64),
+            "created_at": 1_700_000_000i64,
+            "tags": [
+                ["p", "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4"],
+                ["p", "npub1e4m5l5u5qq9eh23zh3nlxl463l2s0y2wzec6yz92s49kzqpj8rfsllzqc3"],
+                ["p", "not-a-pubkey"],
+                ["e", "something-else"]
+            ]
+        })
+    }
+
+    #[test]
+    fn roster_keeps_valid_p_tags_and_records_the_unreadable_ones() {
+        use super::parse_member_roster;
+        let roster = parse_member_roster(&roster_event_fixture());
+        assert_eq!(
+            roster.pubkeys,
+            vec!["35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4".to_string()]
+        );
+        // The npub-form value and the malformed value are NOT dropped silently:
+        // a roster entry written in npub form would otherwise vanish from the
+        // membership set and turn a valid mention into a false refusal.
+        assert_eq!(
+            roster.dropped_p_tags,
+            vec![
+                "npub1e4m5l5u5qq9eh23zh3nlxl463l2s0y2wzec6yz92s49kzqpj8rfsllzqc3".to_string(),
+                "not-a-pubkey".to_string(),
+            ]
+        );
+        let expected_event_id = "d".repeat(64);
+        assert_eq!(roster.event_id.as_deref(), Some(expected_event_id.as_str()));
+        assert_eq!(roster.created_at, Some(1_700_000_000i64));
+    }
+
+    #[test]
+    fn roster_selection_takes_the_newest_39002_event() {
+        use super::newest_roster_event;
+        let older = serde_json::json!({"id": "a".repeat(64), "created_at": 100i64, "tags": []});
+        let newer = serde_json::json!({"id": "b".repeat(64), "created_at": 200i64, "tags": []});
+        let forward = [older.clone(), newer.clone()];
+        let chosen = newest_roster_event(&forward).unwrap();
+        assert_eq!(chosen["id"], newer["id"]);
+        // Order in the relay's reply must not decide the winner.
+        let reversed = [newer.clone(), older.clone()];
+        let chosen = newest_roster_event(&reversed).unwrap();
+        assert_eq!(chosen["id"], newer["id"]);
+        // A tie on created_at falls back to the id.
+        let tie_a = serde_json::json!({"id": "a".repeat(64), "created_at": 100i64, "tags": []});
+        let tie_b = serde_json::json!({"id": "b".repeat(64), "created_at": 100i64, "tags": []});
+        let tie = [tie_a, tie_b];
+        let chosen = newest_roster_event(&tie).unwrap();
+        assert_eq!(chosen["id"], "b".repeat(64));
+        assert!(newest_roster_event(&[]).is_none());
+    }
+
+    #[test]
+    fn refusal_error_carries_the_roster_it_was_checked_against() {
+        use super::{missing_members_error, parse_member_roster, CliError};
+        let roster = parse_member_roster(&roster_event_fixture());
+        let err = missing_members_error("channel-uuid", vec!["00".repeat(32)], &roster);
+        let CliError::Usage(payload) = err else {
+            panic!("expected a usage error");
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        // The key the CLI rejected must still be named: it is what identified
+        // a one-adjacent-pair key slip in the field.
+        assert_eq!(
+            parsed["missing_member_pubkeys"],
+            serde_json::json!(["00".repeat(32)])
+        );
+        // The roster provenance must travel with the refusal, so the refusal is
+        // diagnosable from its own error.
+        assert_eq!(parsed["membership_event_id"], "d".repeat(64));
+        assert_eq!(parsed["membership_event_created_at"], 1_700_000_000i64);
+        assert_eq!(parsed["membership_roster_event_count"], 0);
+        assert_eq!(
+            parsed["membership_roster_snapshot"],
+            serde_json::json!(["35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4"])
+        );
+        assert_eq!(
+            parsed["membership_roster_dropped_p_tags"],
+            serde_json::json!([
+                "npub1e4m5l5u5qq9eh23zh3nlxl463l2s0y2wzec6yz92s49kzqpj8rfsllzqc3",
+                "not-a-pubkey"
+            ])
+        );
+    }
+
     #[test]
     fn search_filter_pages_by_composite_cursor() {
         use super::{search_filter, CliError};
@@ -1685,10 +1947,13 @@ mod tests {
     fn explicit_mentions_authorize_presentation_text_without_name_resolution() {
         let names = vec!["renamed user".into()];
         let profiles = std::collections::HashMap::new();
-        assert_eq!(
-            resolve_names_to_pubkeys(&names, &profiles, true).unwrap(),
-            Vec::<String>::new()
-        );
+        let (resolved, skipped) = resolve_names_to_pubkeys(&names, &profiles, true).unwrap();
+        assert_eq!(resolved, Vec::<String>::new());
+        // The name could not be resolved, so no p tag was added for it — the
+        // publish still succeeds, but the dropped mention is reported.
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].name, "renamed user");
+        assert_eq!(skipped[0].reason, super::SkippedMentionReason::NoCandidate);
         assert!(resolve_names_to_pubkeys(&names, &profiles, false).is_err());
     }
 
@@ -1699,9 +1964,16 @@ mod tests {
             "alice".into(),
             vec![PK_VALID_A.into(), PK_VALID_B.into()],
         )]);
+        let (resolved, skipped) = resolve_names_to_pubkeys(&names, &profiles, true).unwrap();
+        assert_eq!(resolved, Vec::<String>::new());
+        // An ambiguous name beside an explicit --mention publishes the text
+        // without notifying anybody. That loss is reported, not silent.
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].name, "alice");
+        assert_eq!(skipped[0].reason, super::SkippedMentionReason::Ambiguous);
         assert_eq!(
-            resolve_names_to_pubkeys(&names, &profiles, true).unwrap(),
-            Vec::<String>::new()
+            skipped[0].candidates,
+            vec![PK_VALID_A.to_string(), PK_VALID_B.to_string()]
         );
         let error = resolve_names_to_pubkeys(&names, &profiles, false).unwrap_err();
         assert!(error.to_string().contains(PK_VALID_A));
@@ -1712,10 +1984,11 @@ mod tests {
     fn explicit_mentions_make_all_at_names_presentation_only() {
         let names = vec!["alice".into(), "bob".into()];
         let profiles = std::collections::HashMap::from([("alice".into(), vec![PK_VALID_A.into()])]);
-        assert_eq!(
-            resolve_names_to_pubkeys(&names, &profiles, true).unwrap(),
-            vec![PK_VALID_A]
-        );
+        let (resolved, skipped) = resolve_names_to_pubkeys(&names, &profiles, true).unwrap();
+        assert_eq!(resolved, vec![PK_VALID_A]);
+        // Only the unresolvable name is reported; the resolved one is not.
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].name, "bob");
         assert!(resolve_names_to_pubkeys(&names, &profiles, false).is_err());
     }
 
