@@ -215,8 +215,10 @@ impl SearchIndex {
     /// Upsert `documents` and delete `removed` for one community through the
     /// alias, and report each item's result. A batch of more than
     /// [`MAX_BULK_BYTES`] goes out as several bulk requests, one after the
-    /// other; once one is throttled the rest are not sent and count as
-    /// failed.
+    /// other; once one is throttled or fails the rest are not sent and count
+    /// as failed. After the first, a failed request's items count as failed
+    /// and a refused one's as rejected, so the items of the requests already
+    /// applied still count as written.
     /// Deleting a document that is not there succeeds. The request requires
     /// the alias, so a missing index fails the write instead of being created
     /// with a dynamic mapping.
@@ -227,7 +229,7 @@ impl SearchIndex {
     /// already holds at this version or a newer one fails as a conflict.
     ///
     /// A throttled request (HTTP 429) comes back as an outcome in which every
-    /// item failed; any other failed request is an error.
+    /// item failed; any other failed first request is an error.
     pub async fn write(
         &self,
         community: CommunityId,
@@ -240,19 +242,41 @@ impl SearchIndex {
             .map(|document| document_bytes(community, document))
             .chain(removed.iter().map(|_| BULK_ITEM_OVERHEAD));
         let mut outcome = BulkOutcome::default();
+        let mut stopped = false;
         for range in request_ranges(sizes, MAX_BULK_BYTES) {
             let (documents, removed) = split_items(documents, removed, &range);
-            if outcome.throttled {
-                // Not sent: the cluster asked for less.
+            if outcome.throttled || stopped {
+                // Not sent: the cluster asked for less, or is failing.
                 outcome
                     .failed
                     .extend(documents.iter().map(|document| document.event_id));
                 outcome.failed.extend(removed);
                 continue;
             }
-            let part = self
+            let part = match self
                 .write_request(community, documents, removed, version)
-                .await?;
+                .await
+            {
+                Ok(part) => part,
+                // Earlier requests were applied: report this one's items as
+                // failed, so the rows of the applied ones are completed.
+                Err(error) if range.start > 0 => {
+                    let refused = matches!(error, SearchError::Rejected(_));
+                    stopped = !refused;
+                    let failed: Vec<[u8; 32]> = documents
+                        .iter()
+                        .map(|document| document.event_id)
+                        .chain(removed.iter().copied())
+                        .collect();
+                    BulkOutcome {
+                        rejected: if refused { failed.len() } else { 0 },
+                        failed,
+                        reason: Some(error.kind()),
+                        ..BulkOutcome::default()
+                    }
+                }
+                Err(error) => return Err(error),
+            };
             outcome.failed.extend(part.failed);
             outcome.rejected += part.rejected;
             outcome.conflicts += part.conflicts;
@@ -602,7 +626,77 @@ fn transport_error(error: opensearch::Error) -> SearchError {
 
 #[cfg(test)]
 mod tests {
-    use super::request_ranges;
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn large_document(byte: u8) -> SearchDocument {
+        SearchDocument {
+            event_id: [byte; 32],
+            kind: 9,
+            pubkey: [0; 32],
+            channel_id: None,
+            created_at: chrono::DateTime::from_timestamp(0, 0).expect("epoch"),
+            content: "x".repeat(MAX_BULK_BYTES * 5 / 8),
+            channel_type: None,
+            author_is_agent: false,
+            thread_root: None,
+            mentions: Vec::new(),
+        }
+    }
+
+    /// When a batch goes out as several requests and a later one fails, the
+    /// items the cluster already applied are reported as written, so their
+    /// rows are completed instead of being sent again forever.
+    #[tokio::test]
+    async fn a_failed_later_request_keeps_the_items_already_applied() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new()
+            .fallback({
+                let requests = Arc::clone(&requests);
+                move |_body: axum::body::Bytes| async move {
+                    match requests.fetch_add(1, Ordering::SeqCst) {
+                        0 => (
+                            axum::http::StatusCode::OK,
+                            json!({ "errors": false, "items": [] }).to_string(),
+                        ),
+                        _ => (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            "{}".to_string(),
+                        ),
+                    }
+                }
+            })
+            .layer(axum::extract::DefaultBodyLimit::disable());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("address"));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let index = SearchIndex::new(&OpenSearchConfig {
+            url,
+            basic_auth: None,
+            index_prefix: DEFAULT_INDEX_PREFIX.into(),
+        })
+        .expect("client");
+        let documents = [large_document(1), large_document(2), large_document(3)];
+
+        let outcome = index
+            .write(
+                CommunityId::from_uuid(uuid::Uuid::nil()),
+                &documents,
+                &[],
+                1,
+            )
+            .await
+            .expect("the first request was applied");
+        server.abort();
+
+        // Mutation: propagate a later request's error → RED.
+        assert_eq!(outcome.failed, [[2; 32], [3; 32]]);
+        assert_eq!(outcome.rejected, 0);
+        assert_eq!(requests.load(Ordering::SeqCst), 2, "the rest is not sent");
+    }
 
     #[test]
     fn a_batch_over_the_request_limit_is_split_in_order() {
