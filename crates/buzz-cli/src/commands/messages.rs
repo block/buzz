@@ -205,7 +205,7 @@ fn warn_skipped_mentions(skipped: &[SkippedMention]) {
             format!("; candidates: {}", s.candidates.join(", "))
         };
         eprintln!(
-            "warning: mention '@{}' was published without notifying anyone — {} (no p tag added){}",
+            "warning: mention '@{}' will notify nobody — {} (no p tag added for it){}",
             s.name,
             s.reason.as_str(),
             candidates
