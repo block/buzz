@@ -952,3 +952,27 @@ void _insertComposerEmoji(
   );
   if (restoreFocus) focusNode.requestFocus();
 }
+
+/// Replaces the `:query` before the caret with [choice] when [emojiQuery] is
+/// still the active query.
+void _selectComposerEmoji(
+  _MarkdownEditingController controller,
+  FocusNode focusNode,
+  ValueNotifier<String?> emojiQuery,
+  _EmojiChoice choice,
+) {
+  final query = _emojiQuery(controller.value);
+  if (query == null || query != emojiQuery.value) return;
+  final caret = controller.selection.end;
+  final start = caret - query.length - 1;
+  final suffix = _emojiSuffix.matchAsPrefix(controller.text, caret)!;
+  _replaceComposerRange(
+    controller,
+    start: start,
+    end: suffix.end,
+    replacement: choice.text,
+    caret: start + choice.text.length,
+  );
+  focusNode.requestFocus();
+  emojiQuery.value = null;
+}

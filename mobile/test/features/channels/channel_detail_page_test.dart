@@ -1335,6 +1335,15 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(BestieWelcome), findsOneWidget);
+    // The welcome bubble reads in the same type as the chat bubbles below it.
+    final welcome = tester.widget<MessageContent>(
+      find.descendant(
+        of: find.byType(BestieWelcome),
+        matching: find.byType(MessageContent),
+      ),
+    );
+    expect(welcome.baseStyle?.fontSize, chatBodyTextStyle.fontSize);
+    expect(welcome.baseStyle?.height, chatBodyTextStyle.height);
     expect(messagesNotifier.fetchOlderCalls, 5);
     expect(find.text('Load earlier messages'), findsOneWidget);
 

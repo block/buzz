@@ -845,6 +845,31 @@ void main() {
       );
     });
 
+    testWidgets('reply draft uses the published reply text style', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildThreadPage(
+          threadResponse: ForumThreadResponse(
+            post: _makePost(),
+            replies: const [],
+            totalReplies: 0,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Reply to this post\u2026'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(EditableText), 'Draft reply');
+      await tester.pump();
+
+      // A draft wraps exactly as the reply it publishes.
+      final field = tester.widget<EditableText>(find.byType(EditableText));
+      expect(field.style.fontSize, messageBodyTextStyle.fontSize);
+      expect(field.style.height, messageBodyTextStyle.height);
+    });
+
     testWidgets('shows original post and replies header', (tester) async {
       await tester.pumpWidget(
         _buildThreadPage(

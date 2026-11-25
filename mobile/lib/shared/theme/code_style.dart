@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 
-import 'message_typography.dart';
-
 /// The app's own code style — one place stating the mono face, its size and
 /// the colours a code surface is drawn with.
 ///
@@ -15,8 +13,6 @@ abstract final class CodeStyle {
 
   /// Relative size of rendered code, originally 13 points on a 15-point body.
   static const fontSizeFactor = 13 / 15;
-
-  static final fontSize = messageBodyTextStyle.fontSize! * fontSizeFactor;
 
   /// Line height of code text.
   static const lineHeight = 1.5;

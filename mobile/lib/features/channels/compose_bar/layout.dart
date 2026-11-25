@@ -34,9 +34,11 @@ class _ComposeBarLayout extends HookWidget {
   final bool hasPendingUploads;
   final bool isSending;
   final bool readOnly;
+  final TextStyle textStyle;
 
   const _ComposeBarLayout({
     required this.surfaceKey,
+    required this.textStyle,
     required this.voiceNoteRecorder,
     this.keyboardToolbar = false,
     this.onTextTap,
@@ -102,7 +104,7 @@ class _ComposeBarLayout extends HookWidget {
       hasDraft ? controller.text : resolvedHint,
       maxLines: hasDraft ? null : 1,
       overflow: hasDraft ? TextOverflow.clip : TextOverflow.ellipsis,
-      style: chatBodyTextStyle.copyWith(
+      style: textStyle.copyWith(
         color: hasDraft
             ? context.colors.onSurface
             : context.colors.onSurfaceVariant,
@@ -460,13 +462,11 @@ class _ComposeBarLayout extends HookWidget {
       ),
       minLines: 1,
       maxLines: 5,
-      style: chatBodyTextStyle,
+      style: textStyle,
       decoration: InputDecoration(
         hintText: resolvedHint,
         hintMaxLines: 1,
-        hintStyle: chatBodyTextStyle.copyWith(
-          color: context.colors.onSurfaceVariant,
-        ),
+        hintStyle: textStyle.copyWith(color: context.colors.onSurfaceVariant),
         border: InputBorder.none,
         enabledBorder: InputBorder.none,
         focusedBorder: InputBorder.none,
