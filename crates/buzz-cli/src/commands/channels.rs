@@ -506,7 +506,7 @@ async fn submit_checked_canvas_write(
     // then feed the four-way classification:
     //   - survived (ancestor of head)         → accepted JSON, exit 0
     //   - persisted but head unrelated to A   → supersession naming A
-    //   - genuinely absent                    → original 409 rejection
+    //   - genuinely absent                    → Conflict (exit 5), relay reason kept
     //   - either reconciliation read fails    → DeliveryUnknown naming A
     let resp = match submit_result {
         Ok(resp) => resp,
@@ -552,8 +552,17 @@ async fn submit_checked_canvas_write(
                     )));
                 }
                 Ok(false) => {
-                    // A is genuinely absent: return the original relay error unchanged.
-                    return Err(e);
+                    // A is genuinely absent: another write won the head first.
+                    // That is a write conflict (exit 5), the same as a head
+                    // that moved before submit, so scripts can tell a lost
+                    // race from a relay failure. Keep the relay's reason.
+                    let reason = match &e {
+                        CliError::Relay { body, .. } => body.clone(),
+                        other => other.to_string(),
+                    };
+                    return Err(CliError::Conflict(format!(
+                        "canvas {action} was not applied: another write changed the canvas first ({reason}) — read the current head with `buzz canvas history --limit 1` and retry against it"
+                    )));
                 }
                 Err(_) => {
                     // Cannot confirm or deny whether A was stored.
@@ -4959,27 +4968,20 @@ mod restore_canvas_tests {
     /// block (ignoring `canvas_write_survived`) makes this return `CliError::Conflict`
     /// instead of `CliError::Relay`.
     #[tokio::test]
-    async fn conflict_shaped_submit_stays_relay_error_when_our_event_absent() {
+    async fn conflict_shaped_submit_is_a_conflict_when_our_event_absent() {
         let (url, _, _) = conflict_relay(ConflictScenario::GenuinelyAbsent).await;
         let err = cmd_restore_canvas(&client(&url), CHANNEL, REVISION, &mut vec![])
             .await
             .expect_err("a genuine conflict must error");
 
-        // Must be the original Relay error (409) — not fabricated, not Conflict.
+        // Nothing was stored and another write holds the head: a write
+        // conflict (exit 5) that keeps the relay's reason.
         match &err {
-            CliError::Relay { status, body } => {
-                assert_eq!(
-                    *status, 409,
-                    "absent case must preserve the original 409 status"
-                );
-                assert!(
-                    body.contains("canvas changed"),
-                    "absent case must preserve the original conflict body: {body}"
-                );
-            }
-            other => {
-                panic!("expected Relay error (genuine conflict, nothing stored), got {other:?}")
-            }
+            CliError::Conflict(message) => assert!(
+                message.contains("canvas changed"),
+                "absent case must keep the relay's conflict reason: {message}"
+            ),
+            other => panic!("expected Conflict (lost race, nothing stored), got {other:?}"),
         }
     }
 
