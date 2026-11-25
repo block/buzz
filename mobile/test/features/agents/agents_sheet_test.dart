@@ -45,6 +45,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       final title = find.text('Agents').first;
+      expect(tester.getSemantics(title).flagsCollection.isHeader, isTrue);
       final add = find.byWidgetPredicate(
         (w) => w is IosGlassNavigationButton && w.semanticLabel == 'Add agent',
       );

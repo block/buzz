@@ -295,6 +295,9 @@ void main() {
     );
     final bar = tester.widget<IosNavigationBar>(header);
     expect(bar.centerTitleInPane, isTrue);
+    expect(bar.titleInsets.left, greaterThanOrEqualTo(48));
+    expect(bar.titleInsets.right - 134, bar.titleInsets.left);
+    expect(tester.getSize(header).width, 669);
     expect(bar.leadingTitleRowTop, 26);
     expect(bar.leading, isNull);
     final field = find.byType(TextField);

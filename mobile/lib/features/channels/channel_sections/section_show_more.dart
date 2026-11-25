@@ -451,6 +451,13 @@ class _SectionChatsPage extends HookConsumerWidget {
                             FrostedAppBar(
                               nativeTitle: title,
                               nativeLargeTitleWithActions: portrait,
+                              nativeTitleInsets: portrait
+                                  ? const EdgeInsets.symmetric(
+                                      horizontal:
+                                          iosGlassNavigationButtonWidth +
+                                          Grid.xxs,
+                                    )
+                                  : EdgeInsets.zero,
                               alignWithStatusRegion: portrait,
                               leading: portrait
                                   ? IosGlassNavigationButton(

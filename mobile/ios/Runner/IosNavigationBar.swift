@@ -374,7 +374,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
         let rightEdge = container.bounds.width - titleInsetRight - 20 - trailingWidth
         availableWidth = max(0, min(center - leftEdge, rightEdge - center) * 2 - 16)
       }
-      let size = title.sizeThatFits(CGSize(width: availableWidth, height: 44))
+      var size = title.sizeThatFits(CGSize(width: availableWidth, height: 44))
+      size.width = min(size.width, availableWidth)
       title.frame = CGRect(x: alignCollapsedTitleToLeading
                            ? navigation.navigationBar.layoutMargins.left
                            : center - size.width / 2,

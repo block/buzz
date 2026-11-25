@@ -307,7 +307,9 @@ void main() {
     final bar = find.byType(UiKitView);
     final params = tester.widget<UiKitView>(bar).creationParams! as Map;
     expect(params['alignCollapsedTitleToLeading'], false);
-    expect(tester.getCenter(bar).dx, 535 / 2);
+    expect(tester.getSize(bar).width, 669);
+    expect(params['titleInsetLeft'], 0);
+    expect(params['titleInsetRight'], 134);
     expect(params['leadingTitleRowTop'], 26);
     offset.value = 0;
     await tester.pumpAndSettle();

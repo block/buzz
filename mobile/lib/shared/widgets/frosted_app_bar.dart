@@ -436,7 +436,15 @@ class FrostedAppBar extends StatelessWidget {
         centerTitleInPane:
             (portraitTitleRow != null || strip != null) && !nativeLargeTitle,
         titleInsets: portraitTitleRow != null
-            ? EdgeInsets.zero
+            ? EdgeInsets.only(
+                left: portraitTitleRow.left + nativeTitleInsets.left,
+                right:
+                    max(
+                      0,
+                      MediaQuery.sizeOf(context).width - portraitTitleRow.right,
+                    ) +
+                    nativeTitleInsets.right,
+              )
             : nativeTitleInsets == EdgeInsets.zero
             ? railInsets
             : nativeTitleInsets,
@@ -525,16 +533,10 @@ class FrostedAppBar extends StatelessWidget {
                                 : Grid.xxs) *
                             (extra / largeTitleHeight)
                       : 0,
-                  left:
-                      portraitTitleRow?.left ??
-                      (nativeLargeTitleWithActions ? railInsets.left : 0),
-                  right: portraitTitleRow != null
-                      ? max(
-                          0.0,
-                          MediaQuery.sizeOf(context).width -
-                              portraitTitleRow.right,
-                        )
-                      : nativeLargeTitleWithActions
+                  left: nativeLargeTitleWithActions && portraitTitleRow == null
+                      ? railInsets.left
+                      : 0,
+                  right: nativeLargeTitleWithActions && portraitTitleRow == null
                       ? railInsets.right
                       : 0,
                   height: barHeight,
@@ -714,34 +716,39 @@ class FrostedAppBar extends StatelessWidget {
             topAlignedActions: nativeTitleAvatars.isNotEmpty,
             title: title == null
                 ? null
-                : DefaultTextStyle.merge(
-                    style: effectiveTitleStyle,
-                    overflow: TextOverflow.ellipsis,
-                    maxLines: 1,
-                    textAlign: centerTitle ? TextAlign.center : TextAlign.start,
-                    child: centerTitle
-                        ? title!
-                        : Padding(
-                            padding: EdgeInsets.only(
-                              left: effectiveLeading != null
-                                  ? usesAutomaticIosGlassBackButton
-                                        ? iosGlassChannelHeaderTitleSpacing
-                                        : defaultTargetPlatform ==
-                                                  TargetPlatform.android &&
-                                              nativeTitleAvatars.isNotEmpty
-                                        ? 16
-                                        : 0
-                                  : horizontalInset < Grid.gutter
-                                  ? Grid.gutter - horizontalInset
-                                  : 0,
-                              right:
-                                  actions.isEmpty &&
-                                      horizontalInset < Grid.gutter
-                                  ? Grid.gutter - horizontalInset
-                                  : 0,
+                : Semantics(
+                    header: true,
+                    child: DefaultTextStyle.merge(
+                      style: effectiveTitleStyle,
+                      overflow: TextOverflow.ellipsis,
+                      maxLines: 1,
+                      textAlign: centerTitle
+                          ? TextAlign.center
+                          : TextAlign.start,
+                      child: centerTitle
+                          ? title!
+                          : Padding(
+                              padding: EdgeInsets.only(
+                                left: effectiveLeading != null
+                                    ? usesAutomaticIosGlassBackButton
+                                          ? iosGlassChannelHeaderTitleSpacing
+                                          : defaultTargetPlatform ==
+                                                    TargetPlatform.android &&
+                                                nativeTitleAvatars.isNotEmpty
+                                          ? 16
+                                          : 0
+                                    : horizontalInset < Grid.gutter
+                                    ? Grid.gutter - horizontalInset
+                                    : 0,
+                                right:
+                                    actions.isEmpty &&
+                                        horizontalInset < Grid.gutter
+                                    ? Grid.gutter - horizontalInset
+                                    : 0,
+                              ),
+                              child: title!,
                             ),
-                            child: title!,
-                          ),
+                    ),
                   ),
             actions: actions.isEmpty
                 ? null
