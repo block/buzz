@@ -3068,7 +3068,7 @@ void main() {
       kept,
       older,
       deletedInGap,
-      deletionOf(deletedInGap, at: now - 5),
+      deletionOf(deletedInGap),
     ];
     (container.read(readStateProvider.notifier) as _ActivityReadState)
         .markReadThrough(_channelA, now - 4);
@@ -4763,8 +4763,7 @@ NostrEvent _signedPost(
 );
 
 bool _isGapBatch(List<NostrFilter> batch) =>
-    batch.isNotEmpty &&
-    batch.every((filter) => filter.until != null && filter.limit == 1);
+    batch.any((filter) => filter.until != null && filter.limit == 1);
 
 /// Drains pending microtasks so provider rebuilds and awaited writes land.
 Future<void> _settle() async {
@@ -5246,8 +5245,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
       throw RelayException(400, '{"error":"too many explicit channels"}');
     }
     if (messageBatchError case final error?) throw error;
-    if (filters.isNotEmpty &&
-        filters.every((f) => f.until != null && f.limit == 1)) {
+    if (_isGapBatch(filters)) {
       if (gapBatchError case final error?) throw error;
       final gate = gapBatchGate;
       gapBatchGate = null;
