@@ -164,6 +164,20 @@ pub trait AuthorityStore: Send + Sync {
         installation: NewInstallation,
         now: i64,
     ) -> Result<(), AuthorityError>;
+    /// Consume an enrollment challenge and create its installation in one
+    /// atomic step, so the challenge is never spent without the installation.
+    /// When the challenge is already spent, return the exact live installation
+    /// (as [`AuthorityStore::matching_installation`] matches it) that spent
+    /// it: a replay that raced the original request recovers its handle
+    /// instead of a refusal that would make the client discard its key.
+    /// Without either, the request is rejected.
+    async fn enroll_installation(
+        &self,
+        challenge_id: Uuid,
+        challenge: [u8; 32],
+        installation: NewInstallation,
+        now: i64,
+    ) -> Result<Installation, AuthorityError>;
     /// Return an exact live installation previously committed for the same
     /// attested enrollment request. This is the idempotency seam used when a
     /// client loses the successful response and replays the signed request.
@@ -313,62 +327,48 @@ impl AuthorityStore for MemoryAuthorityStore {
         now: i64,
     ) -> Result<(), AuthorityError> {
         let mut s = self.0.lock().map_err(|_| AuthorityError::Unavailable)?;
-        let token_key = n.token_fingerprint;
-        if s.installations.contains_key(&n.id) {
+        s.create_installation(n, now)
+    }
+
+    async fn enroll_installation(
+        &self,
+        challenge_id: Uuid,
+        challenge: [u8; 32],
+        n: NewInstallation,
+        now: i64,
+    ) -> Result<Installation, AuthorityError> {
+        let mut s = self.0.lock().map_err(|_| AuthorityError::Unavailable)?;
+        let found = s
+            .challenges
+            .get(&challenge_id)
+            .filter(|c| c.value == challenge)
+            .map(|c| c.expires_at);
+        if found.is_some_and(|expires_at| expires_at < now) {
+            // Like PostgreSQL: an expired challenge is retired by the refusal,
+            // so a request that read its clock earlier cannot spend it later.
+            s.challenges.remove(&challenge_id);
             return Err(AuthorityError::Rejected);
         }
-        let matching = s
-            .installations
-            .values()
-            .filter(|installation| {
-                installation.app_attest_key_id == n.app_attest_key_id
-                    || installation.token_fingerprint == n.token_fingerprint
-            })
-            .map(|installation| installation.id)
-            .collect::<Vec<_>>();
-        if matching.iter().any(|id| {
-            s.installations
-                .get(id)
-                .is_some_and(|installation| !installation.revoked && installation.expires_at >= now)
-        }) {
-            // App identity and token possession never supersede a live installation.
-            return Err(AuthorityError::Conflict);
+        if found.is_none() {
+            return s
+                .matching_installation(
+                    &n.app_attest_key_id,
+                    n.token_fingerprint,
+                    n.endpoint_epoch,
+                    n.expires_at,
+                    now,
+                )
+                .ok_or(AuthorityError::Rejected);
         }
-        let replaced = matching
-            .into_iter()
-            .filter(|id| {
-                s.installations
-                    .get(id)
-                    .is_some_and(|installation| installation.expires_at < now)
-            })
-            .collect::<Vec<_>>();
-        for id in replaced {
-            if let Some(old) = s.installations.remove(&id) {
-                s.token_owners.remove(&old.token_fingerprint);
-            }
-            s.delegations
-                .retain(|(installation_id, _), _| *installation_id != id);
-            s.delegation_ids
-                .retain(|_, (installation_id, _)| *installation_id != id);
-        }
-        s.token_owners.insert(token_key, n.id);
-        s.installations.insert(
-            n.id,
-            Installation {
-                id: n.id,
-                platform: n.platform,
-                app_attest_key_id: n.app_attest_key_id,
-                app_attest_public_key: n.app_attest_public_key,
-                assertion_counter: n.assertion_counter,
-
-                token_ciphertext: n.token_ciphertext,
-                token_fingerprint: n.token_fingerprint,
-                endpoint_epoch: n.endpoint_epoch,
-                expires_at: n.expires_at,
-                revoked: false,
-            },
-        );
-        Ok(())
+        let id = n.id;
+        // Like the PostgreSQL transaction, a refused creation leaves the
+        // challenge unspent.
+        s.create_installation(n, now)?;
+        s.challenges.remove(&challenge_id);
+        s.installations
+            .get(&id)
+            .cloned()
+            .ok_or(AuthorityError::Unavailable)
     }
 
     async fn installation(&self, id: Uuid, now: i64) -> Result<Installation, AuthorityError> {
@@ -404,17 +404,7 @@ impl AuthorityStore for MemoryAuthorityStore {
         now: i64,
     ) -> Result<Option<Installation>, AuthorityError> {
         let s = self.0.lock().map_err(|_| AuthorityError::Unavailable)?;
-        Ok(s.installations
-            .values()
-            .find(|installation| {
-                !installation.revoked
-                    && installation.expires_at >= now
-                    && installation.app_attest_key_id == key_id
-                    && installation.token_fingerprint == fingerprint
-                    && installation.endpoint_epoch == epoch
-                    && installation.expires_at == expires_at
-            })
-            .cloned())
+        Ok(s.matching_installation(key_id, fingerprint, epoch, expires_at, now))
     }
 
     async fn advance_assertion_counter(
@@ -663,6 +653,89 @@ impl AuthorityStore for MemoryAuthorityStore {
     }
 }
 
+impl MemoryState {
+    fn create_installation(&mut self, n: NewInstallation, now: i64) -> Result<(), AuthorityError> {
+        let s = self;
+        let token_key = n.token_fingerprint;
+        if s.installations.contains_key(&n.id) {
+            return Err(AuthorityError::Rejected);
+        }
+        let matching = s
+            .installations
+            .values()
+            .filter(|installation| {
+                installation.app_attest_key_id == n.app_attest_key_id
+                    || installation.token_fingerprint == n.token_fingerprint
+            })
+            .map(|installation| installation.id)
+            .collect::<Vec<_>>();
+        if matching.iter().any(|id| {
+            s.installations
+                .get(id)
+                .is_some_and(|installation| !installation.revoked && installation.expires_at >= now)
+        }) {
+            // App identity and token possession never supersede a live installation.
+            return Err(AuthorityError::Conflict);
+        }
+        let replaced = matching
+            .into_iter()
+            .filter(|id| {
+                s.installations
+                    .get(id)
+                    .is_some_and(|installation| installation.expires_at < now)
+            })
+            .collect::<Vec<_>>();
+        for id in replaced {
+            if let Some(old) = s.installations.remove(&id) {
+                s.token_owners.remove(&old.token_fingerprint);
+            }
+            s.delegations
+                .retain(|(installation_id, _), _| *installation_id != id);
+            s.delegation_ids
+                .retain(|_, (installation_id, _)| *installation_id != id);
+        }
+        s.token_owners.insert(token_key, n.id);
+        s.installations.insert(
+            n.id,
+            Installation {
+                id: n.id,
+                platform: n.platform,
+                app_attest_key_id: n.app_attest_key_id,
+                app_attest_public_key: n.app_attest_public_key,
+                assertion_counter: n.assertion_counter,
+
+                token_ciphertext: n.token_ciphertext,
+                token_fingerprint: n.token_fingerprint,
+                endpoint_epoch: n.endpoint_epoch,
+                expires_at: n.expires_at,
+                revoked: false,
+            },
+        );
+        Ok(())
+    }
+
+    fn matching_installation(
+        &self,
+        key_id: &[u8],
+        fingerprint: [u8; 32],
+        epoch: i64,
+        expires_at: i64,
+        now: i64,
+    ) -> Option<Installation> {
+        self.installations
+            .values()
+            .find(|installation| {
+                !installation.revoked
+                    && installation.expires_at >= now
+                    && installation.app_attest_key_id == key_id
+                    && installation.token_fingerprint == fingerprint
+                    && installation.endpoint_epoch == epoch
+                    && installation.expires_at == expires_at
+            })
+            .cloned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,6 +813,101 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    fn enrollment(id: u128, fingerprint: u8) -> NewInstallation {
+        NewInstallation {
+            platform: Platform::Android,
+            id: Uuid::from_u128(id),
+            app_attest_key_id: vec![9],
+            app_attest_public_key: vec![8; 65],
+            assertion_counter: 0,
+            token_ciphertext: vec![7],
+            token_fingerprint: [fingerprint; 32],
+            endpoint_epoch: 1,
+            expires_at: 2_000,
+        }
+    }
+
+    async fn enrollment_challenge(store: &MemoryAuthorityStore, id: u128) {
+        store
+            .put_challenge(Challenge {
+                id: Uuid::from_u128(id),
+                value: [6; 32],
+                created_at: 1_000,
+                expires_at: 1_300,
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn enrollment_replay_of_a_spent_challenge_recovers_the_installation_that_spent_it() {
+        let store = MemoryAuthorityStore::default();
+        enrollment_challenge(&store, 20).await;
+        let created = store
+            .enroll_installation(Uuid::from_u128(20), [6; 32], enrollment(21, 5), 1_000)
+            .await
+            .unwrap();
+        assert_eq!(created.id, Uuid::from_u128(21));
+
+        // The replay mints a new candidate id; it gets the committed one.
+        let replayed = store
+            .enroll_installation(Uuid::from_u128(20), [6; 32], enrollment(22, 5), 1_001)
+            .await
+            .unwrap();
+        assert_eq!(replayed, created);
+        assert_eq!(
+            store
+                .enroll_installation(Uuid::from_u128(20), [6; 32], enrollment(23, 6), 1_001)
+                .await,
+            Err(AuthorityError::Rejected),
+            "a spent challenge pays for nothing but its own installation"
+        );
+    }
+
+    #[tokio::test]
+    async fn refused_enrollment_leaves_its_challenge_unspent() {
+        let store = MemoryAuthorityStore::default();
+        store
+            .create_installation(enrollment(30, 5), 1_000)
+            .await
+            .unwrap();
+        enrollment_challenge(&store, 31).await;
+        // Same token, different key: the live installation wins.
+        let mut other_key = enrollment(32, 5);
+        other_key.app_attest_key_id = vec![10];
+        assert_eq!(
+            store
+                .enroll_installation(Uuid::from_u128(31), [6; 32], other_key, 1_000)
+                .await,
+            Err(AuthorityError::Conflict)
+        );
+        assert_eq!(
+            store
+                .consume_challenge(Uuid::from_u128(31), [6; 32], 1_000)
+                .await,
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_replay_first_retires_the_challenge() {
+        let store = MemoryAuthorityStore::default();
+        enrollment_challenge(&store, 40).await;
+        assert_eq!(
+            store
+                .enroll_installation(Uuid::from_u128(40), [6; 32], enrollment(41, 6), 1_301)
+                .await,
+            Err(AuthorityError::Rejected)
+        );
+        // A slower original that read its clock inside the window.
+        assert_eq!(
+            store
+                .enroll_installation(Uuid::from_u128(40), [6; 32], enrollment(42, 6), 1_299)
+                .await,
+            Err(AuthorityError::Rejected)
+        );
     }
 
     #[tokio::test]
