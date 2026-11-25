@@ -2849,11 +2849,23 @@ void main() {
       recentMessages: [old],
       enforceHistoryLimits: true,
     );
+    final savedDir = await Directory.systemTemp.createTemp('active-saved');
+    addTearDown(() => savedDir.delete(recursive: true));
     final container = _buildContainer(
       session: session,
       overrides: [
         readStateProvider.overrideWith(_ActivityReadState.new),
         _testPubkeyProvider.overrideWith(_ActivityPubkey.new),
+        savedMessageScopeProvider.overrideWithValue((
+          communityId: 'community',
+          pubkey: _activityPk,
+        )),
+        savedMessageStoreProvider.overrideWith(
+          (ref) => SavedMessageStore(
+            root: () async => savedDir,
+            diagnostics: const NoopDiagnosticReporter(),
+          ),
+        ),
       ],
     );
     addTearDown(container.dispose);
@@ -3150,6 +3162,28 @@ void main() {
     ];
     (container.read(readStateProvider.notifier) as _ActivityReadState)
         .markReadThrough(_channelA, now - 1);
+    // The earlier second it reads only serves the Active head: another post's
+    // deletion there is not new, so a page being saved meanwhile still is.
+    final regular = session.recentMessages;
+    session.recentMessages = [
+      old,
+      unchecked,
+      after,
+      deletionOf(older, at: now - 1),
+    ];
+    final store = container.read(savedMessageStoreProvider);
+    final page = (channelId: _channelA, rootId: '');
+    final ticket = store.capture(
+      container.read(savedMessageScopeProvider)!,
+      page,
+    );
+    await reconnect();
+    expect(store.isCurrent(ticket), isTrue);
+    expect(notifier.activityFor(_channelA), (
+      known: true,
+      at: boundary.createdAt,
+    ));
+    session.recentMessages = regular;
     await reconnect();
     expect(notifier.activityFor(_channelA).known, isFalse);
     session.recentMessages = [old, unchecked, after];
@@ -3327,6 +3361,91 @@ void main() {
       },
     );
   }
+
+  test('past one shared request, gap posts settle Active activity even when '
+      'the head deletion read fails', () async {
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final ids = [
+      for (var i = 0; i <= kMaxExplicitChannelValues ~/ 2; i++) 'gap-$i',
+    ];
+    final heads = {
+      for (final id in ids)
+        id: _signedPost(now - 100, channel: id, content: id),
+    };
+    final newer = _signedPost(now - 30, channel: ids[0], content: 'newer');
+    final deletion = NostrEvent.fromJson(
+      signNostrEvent(
+        kind: EventKind.deletion,
+        content: '',
+        secretKey: _activityKey,
+        createdAt: now - 50,
+        tags: [
+          ['h', ids[1]],
+          ['e', heads[ids[1]]!.id],
+        ],
+      ).toMap(),
+    );
+    final session = _FakeRelaySession(
+      memberships: [for (final id in ids) _membership(id, _activityPk)],
+      metadata: [for (final id in ids) _meta(id: id, name: id)],
+      recentMessages: heads.values.toList(),
+      enforceHistoryLimits: true,
+    );
+    final container = _buildContainer(
+      session: session,
+      overrides: [
+        readStateProvider.overrideWith(_ActivityReadState.new),
+        _testPubkeyProvider.overrideWith(_ActivityPubkey.new),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(channelsProvider.future);
+    final notifier = container.read(channelsProvider.notifier);
+    await notifier.waitForUnreadCatchUp();
+    for (final id in ids) {
+      final shown = container.listen(
+        channelFilterActivityProvider(id),
+        (_, _) {},
+      );
+      addTearDown(shown.close);
+    }
+    Future<void> reconnect() async {
+      final batches = session.queryBatches.length;
+      session.setStatus(SessionStatus.reconnecting);
+      session.setStatus(SessionStatus.connected);
+      await _waitUntil(
+        () => session.queryBatches
+            .skip(batches)
+            .any((batch) => batch.every((filter) => filter.since != null)),
+      );
+      await notifier.waitForUnreadCatchUp();
+      await _settle();
+    }
+
+    // Read on another device while disconnected, so every channel has a gap.
+    session.recentMessages = [...heads.values, newer, deletion];
+    for (final id in ids) {
+      (container.read(readStateProvider.notifier) as _ActivityReadState)
+          .markReadThrough(id, now - 15);
+    }
+    session.headDeletionBatchError = RelayException(
+      503,
+      '{"error":"query timed out"}',
+    );
+    await reconnect();
+    expect(notifier.activityFor(ids[0]), (known: true, at: newer.createdAt));
+    expect(notifier.activityFor(ids[1]).known, isFalse);
+    expect(notifier.activityFor(ids[2]).known, isFalse);
+
+    // Once the deletions are read, only the deleted head stays unknown.
+    session.headDeletionBatchError = null;
+    await reconnect();
+    expect(notifier.activityFor(ids[1]).known, isFalse);
+    expect(notifier.activityFor(ids[2]), (
+      known: true,
+      at: heads[ids[2]]!.createdAt,
+    ));
+  });
 
   test('live channel events update channel lastMessageAt', () async {
     final session = _FakeRelaySession(
@@ -4890,6 +5009,8 @@ class _FakeRelaySession extends RelaySessionNotifier {
   Object? messageBatchError;
   // Fails batches made only of the catch-up's activity gap reads.
   Object? gapBatchError;
+  // Fails a batch that only reads deletions of given posts.
+  Object? headDeletionBatchError;
   // Holds the next batch of activity gap reads.
   Completer<void>? gapBatchGate;
   Object? latestBatchError;
@@ -5283,6 +5404,15 @@ class _FakeRelaySession extends RelaySessionNotifier {
       throw RelayException(400, '{"error":"too many explicit channels"}');
     }
     if (messageBatchError case final error?) throw error;
+    if (headDeletionBatchError case final error?
+        when filters.isNotEmpty &&
+            filters.every(
+              (filter) =>
+                  filter.tags.containsKey('#e') &&
+                  filter.kinds.contains(EventKind.deletion),
+            )) {
+      throw error;
+    }
     if (_isGapBatch(filters)) {
       if (gapBatchError case final error?) throw error;
       final gate = gapBatchGate;
