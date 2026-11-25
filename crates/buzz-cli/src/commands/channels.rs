@@ -510,8 +510,9 @@ async fn submit_checked_canvas_write(
     //   - either reconciliation read fails    → DeliveryUnknown naming A
     let resp = match submit_result {
         Ok(resp) => resp,
-        Err(e @ CliError::Relay { status: 409, .. }) if matches!(&e, CliError::Relay { body, .. } if body.contains("canvas changed")) =>
-        {
+        // Every relay canvas CAS rejection: the head moved, the expected head
+        // was deleted, or the write would not supersede it.
+        Err(e) if crate::client::is_canvas_conflict(&e) => {
             // Both reads use strong consistency so read-replica lag cannot
             // report a just-stored event as absent.
             let stream = match fetch_canvas_ancestry(client, channel_id).await {
@@ -4591,6 +4592,9 @@ mod restore_canvas_tests {
         /// A is absent (only a stranger, no A in stream or IDs lookup) → genuine
         /// conflict → original `CliError::Relay { 409, .. }` returned unchanged.
         GenuinelyAbsent,
+        /// As `GenuinelyAbsent`, but the relay rejects because the expected
+        /// head was deleted (`canvas revision does not exist`) → Conflict.
+        HeadDeleted,
         /// Ancestry read fails (HTTP 500) → `CliError::DeliveryUnknown`.
         ReadFails,
         /// Ancestry succeeds with A unreachable (canvas_write_survived = false),
@@ -4671,7 +4675,7 @@ mod restore_canvas_tests {
                                             .to_string(),
                                     )
                                 }
-                                ConflictScenario::GenuinelyAbsent => {
+                                ConflictScenario::GenuinelyAbsent | ConflictScenario::HeadDeleted => {
                                     // A was never stored — empty response.
                                     (StatusCode::OK, json!([]).to_string())
                                 }
@@ -4694,7 +4698,7 @@ mod restore_canvas_tests {
                             ConflictScenario::ReadFails => {
                                 (StatusCode::INTERNAL_SERVER_ERROR, String::new())
                             }
-                            ConflictScenario::GenuinelyAbsent => {
+                            ConflictScenario::GenuinelyAbsent | ConflictScenario::HeadDeleted => {
                                 // A is absent — genuine conflict. Stream contains
                                 // only an unrelated stranger (no A, no B).
                                 (
@@ -4765,10 +4769,14 @@ mod restore_canvas_tests {
                         }
                         // Attempt 2 (same bytes — `submit_stored_event` retry):
                         // A is already stored; B built on A; relay returns canonical 409.
+                        let reason = if matches!(scenario, ConflictScenario::HeadDeleted) {
+                            "canvas revision does not exist"
+                        } else {
+                            "canvas changed since it was loaded"
+                        };
                         (
                             StatusCode::CONFLICT,
-                            r#"{"error":"conflict: canvas changed since it was loaded"}"#
-                                .to_string(),
+                            format!(r#"{{"error":"conflict: {reason}"}}"#),
                         )
                     }
                 }),
@@ -4983,6 +4991,20 @@ mod restore_canvas_tests {
             ),
             other => panic!("expected Conflict (lost race, nothing stored), got {other:?}"),
         }
+    }
+
+    /// The expected head deleted between the pre-read and the submit: the relay
+    /// answers 409 `canvas revision does not exist`, which is also a conflict.
+    #[tokio::test]
+    async fn conflict_shaped_submit_is_a_conflict_when_the_head_was_deleted() {
+        let (url, _, _) = conflict_relay(ConflictScenario::HeadDeleted).await;
+        let err = cmd_restore_canvas(&client(&url), CHANNEL, REVISION, &mut vec![])
+            .await
+            .expect_err("a deleted head must error");
+        assert!(
+            matches!(&err, CliError::Conflict(m) if m.contains("canvas revision does not exist")),
+            "expected Conflict keeping the relay's reason, got {err:?}"
+        );
     }
 
     /// A conflict-shaped submit where the ancestry walk itself fails. The
