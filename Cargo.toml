@@ -109,6 +109,7 @@ jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_
 
 # HTTP client (webhook delivery)
 reqwest = { version = "0.13", features = ["json", "rustls", "stream"], default-features = false }
+opensearch = { version = "2.4", default-features = false, features = ["rustls-tls"] }
 
 # Cryptography
 sha2      = "0.11"

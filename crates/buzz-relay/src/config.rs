@@ -305,6 +305,12 @@ pub struct Config {
     /// (`BUZZ_STORAGE_USAGE_URL`). Unset disables storage-usage delivery.
     pub storage_usage_delivery_url: Option<url::Url>,
 
+    /// OpenSearch cluster for message search (`BUZZ_OPENSEARCH_URL`, with
+    /// optional `BUZZ_OPENSEARCH_USERNAME` and `BUZZ_OPENSEARCH_PASSWORD`).
+    /// When set, admitted messages are queued in the search outbox and the
+    /// indexer keeps the index up to date; searches still use Postgres.
+    pub opensearch: Option<buzz_search::opensearch::OpenSearchConfig>,
+
     /// Allow NIP-OA owner attestation for relay membership.
     ///
     /// When `true` and `require_relay_membership` is also `true`, agents
@@ -633,7 +639,7 @@ fn parse_operator_listener_delivery_urls(
     Ok(endpoints)
 }
 
-fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
+pub(crate) fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
     match std::env::var(name) {
         Err(std::env::VarError::NotPresent) => Ok(default),
         Err(error) => Err(ConfigError::InvalidValue(format!(
@@ -1023,6 +1029,13 @@ impl Config {
                 )));
             }
         };
+        let opensearch = parse_opensearch_config(
+            optional_utf8_env("BUZZ_OPENSEARCH_URL")?,
+            optional_utf8_env("BUZZ_OPENSEARCH_USERNAME")?,
+            optional_utf8_env("BUZZ_OPENSEARCH_PASSWORD")?,
+            parse_bool("BUZZ_OPENSEARCH_PREVIEW", false)?,
+        )
+        .map_err(ConfigError::InvalidValue)?;
         if !operator_listener_delivery_urls.is_empty() && relay_operator_api_origin.is_none() {
             error!(
                 "BUZZ_OPERATOR_LISTENERS is set but RELAY_OPERATOR_API_ORIGIN is not — operator-listener registration requests will reject every request until RELAY_OPERATOR_API_ORIGIN is set"
@@ -1572,6 +1585,7 @@ impl Config {
             multi_community_relay,
             operator_listener_delivery_urls,
             storage_usage_delivery_url,
+            opensearch,
             allow_nip_oa_auth,
             klipy,
             media,
@@ -1636,9 +1650,128 @@ impl Config {
     }
 }
 
+/// An environment variable that must be UTF-8 if set.
+fn optional_utf8_env(name: &str) -> Result<Option<String>, ConfigError> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(ConfigError::InvalidValue(format!(
+            "{name} must be valid UTF-8: {error}"
+        ))),
+    }
+}
+
+/// Parse the OpenSearch settings: an HTTP(S) URL without credentials, query,
+/// or fragment, and basic credentials given both or neither. Empty values
+/// count as unset.
+///
+/// Deletes and edits don't reach the index yet, so a URL also needs the
+/// `BUZZ_OPENSEARCH_PREVIEW` opt-in.
+fn parse_opensearch_config(
+    url: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+    preview: bool,
+) -> Result<Option<buzz_search::opensearch::OpenSearchConfig>, String> {
+    let set = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
+    let (username, password) = (set(username), set(password));
+    let Some(raw) = set(url) else {
+        if username.is_some() || password.is_some() {
+            return Err(
+                "BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD need BUZZ_OPENSEARCH_URL"
+                    .into(),
+            );
+        }
+        return Ok(None);
+    };
+    if !preview {
+        return Err("BUZZ_OPENSEARCH_URL needs BUZZ_OPENSEARCH_PREVIEW=true: deleted messages stay in the index, so use it only on a relay without real data".into());
+    }
+    let parsed = url::Url::parse(raw.trim())
+        .map_err(|e| format!("BUZZ_OPENSEARCH_URL is not a valid URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err("BUZZ_OPENSEARCH_URL must be an HTTP(S) URL without credentials, query, or fragment; set BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD for basic auth".into());
+    }
+    let basic_auth = match (username, password) {
+        (Some(username), Some(password)) => Some((username, password)),
+        (None, None) => None,
+        _ => {
+            return Err(
+                "set both BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD, or neither".into(),
+            )
+        }
+    };
+    Ok(Some(buzz_search::opensearch::OpenSearchConfig {
+        url: parsed.to_string(),
+        basic_auth,
+        index_prefix: buzz_search::opensearch::DEFAULT_INDEX_PREFIX.to_string(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opensearch_config_is_optional_and_validated() {
+        let some = |value: &str| Some(value.to_string());
+        assert!(parse_opensearch_config(None, None, None, false)
+            .unwrap()
+            .is_none());
+        assert!(parse_opensearch_config(some(" "), None, None, false)
+            .unwrap()
+            .is_none());
+        assert!(parse_opensearch_config(None, some(""), some(""), false)
+            .unwrap()
+            .is_none());
+        let config =
+            parse_opensearch_config(some("http://localhost:9200"), some(""), some(" "), true)
+                .unwrap()
+                .unwrap();
+        assert!(config.basic_auth.is_none());
+
+        assert!(
+            parse_opensearch_config(some("http://localhost:9200"), None, None, false).is_err(),
+            "a URL without the preview opt-in"
+        );
+        let config = parse_opensearch_config(some("http://localhost:9200"), None, None, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.url, "http://localhost:9200/");
+        assert!(config.basic_auth.is_none());
+        assert_eq!(config.index_prefix, "buzz-");
+
+        let config = parse_opensearch_config(
+            some("https://search.example.org"),
+            some("relay"),
+            some("secret"),
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(config.basic_auth, Some(("relay".into(), "secret".into())));
+        assert!(!format!("{config:?}").contains("secret"));
+
+        for (url, username, password) in [
+            (some("ftp://search.example.org"), None, None),
+            (some("https://user:pw@search.example.org"), None, None),
+            (some("https://search.example.org?x=1"), None, None),
+            (some("not a url"), None, None),
+            (some("https://search.example.org"), some("relay"), None),
+            (None, some("relay"), some("secret")),
+        ] {
+            assert!(
+                parse_opensearch_config(url.clone(), username, password, true).is_err(),
+                "{url:?}"
+            );
+        }
+    }
 
     #[test]
     fn klipy_config_debug_redacts_the_api_key() {

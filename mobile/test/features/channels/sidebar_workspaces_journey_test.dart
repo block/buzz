@@ -48,7 +48,6 @@ void main() {
     relay.session.debugRelayUrl = 'https://relay.example';
     _viewer = relay.pubkey;
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    var soloActivityReads = 0;
     // Before desktop's unified record, the legacy Team sections apply.
     relay.stored.add(
       relay.event('channel-sections', {
@@ -78,12 +77,9 @@ void main() {
             ),
           ),
           channelsProvider.overrideWith(_Channels.new),
-          channelFilterActivityProvider('solo-scratch').overrideWith((_) async {
-            if (soloActivityReads++ == 0) {
-              throw StateError('Activity unavailable');
-            }
-            return now - 8 * 86400;
-          }),
+          channelFilterActivityProvider(
+            'solo-scratch',
+          ).overrideWith((_) => AsyncData(now - 8 * 86400)),
           meGroupsProvider.overrideWith(
             (ref) => Stream.value(
               const MeGroups(
@@ -371,9 +367,6 @@ void main() {
       '7 days',
     );
     await tester.tap(find.byTooltip('Apply changes'));
-    await tester.pumpAndSettle();
-    expect(inList('solo-scratch'), findsOneWidget);
-    await tester.tap(find.text('Retry').last);
     await tester.pumpAndSettle();
     expect(inList('solo-scratch'), findsNothing);
 

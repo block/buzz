@@ -131,6 +131,7 @@ import 'thread_replies_provider.dart';
 import 'open_channel_routes.dart';
 import 'reading_marks.dart';
 import 'timeline_message.dart';
+import 'edit_authority.dart';
 
 part 'channel_detail_page/message_list.dart';
 part 'channel_detail_page/initial_thread_route.dart';
@@ -703,14 +704,26 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     final retention = ephemeralChannelDisplay(resolvedChannel);
 
     // The page also rebuilds for read state, presence, roster and layout
-    // changes. Format only when the events themselves change: the notifier
-    // publishes a new list for every event change.
+    // changes. Reformat only when events, reaction identity, or trusted edit
+    // authorship changes; the notifier publishes a new list for event changes.
     final events = messagesState.value ?? const <NostrEvent>[];
+    final editAuthority = useEditAuthority(ref, events);
     final timelineMessages = useMemoized(
       () => resolvedChannel.isForum
           ? <TimelineMessage>[]
-          : formatTimeline(events, currentPubkey: currentPubkey),
-      [events, currentPubkey, resolvedChannel.isForum],
+          : formatTimeline(
+              events,
+              currentPubkey: currentPubkey,
+              agentOwners: editAuthority.owners,
+              relayPubkey: editAuthority.relayKey,
+            ),
+      [
+        events,
+        currentPubkey,
+        resolvedChannel.isForum,
+        editAuthority.owners,
+        editAuthority.relayKey,
+      ],
     );
     final timelineEntries = buildMainTimelineEntries(
       // End events still update the original card through allMessages.
