@@ -581,10 +581,10 @@ async fn submit_checked_canvas_write(
     // head, or reachable through the head's `expected-revision` ancestry chain
     // (a later write legitimately built on ours, possibly transitively) → the
     // write is live; anything else (including no head) → a concurrent write
-    // won the visible head. The write is preserved in history, so
-    // surface a conflict naming it rather than reporting a hollow success. This
-    // only catches a competitor visible by now; the residual race past this
-    // read needs relay linearization (phase 2).
+    // won the visible head. The write is preserved in history, so surface a
+    // conflict naming it rather than reporting a hollow success. This only
+    // catches a competitor visible by now; the residual race past this read
+    // needs relay linearization (phase 2).
     //
     // The submit above was accepted, so the write is durable. Only this
     // verification read can still fail; when it does we must not present an
@@ -610,6 +610,7 @@ async fn submit_checked_canvas_write(
     let _ = writeln!(out, "{}", normalize_write_response(&resp));
     Ok(())
 }
+
 /// Read a recent slice of the canvas revision stream as `(event_id,
 /// expected-revision tag)` pairs, newest first, for the post-write supersession
 /// check. The head is the first element; the rest let
@@ -2154,6 +2155,11 @@ pub async fn cmd_set_canvas(
                     head_id,
                     head_created_at,
                 )
+            }
+            Some(head_id) if expected == "none" => {
+                return Err(CliError::Conflict(format!(
+                    "the channel already has a canvas (head {head_id}) — read it with `buzz canvas get --revision {head_id}`, merge your change, and retry with --expected {head_id}"
+                )));
             }
             Some(head_id) => {
                 return Err(CliError::Conflict(format!(
@@ -4388,7 +4394,8 @@ mod restore_canvas_tests {
                 .await
                 .expect_err("a moved head must be refused");
             assert!(
-                matches!(&err, CliError::Conflict(m) if m.contains(&format!("the head is now {HEAD}"))),
+                matches!(&err, CliError::Conflict(m) if m.contains(HEAD)
+                    && m.contains(if expected == "none" { "already has a canvas" } else { "the head is now" })),
                 "unexpected error: {err}"
             );
             assert!(
