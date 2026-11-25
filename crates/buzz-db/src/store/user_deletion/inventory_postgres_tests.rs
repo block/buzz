@@ -9,11 +9,16 @@ async fn user_approval_validates_inventory_shape_before_saving_evidence() {
     let db = Db::from_pool(pool.clone());
     let users = db.user_deletion_store();
     let request = users
-        .submit("demo:invalid-scope", "operator", None)
+        .submit(
+            &nostr::Keys::generate().public_key().to_hex(),
+            "operator",
+            None,
+        )
         .await
         .unwrap();
     let mut inventory = request.inventory_manifest.unwrap();
-    inventory["communities"][0]["relationship"] = "owner".into();
+    inventory["communities"] =
+        serde_json::json!([{"community_id":uuid::Uuid::new_v4(), "relationship":"unknown"}]);
     let digest = crate::entity_deletion::inventory_digest(&inventory).unwrap();
     sqlx::query("UPDATE entity_deletion_requests SET inventory_manifest = $2, inventory_digest = $3 WHERE id = $1")
         .bind(request.id).bind(inventory).bind(&digest).execute(&pool).await.unwrap();
@@ -22,7 +27,7 @@ async fn user_approval_validates_inventory_shape_before_saving_evidence() {
         .await
         .unwrap_err()
         .to_string()
-        .contains("owned-community execution is not supported yet"));
+        .contains("unsupported deletion scope"));
     let after = db
         .entity_deletion_store()
         .inspect(request.id)
@@ -35,24 +40,28 @@ async fn user_approval_validates_inventory_shape_before_saving_evidence() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn inventory_failure_rolls_back_request_and_legacy_manifests_remain_readable() {
+async fn inventory_failure_rolls_back_request_and_unversioned_workflows_are_rejected() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .connect(&crate::test_support::database_url())
         .await
         .unwrap();
     let users = Db::from_pool(pool.clone()).user_deletion_store();
-    let mut request = users.submit("demo:legacy", "operator", None).await.unwrap();
-    let mut manifest = request.inventory_manifest.clone().unwrap();
-    manifest["version"] = 1.into();
-    manifest["target"] = request.target.clone().into();
-    for row in manifest["communities"].as_array_mut().unwrap() {
-        row["action"] = "delete_subject_data".into();
-    }
-    request.inventory_manifest = Some(manifest.clone());
-    let legacy = UserDeletionInventory::read(&request).unwrap();
-    assert_eq!(legacy.communities[0].1, manifest["communities"][0]);
-    request.inventory_manifest.as_mut().unwrap()["target"] = "demo:wrong".into();
+    let mut request = users
+        .submit(
+            &nostr::Keys::generate().public_key().to_hex(),
+            "operator",
+            None,
+        )
+        .await
+        .unwrap();
+    request
+        .inventory_manifest
+        .as_mut()
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .remove("workflow_version");
     assert!(UserDeletionInventory::read(&request).is_err());
 
     // A real discovery error must not leave a submitted request behind.
@@ -120,7 +129,7 @@ async fn migration_schema_user_target_constraint_matches_desired_state() {
     users
         .submit("demo:old-client", "operator", None)
         .await
-        .unwrap();
+        .unwrap_err();
     users
         .submit(&"ab".repeat(32), "operator", None)
         .await

@@ -30,7 +30,7 @@ pub struct Args {
     /// Print proposals only (default); does not change data, progress, or caches.
     #[arg(long, alias = "read-only", conflicts_with = "delete")]
     print_only: bool,
-    /// Execute printed batches. Stop the relay and external workers first.
+    /// Execute printed batches in isolated test data. Never stop or restart a relay.
     #[arg(long, conflicts_with = "print_only")]
     pub(super) delete: bool,
     /// Maximum explicit row operations per transaction.
@@ -140,7 +140,7 @@ pub(super) async fn run_command(
 }
 
 // Preview never needs secret material and never invokes the signing path.
-fn store(
+pub(super) fn store(
     db: &buzz_db::Db,
     mode: ExecutionMode,
 ) -> Result<buzz_db::user_deletion::UserDeletionStore> {
@@ -148,12 +148,20 @@ fn store(
     if mode == ExecutionMode::ReadOnly {
         return Ok(store);
     }
+    Ok(match configured_signer()? {
+        Some(signer) => store.with_account_snapshot_signer(signer),
+        None => store,
+    })
+}
+
+pub(super) fn configured_signer() -> Result<Option<nostr::Keys>> {
     match std::env::var("BUZZ_RELAY_PRIVATE_KEY") {
-        Ok(value) => Ok(store.with_account_snapshot_signer(
-            nostr::Keys::parse(&value)
-                .map_err(|_| anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY"))?,
-        )),
-        Err(std::env::VarError::NotPresent) => Ok(store),
+        Ok(value) => {
+            Ok(Some(nostr::Keys::parse(&value).map_err(|_| {
+                anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY")
+            })?))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
         Err(_) => anyhow::bail!("invalid BUZZ_RELAY_PRIVATE_KEY"),
     }
 }

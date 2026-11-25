@@ -118,16 +118,14 @@ impl Fixture {
 
     fn options(&self, max_items: u32) -> RunOptions {
         RunOptions {
-            db: Some(Db::from_pool(self.pool.clone())),
+            db: Db::from_pool(self.pool.clone()),
             media: None,
+            row_ids: None,
             delete: true,
             relay_pubkey: None,
             batch_size: 2,
             max_items,
             next_step: true,
-            fail_stage: None,
-            stage_delay: Duration::ZERO,
-            no_agents_in: Vec::new(),
         }
     }
 
@@ -190,10 +188,10 @@ impl Fixture {
         );
         assert_eq!(
             account.metadata_json["transition"],
-            json!({"kind":"stage","stage":"purge_agents"})
+            json!({"kind":"stage","stage":"purge_profile"})
         );
         let next = state.stage_history.iter().find(|s| s.is_current).unwrap();
-        assert_eq!(next.stage, "purge_agents");
+        assert_eq!(next.stage, "purge_profile");
         assert_eq!(next.status, "pending");
         assert!(next.started_at.is_none());
     }
@@ -203,13 +201,16 @@ impl Fixture {
 #[ignore = "requires Postgres"]
 async fn real_account_cap_saves_failure_then_retry_saves_success() {
     let f = Fixture::new().await;
+    let path = std::env::temp_dir().join(format!("buzz-rows-{}.ndjson", Uuid::new_v4()));
+    let mut options = f.options(1);
+    options.row_ids = Some(crate::user::row_ids::create(&path).unwrap());
     let error = tokio::time::timeout(
         Duration::from_secs(10),
         run(
             &f.store,
             f.request,
             "capped-worker",
-            &f.options(1),
+            &options,
             &CancellationToken::new(),
         ),
     )
@@ -221,6 +222,13 @@ async fn real_account_cap_saves_failure_then_retry_saves_success() {
         f.tokens().await,
         vec![Uuid::from_u128(2), Uuid::from_u128(3)]
     );
+    let entries = std::fs::read_to_string(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    let row: serde_json::Value = serde_json::from_str(entries.trim()).unwrap();
+    assert_eq!(row["stage_id"], f.stage.to_string());
+    assert_eq!(row["mode"], "delete");
+    assert_eq!(row["table"], "api_tokens");
+    assert_eq!(row["key"]["id"], Uuid::from_u128(1).to_string());
     let failed = f.inspect_released().await;
     assert_eq!(failed.request.status, "retry_wait");
     assert_eq!(failed.execution.retry_count, 1);
@@ -286,6 +294,69 @@ async fn real_account_cap_saves_failure_then_retry_saves_success() {
             .started_at,
         started
     );
+
+    // Exercise failure and retry of the same profile stage via the worker.
+    let profile = resumed.stage_history.iter().find(|s| s.is_current).unwrap();
+    assert!(run(
+        &f.store,
+        f.request,
+        "profile-worker",
+        &f.options(1),
+        &CancellationToken::new()
+    )
+    .await
+    .is_err());
+    let stopped = f.inspect_released().await;
+    let stage = stopped.stage_history.iter().find(|s| s.is_current).unwrap();
+    assert_eq!(stage.id, profile.id);
+    assert_eq!(stage.status, "failed");
+    assert_eq!(stopped.request.status, "retry_wait");
+    assert_eq!(stopped.execution.last_error, stage.last_error);
+    sqlx::query("UPDATE entity_deletion_requests SET next_attempt_at=clock_timestamp()-interval '1 second' WHERE id=$1")
+        .bind(f.request).execute(&f.pool).await.unwrap();
+    let mut options = f.options(100);
+    let path = std::env::temp_dir().join(format!("profile-{}.ndjson", Uuid::new_v4()));
+    options.row_ids = Some(crate::user::row_ids::create(&path).unwrap());
+    assert_eq!(
+        run(
+            &f.store,
+            f.request,
+            "profile-retry",
+            &options,
+            &CancellationToken::new()
+        )
+        .await
+        .unwrap(),
+        0
+    );
+    let state = f.inspect_released().await;
+    let done = state
+        .stage_history
+        .iter()
+        .find(|s| s.id == profile.id)
+        .unwrap();
+    assert_eq!(done.status, "completed");
+    assert_eq!(done.metadata_json["result"]["record"], "delete_complete");
+    let output = std::fs::read_to_string(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    let mut keys = Vec::new();
+    for line in output.lines() {
+        let row: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(row["mode"], "delete");
+        assert_eq!(row["stage_id"], profile.id.to_string());
+        assert_eq!(row["table"], "users");
+        keys.push(row["key"]["pubkey"].as_str().unwrap().to_owned());
+    }
+    keys.sort();
+    let mut expected = vec![format!(r"\x{agent}"), format!(r"\x{TARGET}")];
+    expected.sort();
+    assert_eq!(keys, expected);
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE community_id=$1")
+        .bind(f.community)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(remaining, 0);
 }
 
 #[tokio::test]

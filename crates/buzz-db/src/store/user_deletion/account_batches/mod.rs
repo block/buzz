@@ -1,5 +1,5 @@
 //! Bounded account-table cleanup for one community, shared by CLI and workflow.
-//! Deletion assumes relay and external writers are stopped.
+//! Deletion assumes no concurrent writes to the target data.
 
 use super::{normalize_user_deletion_pubkey, ExecutionMode, UserDeletionStore};
 use crate::{DbError, Result};
@@ -411,33 +411,15 @@ async fn validate_stage(
     stage_id: Uuid,
     options: &Options,
 ) -> Result<()> {
-    use crate::store::entity_deletion::{lock_owned, validate_approved_inventory};
-    let request = lock_owned(tx, lease).await?;
-    validate_approved_inventory(tx, &request).await?;
-    let inputs =
-        super::UserDeletionInventory::read(&request)?.inputs(&request.target, options.community)?;
-    if request.status != "running"
-        || normalize_user_deletion_pubkey(&request.target)? != options.target
-    {
-        return Err(invalid("account stage target or status changed"));
-    }
-    let matches: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM entity_deletion_stage_history
-         WHERE id=$1 AND request_id=$2 AND stage='purge_account' AND is_current
-         AND status='running' AND target_community_id=$3 AND metadata_json->'inputs'=$4)",
+    super::validate_cleanup_stage(
+        tx,
+        lease,
+        stage_id,
+        "purge_account",
+        options.community,
+        &options.target,
     )
-    .bind(stage_id)
-    .bind(lease.request_id)
-    .bind(options.community)
-    .bind(inputs)
-    .fetch_one(&mut *tx)
-    .await?;
-    if !matches {
-        return Err(invalid(
-            "account stage is not current or outside approved scope",
-        ));
-    }
-    Ok(())
+    .await
 }
 
 async fn timeouts(conn: &mut PgConnection) -> Result<()> {

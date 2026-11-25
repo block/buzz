@@ -22,8 +22,8 @@ impl EntityDeletionStore {
     ///
     /// An identical retry is read-only. Another operator adds retained evidence
     /// without restarting the workflow. This store does not authenticate the
-    /// operator: today's dummy CLI accepts self-asserted operator names. Callers
-    /// enabling real deletion must authenticate and authorize the operator.
+    /// operator: the CLI accepts self-asserted operator names. Callers must
+    /// authenticate and authorize the operator.
     pub async fn approve(
         &self,
         id: Uuid,

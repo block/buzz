@@ -2521,7 +2521,8 @@ mod postgres_tests {
     }
 
     async fn approved_stage_allows_post_inventory_row_churn_before_fencing() {
-        let (db, services, claim) = claimed_test_deletion("deletion-row-churn").await;
+        let (db, mut services, claim) = claimed_test_deletion("deletion-row-churn").await;
+        services.media = deletion_test_media_storage();
         let frozen: FrozenInventory = serde_json::from_value(
             claim
                 .request

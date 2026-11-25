@@ -23,6 +23,7 @@ impl Db {
 mod approvals;
 mod leases;
 mod observations;
+mod owned_communities;
 pub(crate) mod requests;
 mod stages;
 pub use approvals::EntityApproval;

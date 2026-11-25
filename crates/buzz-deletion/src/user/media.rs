@@ -1,4 +1,5 @@
 //! User media cleanup. Both modes use the same upload-only inventory.
+use super::row_ids::RowIds;
 use anyhow::{bail, Context, Result};
 use buzz_db::{user_deletion::UserDeletionTargets, Db, DbConfig};
 use buzz_media::{
@@ -25,7 +26,7 @@ pub struct Args {
     /// Print selected files without changing the database or storage (default).
     #[arg(long, visible_alias = "print-only", conflicts_with = "delete")]
     pub read_only: bool,
-    /// Delete selected files.
+    /// Delete selected files in an isolated test bucket. Never stop or restart a relay.
     #[arg(long)]
     pub delete: bool,
 }
@@ -54,7 +55,7 @@ pub async fn handle(db: &Db, pubkey: &str, delete: bool) -> Result<Value> {
     let pubkey = buzz_db::user_deletion::normalize_user_deletion_pubkey(pubkey)?;
     let media = configured_storage()?;
     let mut output = BufWriter::new(std::io::stdout());
-    handle_with_storage(db, &media, &pubkey, delete, &mut output).await
+    handle_with_storage(db, &media, &pubkey, delete, &mut output, None).await
 }
 
 pub(super) async fn handle_with_storage(
@@ -63,9 +64,19 @@ pub(super) async fn handle_with_storage(
     pubkey: &str,
     delete: bool,
     output: &mut impl Write,
+    ids: Option<&RowIds<'_>>,
 ) -> Result<Value> {
     let pubkey = buzz_db::user_deletion::normalize_user_deletion_pubkey(pubkey)?;
-    run_handler(db, media, &pubkey, delete, output).await
+    run_handler_with_inventory(
+        db,
+        media,
+        &pubkey,
+        delete,
+        output,
+        Inventory::new().await?,
+        ids,
+    )
+    .await
 }
 
 // Fakes replace only external DB/storage boundaries; the tests run the same
@@ -145,6 +156,7 @@ impl Storage for MediaStorage {
     }
 }
 
+#[cfg(test)]
 async fn run_handler(
     db: &impl Database,
     media: &impl Storage,
@@ -152,7 +164,16 @@ async fn run_handler(
     delete: bool,
     output: &mut impl Write,
 ) -> Result<Value> {
-    run_handler_with_inventory(db, media, pubkey, delete, output, Inventory::new().await?).await
+    run_handler_with_inventory(
+        db,
+        media,
+        pubkey,
+        delete,
+        output,
+        Inventory::new().await?,
+        None,
+    )
+    .await
 }
 
 async fn run_handler_with_inventory(
@@ -162,6 +183,7 @@ async fn run_handler_with_inventory(
     delete: bool,
     output: &mut impl Write,
     mut inventory: Inventory,
+    ids: Option<&RowIds<'_>>,
 ) -> Result<Value> {
     let keys = db.targets(pubkey).await?;
     let keys_set: HashSet<_> = keys.agents.iter().cloned().collect();
@@ -243,7 +265,7 @@ async fn run_handler_with_inventory(
         }
     }
     inventory.require_immutable_versions().await?;
-    let result = report::execute(db, media, &keys, delete, &mut inventory, output).await?;
+    let result = report::execute(db, media, &keys, delete, &mut inventory, output, ids).await?;
     inventory.close().await?;
     Ok(result)
 }

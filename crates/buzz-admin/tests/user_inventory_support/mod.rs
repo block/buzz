@@ -1,4 +1,4 @@
-//! Shared assertions for the inventory CLI's demo and real workflow journeys.
+//! Shared assertions for the inventory CLI and persisted workflow.
 
 use serde_json::Value;
 use std::process::Output;
@@ -42,53 +42,33 @@ async fn workflow_refuses(url: &str, args: &[&str], expected: &str) {
     assert!(stderr.contains(expected), "{args:?}: {stderr}");
 }
 
-pub async fn real_workflow_stops_at_gate(url: &str, id: &str) -> Value {
+pub async fn step_real_workflow_past_gate(url: &str, id: &str) -> Value {
     let approved = workflow_cli(url, &["inspect", id], true).await;
     assert_eq!(approved["status"], "approved");
     assert!(approved["stage_history"].as_array().unwrap().is_empty());
     workflow_refuses(
         url,
         &["run", id, "--next-step"],
-        "real workflow execution requires --delete",
+        "workflow execution requires --delete",
     )
     .await;
     // Refusing the missing flag must happen before claiming or initializing.
     assert_eq!(workflow_cli(url, &["inspect", id], true).await, approved);
 
-    let mut previous = approved;
-    for _ in 0..2 {
-        workflow_refuses(
-            url,
-            &["run", id, "--delete", "--next-step"],
-            "real handler gate_user is not implemented",
-        )
-        .await;
-        let stopped = workflow_cli(url, &["inspect", id], true).await;
-        assert_eq!(stopped["status"], "running");
-        let execution = &stopped["execution"];
-        assert!(execution["lease_owner"].is_null());
-        assert!(execution["lease_expires_at"].is_null());
-        assert!(execution["completed_at"].is_null());
-        // A new generation proves the retry reclaimed the released request.
-        assert_eq!(
-            execution["lease_generation"].as_i64().unwrap(),
-            previous["execution"]["lease_generation"].as_i64().unwrap() + 1
-        );
-        let stages = stopped["stage_history"].as_array().unwrap();
-        assert_eq!(stages.len(), 1);
-        let stage = &stages[0];
-        assert_eq!(stage["stage"], "gate_user");
-        assert_eq!(stage["status"], "pending");
-        assert_eq!(stage["is_current"], true);
-        assert!(stage["target_community_id"].is_null());
-        assert!(stage["started_at"].is_null());
-        assert!(stage["finished_at"].is_null());
-        assert!(stage["metadata_json"].get("result").is_none());
-        assert!(stage["metadata_json"].get("transition").is_none());
-        if !previous["stage_history"].as_array().unwrap().is_empty() {
-            assert_eq!(stopped["stage_history"], previous["stage_history"]);
-        }
-        previous = stopped;
-    }
-    previous
+    let stepped = workflow_cli(url, &["run", id, "--delete", "--next-step"], true).await;
+    assert_eq!(stepped["status"], "running");
+    let stages = stepped["stage_history"].as_array().unwrap();
+    assert_eq!(stages.len(), 2);
+    assert_eq!(stages[0]["stage"], "gate_user");
+    assert_eq!(stages[0]["status"], "completed");
+    assert_eq!(stages[0]["metadata_json"]["result"]["implemented"], false);
+    assert_eq!(
+        stages[0]["metadata_json"]["result"]["execution_mode"],
+        "delete"
+    );
+    assert_eq!(stages[1]["stage"], "purge_media");
+    assert_eq!(stages[1]["status"], "pending");
+    assert_eq!(stages[1]["is_current"], true);
+    assert!(stepped["execution"]["lease_owner"].is_null());
+    stepped
 }

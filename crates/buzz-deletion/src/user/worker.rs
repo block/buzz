@@ -7,21 +7,20 @@ use buzz_db::entity_deletion::{EntityDeletionStore, EntityLease, EntityStage, Ne
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::handlers::HandlerProgress;
 use super::{handlers, transition::UserDeletionTransition};
-use crate::{StageOutcome, DEFAULT_LEASE_DURATION, HEARTBEAT_INTERVAL};
+use crate::{DEFAULT_LEASE_DURATION, HEARTBEAT_INTERVAL};
 
-/// Real execution controls and demo-only failure/delay options.
+/// Execution controls for an approved user deletion.
 pub(super) struct RunOptions {
-    pub db: Option<buzz_db::Db>,
+    pub db: buzz_db::Db,
     pub media: Option<std::sync::Arc<buzz_media::MediaStorage>>,
     pub delete: bool,
+    pub row_ids: Option<std::fs::File>,
     pub relay_pubkey: Option<String>,
     pub batch_size: u16,
     pub max_items: u32,
     pub next_step: bool,
-    pub fail_stage: Option<String>,
-    pub stage_delay: Duration,
-    pub no_agents_in: Vec<Uuid>,
 }
 
 pub(super) async fn run(
@@ -39,8 +38,20 @@ pub(super) async fn run(
             request.entity_type
         );
     }
-    if !request.target.starts_with("demo:") && (!options.delete || options.db.is_none()) {
-        bail!("real workflow execution requires --delete and a database");
+    buzz_db::user_deletion::UserDeletionInventory::read(&request)?;
+    // Preserve opaque account identities in existing inventories. A mode-tagged
+    // manifest from an unsupported workflow must never authorize deletion.
+    anyhow::ensure!(
+        request
+            .inventory_manifest
+            .as_ref()
+            .is_none_or(|m| m.get("execution_mode").is_none()),
+        "unsupported saved execution mode"
+    );
+    anyhow::ensure!(options.delete != request.target.starts_with("read-only:"),
+        "real workflow execution requires --delete for a deletion request or --read-only for a read-only request");
+    if options.delete && matches!(request.status.as_str(), "completed" | "running") {
+        store.resume_delegated_review(id).await?;
     }
     let Some(lease) = store.claim(id, owner, DEFAULT_LEASE_DURATION).await? else {
         if store.get(id).await?.status == "completed" {
@@ -102,11 +113,10 @@ async fn execute_claim(
                     shutdown,
                     HEARTBEAT_INTERVAL,
                 )
-                .await
+                .await?
                 {
-                    StageOutcome::Completed => {}
-                    StageOutcome::Shutdown => return Ok(0),
-                    StageOutcome::Failed(error) => return Err(error),
+                    HandlerProgress::Advance => {}
+                    HandlerProgress::Stop => return Ok(0),
                 }
                 previous_stage_id = Some(row.id);
                 executed += 1;
@@ -122,7 +132,7 @@ async fn run_stage_with_heartbeat(
     options: &RunOptions,
     shutdown: &CancellationToken,
     heartbeat_period: Duration,
-) -> StageOutcome {
+) -> Result<HandlerProgress> {
     let handler = handlers::dispatch(store, lease, stage, options);
     tokio::pin!(handler);
     let mut interval = tokio::time::interval(heartbeat_period);
@@ -142,12 +152,9 @@ async fn run_stage_with_heartbeat(
     };
     tokio::select! {
         biased;
-        _ = shutdown.cancelled() => StageOutcome::Shutdown,
-        result = &mut handler => match result {
-            Ok(()) => StageOutcome::Completed,
-            Err(error) => StageOutcome::Failed(error),
-        },
-        error = renewal => StageOutcome::Failed(error.into()),
+        _ = shutdown.cancelled() => Ok(HandlerProgress::Stop),
+        result = &mut handler => result,
+        error = renewal => Err(error.into()),
     }
 }
 

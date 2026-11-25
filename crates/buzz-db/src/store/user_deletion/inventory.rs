@@ -25,10 +25,8 @@ impl UserDeletionInventory {
             .inventory_manifest
             .as_ref()
             .ok_or_else(|| invalid("missing inventory"))?;
-        // Preserve old manifests and their exact saved handler inputs on resume.
-        let legacy = value.get("version").is_some() || value.get("target").is_some();
-        if legacy && (value["version"] != 1 || value["target"] != request.target) {
-            return Err(invalid("unsupported inventory version or target"));
+        if value["workflow_version"] != 2 {
+            return Err(invalid("unsupported user deletion workflow version; inspect the saved request before proceeding"));
         }
         let rows = value["communities"]
             .as_array()
@@ -41,19 +39,15 @@ impl UserDeletionInventory {
         let mut seen = HashSet::new();
         let mut communities = Vec::new();
         for row in rows {
-            if row["relationship"] == "owner" {
-                return Err(invalid("owned-community execution is not supported yet"));
-            }
             let id = row["community_id"]
                 .as_str()
                 .and_then(|s| Uuid::parse_str(s).ok())
                 .ok_or_else(|| invalid("invalid inventory community id"))?;
             if !seen.insert(id)
-                || (legacy && row["action"] != "delete_subject_data")
-                || (!legacy && row.get("action").is_some())
+                || row.get("action").is_some()
                 || !matches!(
                     row["relationship"].as_str(),
-                    Some("participant" | "former_participant")
+                    Some("participant" | "former_participant" | "past_participant" | "owner")
                 )
             {
                 return Err(invalid("duplicate community or unsupported deletion scope"));
@@ -75,5 +69,15 @@ impl UserDeletionInventory {
                 .ok_or_else(|| invalid("stage community is outside inventory"))?,
         };
         Ok(json!({"target": target, "community": community}))
+    }
+    pub(super) fn non_owner_inputs(&self, target: &str, community: Option<Uuid>) -> Result<Value> {
+        let community = community.ok_or_else(|| invalid("missing stage community"))?;
+        let inputs = self.inputs(target, Some(community))?;
+        if inputs["community"]["relationship"] == "owner" {
+            return Err(invalid(
+                "owner inventory requires the community deletion handoff",
+            ));
+        }
+        Ok(inputs)
     }
 }

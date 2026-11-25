@@ -1,4 +1,4 @@
-//! User inventory, offline account cleanup and persisted deletion workflows.
+//! User inventory, account cleanup and persisted deletion workflows.
 
 use anyhow::{bail, Result};
 use buzz_db::user_deletion::ExecutionMode;
@@ -12,30 +12,30 @@ pub enum Command {
     ContentBatches(content_batches::Args),
     /// Run media cleanup directly, without a workflow request.
     MediaBatches(media::Args),
-    /// Preview or delete profiles in one community; deletion requires stopped writers.
+    /// Preview or delete profiles in one community.
     ProfileBatches(profile_batches::Args),
-    /// Print account-table batches for one community; --delete executes offline.
+    /// Print account-table batches for one community or apply them with --delete.
     AccountBatches(account_batches::Args),
     /// Capture frozen human/agent inputs across stored communities, read-only.
     AccountScope {
         /// Human public key, hex or npub.
-        #[arg(long, value_parser = inventory::parse_subject)]
+        #[arg(long, value_parser = content_batches::parse_pubkey)]
         pubkey: String,
     },
-    /// Print real current memberships as JSON; does not save or execute a request.
+    /// Print affected communities as JSON; does not save or execute a request.
     Inventory {
-        /// Demo fixture (default), hex public key, or npub. Current memberships only.
-        #[arg(long, default_value = "demo", value_parser = inventory::parse_subject)]
+        /// Human public key, as hex or npub.
+        #[arg(long, value_parser = content_batches::parse_pubkey)]
         pubkey: String,
     },
     /// Save a request. An identical resubmission returns the existing row.
     Submit {
-        /// Optional demo request label, for example demo:alice. Conflicts with --pubkey.
-        #[arg(long, conflicts_with = "pubkey")]
-        target: Option<String>,
-        /// Demo fixture (default), hex public key, or npub to discover and save.
-        #[arg(long, value_parser = inventory::parse_subject)]
-        pubkey: Option<String>,
+        /// Keep read-only progress separate from deletion of this subject.
+        #[arg(long, requires = "pubkey")]
+        read_only: bool,
+        /// Human public key, as hex or npub.
+        #[arg(long, value_parser = content_batches::parse_pubkey)]
+        pubkey: String,
         /// Submitting operator identity.
         #[arg(long)]
         requested_by: String,
@@ -47,7 +47,7 @@ pub enum Command {
     Approve {
         /// Request UUID returned by submit.
         id: Uuid,
-        /// Approving operator identity (self-asserted for this demo).
+        /// Approving operator identity (self-asserted).
         #[arg(long)]
         approved_by: String,
         /// Inventory digest from inspect; approval must match this exact inventory.
@@ -58,9 +58,15 @@ pub enum Command {
     Run {
         /// Approved request UUID.
         id: Uuid,
-        /// Execute implemented real handlers; stop relay and external writers first.
+        /// Execute implemented handlers. Never stop or restart a relay. Use isolated test data while account gating is unimplemented.
         #[arg(long)]
         delete: bool,
+        /// Run the same workflow and record progress without applying source deletions.
+        #[arg(long, conflicts_with = "delete")]
+        read_only: bool,
+        /// Write selected row keys and media identifiers as JSON lines to a new file.
+        #[arg(long, value_name = "PATH")]
+        write_row_ids: Option<std::path::PathBuf>,
         /// Trusted relay signer for historical content attribution.
         #[arg(long, value_parser=content_batches::parse_pubkey)]
         relay_pubkey: Option<String>,
@@ -76,17 +82,8 @@ pub enum Command {
         /// Execute one handler, transition to the next stage, and release ownership.
         #[arg(long)]
         next_step: bool,
-        /// Inject a retryable failure when this dummy stage is reached.
-        #[arg(long, value_parser = workflow::parse_stage)]
-        fail_stage: Option<String>,
-        /// Delay each dummy action for inspection and shutdown testing (up to 60s).
-        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u64).range(0..=60_000))]
-        stage_delay_ms: u64,
-        /// Simulate no agents in this community; may be repeated. Saves a runtime branch result.
-        #[arg(long)]
-        demo_no_agents_in: Vec<Uuid>,
     },
-    /// List synthetic requests, newest first.
+    /// List saved requests, newest first.
     List {
         /// Maximum number of rows.
         #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
@@ -165,21 +162,17 @@ pub async fn run(command: Command) -> Result<i32> {
             )?;
         }
         Command::Inventory { pubkey } => {
-            crate::print_json(&inventory::generate(&db, &pubkey).await?)?;
+            crate::print_json(&db.user_deletion_store().generate_inventory(&pubkey).await?)?;
         }
         Command::Submit {
-            target,
+            read_only,
             pubkey,
             requested_by,
             reason,
         } => {
-            let target = target.unwrap_or_else(|| match pubkey.as_deref() {
-                None | Some("demo") => "demo:default".to_owned(),
-                Some(key) => key.to_owned(),
-            });
             crate::print_json(
                 &db.user_deletion_store()
-                    .submit(&target, &requested_by, reason.as_deref())
+                    .submit_for_mode(&pubkey, &requested_by, reason.as_deref(), read_only)
                     .await?,
             )?;
         }
@@ -196,39 +189,44 @@ pub async fn run(command: Command) -> Result<i32> {
         Command::Run {
             id,
             delete,
+            read_only,
+            write_row_ids,
             relay_pubkey,
             batch_size,
             max_items,
             executor_id,
             next_step,
-            fail_stage,
-            stage_delay_ms,
-            demo_no_agents_in,
         } => {
+            anyhow::ensure!(
+                delete || read_only,
+                "workflow execution requires --delete or --read-only"
+            );
             let request = store.get(id).await?;
-            let real = !request.target.starts_with("demo:");
-            if real {
-                anyhow::ensure!(delete, "real workflow execution requires --delete; use account-batches --read-only to preview");
-                anyhow::ensure!(
-                    fail_stage.is_none() && stage_delay_ms == 0 && demo_no_agents_in.is_empty(),
-                    "dummy controls cannot be used for real deletion"
-                );
-            }
+            // Earlier submissions may already identify the signer of historical records.
+            let saved_signer = request
+                .inventory_manifest
+                .as_ref()
+                .and_then(|manifest| manifest.get("discovery_relay_pubkey"))
+                .and_then(|key| key.as_str());
+            let relay_pubkey = match relay_pubkey.or_else(|| saved_signer.map(str::to_owned)) {
+                Some(key) => Some(key),
+                None => {
+                    account_batches::configured_signer()?.map(|keys| keys.public_key().to_hex())
+                }
+            };
             let code = worker::run(
                 &store,
                 id,
                 &executor_id.unwrap_or_else(crate::default_executor_id),
                 &worker::RunOptions {
-                    db: real.then(|| buzz_db::Db::from_pool(db.pool().clone())),
+                    db: buzz_db::Db::from_pool(db.pool().clone()),
                     media: None,
+                    row_ids: write_row_ids.as_deref().map(row_ids::create).transpose()?,
                     delete,
                     relay_pubkey,
                     batch_size,
                     max_items,
                     next_step,
-                    fail_stage,
-                    stage_delay: std::time::Duration::from_millis(stage_delay_ms),
-                    no_agents_in: demo_no_agents_in,
                 },
                 &crate::shutdown_token(),
             )
@@ -245,12 +243,12 @@ pub async fn run(command: Command) -> Result<i32> {
 mod account_batches;
 mod content_batches;
 mod handlers;
-mod inventory;
 /// Direct upload-only media cleanup and its workflow handler.
 pub mod media;
 /// Standalone delegation of an owned community to community deletion.
 pub mod owned_community;
 mod profile_batches;
+mod row_ids;
 /// Read-only summaries of locally saved request progress and external waits.
 pub mod summary;
 mod transition;

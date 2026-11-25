@@ -9,7 +9,8 @@ use std::time::Duration;
 use tokio::process::Command;
 use uuid::Uuid;
 
-const TARGET: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+const RELAY: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+const TARGET: &str = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
 
 async fn cli(url: &str, args: &[&str]) -> Output {
     let binary = std::env::var_os("NEXTEST_BIN_EXE_buzz_admin")
@@ -68,6 +69,10 @@ async fn account_workflow_stdout_is_one_document_and_direct_output_remains_ndjso
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::query("INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, d_tag)
+        VALUES ($1, decode(repeat('bb',32),'hex'), decode($2,'hex'), now(), 30382, $3, '{}', decode(repeat('00',64),'hex'), $4)")
+        .bind(community).bind(RELAY).bind(json!([["d", TARGET], ["p", TARGET]])).bind(TARGET)
+        .execute(&pool).await.unwrap();
     let request = db
         .user_deletion_store()
         .submit(TARGET, "fixture", None)
@@ -207,4 +212,19 @@ async fn account_workflow_stdout_is_one_document_and_direct_output_remains_ndjso
         .unwrap()
         .iter()
         .any(|t| t[0] == "member" && t[1] == TARGET));
+    // The workflow obtains the profile signer's public key from relay configuration.
+    cli(
+        &url,
+        &["run", &request.id.to_string(), "--delete", "--next-step"],
+    )
+    .await;
+    let profile_remains: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM events WHERE community_id=$1 AND kind=30382 AND d_tag=$2)",
+    )
+    .bind(community)
+    .bind(TARGET)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!profile_remains);
 }

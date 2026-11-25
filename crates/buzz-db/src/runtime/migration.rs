@@ -1056,7 +1056,8 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 106);
+        assert_eq!(migrations.len(), 107);
+        assert_eq!(migrations[106].version, 107);
         assert_eq!(migrations[105].version, 106);
         assert!(
             strip_sql_comments(migrations[105].sql.as_str()).contains("CREATE TABLE search_outbox")

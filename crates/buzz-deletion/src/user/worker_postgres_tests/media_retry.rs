@@ -23,8 +23,8 @@ async fn gate_then_media_requires_delete_and_retries_storage_failure_before_comm
     assert_eq!(paused.stage_history[0].stage, "gate_user");
     assert_eq!(paused.stage_history[0].status, "completed");
     assert_eq!(
-        paused.stage_history[0].metadata_json["result"]["fixture"],
-        true
+        paused.stage_history[0].metadata_json["result"]["implemented"],
+        false
     );
     let media_id = paused.stage_history[1].id;
     assert_eq!(paused.stage_history[1].stage, "purge_media");

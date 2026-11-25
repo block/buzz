@@ -1,4 +1,4 @@
-//! Read-only discovery of a public key's current community memberships.
+//! Shared read-only discovery of current community memberships.
 
 use super::{UserDeletionStore, MAX_COMMUNITIES};
 use crate::{DbError, Result};
@@ -21,50 +21,16 @@ fn invalid_pubkey() -> DbError {
     DbError::DeletionSafety("expected a 64-character hex public key or an npub".into())
 }
 
-// Identity resolution belongs to intake, never approval or workflow recovery.
-pub(super) fn normalize_target(input: &str) -> Result<String> {
-    if let Some(slug) = input.strip_prefix("demo:") {
-        if slug.is_empty()
-            || slug.len() > 64
-            || !slug.as_bytes()[0].is_ascii_alphanumeric()
-            || !slug
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-        {
-            return Err(DbError::DeletionSafety("invalid demo target label".into()));
-        }
-        return Ok(input.to_owned());
-    }
-    normalize_user_deletion_pubkey(input)
-}
-
-fn demo_inventory() -> serde_json::Value {
-    serde_json::json!({
-        "communities": [
-            {
-                "community_id": "00000000-0000-0000-0000-00000000000b",
-                "label": "demo:community-b",
-                "relationship": "participant"
-            },
-            {
-                "community_id": "00000000-0000-0000-0000-00000000000c",
-                "label": "demo:community-c",
-                "relationship": "former_participant"
-            }
-        ]
-    })
-}
-
 #[derive(sqlx::FromRow)]
 struct Membership {
     community_id: Uuid,
     host: String,
-    role: Option<String>,
+    owned: bool,
+    via_agent: bool,
 }
 
 impl UserDeletionStore {
-    /// Generate only community identities and relationships for demo or real input.
-    /// `demo` selects the existing fixture; other inputs accept hex or npub.
+    /// List current memberships and communities owned by the subject or a direct agent.
     pub async fn generate_inventory(&self, pubkey: &str) -> Result<Value> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("SET TRANSACTION READ ONLY")
@@ -76,37 +42,104 @@ impl UserDeletionStore {
     }
 }
 
+/// Recheck ownership inside the caller's community write transaction.
+pub(crate) async fn check_community_ownership(
+    conn: &mut sqlx::PgConnection,
+    target: &str,
+    community: Uuid,
+    expected_owner: bool,
+) -> Result<()> {
+    // Serving ownership changes take the shared form of this lock. A fresh
+    // statement snapshot after acquiring it must see any writer we waited for.
+    crate::deletion::lock_community_deletion(conn, crate::CommunityId::from_uuid(community))
+        .await?;
+    let (owned, isolation): (bool, String) = sqlx::query_as(concat!(
+        "SELECT EXISTS(SELECT 1 FROM (",
+        include_str!("community_owners.sql"),
+        ") owners WHERE community_id = $2), current_setting('transaction_isolation')"
+    ))
+    .bind(target)
+    .bind(community)
+    .fetch_one(conn)
+    .await?;
+    if isolation != "read committed" {
+        return Err(DbError::DeletionSafety(
+            "ownership validation requires read committed isolation".into(),
+        ));
+    }
+    if owned != expected_owner {
+        return Err(ownership_changed(community));
+    }
+    Ok(())
+}
+
+fn ownership_changed(community: Uuid) -> DbError {
+    DbError::DeletionSafety(format!(
+        "ownership of community {community} differs from the approved inventory; review the ownership change before continuing"
+    ))
+}
+
+impl UserDeletionStore {
+    /// Verify the set of owned communities before the global media stage starts.
+    pub async fn check_owned_inventory(
+        &self,
+        target: &str,
+        inventory: &super::UserDeletionInventory,
+    ) -> Result<()> {
+        let approved: Vec<_> = inventory
+            .communities
+            .iter()
+            .filter(|(_, entry)| entry["relationship"] == "owner")
+            .map(|(id, _)| *id)
+            .collect();
+        // An independently submitted child may already have removed its owner
+        // rows. The parent will observe that child without submitting another.
+        let changed: Option<Uuid> = sqlx::query_scalar(concat!(
+            "WITH owners AS (", include_str!("community_owners.sql"), ")
+             SELECT community_id FROM owners WHERE NOT (community_id = ANY($2))
+             UNION ALL
+             SELECT id FROM unnest($2::uuid[]) AS approved(id)
+             WHERE NOT EXISTS (SELECT 1 FROM owners WHERE community_id = approved.id)
+               AND NOT EXISTS (SELECT 1 FROM community_deletion_requests WHERE community_id = approved.id)
+             ORDER BY 1 LIMIT 1"
+        ))
+        .bind(target)
+        .bind(approved)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(id) = changed {
+            return Err(ownership_changed(id));
+        }
+        Ok(())
+    }
+}
+
 // Submission uses its existing transaction, including when the pool has one connection.
 pub(super) async fn generate_inventory_on(
     conn: &mut sqlx::PgConnection,
     pubkey: &str,
 ) -> Result<Value> {
-    if pubkey == "demo" {
-        return Ok(demo_inventory());
-    }
-    let pubkey = normalize_target(pubkey)?;
-    if pubkey.starts_with("demo:") {
-        return Ok(demo_inventory());
-    }
+    let pubkey = normalize_user_deletion_pubkey(pubkey)?;
     sqlx::query("SET LOCAL statement_timeout = '30s'")
         .execute(&mut *conn)
         .await?;
     // Operator-global discovery: deliberately do not apply the product's
     // active-community filters. One statement gives one membership snapshot.
-    let rows = sqlx::query_as::<_, Membership>(
-        "WITH current_channels AS ( \
-                 SELECT DISTINCT community_id FROM channel_members \
-                 WHERE pubkey = decode($1, 'hex') AND removed_at IS NULL \
-             ), matched_communities AS ( \
-                 SELECT community_id FROM relay_members WHERE pubkey = $1 \
-                 UNION SELECT community_id FROM current_channels \
-             ) \
-             SELECT c.id AS community_id, c.host, m.role \
-             FROM matched_communities matched \
-             JOIN communities c ON c.id = matched.community_id \
-             LEFT JOIN relay_members m ON m.community_id = c.id AND m.pubkey = $1 \
-             ORDER BY c.id LIMIT $2",
-    )
+    let rows = sqlx::query_as::<_, Membership>(concat!(
+        "WITH owners AS (",
+        include_str!("community_owners.sql"),
+        "),
+             matches AS (
+                 SELECT community_id, true AS owned, via_agent FROM owners
+                 UNION ALL SELECT community_id, false, false FROM relay_members WHERE pubkey = $1
+                 UNION ALL SELECT DISTINCT community_id, false, false FROM channel_members
+                      WHERE pubkey = decode($1, 'hex') AND removed_at IS NULL
+             )
+             SELECT c.id AS community_id, c.host, bool_or(m.owned) AS owned,
+                    bool_or(m.via_agent) AS via_agent
+             FROM matches m JOIN communities c ON c.id = m.community_id
+             GROUP BY c.id ORDER BY c.id LIMIT $2"
+    ))
     .bind(&pubkey)
     .bind((MAX_COMMUNITIES + 1) as i64)
     .fetch_all(&mut *conn)
@@ -119,24 +152,20 @@ pub(super) async fn generate_inventory_on(
     let communities = rows
         .into_iter()
         .map(|row| {
-            let relationship = match row.role.as_deref() {
-                Some("owner") => "owner",
-                Some("admin" | "member") | None => "participant",
-                _ => {
-                    return Err(DbError::DeletionSafety(
-                        "unsupported membership role".into(),
-                    ))
-                }
-            };
-            Ok(json!({
+            let mut entry = json!({
                 "community_id": row.community_id,
                 "label": row.host,
-                "relationship": relationship,
-            }))
+                "relationship": if row.owned { "owner" } else { "participant" },
+            });
+            if row.via_agent {
+                entry["owned_by_agent"] = true.into();
+            }
+            entry
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Vec<_>>();
     Ok(json!({
         "communities": communities,
+        "workflow_version": 2,
     }))
 }
 

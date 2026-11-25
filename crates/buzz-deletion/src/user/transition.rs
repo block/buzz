@@ -57,11 +57,14 @@ fn decide_next(request: &EntityRequest, history: &[EntityStage]) -> Result<Stage
     };
     match current.status.as_str() {
         "pending" | "running" | "failed" => Ok(StageTransition::Resume(current.id)),
-        "completed" => {
+        "completed" | "submitted" => {
+            if current.status == "submitted" && current.stage != "delete_owned_community" {
+                return Err(invalid("unexpected submitted stage"));
+            }
             let outcome = decision(&current)?;
             let successor = progress.apply(&inventory, &current, outcome)?;
             if successor.is_none()
-                && progress.completed_communities.len() != inventory.communities.len()
+                && progress.visited_communities.len() != inventory.communities.len()
             {
                 return Err(invalid("terminal transition leaves uncovered communities"));
             }

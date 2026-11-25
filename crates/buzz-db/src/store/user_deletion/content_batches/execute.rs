@@ -148,10 +148,17 @@ pub(super) async fn execute_owned_batch(
         .await?;
     ownership::recheck(&mut tx, options, start).await?;
     if let Some((lease, stage_id)) = stage {
+        super::super::check_community_ownership(
+            &mut tx,
+            &normalize_user_deletion_pubkey(&options.pubkey)?,
+            community,
+            false,
+        )
+        .await?;
         let request = crate::store::entity_deletion::lock_owned(&mut tx, lease).await?;
         crate::store::entity_deletion::validate_approved_inventory(&mut tx, &request).await?;
         let expected = crate::user_deletion::UserDeletionInventory::read(&request)?
-            .inputs(&request.target, Some(community))?;
+            .non_owner_inputs(&request.target, Some(community))?;
         let inputs: Option<Value> = sqlx::query_scalar("SELECT metadata_json->'inputs' FROM entity_deletion_stage_history WHERE id=$1 AND request_id=$2 AND stage='purge_content' AND target_community_id=$3 AND is_current AND status='running' FOR UPDATE")
             .bind(stage_id).bind(lease.request_id).bind(community).fetch_optional(&mut *tx).await?;
         if request.target != normalize_user_deletion_pubkey(&options.pubkey)?

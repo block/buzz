@@ -1,5 +1,4 @@
-//! Request summaries from a single user-table snapshot. No child API or
-//! community deletion tables are consulted; observations can therefore be stale.
+//! Final workflow review and read-only inspection of the saved observations.
 
 use buzz_db::entity_deletion::{EntityDeletionStore, EntityInspection, EntityStage};
 use serde::Serialize;
@@ -29,7 +28,7 @@ pub struct RequestSummary {
 pub struct UnfinishedStage {
     /// Exact stage row, including community, inputs, timestamps, and errors.
     pub stage: EntityStage,
-    /// Display state: failed, pending, running, or waiting_external.
+    /// Display state: failed, pending, submitted, running, or waiting_external.
     pub state: String,
     /// Last saved external observation, including reason, child ID/status,
     /// observation time, operator action and command argument arrays when known.
@@ -55,7 +54,12 @@ pub async fn summarize_request(
         .iter()
         .filter(|row| row.status != "completed")
         .map(|row| {
-            let observation = row.metadata_json.get("waiting").cloned();
+            let observation = if row.status == "submitted" {
+                row.metadata_json.get("result")
+            } else {
+                row.metadata_json.get("waiting")
+            }
+            .cloned();
             UnfinishedStage {
                 stage: row.clone(),
                 state: if row.status == "running" && observation.is_some() {
@@ -90,7 +94,7 @@ pub async fn summarize_request(
         .iter()
         .any(|row| row.needs_external_refresh)
     {
-        "The request is unfinished. External statuses are last-observed snapshots, not live checks. Revisit those stage handlers to refresh them; this summary performs no external work."
+        "The request is unfinished. External statuses are last-observed snapshots, not live checks. Run the user request again to refresh outstanding dependencies; this summary performs no external work."
     } else {
         "The request is unfinished. Inspect its approval, retry and stage state. Completed reached stages do not prove that all workflow steps have been reached."
     };
@@ -101,5 +105,67 @@ pub async fn summarize_request(
         unfinished_stages,
         communities_not_reached,
         explanation,
+    })
+}
+
+#[derive(Serialize)]
+pub(super) struct FinalSummary {
+    pub remaining: Vec<Value>,
+    skipped_unimplemented: Vec<String>,
+}
+
+/// Refresh only outstanding owned deletions. The operator can invoke the same
+/// request again after the independent community workflows make progress.
+pub(super) async fn final_review(
+    store: &EntityDeletionStore,
+    lease: &buzz_db::entity_deletion::EntityLease,
+    current: &EntityStage,
+    options: &super::worker::RunOptions,
+    current_result: &Value,
+) -> anyhow::Result<FinalSummary> {
+    use anyhow::ensure;
+    let saved = store.inspect(lease.request_id).await?;
+    let mut remaining = Vec::new();
+    let mut skipped = Vec::new();
+    for stage in &saved.stage_history {
+        let result = if stage.id == current.id {
+            current_result
+        } else {
+            &stage.metadata_json["result"]
+        };
+        if result["implemented"] == false {
+            skipped.push(stage.stage.clone());
+        }
+        if stage.id == current.id {
+            continue;
+        }
+        if options.delete && stage.stage == "delete_owned_community" {
+            // A legacy completed row can mean only that submission succeeded.
+            if stage.status == "completed"
+                && super::owned_community::observed_complete(&stage.metadata_json["result"])
+            {
+                continue;
+            }
+            let db = &options.db;
+            let (observation, complete) =
+                super::owned_community::refresh(&saved.request, stage, &db.deletion_store())
+                    .await?;
+            store
+                .save_owned_observation(lease, current.id, stage.id, observation.clone(), complete)
+                .await?;
+            if !complete {
+                remaining.push(observation);
+            }
+        } else {
+            ensure!(
+                stage.status == "completed",
+                "unfinished prerequisite {}",
+                stage.stage
+            );
+        }
+    }
+    Ok(FinalSummary {
+        remaining,
+        skipped_unimplemented: skipped,
     })
 }

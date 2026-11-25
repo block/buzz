@@ -11,6 +11,7 @@ pub(super) async fn execute(
     delete: bool,
     inventory: &mut Inventory,
     output: &mut impl Write,
+    ids: Option<&super::RowIds<'_>>,
 ) -> Result<Value> {
     let mode = if delete { "delete" } else { "read-only" };
     write!(
@@ -31,11 +32,15 @@ pub(super) async fn execute(
                 write!(output, ",")?;
             }
             selected += 1;
+            let action = if shared { "keep" } else { "delete" };
+            if let Some(ids) = ids {
+                ids.record(json!({"file_hash":hash,"action":action,"uploader_action":"remove_target_claims"}))?;
+            }
             let fields = json!({
                 "filename": inventory.filename(&hash).await?,
                 "original_filename": null,
                 "file_hash": hash,
-                "decision": if shared { "keep" } else { "delete" },
+                "decision": action,
                 "reason": if shared { "Uploaded by someone outside the target set" }
                     else { "All known uploaders belong to the target set" },
                 "has_other_uploader": shared,
@@ -63,6 +68,9 @@ pub(super) async fn execute(
                     write!(output, "\n    ")?;
                     serde_json::to_writer(&mut *output, &version)?;
                     first_version = false;
+                    if let Some(ids) = ids {
+                        ids.record(json!({"file_hash":hash,"action":action,"version":version}))?;
+                    }
                     if delete && !shared {
                         media.delete(&version).await?;
                         handled += 1;

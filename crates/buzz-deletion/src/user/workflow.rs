@@ -43,24 +43,32 @@ const RULES: &[Rule] = &[
     Rule {
         name: "purge_content",
         community_scope: true,
-        allowed: &[
-            Decision::Stage("purge_account"),
-            Decision::Stage("purge_agents"),
-            Decision::CommunityComplete,
-        ],
+        allowed: &[Decision::Stage("purge_account")],
         decide: after_purge_content,
     },
     Rule {
         name: "purge_account",
         community_scope: true,
-        allowed: &[Decision::Stage("purge_agents")],
-        decide: |_| Ok(Decision::Stage("purge_agents")),
+        allowed: &[Decision::Stage("purge_profile")],
+        decide: |_| Ok(Decision::Stage("purge_profile")),
     },
     Rule {
-        name: "purge_agents",
+        name: "purge_profile",
         community_scope: true,
         allowed: &[Decision::CommunityComplete],
         decide: |_| Ok(Decision::CommunityComplete),
+    },
+    Rule {
+        name: "delete_owned_community",
+        community_scope: true,
+        allowed: &[Decision::CommunityComplete],
+        decide: |_| Ok(Decision::CommunityComplete),
+    },
+    Rule {
+        name: "global_cleanup",
+        community_scope: false,
+        allowed: &[Decision::RequestComplete],
+        decide: |_| Ok(Decision::RequestComplete),
     },
 ];
 
@@ -69,12 +77,7 @@ fn after_purge_content(result: &Value) -> Result<Decision> {
     if result["account_erasure_complete"] == false {
         return Ok(Decision::Stage("purge_account"));
     }
-    // Demo execution retains its saved, simulated agent-routing result.
-    match result["has_agents"].as_bool() {
-        Some(true) => Ok(Decision::Stage("purge_agents")),
-        Some(false) => Ok(Decision::CommunityComplete),
-        None => Err(invalid("purge_content result must contain has_agents")),
-    }
+    Err(invalid("missing content cleanup result"))
 }
 
 pub(super) fn rule(name: &str) -> Result<&'static Rule> {
@@ -82,13 +85,6 @@ pub(super) fn rule(name: &str) -> Result<&'static Rule> {
         .iter()
         .find(|rule| rule.name == name)
         .ok_or_else(|| invalid("unknown workflow stage"))
-}
-
-// The CLI derives stage validation from this workflow, without a second list.
-pub(super) fn parse_stage(name: &str) -> std::result::Result<String, String> {
-    rule(name)
-        .map(|rule| rule.name.to_owned())
-        .map_err(|error| error.to_string())
 }
 
 pub(super) fn decision(stage: &EntityStage) -> Result<Decision> {
@@ -112,7 +108,7 @@ pub(super) struct Step {
 
 pub(super) struct Progress {
     pub current: Option<EntityStage>,
-    pub completed_communities: HashSet<Uuid>,
+    pub visited_communities: HashSet<Uuid>,
     pub terminal: bool,
 }
 
@@ -126,7 +122,7 @@ impl Progress {
     ) -> Result<Self> {
         let mut progress = Self {
             current: None,
-            completed_communities: HashSet::new(),
+            visited_communities: HashSet::new(),
             terminal: false,
         };
         let mut successors = HashMap::new();
@@ -177,7 +173,9 @@ impl Progress {
                 progress.current = Some((*row).clone());
                 break;
             }
-            if row.status != "completed" {
+            if row.status != "completed"
+                && !(row.stage == "delete_owned_community" && row.status == "submitted")
+            {
                 return Err(invalid("non-current stage is not completed"));
             }
             let outcome = decision(row)?;
@@ -214,24 +212,31 @@ impl Progress {
                     let id = row
                         .target_community_id
                         .ok_or_else(|| invalid("community outcome on request stage"))?;
-                    if !self.completed_communities.insert(id) {
-                        return Err(invalid("community completed twice"));
+                    if !self.visited_communities.insert(id) {
+                        return Err(invalid("community visited twice"));
                     }
                 }
                 match inventory
                     .communities
                     .iter()
-                    .find(|(id, _)| !self.completed_communities.contains(id))
+                    .find(|(id, _)| !self.visited_communities.contains(id))
                 {
-                    Some((id, _)) => Ok(Some(Step {
-                        name: COMMUNITY_INITIAL_STAGE,
+                    Some((id, attrs)) => Ok(Some(Step {
+                        name: if attrs["relationship"] == "owner" {
+                            "delete_owned_community"
+                        } else {
+                            COMMUNITY_INITIAL_STAGE
+                        },
                         community: Some(*id),
                     })),
-                    None => self.apply(inventory, row, Decision::RequestComplete),
+                    None => Ok(Some(Step {
+                        name: "global_cleanup",
+                        community: None,
+                    })),
                 }
             }
             Decision::RequestComplete => {
-                if self.completed_communities.len() != inventory.communities.len() {
+                if self.visited_communities.len() != inventory.communities.len() {
                     return Err(invalid("request cannot finish with uncovered communities"));
                 }
                 Ok(None)
@@ -245,30 +250,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn content_routes_real_cleanup_and_saved_demo_results() {
-        assert_eq!(COMMUNITY_INITIAL_STAGE, "purge_content");
+    fn content_cleanup_precedes_account_cleanup() {
         let content = rule(COMMUNITY_INITIAL_STAGE).unwrap();
-        assert!(content.community_scope);
-        for (result, expected) in [
-            (
-                serde_json::json!({"content": {}, "account_erasure_complete": false}),
-                Decision::Stage("purge_account"),
-            ),
-            (
-                serde_json::json!({"account_erasure_complete": false, "has_agents": false}),
-                Decision::Stage("purge_account"),
-            ),
-            (
-                serde_json::json!({"dummy": true, "has_agents": true}),
-                Decision::Stage("purge_agents"),
-            ),
-            (
-                serde_json::json!({"dummy": true, "has_agents": false}),
-                Decision::CommunityComplete,
-            ),
-        ] {
-            assert_eq!((content.decide)(&result).unwrap(), expected);
-        }
+        assert_eq!(
+            (content.decide)(&serde_json::json!({"account_erasure_complete":false})).unwrap(),
+            Decision::Stage("purge_account")
+        );
         assert!((content.decide)(&serde_json::json!({})).is_err());
     }
 
@@ -287,13 +274,5 @@ mod tests {
             (media.decide)(&serde_json::json!({})).unwrap(),
             Decision::EnterCommunities
         );
-    }
-
-    #[test]
-    fn stage_options_follow_the_workflow_definition() {
-        for rule in RULES {
-            assert_eq!(parse_stage(rule.name).unwrap(), rule.name);
-        }
-        assert!(parse_stage("unregistered_stage").is_err());
     }
 }

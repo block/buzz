@@ -24,6 +24,7 @@ async fn late_capacity_failure_never_deletes_an_already_discovered_file() {
             true,
             &mut output,
             Inventory::with_limits(max_bytes, max_entries),
+            None,
         )
         .await
         .unwrap_err();

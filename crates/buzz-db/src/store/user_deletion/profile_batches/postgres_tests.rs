@@ -314,7 +314,48 @@ async fn limits_dependencies_and_signer_fail_before_any_mutation() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn content_then_profile_cleanup_retains_human_and_agent_repositories() {
+async fn owned_workflow_with_retained_history_blocks_profile_removal() {
+    let f = Fixture::new().await;
+    f.profiles().await;
+    let workflow: Uuid = sqlx::query_scalar(
+        "INSERT INTO workflows(community_id,name,owner_pubkey,definition,definition_hash)
+         VALUES($1,'shared workflow',$2,'{}',$3) RETURNING id",
+    )
+    .bind(f.community)
+    .bind(f.agent.public_key().to_bytes().as_slice())
+    .bind(vec![0u8; 32])
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO workflow_runs(community_id,workflow_id,status) VALUES($1,$2,'completed')",
+    )
+    .bind(f.community)
+    .bind(workflow)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let before = export(&f.pool).await;
+    let mut output = Vec::new();
+    assert!(f
+        .store
+        .run_profile_batches(
+            &f.options(2),
+            true,
+            Some(&f.relay.secret_key().to_secret_hex()),
+            &mut output
+        )
+        .await
+        .is_err());
+    assert!(String::from_utf8(output)
+        .unwrap()
+        .contains("workflows: content/account cleanup"));
+    assert_eq!(before, export(&f.pool).await);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn content_then_profile_cleanup_retains_canvases_and_repositories() {
     use crate::user_deletion::{content_batches::ContentBatchOptions, ExecutionMode};
 
     let f = Fixture::new().await;
@@ -350,7 +391,9 @@ async fn content_then_profile_cleanup_retains_human_and_agent_repositories() {
             .unwrap();
         }
     }
-    // Retaining repositories must not exempt ordinary human or agent content.
+    let canvas = f
+        .event(f.community, &f.human, 40100, vec![], "shared canvas")
+        .await;
     for owner in [&f.human, &f.agent] {
         f.event(f.community, owner, 1, vec![], "remove content first")
             .await;
@@ -402,10 +445,12 @@ async fn content_then_profile_cleanup_retains_human_and_agent_repositories() {
     assert_eq!(proposed.items, deleted.items);
     let after = export(&f.pool).await;
     assert_eq!(before["git_repo_names"], after["git_repo_names"]);
+    let canvas_id = json!(format!("\\x{}", canvas.id));
     for (table, rows) in &before {
         for row in rows.as_array().unwrap() {
             if row["community_id"] == json!(f.elsewhere)
-                || (table == "events" && repository_ids.contains(&row["id"]))
+                || (table == "events"
+                    && (row["id"] == canvas_id || repository_ids.contains(&row["id"])))
                 || (table == "event_mentions" && repository_ids.contains(&row["event_id"]))
             {
                 assert!(

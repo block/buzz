@@ -5,7 +5,7 @@ CREATE TABLE entity_deletion_stage_history (
     request_id UUID NOT NULL,
     target_community_id UUID,
     stage TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'failed', 'completed')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'failed', 'submitted', 'completed')),
     is_current BOOLEAN NOT NULL DEFAULT true,
     started_at TIMESTAMPTZ,
     finished_at TIMESTAMPTZ,

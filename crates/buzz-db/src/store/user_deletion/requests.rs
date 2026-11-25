@@ -1,5 +1,5 @@
 //! Submit a user request and its discovered inventory in one transaction.
-use super::{discovery::normalize_target, UserDeletionStore};
+use super::{normalize_user_deletion_pubkey, UserDeletionStore};
 use crate::entity_deletion::EntityRequest;
 use crate::store::entity_deletion::requests::{
     inventory_digest, validate_operator, REQUEST_COLUMNS,
@@ -18,7 +18,25 @@ impl UserDeletionStore {
         requested_by: &str,
         reason: Option<&str>,
     ) -> Result<EntityRequest> {
-        let target = normalize_target(target)?;
+        self.submit_for_mode(target, requested_by, reason, false)
+            .await
+    }
+
+    /// Freeze one inventory per subject and mode. Separate progress prevents a
+    /// read-only stage from satisfying a later deletion of the same subject.
+    pub async fn submit_for_mode(
+        &self,
+        subject: &str,
+        requested_by: &str,
+        reason: Option<&str>,
+        read_only: bool,
+    ) -> Result<EntityRequest> {
+        let subject = normalize_user_deletion_pubkey(subject)?;
+        let target = if read_only {
+            format!("read-only:{subject}")
+        } else {
+            subject.clone()
+        };
         validate_operator(requested_by)?;
         if reason.is_some_and(|r| r.len() > 4096) {
             return Err(DbError::DeletionSafety("reason exceeds 4096 bytes".into()));
@@ -47,7 +65,7 @@ impl UserDeletionStore {
             )));
         }
         if request.status == "submitted" {
-            let inventory = super::discovery::generate_inventory_on(&mut tx, &target).await?;
+            let inventory = super::discovery::generate_inventory_on(&mut tx, &subject).await?;
             let digest = inventory_digest(&inventory)?;
             request = sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "UPDATE entity_deletion_requests
@@ -61,8 +79,8 @@ impl UserDeletionStore {
             .bind(digest)
             .fetch_one(&mut *tx)
             .await?;
-            // Use the approval validator before committing either the request
-            // or inventory, so unsupported scopes leave no new request behind.
+            // Validate shape and supported scope before committing either the
+            // inventory or request. Unsupported execution fails, never filters.
             super::UserDeletionInventory::read(&request)?;
         }
         tx.commit().await?;

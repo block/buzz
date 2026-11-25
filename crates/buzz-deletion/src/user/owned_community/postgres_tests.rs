@@ -1,4 +1,5 @@
 use super::*;
+use crate::community::submit_and_prepare;
 use crate::user::summary::summarize_request;
 use buzz_db::entity_deletion::{inventory_digest, NewEntityStage, NextStage, StageTransition};
 use buzz_db::Db;
@@ -28,9 +29,14 @@ async fn fixture() -> Fixture {
         .unwrap()
         .id;
     let store = db.entity_deletion_store();
-    // Owned intake/routing intentionally remain disabled. Seed that future
-    // approved input, then use the real claim, stage and handler operations.
+    // Seed the approved stage directly to test independent child observations.
     let target = "11".repeat(32);
+    sqlx::query("INSERT INTO relay_members(community_id,pubkey,role) VALUES($1,$2,'owner')")
+        .bind(community.as_uuid())
+        .bind(&target)
+        .execute(db.pool())
+        .await
+        .unwrap();
     let item = json!({"community_id": community.as_uuid(), "relationship": "owner", "label": "owned.example"});
     let inventory = json!({"communities": [item, {
         "community_id": Uuid::new_v4(), "relationship": "participant", "label": "not-reached"

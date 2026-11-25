@@ -7,7 +7,7 @@ const PUBKEY: &str = "5e4083a7a793d02575876eaf47932b4835999f5af2653d26250a909b45
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn owner_preview_is_available_but_submission_rolls_back_until_scope_is_supported() {
+async fn owner_is_frozen_in_ordinary_and_read_only_submissions() {
     let pool = PgPool::connect(&crate::test_support::database_url())
         .await
         .unwrap();
@@ -26,30 +26,26 @@ async fn owner_preview_is_available_but_submission_rolls_back_until_scope_is_sup
         .unwrap();
     let preview = store.generate_inventory(PUBKEY).await.unwrap();
     assert_eq!(preview["communities"][0]["relationship"], "owner");
-    let error = store.submit(PUBKEY, "operator", None).await.unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("owned-community execution is not supported yet"));
-    let count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM entity_deletion_requests WHERE target = $1")
-            .bind(PUBKEY)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(count, 0);
-
-    // A refused submission must not reserve the target or retain stale inventory.
-    sqlx::query("UPDATE relay_members SET role = 'member' WHERE community_id = $1 AND pubkey = $2")
-        .bind(community)
-        .bind(PUBKEY)
+    let saved = store.submit(PUBKEY, "operator", None).await.unwrap();
+    assert_eq!(saved.inventory_manifest.as_ref().unwrap(), &preview);
+    let agent_only = Uuid::new_v4();
+    sqlx::query("INSERT INTO communities(id, host) VALUES ($1, 'former.example')")
+        .bind(agent_only)
         .execute(&pool)
         .await
         .unwrap();
-    let saved = store.submit(PUBKEY, "operator", None).await.unwrap();
-    assert_eq!(saved.status, "inventoried");
+    let agent = nostr::Keys::generate().public_key().to_hex();
+    sqlx::query("INSERT INTO users(community_id,pubkey,agent_owner_pubkey,deactivated_at) VALUES($1,decode($2,'hex'),decode($3,'hex'),now())")
+        .bind(agent_only).bind(&agent).bind(PUBKEY).execute(&pool).await.unwrap();
+    let preview = store.generate_inventory(PUBKEY).await.unwrap();
+    assert_eq!(saved.inventory_manifest.as_ref().unwrap(), &preview);
+    let read_only = store
+        .submit_for_mode(PUBKEY, "operator", None, true)
+        .await
+        .unwrap();
     assert_eq!(
-        saved.inventory_manifest.as_ref().unwrap()["communities"][0]["relationship"],
-        "participant"
+        read_only.inventory_manifest.unwrap()["communities"],
+        preview["communities"]
     );
     store
         .approve(
@@ -109,7 +105,7 @@ async fn channel_memberships_discover_participants_deduplicate_and_preserve_owne
                 .bind(community).bind(channel).bind(&key).bind(removed)
                 .execute(&pool).await.unwrap();
         }
-        if !removed && !unrelated {
+        if !unrelated && !removed {
             expected.push((community, relay_role));
         }
     }
@@ -215,6 +211,7 @@ async fn current_inventory_includes_all_lifecycle_states_and_excludes_removed_me
         inventory,
         json!({
             "communities": expected,
+            "workflow_version": 2,
         })
     );
     let npub = nostr::PublicKey::parse(PUBKEY)

@@ -1,3 +1,5 @@
+const ALICE: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+const BOB: &str = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
 use super::*;
 use std::time::Duration;
 
@@ -38,8 +40,8 @@ async fn concurrent_submissions_converge_and_conflicts_preserve_request() {
     let store = store().await;
     let submissions = users(&store);
     let (first, second) = tokio::join!(
-        submissions.submit("demo:alice", "operator-a", Some("manual test")),
-        submissions.submit("demo:alice", "operator-a", Some("manual test")),
+        submissions.submit(ALICE, "operator-a", Some("manual test")),
+        submissions.submit(ALICE, "operator-a", Some("manual test")),
     );
     let first = first.expect("first submission");
     let second = second.expect("concurrent submission");
@@ -49,11 +51,11 @@ async fn concurrent_submissions_converge_and_conflicts_preserve_request() {
     assert_eq!(first.created_at, second.created_at);
     assert_eq!(first.updated_at, second.updated_at);
     assert!(users(&store)
-        .submit("demo:alice", "operator-b", Some("manual test"))
+        .submit(ALICE, "operator-b", Some("manual test"))
         .await
         .is_err());
     assert!(users(&store)
-        .submit("demo:alice", "operator-a", None)
+        .submit(ALICE, "operator-a", None)
         .await
         .is_err());
     let saved = store.get(first.id).await.expect("saved request");
@@ -63,12 +65,12 @@ async fn concurrent_submissions_converge_and_conflicts_preserve_request() {
     );
     assert_eq!(store.list(100).await.expect("list").len(), 1);
     users(&store)
-        .submit("demo:bob", "operator-a", None)
+        .submit(BOB, "operator-a", None)
         .await
         .expect("second target");
     let recent = store.list(1).await.expect("bounded newest first");
     assert_eq!(recent.len(), 1);
-    assert_eq!(recent[0].target, "demo:bob");
+    assert_eq!(recent[0].target, BOB);
     assert!(matches!(
         store.get(Uuid::new_v4()).await,
         Err(DbError::NotFound(_))
@@ -99,17 +101,14 @@ async fn invalid_submissions_do_not_create_rows() {
         .await
         .is_err());
     for actor in ["", " operator-a", "operator-a "] {
-        assert!(users(&store)
-            .submit("demo:alice", actor, None)
-            .await
-            .is_err());
+        assert!(users(&store).submit(ALICE, actor, None).await.is_err());
     }
     assert!(users(&store)
-        .submit("demo:alice", &"a".repeat(257), None)
+        .submit(ALICE, &"a".repeat(257), None)
         .await
         .is_err());
     assert!(users(&store)
-        .submit("demo:alice", "operator-a", Some(&"a".repeat(4097)))
+        .submit(ALICE, "operator-a", Some(&"a".repeat(4097)))
         .await
         .is_err());
     assert!(store.list(100).await.expect("empty list").is_empty());
@@ -139,7 +138,7 @@ async fn desired_schema_has_plain_intake_without_database_guards() {
     .await
     .is_err());
     users(&store)
-        .submit("demo:alice", "operator-a", None)
+        .submit(ALICE, "operator-a", None)
         .await
         .expect("valid submission");
 }
@@ -170,7 +169,7 @@ async fn migration_schema_entity_intake_preserves_existing_data() {
     .expect("registry");
     assert!(registered);
     let request = users(&store)
-        .submit("demo:alice", "operator-a", None)
+        .submit(ALICE, "operator-a", None)
         .await
         .expect("submit");
     crate::migration::run_migrations(&store.pool)
@@ -182,7 +181,7 @@ async fn migration_schema_entity_intake_preserves_existing_data() {
             .await
             .expect("preserved request")
             .target,
-        "demo:alice"
+        ALICE
     );
     let host: String = sqlx::query_scalar("SELECT host FROM communities WHERE id = $1")
         .bind(community)
@@ -201,7 +200,7 @@ async fn migration_schema_entity_intake_preserves_existing_data() {
 async fn approval_is_atomic_idempotent_and_bound_to_inventory() {
     let store = store().await;
     let request = users(&store)
-        .submit("demo:approval", "operator-a", None)
+        .submit(ALICE, "operator-a", None)
         .await
         .unwrap();
     let digest = request.inventory_digest.as_deref().unwrap();
@@ -209,11 +208,7 @@ async fn approval_is_atomic_idempotent_and_bound_to_inventory() {
     assert!(before.stage_history.is_empty());
     assert!(before.approvals.is_empty());
     let inventory = before.request.inventory_manifest.as_ref().unwrap();
-    assert_eq!(inventory["communities"][0]["relationship"], "participant");
-    assert_eq!(
-        inventory["communities"][1]["relationship"],
-        "former_participant"
-    );
+    assert_eq!(inventory["communities"], serde_json::json!([]));
     for (actor, hash) in [("operator-b", "wrong"), (" operator-b", digest)] {
         assert!(store.approve(request.id, actor, hash).await.is_err());
         assert_eq!(
@@ -239,7 +234,7 @@ async fn approval_is_atomic_idempotent_and_bound_to_inventory() {
         .await
         .unwrap();
     users(&store)
-        .submit("demo:approval", "operator-a", None)
+        .submit(ALICE, "operator-a", None)
         .await
         .unwrap();
     assert_eq!(
@@ -300,7 +295,7 @@ async fn approval_is_atomic_idempotent_and_bound_to_inventory() {
 async fn approval_rolls_back_when_evidence_cannot_be_saved() {
     let store = store().await;
     let request = users(&store)
-        .submit("demo:rollback", "operator-a", None)
+        .submit(ALICE, "operator-a", None)
         .await
         .unwrap();
     // Force approval evidence to fail after the parent status update.
@@ -326,12 +321,13 @@ async fn approval_rolls_back_when_evidence_cannot_be_saved() {
 async fn approval_refuses_changed_inventory_and_unexpected_stage_history() {
     let store = store().await;
     let request = users(&store)
-        .submit("demo:changed", "operator-a", None)
+        .submit(ALICE, "operator-a", None)
         .await
         .unwrap();
     let digest = request.inventory_digest.as_deref().unwrap();
     let mut inventory = request.inventory_manifest.clone().unwrap();
-    inventory["communities"].as_array_mut().unwrap().reverse();
+    inventory["communities"] =
+        serde_json::json!([{"community_id":Uuid::new_v4(), "relationship":"participant"}]);
     sqlx::query("UPDATE entity_deletion_requests SET inventory_manifest = $2 WHERE id = $1")
         .bind(request.id)
         .bind(&inventory)
@@ -372,7 +368,7 @@ async fn approval_refuses_changed_inventory_and_unexpected_stage_history() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn migration_schema_approval_preserves_legacy_intake_and_resubmission_prepares_it() {
+async fn migration_schema_approval_preserves_historical_intake_and_accepts_public_keys() {
     let store = store().await;
     crate::migration::run_migrations_through(&store.pool, 68)
         .await
@@ -388,11 +384,11 @@ async fn migration_schema_approval_preserves_legacy_intake_and_resubmission_prep
     assert!(before.approvals.is_empty());
     assert!(store.approve(id, "operator-b", "unknown").await.is_err());
     let prepared = users(&store)
-        .submit("demo:legacy", "operator-a", None)
+        .submit(ALICE, "operator-a", None)
         .await
         .unwrap();
-    assert_eq!(prepared.id, id);
-    assert_eq!(prepared.created_at, before.request.created_at);
+    assert_ne!(prepared.id, id);
+    let id = prepared.id;
     store
         .approve(
             id,
@@ -423,7 +419,7 @@ async fn migration_schema_approval_preserves_legacy_intake_and_resubmission_prep
 async fn approval_refuses_to_repair_missing_evidence() {
     let store = store().await;
     let request = users(&store)
-        .submit("demo:missing-evidence", "operator-a", None)
+        .submit(ALICE, "operator-a", None)
         .await
         .unwrap();
     let digest = request.inventory_digest.as_deref().unwrap();
@@ -452,7 +448,7 @@ async fn approval_refuses_to_repair_missing_evidence() {
 async fn dropped_heartbeat_leaves_no_open_transaction_for_the_release() {
     let store = store().await;
     let request = users(&store)
-        .submit("demo:dropped-heartbeat", "operator-a", None)
+        .submit(ALICE, "operator-a", None)
         .await
         .unwrap();
     store

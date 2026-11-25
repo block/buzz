@@ -23,16 +23,14 @@ impl Drop for Fixture {
 impl Fixture {
     pub fn options(&self) -> RunOptions {
         RunOptions {
-            db: Some(Db::from_pool(self.pool.clone())),
+            db: Db::from_pool(self.pool.clone()),
             media: Some(self.storage.clone()),
+            row_ids: None,
             delete: true,
             relay_pubkey: None,
             batch_size: 100,
             max_items: 100_000,
             next_step: false,
-            fail_stage: None,
-            stage_delay: Duration::ZERO,
-            no_agents_in: Vec::new(),
         }
     }
     pub async fn uploader_count(&self) -> i64 {
@@ -45,6 +43,10 @@ impl Fixture {
 }
 
 pub(super) async fn fixture() -> Fixture {
+    fixture_with_roles(&["member", "member"]).await
+}
+
+pub(super) async fn fixture_with_roles(roles: &[&str]) -> Fixture {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
         .unwrap();
@@ -54,7 +56,7 @@ pub(super) async fn fixture() -> Fixture {
         db.migrate().await.unwrap();
     }
     let target = nostr::Keys::generate().public_key().to_hex();
-    for id in [11, 12] {
+    for (id, role) in (11..).zip(roles.iter().copied()) {
         let community = Uuid::from_u128(id);
         sqlx::query("INSERT INTO communities(id, host) VALUES ($1, $2)")
             .bind(community)
@@ -62,14 +64,13 @@ pub(super) async fn fixture() -> Fixture {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query(
-            "INSERT INTO relay_members(community_id, pubkey, role) VALUES ($1, $2, 'member')",
-        )
-        .bind(community)
-        .bind(&target)
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO relay_members(community_id, pubkey, role) VALUES ($1, $2, $3)")
+            .bind(community)
+            .bind(&target)
+            .bind(role)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
     sqlx::query("INSERT INTO media_uploaders(community_id, sha256, pubkey) VALUES ($1, $2, decode($3, 'hex'))")
         .bind(Uuid::from_u128(11)).bind("a".repeat(64)).bind(&target)
@@ -88,33 +89,6 @@ pub(super) async fn fixture() -> Fixture {
         )
         .await
         .unwrap();
-
-    // The real gate is not implemented. Supply its fixture prerequisite through
-    // the same storage API, then exercise real media dispatch and retry.
-    let lease = store
-        .claim(request.id, "fixture", DEFAULT_LEASE_DURATION)
-        .await
-        .unwrap()
-        .unwrap();
-    let transition = UserDeletionTransition::new(&store);
-    let NextStage::Stage(gate) = transition.get_next_stage(&lease, None).await.unwrap() else {
-        panic!("expected gate")
-    };
-    assert_eq!(gate.stage, "gate_user");
-    store.start_stage(&lease, gate.id).await.unwrap();
-    store
-        .save_stage_success(&lease, gate.id, serde_json::json!({"fixture": true}))
-        .await
-        .unwrap();
-    let NextStage::Stage(media) = transition
-        .get_next_stage(&lease, Some(gate.id))
-        .await
-        .unwrap()
-    else {
-        panic!("expected media")
-    };
-    assert_eq!(media.stage, "purge_media");
-    store.release(&lease).await.unwrap();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -179,7 +153,7 @@ pub(super) async fn fixture() -> Fixture {
                     if failure.load(Ordering::SeqCst) {
                         "<ListVersionsResult><IsTruncated>false</IsTruncated>".into()
                     } else {
-                        let entry = if removed.load(Ordering::SeqCst) || (request.contains("prefix=_uploads") || request.contains("prefix=_meta")) {
+                        let entry = if removed.load(Ordering::SeqCst) || !request.contains(&format!("prefix={hash}.")) {
                             String::new()
                         } else {
                             format!("<Version><Key>{hash}.png</Key><VersionId>v1</VersionId><Size>1</Size></Version>")
@@ -192,7 +166,7 @@ pub(super) async fn fixture() -> Fixture {
             }).await.unwrap();
         }
     });
-    Fixture {
+    let fixture = Fixture {
         store,
         id: request.id,
         pool,
@@ -201,5 +175,17 @@ pub(super) async fn fixture() -> Fixture {
         deleted,
         storage,
         server,
-    }
+    };
+    let mut gate = fixture.options();
+    gate.next_step = true;
+    run(
+        &fixture.store,
+        fixture.id,
+        "fixture",
+        &gate,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    fixture
 }
