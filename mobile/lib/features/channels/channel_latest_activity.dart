@@ -40,6 +40,9 @@ class _ChannelActivity {
   /// The channel's activity time, for deciding whether a read can change it.
   int? latestAt(String channelId) => _latest[channelId]?.at;
 
+  /// The id of the channel's latest post, if one is known.
+  String? latestId(String channelId) => _latest[channelId]?.id;
+
   /// Whether a latest read or live message covered [channelId] since its
   /// latest post was last deleted, if ever. A list read that keeps the list's
   /// times still reads the channels without one.
