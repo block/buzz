@@ -1132,10 +1132,12 @@ mod postgres_tests {
     async fn smart_git_records_the_presented_owner_before_crediting_a_role() {
         use axum::extract::FromRequestParts;
         use buzz_core::channel::MemberRole;
-        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
-            .await
-            .unwrap();
-        buzz_db::Db::from_pool(pool).migrate().await.unwrap();
+        if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .unwrap();
+            buzz_db::Db::from_pool(pool).migrate().await.unwrap();
+        }
         let state = off_state().await.unwrap();
         let host = format!("owner-admission-{}.example", uuid::Uuid::new_v4().simple());
         let community = state
@@ -1249,10 +1251,12 @@ mod postgres_tests {
     async fn a_restricted_land_preserves_owner_admission() {
         use axum::extract::FromRequestParts;
         use buzz_core::channel::MemberRole;
-        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
-            .await
-            .unwrap();
-        buzz_db::Db::from_pool(pool).migrate().await.unwrap();
+        if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .unwrap();
+            buzz_db::Db::from_pool(pool).migrate().await.unwrap();
+        }
         let mut state = off_state().await.unwrap();
         let host = format!("owner-admission-{}.example", uuid::Uuid::new_v4().simple());
         let community = state
