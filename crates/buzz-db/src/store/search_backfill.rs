@@ -71,6 +71,18 @@ pub async fn progress(pool: &PgPool) -> Result<Vec<(CommunityId, bool)>> {
         .collect())
 }
 
+/// Forget every community's backfill progress, so each is backfilled again
+/// from its newest event, and return how many rows were removed. For a new,
+/// empty index: the progress described the index it replaces. Deleting rows
+/// needs no community admission: it only removes rows that a community
+/// deletion's purge removes too.
+pub async fn reset(pool: &PgPool) -> Result<u64> {
+    let reset = sqlx::query("DELETE FROM search_backfill")
+        .execute(pool)
+        .await?;
+    Ok(reset.rows_affected())
+}
+
 /// Queue up to `limit` more event keys for the active community not in
 /// `skip` whose backfill is incomplete and least recently advanced, newest
 /// events first, and advance its cursor.

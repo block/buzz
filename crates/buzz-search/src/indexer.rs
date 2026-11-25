@@ -368,6 +368,16 @@ impl Indexer {
     /// at least the settle time old.
     async fn pass(&self, settled: &mut bool) -> Result<bool, IndexerError> {
         if self.index.ensure().await? {
+            // The new index is empty, whatever the stored progress says
+            // (the old one was deleted or lost): backfill every community.
+            let reset = search_backfill::reset(self.db.pool()).await?;
+            if reset > 0 {
+                info!(
+                    communities = reset,
+                    "search index created; backfilling every community again"
+                );
+                self.publish_backfill_progress().await;
+            }
             tokio::time::sleep(self.new_index_settle).await;
         } else if !*settled {
             // The relay that created the index may have lost the lease before

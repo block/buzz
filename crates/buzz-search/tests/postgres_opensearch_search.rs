@@ -815,7 +815,8 @@ async fn stored_messages_are_backfilled_newest_first_and_resume() {
 }
 
 /// The lease holder starts backfilling on its own once OpenSearch is
-/// configured.
+/// configured, and again into an index it recreates after the old one went
+/// away.
 #[tokio::test]
 #[ignore = "requires Postgres and OpenSearch"]
 async fn the_indexer_backfills_on_its_own() {
@@ -854,6 +855,26 @@ async fn the_indexer_backfills_on_its_own() {
     })
     .await
     .expect("every stored message becomes searchable");
+    let progress = buzz_db::search_backfill::progress(db.pool())
+        .await
+        .expect("progress");
+    assert!(progress.contains(&(community, true)), "{progress:?}");
+
+    // The index goes away while the backfill is complete.
+    index.delete().await.expect("delete index");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            // Fails until the indexer has created the index again.
+            if index.refresh().await.is_ok()
+                && find(&service, community, "autoword").await.len() == 5
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("every stored message is backfilled into the new index");
     indexer.abort();
     index.delete().await.expect("delete index");
 }

@@ -27,10 +27,11 @@ messages stored before it was set. Searches still run on Postgres.
    have run. The backfill starts with the first relay to hold the lease.
 
 If a relay without the settings ran after the backfill started, wait until
-every relay has them, then delete the index and run
-`DELETE FROM search_backfill` while searches run on Postgres. The relay
-creates the index again, waits 30 seconds before its first write, and
-backfills every community. The reset alone is
+every relay has them, then delete the index while searches run on
+Postgres. The relay creates the index again, clears the backfill progress,
+waits 30 seconds before its first write, and backfills every community. It
+does the same whenever the index goes missing. Running
+`DELETE FROM search_backfill` without deleting the index is
 not enough: the backfill reads only live messages, so it would leave the
 documents of messages deleted in the meantime. Deleting one community's row
 backfills that community again.
