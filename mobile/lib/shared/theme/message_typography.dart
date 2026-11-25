@@ -25,13 +25,19 @@ const messageBubbleVerticalInset = 10.0;
 /// Maximum text-bubble width relative to the screen, including padding.
 const messageTextMaxWidthFraction = 2 / 3;
 
-/// Shared by drafts and sent messages so their line spacing matches.
+/// Base typography for message content.
 const messageBodyTextStyle = TextStyle(
   fontFamily: _fontFamily,
   fontSize: 17,
   fontWeight: FontWeight.w400,
   height: 23 / 17,
   letterSpacing: _messageLetterSpacing,
+);
+
+/// Shared by the composer and chat bubbles so their line spacing matches.
+final chatBodyTextStyle = messageBodyTextStyle.copyWith(
+  fontSize: 16,
+  height: 21 / 16,
 );
 
 /// Message author names: 15sp semibold on a 17sp line height.

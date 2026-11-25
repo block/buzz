@@ -6590,7 +6590,7 @@ void main() {
       final helloText = tester.widget<RichText>(helloContent);
       expect(
         effectiveFontSizeForText(helloText.text, 'Hello world!'),
-        messageBodyTextStyle.fontSize,
+        chatBodyTextStyle.fontSize,
       );
       final messageList = tester.widget<ScrollablePositionedList>(
         find.byKey(const ValueKey('channel-message-list')),

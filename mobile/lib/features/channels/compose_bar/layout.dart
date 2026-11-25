@@ -102,7 +102,7 @@ class _ComposeBarLayout extends HookWidget {
       hasDraft ? controller.text : resolvedHint,
       maxLines: hasDraft ? null : 1,
       overflow: hasDraft ? TextOverflow.clip : TextOverflow.ellipsis,
-      style: messageBodyTextStyle.copyWith(
+      style: chatBodyTextStyle.copyWith(
         color: hasDraft
             ? context.colors.onSurface
             : context.colors.onSurfaceVariant,
@@ -460,11 +460,11 @@ class _ComposeBarLayout extends HookWidget {
       ),
       minLines: 1,
       maxLines: 5,
-      style: messageBodyTextStyle,
+      style: chatBodyTextStyle,
       decoration: InputDecoration(
         hintText: resolvedHint,
         hintMaxLines: 1,
-        hintStyle: messageBodyTextStyle.copyWith(
+        hintStyle: chatBodyTextStyle.copyWith(
           color: context.colors.onSurfaceVariant,
         ),
         border: InputBorder.none,

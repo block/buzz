@@ -26,6 +26,13 @@ void main() {
       letterSpacing: -0.45,
     );
     expectStyle(
+      chatBodyTextStyle,
+      fontSize: 16,
+      fontWeight: FontWeight.w400,
+      lineHeight: 21,
+      letterSpacing: -0.45,
+    );
+    expectStyle(
       messageUsernameTextStyle,
       fontSize: 15,
       fontWeight: FontWeight.w600,
