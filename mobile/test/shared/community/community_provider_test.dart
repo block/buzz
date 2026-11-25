@@ -490,6 +490,104 @@ void main() {
     );
 
     test(
+      'a Retry that fails before sending keeps an opt-out whose OK was lost',
+      () async {
+        Object failure = SignedEventUnacknowledged(TimeoutException('no OK'));
+        deactivator = (community, {generation, deadline}) async {
+          deactivationGenerations.add(generation);
+          throw failure;
+        };
+        final subscription = BuzzPushSubscription(
+          filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+          notificationClass: 'default',
+        );
+        final community =
+            Community.create(
+              name: 'Test',
+              relayUrl: 'https://test.example.com',
+            ).copyWith(
+              pushNotificationsEnabled: true,
+              pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+                desired: [subscription],
+              ).withAccepted(subscriptions: [subscription], generation: 7),
+            );
+        await communityStorage.save(community);
+        container = createContainer();
+        await container.read(communityListProvider.future);
+        final notifier = container.read(communityListProvider.notifier);
+
+        // The relay may hold generation 8: its OK never came back.
+        await notifier.setPushNotificationsEnabled(community.id, false);
+        expect(
+          (await communityStorage.loadAll())
+              .single
+              .pushSubscriptionState
+              .pendingTombstoneGeneration,
+          8,
+        );
+
+        // Still offline, the Retry fails before sending anything. Push must
+        // stay off: turning it back on would let the next sync publish an
+        // active lease over the opt-out the relay may already hold.
+        failure = StateError('offline');
+        await notifier.retryPushOptOut(community.id);
+
+        final stored = (await communityStorage.loadAll()).single;
+        expect(stored.pushNotificationsEnabled, isFalse);
+        expect(stored.pushSubscriptionState.pendingTombstoneGeneration, 9);
+        expect(deactivationGenerations, [8, 9]);
+        expect(
+          container.read(pushOptOutStatusProvider)[community.id],
+          PushOptOutStatus.failed,
+        );
+      },
+    );
+
+    test(
+      'a failed save after the relay accepts an opt-out keeps it pending',
+      () async {
+        final storage = _FailingSaveStorage(fakeSecure);
+        communityStorage = storage;
+        deactivator = (community, {generation, deadline}) async {
+          deactivationGenerations.add(generation);
+          // The relay answered OK; recording that locally is what fails.
+          storage.failNextSave = true;
+        };
+        final subscription = BuzzPushSubscription(
+          filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+          notificationClass: 'default',
+        );
+        final community =
+            Community.create(
+              name: 'Test',
+              relayUrl: 'https://test.example.com',
+            ).copyWith(
+              pushNotificationsEnabled: true,
+              pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+                desired: [subscription],
+              ).withAccepted(subscriptions: [subscription], generation: 7),
+            );
+        await communityStorage.save(community);
+        container = createContainer();
+        await container.read(communityListProvider.future);
+
+        await container
+            .read(communityListProvider.notifier)
+            .setPushNotificationsEnabled(community.id, false);
+
+        final stored = (await communityStorage.loadAll()).single;
+        expect(stored.pushNotificationsEnabled, isFalse);
+        expect(stored.pushSubscriptionState.pendingTombstoneGeneration, 8);
+        expect(stored.pushSubscriptionState.acceptedGeneration, 7);
+        expect(deactivationGenerations, [8]);
+        expect(
+          container.read(pushOptOutStatusProvider)[community.id],
+          PushOptOutStatus.failed,
+        );
+      },
+    );
+
+    test(
       'opt-out after a gateway change still tombstones with the saved lease id',
       () async {
         // The test binding answers every HttpClient request with a 400, but
@@ -1393,3 +1491,18 @@ Map<String, dynamic> _descriptorJson(String origin) => {
     },
   },
 };
+
+class _FailingSaveStorage extends CommunityStorage {
+  _FailingSaveStorage(FlutterSecureStorage secure) : super(secure: secure);
+
+  bool failNextSave = false;
+
+  @override
+  Future<void> save(Community community) {
+    if (failNextSave) {
+      failNextSave = false;
+      throw StateError('keychain write failed');
+    }
+    return super.save(community);
+  }
+}

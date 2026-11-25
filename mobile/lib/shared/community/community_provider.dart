@@ -834,33 +834,52 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     required bool advanceGeneration,
   }) async {
     final statuses = ref.read(pushOptOutStatusProvider.notifier);
+    final int? accepted;
     try {
-      await _publishPendingTombstone(
+      accepted = await _publishPendingTombstone(
         id,
         deadline: deadline,
         advanceGeneration: advanceGeneration,
       );
-      pushLeaseCleanupError.value = null;
-      statuses.clear(id);
     } catch (error, stackTrace) {
       reportPushLeaseCleanupError(error, stackTrace);
       try {
         await _settleFailedOptOut(
           id,
-          maybeReceived: error is SignedEventUnacknowledged,
+          // A Retry only runs on an opt-out an earlier attempt left pending,
+          // which that attempt's relay may hold. Its own failure, even before
+          // sending, can't show the relay never received an opt-out.
+          maybeReceived:
+              advanceGeneration || error is SignedEventUnacknowledged,
         );
       } finally {
         statuses.set(id, PushOptOutStatus.failed);
       }
+      return;
     }
+    if (accepted != null) {
+      try {
+        await _markPushLeaseTombstoneAccepted(id, accepted);
+      } catch (error, stackTrace) {
+        // The relay accepted the tombstone; only recording that failed. The
+        // opt-out stays pending, never reversed, until a lease read settles it.
+        reportPushLeaseCleanupError(error, stackTrace);
+        statuses.set(id, PushOptOutStatus.failed);
+        return;
+      }
+    }
+    pushLeaseCleanupError.value = null;
+    statuses.clear(id);
   }
 
-  /// Publishes a durably journaled opt-out tombstone.
+  /// Publishes a durably journaled opt-out tombstone. Returns the generation
+  /// the relay accepted, which the caller records, or null when no opt-out
+  /// was pending.
   ///
   /// A retry advances the generation before network I/O. That makes an
   /// ambiguous relay-commit/local-save failure idempotent in effect: the next
   /// inactive replacement wins even if the prior tombstone already committed.
-  Future<void> _publishPendingTombstone(
+  Future<int?> _publishPendingTombstone(
     String id, {
     required DateTime deadline,
     required bool advanceGeneration,
@@ -892,7 +911,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     });
     final community = pendingCommunity;
     final generation = pendingGeneration;
-    if (community == null || generation == null) return;
+    if (community == null || generation == null) return null;
     // The deactivator honors the deadline itself and says whether the relay
     // could have seen the tombstone. This backstop only catches a step that
     // hangs past it, and can't tell, so it keeps the opt-out unconfirmed.
@@ -908,7 +927,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
             TimeoutException('The push opt-out ran out of time'),
           ),
         );
-    await _markPushLeaseTombstoneAccepted(id, generation);
+    return generation;
   }
 
   /// Shows the relay's last confirmed setting after a failed opt-out.
