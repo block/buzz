@@ -86,9 +86,11 @@ void main() {
       final promptBefore = tester.getTopLeft(find.text(prompt)).dy;
       final card = find.byKey(ValueKey(existingDesktopKeys.public));
       final cardBefore = tester.getTopLeft(card).dy;
-      await tester.drag(
+      // Keep both widgets visible so their offsets can be compared.
+      await tester.timedDrag(
         find.byType(CustomScrollView).first,
-        const Offset(0, -120),
+        const Offset(0, -48),
+        const Duration(seconds: 1),
       );
       await tester.pumpAndSettle();
       final promptDelta =
