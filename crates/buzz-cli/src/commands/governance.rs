@@ -92,7 +92,8 @@ async fn document(
 
 /// Move a repository's binding: a governed bind, over the current head.
 /// The relay requires an admin of both the bound channel and `channel`.
-pub async fn bind(repo: &str, channel: &str, client: &BuzzClient) -> Result<(), CliError> {
+/// Returns the relay's write response.
+pub async fn bind(repo: &str, channel: &str, client: &BuzzClient) -> Result<String, CliError> {
     let id: DocumentId = format!("bind:{repo}").parse().map_err(CliError::Usage)?;
     let raw = client
         .query(&serde_json::json!({"governance_head": 1, "document": id.to_string()}))
@@ -107,11 +108,7 @@ pub async fn bind(repo: &str, channel: &str, client: &BuzzClient) -> Result<(), 
         .map_err(CliError::Usage)?;
     let event = client.sign_event(builder).await?;
     let result = client.submit_event(event).await?;
-    println!(
-        "{}",
-        super::parse_write_response(&result, "the binding changed concurrently; retry")?
-    );
-    Ok(())
+    super::parse_write_response(&result, "the binding changed concurrently; retry")
 }
 
 pub async fn dispatch(command: GovCmd, client: &BuzzClient) -> Result<(), CliError> {

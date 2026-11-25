@@ -219,7 +219,6 @@ pub(crate) fn build_create_announcement(
     channel: Option<&str>,
 ) -> Result<EventBuilder, CliError> {
     validate_repo_id(repo_id)?;
-
     let clone_refs: Vec<&str> = clone_urls.iter().map(|s| s.as_str()).collect();
     let relay_refs: Vec<&str> = relays.iter().map(|s| s.as_str()).collect();
 
@@ -402,10 +401,11 @@ async fn cmd_protect_remove(
 ///
 /// The relay's pin is the binding; the announcement's `buzz-channel` tag
 /// only seeds it. A bound repository moves by a governed bind (an admin of
-/// both channels), then its announcement is republished to name the new
-/// channel, which the relay accepts only once the pin agrees. An unbound
-/// repository (issue #3527) just gains the tag, which pins it. The UUID is
-/// checked for shape here; channel existence and roles are the relay's.
+/// both channels), which is the result; its announcement is then
+/// republished to name the new channel, and a failure there is only a
+/// warning, since the move has committed. An unbound repository
+/// (issue #3527) just gains the tag, which pins it. The UUID is checked for
+/// shape here; channel existence and roles are the relay's.
 async fn cmd_bind_repo(client: &BuzzClient, repo_id: &str, channel: &str) -> Result<(), CliError> {
     let event = current_repo(client, repo_id).await?;
     let builder =
@@ -421,7 +421,17 @@ async fn cmd_bind_repo(client: &BuzzClient, repo_id: &str, channel: &str) -> Res
             "{KIND_GIT_REPO_ANNOUNCEMENT}:{}:{repo_id}",
             event.pubkey.to_hex()
         );
-        super::governance::bind(&repo, channel, client).await?;
+        let moved = super::governance::bind(&repo, channel, client).await?;
+        let event = client.sign_event(builder).await?;
+        let republished = match client.submit_event(event).await {
+            Ok(raw) => validate_write_response(&raw).map(drop),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = republished {
+            eprintln!("warning: the repository moved, but its announcement still names the old channel: {error}");
+        }
+        println!("{moved}");
+        return Ok(());
     }
     submit_repo_update(client, builder).await
 }
