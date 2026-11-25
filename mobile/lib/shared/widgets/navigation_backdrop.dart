@@ -17,10 +17,12 @@ class NavigationBackdrop extends StatelessWidget {
     super.key,
     required this.child,
     this.active = true,
+    this.prefersSoftTopEdge = false,
     this.suppressNativeView = false,
   });
 
   final Widget child;
+  final bool prefersSoftTopEdge;
 
   /// Activates the Flutter blur; UIKit owns native scroll-edge visibility.
   final bool active;
@@ -41,6 +43,7 @@ class NavigationBackdrop extends StatelessWidget {
                   centerTitleInPane:
                       DuoToolbarScope.maybeOf(context)?.strip != null,
                   backdropOnly: true,
+                  prefersSoftTopEdge: prefersSoftTopEdge,
                   alwaysFrosted: true,
                 ),
               ),

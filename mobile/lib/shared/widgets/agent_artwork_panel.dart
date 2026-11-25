@@ -4,25 +4,34 @@ import '../animated_avatar.dart';
 import '../theme/theme.dart';
 import 'avatar_image.dart';
 
+const profilePortraitSize = 80.0;
+
 /// A desktop-style profile container with static, faded portrait artwork.
 class AgentArtworkPanel extends StatelessWidget {
   const AgentArtworkPanel({
     required this.imageUrl,
     required this.child,
     this.borderRadius,
+    this.personProfile = false,
     super.key,
   });
   final String? imageUrl;
+  final bool personProfile;
   final Widget child;
   final BorderRadius? borderRadius;
 
   @override
   Widget build(BuildContext context) {
     final poster = parseAnimatedAvatarUrl(imageUrl)?.posterUrl ?? imageUrl;
+    final artwork = AvatarImageContent(
+      imageUrl: poster,
+      preferThumbnail: true,
+      fallback: const SizedBox.shrink(),
+    );
     return ClipRRect(
       borderRadius: borderRadius ?? BorderRadius.circular(Radii.card),
       child: ColoredBox(
-        color: context.colors.surfaceContainerLow,
+        color: Theme.of(context).scaffoldBackgroundColor,
         child: Stack(
           children: [
             if (poster != null && !MediaQuery.highContrastOf(context))
@@ -36,7 +45,7 @@ class AgentArtworkPanel extends StatelessWidget {
                           begin: Alignment.topCenter,
                           end: Alignment.bottomCenter,
                           colors: [Colors.white, Colors.transparent],
-                          stops: [0.05, 0.7],
+                          stops: [0.05, 1.0],
                         ).createShader(bounds),
                         child: Opacity(
                           opacity: .55,
@@ -47,10 +56,13 @@ class AgentArtworkPanel extends StatelessWidget {
                             ),
                             child: Transform.scale(
                               scale: 2,
-                              child: AvatarImageContent(
-                                imageUrl: poster,
-                                preferThumbnail: true,
-                                fallback: const SizedBox.shrink(),
+                              child: FittedBox(
+                                fit: BoxFit.cover,
+                                child: SizedBox.square(
+                                  // Match the portrait's decoded-image cache key.
+                                  dimension: profilePortraitSize,
+                                  child: artwork,
+                                ),
                               ),
                             ),
                           ),
@@ -60,7 +72,10 @@ class AgentArtworkPanel extends StatelessWidget {
                   ),
                 ),
               ),
-            child,
+            if (personProfile)
+              SizedBox(width: double.infinity, child: child)
+            else
+              child,
           ],
         ),
       ),

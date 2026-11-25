@@ -88,23 +88,16 @@ class MembersSheet extends HookConsumerWidget {
       });
     }
 
-    // Preload profiles for all members so avatars appear.
+    final memberKeys = allMembers.map((member) => member.pubkey).toList();
     useEffect(() {
-      if (allMembers.isNotEmpty) {
-        ref
-            .read(userCacheProvider.notifier)
-            .preload(allMembers.map((m) => m.pubkey).toList());
-        // Track user statuses for people (not bots).
-        final peoplePubkeys = allMembers
-            .where((m) => !m.isBot)
-            .map((m) => m.pubkey)
-            .toList();
-        if (peoplePubkeys.isNotEmpty) {
-          ref.read(userStatusCacheProvider.notifier).track(peoplePubkeys);
-        }
-      }
+      if (memberKeys.isEmpty) return null;
+      ref.read(userCacheProvider.notifier).preload(memberKeys);
+      ref.read(userStatusCacheProvider.notifier).track([
+        for (final member in allMembers)
+          if (!member.isBot) member.pubkey,
+      ]);
       return null;
-    }, [allMembers.length]);
+    }, [channel.id, ...memberKeys]);
 
     Widget tile(ChannelMember member) {
       final key = member.pubkey.toLowerCase();

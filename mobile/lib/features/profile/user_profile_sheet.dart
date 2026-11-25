@@ -1,3 +1,5 @@
+import '../../shared/widgets/agent_artwork_panel.dart';
+import 'profile_sheet_layout.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -20,10 +22,7 @@ import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/avatar_shape.dart';
 import '../../shared/widgets/avatar_image.dart';
-import '../../shared/widgets/agent_artwork_panel.dart';
-import '../../shared/widgets/buzz_sheet_header.dart';
 import '../../shared/verified_profiles/verified_profile_directory.dart';
-import '../../shared/widgets/buzz_action_tile.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/progressive_animated_avatar.dart';
 import '../channels/channel.dart';
@@ -31,6 +30,9 @@ import '../channels/channel_detail_page.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/message_content.dart';
 import 'presence_cache_provider.dart';
+import 'set_status_sheet.dart';
+import 'profile_edit_page.dart';
+import 'profile_details.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import 'user_status_cache_provider.dart';
 
@@ -46,17 +48,48 @@ Future<void> showUserProfileSheet(
   String pubkey, {
   ProviderListenable<IdentityNames>? names,
   WidgetBuilder? contextualActions,
+  ProfileDetails details = const ProfileDetails(),
 }) async {
+  final rootNavigator = Navigator.of(context, rootNavigator: true);
+  ProfileLead? selectedLead;
+  var editRequested = false;
   final channel = await showBuzzModalBottomSheet<Channel>(
     context: context,
     isScrollControlled: true,
+    useSafeArea: true,
     showDragHandle: false,
-    builder: (_) => UserProfileSheet(
+    backgroundColor: utilitySurfaceThemeData(
+      Theme.of(context),
+    ).scaffoldBackgroundColor,
+    showCloseButton: false,
+    showRailCloseButton: true,
+    detentCorners: true,
+    builder: (sheetContext) => UserProfileSheet(
       pubkey: pubkey,
+      sheetControls: true,
+      details: details,
+      onLead: (lead) {
+        selectedLead = lead;
+        Navigator.of(sheetContext).pop();
+      },
+      onEditProfile: () {
+        editRequested = true;
+        Navigator.of(sheetContext).pop();
+      },
       names: names,
       contextualActions: contextualActions,
     ),
   );
+  if (selectedLead case final lead?) {
+    if (context.mounted) await _openLead(context, lead);
+    return;
+  }
+  if (editRequested && rootNavigator.mounted) {
+    await rootNavigator.push(
+      MaterialPageRoute<void>(builder: (_) => const ProfileEditPage()),
+    );
+    return;
+  }
   if (channel == null || !context.mounted) return;
   await Navigator.of(context).push(
     MaterialPageRoute<void>(
@@ -68,8 +101,17 @@ Future<void> showUserProfileSheet(
   );
 }
 
+Future<void> _openLead(BuildContext context, ProfileLead lead) =>
+    lead.pubkey != null
+    ? showUserProfileSheet(context, lead.pubkey!)
+    : showPreviewLead(context, lead);
+
 class UserProfileSheet extends HookConsumerWidget {
   final String pubkey;
+  final bool sheetControls;
+  final VoidCallback? onEditProfile;
+  final ValueChanged<ProfileLead>? onLead;
+  final ProfileDetails details;
 
   /// Opens a conversation from an embedded profile without popping its pane.
   final ValueChanged<Channel>? onOpenChannel;
@@ -82,6 +124,7 @@ class UserProfileSheet extends HookConsumerWidget {
 
   /// Agent artwork treatment within the profile sheet.
   final bool agentPresentation;
+  final String? initialAvatarUrl;
   final String? agentSubtitle;
   final Widget? agentSubtitleIcon;
 
@@ -109,10 +152,15 @@ class UserProfileSheet extends HookConsumerWidget {
   const UserProfileSheet({
     super.key,
     required this.pubkey,
+    this.sheetControls = false,
+    this.onEditProfile,
+    this.onLead,
+    this.details = const ProfileDetails(),
     this.onOpenChannel,
     this.embedded = false,
     this.contentPadding = EdgeInsets.zero,
     this.agentPresentation = false,
+    this.initialAvatarUrl,
     this.agentSubtitle,
     this.agentSubtitleIcon,
     this.names,
@@ -160,6 +208,31 @@ class UserProfileSheet extends HookConsumerWidget {
       ref.read(userCacheProvider.notifier).preload([pk]);
       return release;
     }, [pk]);
+    const preview = bool.fromEnvironment('BUZZ_PROFILE_PREVIEW');
+    final photoOpen = useState(false);
+    final photoTransform = useTransformationController(keys: [photoOpen.value]);
+    final swipeStart = useRef<Offset?>(null);
+    final pointers = useMemoized(() => <int>{}, [photoOpen.value]);
+    final portraitKey = useMemoized(GlobalKey.new);
+
+    final isAgent = agentPresentation || profile?.isAgent == true;
+    final detailsToShow = !preview
+        ? details
+        : ProfileDetails(
+            personal: const [(label: 'Email', value: 'viewer@example.org')],
+            team: const [(label: 'Team', value: 'Product design')],
+            tenure: const (
+              label: String.fromEnvironment(
+                'BUZZ_PROFILE_TENURE_LABEL',
+                defaultValue: 'Time at organization',
+              ),
+              value: '2 years',
+            ),
+            lead: previewDesignLead,
+            city: 'London, United Kingdom',
+            timeZone: 'Europe/London',
+            coordinates: (latitude: 51.51, longitude: -0.13),
+          );
     final copied = useState(false);
     final isOpeningDirectMessage = useState(false);
 
@@ -173,14 +246,14 @@ class UserProfileSheet extends HookConsumerWidget {
     final displayName =
         (opener != null ? ref.watch(opener) : watchIdentityNames(ref, {pk}))
             .labelFor(pk);
-    final verifiedFullName = ref.watch(
-      verifiedProfilesProvider.select((all) => all[pk]?.fullName),
+    final verified = ref.watch(
+      verifiedProfilesProvider.select((all) => all[pk]),
     );
     final titleName = agentPresentation
         ? displayName
-        : verifiedFullName ?? displayName;
+        : verified?.fullName ?? displayName;
     final secondaryName = titleName != displayName ? displayName : null;
-    final avatarUrl = profile?.avatarUrl;
+    final avatarUrl = profile?.avatarUrl ?? initialAvatarUrl;
     final nip05 = profile?.nip05Handle;
     final initial =
         profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
@@ -222,396 +295,291 @@ class UserProfileSheet extends HookConsumerWidget {
       }
     }
 
-    final content = ConstrainedBox(
-      constraints: BoxConstraints(
-        maxHeight: embedded
-            ? double.infinity
-            : MediaQuery.sizeOf(context).height * 0.7,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Flexible(
-            child: Padding(
-              padding: EdgeInsets.fromLTRB(
-                Grid.gutter,
-                0,
-                Grid.gutter,
-                MediaQuery.viewInsetsOf(context).bottom,
-              ),
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.only(bottom: Grid.xs),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Center the presence chip on the avatar's lower edge.
-                    Padding(
-                      padding: EdgeInsets.only(
-                        bottom: agentPresentation ? 0 : Grid.xl / 2,
-                      ),
-                      child: Stack(
-                        clipBehavior: Clip.none,
-                        children: [
-                          Align(
-                            alignment: Alignment.center,
-                            child: agentPresentation
-                                ? SizedBox(
-                                    width: Grid.xxl * 2,
-                                    child: _ProfileAvatar(
-                                      avatarUrl: avatarUrl,
-                                      initial: initial,
-                                      isAgent: true,
-                                    ),
-                                  )
-                                : FractionallySizedBox(
-                                    widthFactor: 0.5,
-                                    child: _ProfileAvatar(
-                                      avatarUrl: avatarUrl,
-                                      initial: initial,
-                                      isAgent: profile?.isAgent == true,
-                                    ),
-                                  ),
-                          ),
-                          if (!agentPresentation)
-                            Positioned(
-                              left: 0,
-                              right: 0,
-                              bottom: -(Grid.xl / 2),
-                              child: _ProfilePresenceChip(presence: presence),
-                            ),
-                        ],
-                      ),
-                    ),
-                    SizedBox(height: agentPresentation ? Grid.xs : Grid.half),
-
-                    // Display name — centered, large
-                    Center(
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Flexible(
-                            child: Text(
-                              titleName,
-                              style: agentPresentation
-                                  ? context.textTheme.bodyLarge?.copyWith(
-                                      fontSize: 20,
-                                      height: 1.4,
-                                      letterSpacing: -0.2,
-                                    )
-                                  : context.textTheme.headlineSmall?.copyWith(
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                              textAlign: TextAlign.center,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    if (secondaryName != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: Grid.xxs),
-                        child: Center(
-                          child: Text(
-                            secondaryName,
-                            textAlign: TextAlign.center,
-                            style: context.textTheme.bodySmall?.copyWith(
-                              color: context.colors.onSurfaceVariant,
-                            ),
-                          ),
-                        ),
-                      ),
-                    if (!agentPresentation && agentSubtitle != null) ...[
-                      const SizedBox(height: Grid.xxs),
-                      Center(
-                        child: Wrap(
-                          alignment: WrapAlignment.center,
-                          crossAxisAlignment: WrapCrossAlignment.center,
-                          spacing: Grid.half,
-                          children: [
-                            if (agentSubtitleIcon != null)
-                              ExcludeSemantics(
-                                child: IconTheme(
-                                  data: IconThemeData(
-                                    color: context.colors.onSurfaceVariant,
-                                  ),
-                                  child: agentSubtitleIcon!,
-                                ),
-                              ),
-                            Text(
-                              agentSubtitle!,
-                              style: context.textTheme.bodySmall?.copyWith(
-                                color: context.colors.onSurfaceVariant,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                    if (about.trim().isNotEmpty) ...[
-                      const SizedBox(height: Grid.xxs),
-                      SizedBox(
-                        width: double.infinity,
-                        child: Text(
-                          about,
-                          textAlign: TextAlign.center,
-                          style: context.textTheme.bodyMedium?.copyWith(
-                            color: context.colors.onSurfaceVariant,
-                          ),
-                        ),
-                      ),
-                    ],
-                    // Keep the current status centered beneath the profile identity.
-                    if (userStatus != null && !userStatus.isEmpty)
-                      SizedBox(
-                        width: double.infinity,
-                        child: Padding(
-                          padding: const EdgeInsets.only(
-                            top: Grid.xxs,
-                            left: Grid.gutter,
-                            right: Grid.gutter,
-                            bottom: Grid.xxs,
-                          ),
-                          child: MessageContent(
-                            content: userStatus.text.isNotEmpty
-                                ? '${userStatus.emoji.isNotEmpty ? '${userStatus.emoji} ' : ''}${userStatus.text}'
-                                : userStatus.emoji,
-                            baseStyle: context.textTheme.bodySmall?.copyWith(
-                              color: context.colors.onSurfaceVariant,
-                            ),
-                            textAlign: TextAlign.center,
-                            maxLines: 2,
-                          ),
-                        ),
-                      ),
-
-                    // NIP-05 handle — centered, secondary
-                    if (nip05 != null && nip05.isNotEmpty) ...[
-                      const SizedBox(height: Grid.half),
-                      Center(
-                        child: Text(
-                          nip05,
-                          style: context.textTheme.bodyMedium?.copyWith(
-                            color: context.colors.onSurfaceVariant,
-                          ),
-                        ),
-                      ),
-                    ],
-
-                    // The 48-point target adds 8 points above the 32-point capsule.
-                    SizedBox(
-                      height: agentPresentation
-                          ? Grid.xxs
-                          : primaryActionsSpacing,
-                    ),
-
-                    if (agentPresentation) ...[
-                      Center(
-                        child: Wrap(
-                          alignment: WrapAlignment.center,
-                          crossAxisAlignment: WrapCrossAlignment.center,
-                          spacing: Grid.xxs,
-                          runSpacing: Grid.xxs,
-                          children: [
-                            if (pk != currentPubkey)
-                              ProfileActionChip(
-                                onPressed: isOpeningDirectMessage.value
-                                    ? null
-                                    : openDirectMessage,
-                                label: isOpeningDirectMessage.value
-                                    ? 'Opening…'
-                                    : 'Message',
-                              ),
-                            if (contextualActions != null)
-                              Builder(builder: contextualActions!),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: Grid.sm),
-                      if (agentIdentity != null)
-                        Builder(builder: agentIdentity!),
-                      AppListCard(
-                        label: 'Public key',
-                        horizontalPadding: 0,
-                        children: [
-                          Semantics(
-                            button: true,
-                            enabled: npub != null,
-                            label: copied.value
-                                ? 'Copied public key'
-                                : 'Copy public key',
-                            value: npub,
-                            liveRegion: true,
-                            child: Tooltip(
-                              message: 'Copy public key',
-                              excludeFromSemantics: true,
-                              child: InkWell(
-                                onTap: npub == null ? null : copyPublicKey,
-                                child: Padding(
-                                  padding: const EdgeInsets.all(Grid.xs),
-                                  child: ExcludeSemantics(
-                                    child: Row(
-                                      children: [
-                                        Expanded(
-                                          child: Text(
-                                            npub ?? 'Public key unavailable',
-                                            style: context.textTheme.bodySmall,
-                                          ),
-                                        ),
-                                        const SizedBox(width: Grid.xs),
-                                        AnimatedSwitcher(
-                                          duration:
-                                              MediaQuery.disableAnimationsOf(
-                                                context,
-                                              )
-                                              ? Duration.zero
-                                              : const Duration(
-                                                  milliseconds: 180,
-                                                ),
-                                          switchInCurve: Curves.easeOutCubic,
-                                          switchOutCurve: Curves.easeInCubic,
-                                          transitionBuilder:
-                                              (child, animation) =>
-                                                  ScaleTransition(
-                                                    scale: animation,
-                                                    child: child,
-                                                  ),
-                                          child: Icon(
-                                            copied.value
-                                                ? BuzzIcons.check
-                                                : BuzzIcons.copy,
-                                            key: ValueKey(copied.value),
-                                            size: 18,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      if (agentSettings != null)
-                        Builder(builder: agentSettings!),
-                    ] else ...[
-                      Row(
-                        children: [
-                          if (pk != currentPubkey) ...[
-                            Expanded(
-                              child: BuzzActionTile(
-                                icon: isOpeningDirectMessage.value
-                                    ? null
-                                    : BuzzIcons.messageSquare,
-                                label: isOpeningDirectMessage.value
-                                    ? 'Opening…'
-                                    : 'Message',
-                                isLoading: isOpeningDirectMessage.value,
-                                loadingSemanticLabel: 'Opening direct message',
-                                onTap: openDirectMessage,
-                              ),
-                            ),
-                            const SizedBox(width: Grid.twelve),
-                          ],
-                          Expanded(
-                            child: BuzzActionTile(
-                              icon: copied.value
-                                  ? BuzzIcons.check
-                                  : BuzzIcons.key,
-                              label: copied.value
-                                  ? 'Copied'
-                                  : 'Copy public key',
-                              isEnabled: npub != null,
-                              onTap: copyPublicKey,
-                            ),
-                          ),
-                        ],
-                      ),
-                      SizedBox(height: contextualActionsSpacing),
-                      if (contextualActions != null)
-                        Builder(builder: contextualActions!),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-    if (!agentPresentation) return content;
-    return AgentArtworkPanel(
-      imageUrl: avatarUrl,
-      borderRadius: BorderRadius.zero,
-      child: SafeArea(
-        top: false,
-        bottom: false,
-        minimum: contentPadding,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            BuzzSheetHeader(leading: headerLeading),
-            Flexible(child: SafeArea(top: false, child: content)),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// The read-only version of the presence control in Settings. A viewed profile
-/// reflects its owner's availability but does not allow another user to change
-/// it.
-class _ProfilePresenceChip extends StatelessWidget {
-  const _ProfilePresenceChip({required this.presence});
-
-  final String? presence;
-
-  @override
-  Widget build(BuildContext context) {
-    final effectivePresence = switch (presence) {
-      'online' || 'away' || 'offline' => presence,
-      _ => null,
-    };
-    final backgroundColor = switch (effectivePresence) {
-      'online' => context.appColors.success,
-      'away' => context.appColors.warning,
-      _ => context.colors.onSurfaceVariant,
-    };
-    final label = switch (effectivePresence) {
+    final presenceLabel = switch (presence) {
       'online' => 'Online',
       'away' => 'Away',
       'offline' => 'Offline',
       _ => 'Unknown',
     };
-
-    return Semantics(
-      label: 'Presence: $label',
-      excludeSemantics: true,
-      child: SizedBox(
-        height: Grid.xl,
-        child: Center(
-          child: Material(
-            color: backgroundColor,
-            borderRadius: BorderRadius.circular(Radii.full),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: Grid.xs,
-                vertical: Grid.xxs,
+    final hasBadge = ['online', 'away', 'offline'].contains(presence);
+    final status = [
+      if (userStatus != null) userStatus.emoji,
+      if (userStatus != null) userStatus.text,
+    ].where((part) => part.trim().isNotEmpty).join(' ');
+    return ProfileSheetLayout(
+      avatarUrl: avatarUrl,
+      agent: isAgent,
+      embedded: embedded,
+      sheetControls: sheetControls,
+      contentPadding: contentPadding,
+      status: status.isEmpty ? null : _ThoughtBubble(text: status),
+      hero: Column(
+        children: [
+          SizedBox.square(
+            key: portraitKey,
+            dimension: profilePortraitSize,
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                ClipPath(
+                  clipper: hasBadge ? _StatusNotch(isAgent) : null,
+                  child: _ProfileAvatar(
+                    avatarUrl: avatarUrl,
+                    initial: initial,
+                    isAgent: isAgent,
+                    onEnlarge: avatarUrl == null
+                        ? null
+                        : () => photoOpen.value = true,
+                  ),
+                ),
+                if (!hasBadge)
+                  Semantics(
+                    label: 'Presence: Unknown',
+                    child: const SizedBox.shrink(),
+                  ),
+                if (hasBadge)
+                  Positioned(
+                    right: 2,
+                    bottom: 2,
+                    child: Semantics(
+                      label: 'Presence: $presenceLabel',
+                      child: Container(
+                        width: 20,
+                        height: 20,
+                        decoration: ShapeDecoration(
+                          shape: avatarShape(isAgent: isAgent),
+                          color: presence == 'online'
+                              ? context.appColors.success
+                              : presence == 'away'
+                              ? context.appColors.warning
+                              : context.colors.outline,
+                        ),
+                      ),
+                    ),
+                  ),
+                if (status.isNotEmpty) ...[
+                  for (final dot in [
+                    (left: 5.0, top: -6.0, size: 13.0),
+                    (left: 15.0, top: 7.0, size: 7.0),
+                  ])
+                    Positioned(
+                      left: dot.left,
+                      top: dot.top,
+                      child: IgnorePointer(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: context.colors.surface,
+                            shape: BoxShape.circle,
+                          ),
+                          child: SizedBox.square(dimension: dot.size),
+                        ),
+                      ),
+                    ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          Text(
+            titleName,
+            textAlign: TextAlign.center,
+            style: context.textTheme.titleMedium,
+          ),
+          if (secondaryName != null)
+            Text(secondaryName, style: context.textTheme.bodySmall),
+          if (isAgent && about.isNotEmpty)
+            Text(about, textAlign: TextAlign.center),
+          if (!isAgent && detailsToShow.city != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(detailsToShow.city!),
+            ),
+          if (!isAgent && detailsToShow.timeZone != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: ProfileHeaderClock(zoneName: detailsToShow.timeZone!),
+            ),
+          const SizedBox(height: Grid.xxs),
+          Wrap(
+            alignment: WrapAlignment.center,
+            spacing: Grid.xxs,
+            runSpacing: Grid.xxs,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              if (pk == currentPubkey && !isAgent) ...[
+                ProfileActionChip(
+                  label: 'Edit profile',
+                  onPressed:
+                      onEditProfile ??
+                      () => Navigator.of(context, rootNavigator: true).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const ProfileEditPage(),
+                        ),
+                      ),
+                ),
+                ProfileActionChip(
+                  label: status.isEmpty ? 'Set a status' : 'Update status',
+                  onPressed: () =>
+                      showSetStatusSheet(context, currentStatus: userStatus),
+                ),
+              ] else if (pk != currentPubkey)
+                ProfileActionChip(
+                  label: isOpeningDirectMessage.value ? 'Opening…' : 'Message',
+                  onPressed: isOpeningDirectMessage.value
+                      ? null
+                      : openDirectMessage,
+                ),
+              if (agentPresentation && contextualActions != null)
+                Builder(builder: contextualActions!),
+            ],
+          ),
+        ],
+      ),
+      body: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (isAgent) ...[
+              if (agentIdentity != null) Builder(builder: agentIdentity!),
+              AppListCard(
+                outlined: true,
+                label: 'Public key',
+                horizontalPadding: 0,
+                children: [
+                  Semantics(
+                    button: true,
+                    enabled: npub != null,
+                    label: copied.value
+                        ? 'Copied public key'
+                        : 'Copy public key',
+                    value: npub,
+                    liveRegion: true,
+                    child: Tooltip(
+                      message: 'Copy public key',
+                      excludeFromSemantics: true,
+                      child: InkWell(
+                        onTap: npub == null ? null : copyPublicKey,
+                        child: Padding(
+                          padding: const EdgeInsets.all(Grid.xs),
+                          child: ExcludeSemantics(
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    npub ?? 'Public key unavailable',
+                                    style: context.textTheme.bodySmall,
+                                  ),
+                                ),
+                                const SizedBox(width: Grid.xs),
+                                AnimatedSwitcher(
+                                  duration:
+                                      MediaQuery.disableAnimationsOf(context)
+                                      ? Duration.zero
+                                      : const Duration(milliseconds: 180),
+                                  switchInCurve: Curves.easeOutCubic,
+                                  switchOutCurve: Curves.easeInCubic,
+                                  transitionBuilder: (child, animation) =>
+                                      ScaleTransition(
+                                        scale: animation,
+                                        child: child,
+                                      ),
+                                  child: Icon(
+                                    copied.value
+                                        ? BuzzIcons.check
+                                        : BuzzIcons.copy,
+                                    key: ValueKey(copied.value),
+                                    size: 18,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
-              child: Text(
-                label,
-                style: filterChipTextStyle.copyWith(
-                  color: context.colors.onPrimary,
-                  fontWeight: FontWeight.w500,
+              if (agentSettings != null) Builder(builder: agentSettings!),
+            ] else
+              ProfileDetailsCards(
+                details: detailsToShow,
+                about: preview && about.trim().isEmpty
+                    ? 'Designing tools for collaboration.'
+                    : about,
+                username:
+                    verified?.username ?? nip05 ?? (preview ? 'viewer' : null),
+                avatarUrl: avatarUrl,
+                publicKey: npub == null ? 'Unavailable' : shortPubkey(npub),
+                onLead: onLead ?? (lead) => _openLead(context, lead),
+                onCopyKey: npub == null ? null : copyPublicKey,
+                copied: copied.value,
+              ),
+            if (!agentPresentation && contextualActions != null)
+              Builder(builder: contextualActions!),
+          ],
+        ),
+      ),
+      portraitKey: portraitKey,
+      photoOpen: photoOpen.value && avatarUrl != null,
+      onPhotoBack: () => photoOpen.value = false,
+      enlargedPhoto: avatarUrl == null
+          ? null
+          : AvatarClip(
+              key: const ValueKey('enlarged-profile-portrait'),
+              isAgent: isAgent,
+              child: Listener(
+                onPointerDown: (event) {
+                  pointers.add(event.pointer);
+                  swipeStart.value =
+                      pointers.length == 1 &&
+                          photoTransform.value.getMaxScaleOnAxis() <= 1.001
+                      ? event.position
+                      : null;
+                },
+                onPointerCancel: (event) {
+                  pointers.remove(event.pointer);
+                  swipeStart.value = null;
+                },
+                onPointerUp: (event) {
+                  pointers.remove(event.pointer);
+                  final start = swipeStart.value;
+                  swipeStart.value = null;
+                  if (start == null) return;
+                  final delta = event.position - start;
+                  if (delta.dy >= 40 && delta.dy > delta.dx.abs()) {
+                    photoOpen.value = false;
+                  }
+                },
+                child: InteractiveViewer(
+                  transformationController: photoTransform,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      FittedBox(
+                        child: SizedBox.square(
+                          dimension: profilePortraitSize,
+                          child: AvatarImageContent(
+                            imageUrl:
+                                parseAnimatedAvatarUrl(avatarUrl)?.posterUrl ??
+                                avatarUrl,
+                            preferThumbnail: true,
+                            fallback: _AvatarFallback(initial: initial),
+                          ),
+                        ),
+                      ),
+                      _ProfileAvatar(
+                        avatarUrl: avatarUrl,
+                        initial: initial,
+                        isAgent: isAgent,
+                        transparentFallback: true,
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
-        ),
-      ),
     );
   }
 }
@@ -619,9 +587,13 @@ class _ProfilePresenceChip extends StatelessWidget {
 class _ProfileAvatar extends HookWidget {
   final String? avatarUrl;
   final String initial;
+  final bool transparentFallback;
   final bool isAgent;
 
+  final VoidCallback? onEnlarge;
   const _ProfileAvatar({
+    this.onEnlarge,
+    this.transparentFallback = false,
     required this.avatarUrl,
     required this.initial,
     required this.isAgent,
@@ -637,37 +609,52 @@ class _ProfileAvatar extends HookWidget {
 
     return AspectRatio(
       aspectRatio: 1,
-      child: GestureDetector(
-        key: const ValueKey('selected-profile-avatar'),
-        onTap: animatedAvatar == null
-            ? null
-            : () => stoppedAnimationUrl.value =
-                  stoppedAnimationUrl.value == animatedAvatar.animationUrl
-                  ? null
-                  : animatedAvatar.animationUrl,
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final avatar = isPlaying
-                ? ProgressiveAnimatedAvatar(
-                    key: ValueKey(animatedAvatar.animationUrl),
-                    descriptor: animatedAvatar,
-                    fallback: _AvatarFallback(initial: initial),
-                  )
-                : AvatarImageContent(
-                    imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
-                    preferThumbnail: true,
-                    fallback: _AvatarFallback(initial: initial),
-                  );
-            return AvatarClip(
-              isAgent: isAgent,
-              child: !isAgent || !usesInsetAgentArtwork(avatarUrl)
-                  ? avatar
-                  : Transform.scale(
-                      scale: animatedAvatarArtworkScale,
-                      child: avatar,
-                    ),
-            );
-          },
+      child: Semantics(
+        button: animatedAvatar != null || onEnlarge != null,
+        label: animatedAvatar != null
+            ? (isPlaying ? 'Pause profile animation' : 'Play profile animation')
+            : (onEnlarge != null ? 'Enlarge profile photo' : null),
+        onLongPressHint: animatedAvatar != null && onEnlarge != null
+            ? 'enlarge profile photo'
+            : null,
+        child: InkWell(
+          key: const ValueKey('selected-profile-avatar'),
+          onLongPress: animatedAvatar == null ? null : onEnlarge,
+          onTap: animatedAvatar == null
+              ? onEnlarge
+              : () => stoppedAnimationUrl.value =
+                    stoppedAnimationUrl.value == animatedAvatar.animationUrl
+                    ? null
+                    : animatedAvatar.animationUrl,
+          child: ExcludeSemantics(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final fallback = transparentFallback
+                    ? const SizedBox.shrink()
+                    : _AvatarFallback(initial: initial);
+                final avatar = isPlaying
+                    ? ProgressiveAnimatedAvatar(
+                        key: ValueKey(animatedAvatar.animationUrl),
+                        descriptor: animatedAvatar,
+                        fallback: fallback,
+                      )
+                    : AvatarImageContent(
+                        imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
+                        preferThumbnail: true,
+                        fallback: fallback,
+                      );
+                return AvatarClip(
+                  isAgent: isAgent,
+                  child: !isAgent || !usesInsetAgentArtwork(avatarUrl)
+                      ? avatar
+                      : Transform.scale(
+                          scale: animatedAvatarArtworkScale,
+                          child: avatar,
+                        ),
+                );
+              },
+            ),
+          ),
         ),
       ),
     );
@@ -693,4 +680,171 @@ class _AvatarFallback extends StatelessWidget {
       ),
     );
   }
+}
+
+class _ThoughtBubble extends StatelessWidget {
+  const _ThoughtBubble({required this.text});
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = context.colors.surface;
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Stack(
+        clipBehavior: Clip.none,
+        alignment: Alignment.center,
+        children: [
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: color,
+              borderRadius: BorderRadius.circular(26),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x18000000),
+                  blurRadius: 8,
+                  offset: Offset(0, 2),
+                ),
+              ],
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              child: _StatusTicker(text: text),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StatusTicker extends HookWidget {
+  const _StatusTicker({required this.text});
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final line = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    final scroll = useScrollController();
+    final copy = useMemoized(GlobalKey.new);
+    final distance = useState(0.0);
+    final animation = useAnimationController();
+    useEffect(() {
+      if (distance.value == 0 || reducedMotion) return null;
+      final travel = distance.value;
+      void move() {
+        if (scroll.hasClients) scroll.jumpTo(animation.value * travel);
+      }
+
+      animation.addListener(move);
+      animation.repeat(
+        period: Duration(milliseconds: (travel / 24 * 1000).round()),
+      );
+      return () {
+        animation.removeListener(move);
+        animation.stop();
+        animation.value = 0;
+        if (scroll.hasClients) scroll.jumpTo(0);
+      };
+    }, [distance.value, line, reducedMotion]);
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 196),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          if (reducedMotion) {
+            return MessageContent(content: text, textAlign: TextAlign.center);
+          }
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            final size = copy.currentContext?.size;
+            if (!context.mounted || size == null) return;
+            final next = size.width > constraints.maxWidth
+                ? size.width + 48
+                : 0.0;
+            if (next != distance.value) distance.value = next;
+          });
+          final ticker = Semantics(
+            label: text,
+            excludeSemantics: true,
+            child: SingleChildScrollView(
+              controller: scroll,
+              physics: const NeverScrollableScrollPhysics(),
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  MessageContent(key: copy, content: line),
+                  if (distance.value > 0) ...[
+                    const SizedBox(width: 48),
+                    MessageContent(content: line),
+                  ],
+                ],
+              ),
+            ),
+          );
+          if (distance.value == 0) return ticker;
+          return ShaderMask(
+            blendMode: BlendMode.dstIn,
+            shaderCallback: (bounds) {
+              final edge = (8 / bounds.width).clamp(0.0, 0.5);
+              return LinearGradient(
+                colors: const [
+                  Colors.transparent,
+                  Colors.white,
+                  Colors.white,
+                  Colors.transparent,
+                ],
+                stops: [0, edge, 1 - edge, 1],
+              ).createShader(bounds);
+            },
+            child: ticker,
+          );
+        },
+      ),
+    );
+  }
+}
+
+// The two tangent joins come from desktop's 40-point avatar-status-cutout.svg.
+class _StatusNotch extends CustomClipper<Path> {
+  const _StatusNotch(this.isAgent);
+  final bool isAgent;
+  @override
+  Path getClip(Size size) {
+    final outline = isAgent
+        ? (Path()
+            ..moveTo(39.909, 24.629)
+            ..cubicTo(39.837, 26.228, 37.956, 26.169, 36.360, 26.064)
+            ..cubicTo(35.660, 26.018, 34.877, 26, 34, 26)
+            ..cubicTo(27.12, 26, 26, 27.12, 26, 34)
+            ..cubicTo(26, 34.877, 26.018, 35.660, 26.064, 36.360)
+            ..cubicTo(26.169, 37.956, 26.228, 39.837, 24.629, 39.909)
+            ..cubicTo(23.216, 39.973, 21.676, 40, 20, 40)
+            ..cubicTo(2.8, 40, 0, 37.2, 0, 20)
+            ..cubicTo(0, 2.8, 2.8, 0, 20, 0)
+            ..cubicTo(37.2, 0, 40, 2.8, 40, 20)
+            ..cubicTo(40, 21.676, 39.973, 23.216, 39.909, 24.629)
+            ..close())
+        : (Path()
+            ..moveTo(39.271, 25.349)
+            ..cubicTo(38.844, 26.891, 36.913, 26.379, 35.335, 26.112)
+            ..arcToPoint(
+              const Offset(26.112, 35.335),
+              radius: const Radius.circular(8),
+              clockwise: false,
+            )
+            ..cubicTo(26.379, 36.913, 26.891, 38.844, 25.349, 39.271)
+            ..arcToPoint(
+              const Offset(39.271, 25.349),
+              radius: const Radius.circular(20),
+              largeArc: true,
+            )
+            ..close());
+    return outline.transform(
+      Matrix4.diagonal3Values(size.width / 40, size.height / 40, 1).storage,
+    );
+  }
+
+  @override
+  bool shouldReclip(_StatusNotch oldClipper) => oldClipper.isAgent != isAgent;
 }

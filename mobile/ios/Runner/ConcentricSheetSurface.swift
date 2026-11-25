@@ -35,6 +35,9 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
   private let usesGlass: Bool
   private let animateGeometry: Bool
   private let topRadius: Double?
+  private let detentCorners: Bool
+  private var compactRadius: CGFloat = 24
+  private var lastDetentRadius: CGFloat?
 
   init(
     frame: CGRect,
@@ -45,6 +48,8 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
     let arguments = args as? [String: Any]
     let colorValue = (arguments?["color"] as? NSNumber)?.uint32Value ?? 0xFFFF_FFFF
     let minimumRadius = (arguments?["minimumRadius"] as? NSNumber)?.doubleValue ?? 24
+    detentCorners = arguments?["detentCorners"] as? Bool == true
+    compactRadius = minimumRadius
     topRadius = (arguments?["topRadius"] as? NSNumber)?.doubleValue
     independentCorners = (arguments?["independentCorners"] as? NSNumber)?.boolValue == true
     usesGlass = (arguments?["usesGlass"] as? NSNumber)?.boolValue == true
@@ -86,6 +91,7 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
 
     (rootView as? ConcentricSurfaceRootView)?.onLayout = { [weak self] in
       guard let self else { return }
+      self.updateDetentCorners()
       self.channel.invokeMethod("cornerRadiiChanged", arguments: self.cornerRadii())
     }
 
@@ -204,6 +210,22 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
     } else {
       surfaceView.layer.cornerRadius = minimumRadius
     }
+  }
+
+  private func updateDetentCorners() {
+    guard detentCorners, let window = rootView.window, #available(iOS 26.0, *) else { return }
+    let maximumHeight = window.bounds.height - window.safeAreaInsets.top
+    guard maximumHeight > 0 else { return }
+    let progress = min(1, max(0, (rootView.bounds.height / maximumHeight - 0.5) * 2))
+    let displayRadius = surfaceView.effectiveRadius(corner: .bottomLeft)
+    let radius = compactRadius + (max(compactRadius, displayRadius) - compactRadius) * progress
+    guard lastDetentRadius != radius else { return }
+    lastDetentRadius = radius
+    let bottom = UICornerRadius.containerConcentric(minimum: compactRadius)
+    surfaceView.cornerConfiguration = .corners(
+      topLeftRadius: .fixed(radius), topRightRadius: .fixed(radius),
+      bottomLeftRadius: bottom, bottomRightRadius: bottom
+    )
   }
 
   private func cornerRadii() -> [String: CGFloat] {

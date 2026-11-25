@@ -22,6 +22,9 @@ _ToastCoordinator _toastCoordinator(BuildContext context) {
   return _toastCoordinators[overlay] ??= _ToastCoordinator();
 }
 
+ValueListenable<bool> buzzToastVisibleOf(BuildContext context) =>
+    _toastCoordinator(context);
+
 class _ToastCoordinator extends ValueNotifier<bool> {
   _ToastCoordinator() : super(false);
 

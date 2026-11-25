@@ -22,6 +22,7 @@ class ConcentricSheetSurface extends HookWidget {
     ),
     this.providesSheetSurface = true,
     this.usesGlass = false,
+    this.detentCorners = false,
     this.animateGeometry = false,
     this.capsule = false,
     this.glassTintColor,
@@ -36,6 +37,7 @@ class ConcentricSheetSurface extends HookWidget {
   final EdgeInsetsGeometry padding;
   final bool providesSheetSurface;
   final bool usesGlass;
+  final bool detentCorners;
 
   /// Animates native material corner changes, respecting Reduce Motion.
   final bool animateGeometry;
@@ -253,7 +255,9 @@ class ConcentricSheetSurface extends HookWidget {
                     'minimumRadius': minimumRadius,
                     'capsule': capsule,
                     'independentCorners': providesSheetSurface,
-                    if (providesSheetSurface) 'topRadius': sheetTopRadius,
+                    if (providesSheetSurface && !detentCorners)
+                      'topRadius': sheetTopRadius,
+                    'detentCorners': detentCorners,
                     'usesGlass': usesGlass,
                     'animateGeometry': animateGeometry,
                     if (glassTintColor case final tint?)

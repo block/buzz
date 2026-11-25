@@ -1,4 +1,6 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../theme/theme.dart';
 import 'app_list_inset.dart';
@@ -10,6 +12,8 @@ class AppListCard extends StatelessWidget {
   const AppListCard({
     super.key,
     this.label,
+    this.labelOverArtwork = false,
+    this.outlined = false,
     this.dividerIndent,
     this.iconColumnWidth,
     this.clipBehavior = Clip.antiAlias,
@@ -20,6 +24,8 @@ class AppListCard extends StatelessWidget {
 
   /// Rendered above the card in sentence case, as written — no uppercasing.
   final String? label;
+  final bool labelOverArtwork;
+  final bool outlined;
   final Clip clipBehavior;
 
   /// Separator inset from the card edge. Defaults to the standard row label
@@ -40,6 +46,54 @@ class AppListCard extends StatelessWidget {
   final List<Widget> children;
 
   static const _inset = Grid.xs;
+
+  Widget _sectionLabel(BuildContext context) {
+    final style = context.textTheme.labelMedium!.copyWith(
+      color: labelOverArtwork
+          ? context.colors.onSurface
+          : context.colors.onSurfaceVariant,
+      fontWeight: FontWeight.w600,
+    );
+    final text = Text(label!, style: style);
+    if (!labelOverArtwork ||
+        defaultTargetPlatform != TargetPlatform.iOS ||
+        MediaQuery.highContrastOf(context)) {
+      return text;
+    }
+
+    final size = MediaQuery.textScalerOf(context).scale(style.fontSize!);
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final rtl = Directionality.of(context) == TextDirection.rtl;
+    return Semantics(
+      header: true,
+      label: label,
+      child: ExcludeSemantics(
+        child: Stack(
+          children: [
+            SizedBox(
+              width: double.infinity,
+              child: Opacity(opacity: 0, child: text),
+            ),
+            Positioned.fill(
+              child: IgnorePointer(
+                child: UiKitView(
+                  key: ValueKey((label, size, dark, rtl)),
+                  viewType: 'buzz/profile_vibrant_label',
+                  creationParamsCodec: const StandardMessageCodec(),
+                  creationParams: {
+                    'text': label,
+                    'size': size,
+                    'dark': dark,
+                    'rtl': rtl,
+                  },
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -77,13 +131,7 @@ class AppListCard extends StatelessWidget {
           if (label != null)
             Padding(
               padding: const EdgeInsets.only(left: Grid.half, bottom: Grid.xxs),
-              child: Text(
-                label!,
-                style: context.textTheme.labelMedium?.copyWith(
-                  color: context.colors.onSurfaceVariant,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
+              child: _sectionLabel(context),
             ),
           Material(
             // The softest step on the elevation ramp — a rung below the home tab
@@ -92,7 +140,20 @@ class AppListCard extends StatelessWidget {
             // does. The dividers carry the group structure, so the fill only has
             // to separate the card from the page.
             color: context.colors.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(Radii.container),
+            shape: outlined
+                ? RoundedSuperellipseBorder(
+                    borderRadius: BorderRadius.circular(Radii.container),
+                    side: BorderSide(
+                      color: context.colors.inverseSurface.withValues(
+                        alpha: .07,
+                      ),
+                      width: 1,
+                      strokeAlign: BorderSide.strokeAlignInside,
+                    ),
+                  )
+                : RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(Radii.container),
+                  ),
             // Keeps row ripples inside the rounded corners.
             clipBehavior: clipBehavior,
             child: AppListInset(

@@ -1733,7 +1733,7 @@ void main() {
         await tester.pumpAndSettle();
         void check(String label) {
           if (profile) {
-            expect(find.text(label), findsOneWidget);
+            expect(find.text(label), findsNothing);
             expect(find.bySemanticsLabel('Presence: $label'), findsOneWidget);
             expect(find.bySemanticsLabel(label), findsNothing);
           } else {
@@ -13858,21 +13858,18 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Copy public key'), findsOneWidget);
+      expect(find.text('Public key'), findsOneWidget);
       // The full hex key is never rendered in the sheet.
       expect(find.text(alicePubkey), findsNothing);
       expect(find.text(bobPubkey), findsNothing);
       expect(find.byType(UserProfileSheet), findsOneWidget);
 
-      await tester.ensureVisible(find.text('Copy public key'));
+      await Scrollable.ensureVisible(
+        tester.element(find.text('Public key')),
+        alignment: 0.5,
+      );
       await tester.pumpAndSettle();
-      final copyAction = find
-          .ancestor(
-            of: find.text('Copy public key'),
-            matching: find.byType(GestureDetector),
-          )
-          .last;
-      tester.widget<GestureDetector>(copyAction).onTap!();
+      await tester.tap(find.text('Public key'));
       await tester.pump();
       await tester.pump();
       expect(find.text('Public key copied'), findsOneWidget);
@@ -13905,7 +13902,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Copy public key'), findsOneWidget);
+      expect(find.text('Public key'), findsOneWidget);
       // Malformed identity → neutral label, never truncated raw input.
       expect(
         find.descendant(
@@ -13915,26 +13912,12 @@ void main() {
         findsOneWidget,
       );
       expect(find.text(invalidPubkey), findsNothing);
-      // The copy tile is disabled and exposes no tap handler.
-      final disabledCopyAction = find
-          .ancestor(
-            of: find.text('Copy public key'),
-            matching: find.byType(GestureDetector),
-          )
-          .last;
-      expect(tester.widget<GestureDetector>(disabledCopyAction).onTap, isNull);
-      final copySemantics = find
-          .ancestor(
-            of: find.text('Copy public key'),
-            matching: find.byType(Semantics),
-          )
-          .first;
-      expect(
-        tester.widget<Semantics>(copySemantics).properties.enabled,
-        isFalse,
+      await Scrollable.ensureVisible(
+        tester.element(find.text('Public key')),
+        alignment: 0.5,
       );
-
-      await tester.tap(disabledCopyAction, warnIfMissed: false);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Public key'));
       await tester.pump();
       await tester.pump();
       expect(find.text('Public key copied'), findsNothing);
@@ -14010,7 +13993,7 @@ void main() {
               of: find.byType(UserProfileSheet),
               matching: find.text('npub1kzc…uyv8'),
             ),
-            findsOneWidget,
+            findsNWidgets(2),
           );
           // The full hex key is never rendered either.
           expect(find.text(bobPubkey), findsNothing);
@@ -14163,7 +14146,7 @@ void main() {
       semantics.dispose();
       await tester.pumpAndSettle();
 
-      expect(find.text('Copy public key'), findsOneWidget);
+      expect(find.text('Public key'), findsOneWidget);
       expect(find.byType(UserProfileSheet), findsOneWidget);
       expect(
         find.descendant(
@@ -14297,7 +14280,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Copy public key'), findsOneWidget);
+      expect(find.text('Public key'), findsOneWidget);
       expect(find.byType(UserProfileSheet), findsOneWidget);
     });
 

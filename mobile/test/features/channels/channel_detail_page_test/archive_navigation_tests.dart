@@ -99,7 +99,11 @@ void archiveNavigationTests() {
     );
 
     // The profile still works: Message opens the DM.
-    await tester.ensureVisible(find.text('Message'));
+    await Scrollable.ensureVisible(
+      tester.element(find.text('Message')),
+      alignment: 0.5,
+    );
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Message'));
     await tester.pumpAndSettle();
     expect(dmOpened, isTrue);

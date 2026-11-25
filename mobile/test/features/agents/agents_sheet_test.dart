@@ -200,6 +200,25 @@ void main() {
     expect(find.byType(BottomSheet), findsOneWidget);
     expect(find.byType(UserProfileSheet), findsOneWidget);
     expect(find.text('Model not shared'), findsNothing);
+    final detent = tester.widget<DraggableScrollableSheet>(
+      find.descendant(
+        of: find.byType(UserProfileSheet),
+        matching: find.byType(DraggableScrollableSheet),
+      ),
+    );
+    expect(detent.controller!.size, closeTo(detent.minChildSize, .001));
+    await tester.fling(
+      find
+          .descendant(
+            of: find.byType(UserProfileSheet),
+            matching: find.byType(SingleChildScrollView),
+          )
+          .first,
+      const Offset(0, -400),
+      1400,
+    );
+    await tester.pumpAndSettle();
+    expect(detent.controller!.size, closeTo(1, .001));
     expect(list.mounted, isTrue);
     expect(find.text('Identity'), findsNothing);
     expect(find.text('Settings'), findsNothing);
@@ -245,7 +264,7 @@ void main() {
       ),
     );
     final keyRow = find.byTooltip('Copy public key');
-    await tester.ensureVisible(keyRow);
+    await Scrollable.ensureVisible(tester.element(keyRow), alignment: .5);
     await tester.tapAt(tester.getTopLeft(keyRow) + const Offset(8, 8));
     await tester.pumpAndSettle();
     expect(
@@ -271,12 +290,18 @@ void main() {
     expect(find.text('Could not load instructions.'), findsOneWidget);
     h.onQuery = (_) async => [];
     h.authorityDown = true;
-    await tester.ensureVisible(find.text('Retry'));
+    await Scrollable.ensureVisible(
+      tester.element(find.text('Retry')),
+      alignment: .5,
+    );
     await tester.tap(find.text('Retry'));
     await tester.pumpAndSettle();
     expect(find.text('Could not load instructions.'), findsOneWidget);
     h.authorityDown = false;
-    await tester.ensureVisible(find.text('Retry'));
+    await Scrollable.ensureVisible(
+      tester.element(find.text('Retry')),
+      alignment: .5,
+    );
     await tester.tap(find.text('Retry'));
     await tester.pumpAndSettle();
     expect(
@@ -286,19 +311,28 @@ void main() {
     tester.platformDispatcher.textScaleFactorTestValue = 2;
     await tester.pumpAndSettle();
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.byTooltip('Copy public key'));
+    await Scrollable.ensureVisible(
+      tester.element(find.byTooltip('Copy public key')),
+      alignment: .5,
+    );
     expect(tester.takeException(), isNull);
     tester.platformDispatcher.clearTextScaleFactorTestValue();
     await tester.pumpAndSettle();
     await tester.pumpAndSettle();
     h.relay.loseAcknowledgment = true;
-    await tester.ensureVisible(find.text('Make Bestie'));
+    await Scrollable.ensureVisible(
+      tester.element(find.text('Make Bestie')),
+      alignment: .5,
+    );
     await tester.tap(find.text('Make Bestie'));
     await tester.pumpAndSettle();
     expect(find.textContaining('Could not save Bestie.'), findsOneWidget);
     h.relay.loseAcknowledgment = false;
     h.relay.events = []; // The unacknowledged write was not retained.
-    await tester.ensureVisible(find.text('Make Bestie'));
+    await Scrollable.ensureVisible(
+      tester.element(find.text('Make Bestie')),
+      alignment: .5,
+    );
     await tester.tap(find.text('Make Bestie'));
     await tester.pumpAndSettle();
     expect(find.text('Your Bestie'), findsOneWidget);
@@ -354,7 +388,10 @@ void main() {
         findsNothing,
       );
       await tester.pumpAndSettle();
-      await tester.ensureVisible(find.text('Delete agent'));
+      await Scrollable.ensureVisible(
+        tester.element(find.text('Delete agent')),
+        alignment: .5,
+      );
       expect(
         tester.getTopLeft(find.text('Delete agent')).dy,
         greaterThan(tester.getTopLeft(find.text('Public key')).dy),
@@ -374,7 +411,10 @@ void main() {
       await tester.pumpAndSettle();
       await tester.pumpAndSettle();
       h.relay.events = [];
-      await tester.ensureVisible(find.text('Make Bestie'));
+      await Scrollable.ensureVisible(
+        tester.element(find.text('Make Bestie')),
+        alignment: .5,
+      );
       await tester.tap(find.text('Make Bestie'));
       await tester.pumpAndSettle();
       expect(find.text('Your Bestie'), findsOneWidget);
