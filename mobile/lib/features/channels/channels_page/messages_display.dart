@@ -33,15 +33,21 @@ class MessagesDisplay {
     return mode ?? store?.modeFor(group, fallback: fallback) ?? fallback;
   }
 
+  bool explicitlyActive(ChannelFilterStore? store, String group) =>
+      (mode ?? store?.modeFor(group)) == ChannelFilterMode.active;
+
   int? limitFor(ChannelFilterStore? store, String group) {
     final n = count ?? store?.countFor(group) ?? sectionCounts.first;
-    return modeFor(store, group) == ChannelFilterMode.active || n == 0
-        ? null
-        : n;
+    return explicitlyActive(store, group) || n == 0 ? null : n;
   }
 
   int windowFor(ChannelFilterStore? store, String group) {
-    final fallback = messages ? 7 * 86400 : defaultActiveWindowSeconds;
+    final fallback =
+        messages &&
+            modeFor(store, group) == ChannelFilterMode.active &&
+            !explicitlyActive(store, group)
+        ? 7 * 86400
+        : defaultActiveWindowSeconds;
     return days == null
         ? store?.windowFor(group, fallback: fallback) ?? fallback
         : days! * 86400;

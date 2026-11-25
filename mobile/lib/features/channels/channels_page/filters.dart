@@ -81,6 +81,11 @@ Future<String?> showSectionViewSheet(
   ValueChanged<ChannelSortMode>? onSort,
   bool custom = false,
 }) async {
+  final centralized = group == null || context.widget is MessagesSectionOptions;
+  final messages =
+      group == null ||
+      context.widget is MessagesSectionOptions ||
+      MessagesSectionOptions.active(context);
   final orderScope = context
       .getElementForInheritedWidgetOfExactType<SectionOrderScope>();
   final presentingRoute = defaultTargetPlatform == TargetPlatform.iOS
@@ -103,11 +108,8 @@ Future<String?> showSectionViewSheet(
       builder: (sheetContext) {
         sheetRoute = ModalRoute.of(sheetContext);
         return _SectionViewSheet(
-          centralized:
-              group == null || context.widget is MessagesSectionOptions,
-          messages:
-              context.widget is MessagesSectionOptions ||
-              MessagesSectionOptions.active(context),
+          centralized: centralized,
+          messages: messages,
           canReorder: orderScope != null,
           title: title,
           group: group,

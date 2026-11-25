@@ -258,7 +258,11 @@ class _SliverChannelsList extends HookConsumerWidget {
       if (display.modeFor(filters?.store, group) != ChannelFilterMode.active) {
         continue;
       }
-      final evidence = ref.watch(channelFilterActivityProvider(id));
+      final evidence = ref.watch(
+        display.explicitlyActive(filters?.store, group)
+            ? channelFilterActivityProvider(id)
+            : cachedChannelFilterActivityProvider(id),
+      );
       activity[id] = evidence;
       // Solo uses the same evidence and handles its own row expiry.
       if (key == 'solo') continue;

@@ -490,7 +490,13 @@ class _SoloFilterSection extends HookConsumerWidget {
         : chats.toList();
     for (final chat in orderedChats) {
       final activity = mode == ChannelFilterMode.active
-          ? ref.watch(channelFilterActivityProvider(chat.id)).asData
+          ? ref
+                .watch(
+                  display.explicitlyActive(manager?.store, group)
+                      ? channelFilterActivityProvider(chat.id)
+                      : cachedChannelFilterActivityProvider(chat.id),
+                )
+                .asData
           : null;
       final at = activity?.value;
       if (at != null) {

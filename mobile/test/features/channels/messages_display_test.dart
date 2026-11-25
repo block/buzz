@@ -9,6 +9,41 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test('inherited Active caps previews without requesting gap recovery', () {
+    const display = MessagesDisplay();
+    final saved = ChannelFilterStore.parse({
+      'version': 1,
+      'groups': {'channels': 'active'},
+    });
+    expect(display.windowFor(saved, 'channels'), 30 * 86400);
+    expect(display.explicitlyActive(saved, 'channels'), isTrue);
+    expect(display.limitFor(saved, 'channels'), isNull);
+    expect(display.explicitlyActive(saved, 'dms'), isFalse);
+    expect(display.limitFor(saved, 'dms'), 5);
+    expect(const MessagesDisplay(count: 15).limitFor(saved, 'dms'), 15);
+    expect(display.windowFor(saved, 'dms'), 7 * 86400);
+  });
+
+  test('a desktop sort reset survives a local cache round trip', () {
+    final saved = ChannelSortStore.fromWorkspaceJson({
+      'meta': {
+        'v': 1,
+        'g': {
+          'channels': [123, 'device', null],
+        },
+      },
+    });
+    final cached = ChannelSortStore.fromJson(saved.toJson());
+    expect(
+      const MessagesDisplay().sortFor(cached, 'channels'),
+      ChannelSortMode.alpha,
+    );
+    expect(
+      const MessagesDisplay().sortFor(cached, 'dms'),
+      ChannelSortMode.recent,
+    );
+  });
+
   test(
     'section defaults survive upgrade and overrides reopen in their own scope',
     () async {
