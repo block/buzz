@@ -73,6 +73,11 @@ psql -c "SELECT setval('search_index_version', (SELECT last_value FROM search_in
 | `buzz_search_index_version_conflicts_total` | It is not zero: the version sequence handed out values again (below). |
 | `buzz_search_backfill_complete` | `1` means every stored message of the community is queued, not yet indexed. Move searches to OpenSearch once it is `1` for every community and `search_outbox` has emptied. |
 
+If `buzz_search_index_rejected_total` rises, investigate the rejection and
+fix the cause. The relay retries rejected rows automatically. A sustained
+spike can block newer messages in the affected community and pause backfill
+across communities. After the fix, verify that the queue drains.
+
 ## Known gaps
 
 - **Deleted communities.** Deleting a community does not remove its
