@@ -54,6 +54,17 @@ If you stream Postgres changes through logical replication, leave
 `search_outbox` and `search_backfill` out of the publication. Their rows are
 short-lived queue entries and progress markers.
 
+After a point-in-time restore, or a cut-over to a cluster built by logical
+replication (which copies no sequence values), the version sequence can be
+far below the versions the index holds. The index then refuses changes to the
+messages it holds: `buzz_search_index_version_conflicts_total` rises and their
+rows stay in `search_outbox`. Rebuild the index (above), or move the sequence
+on by a trillion, more values than the indexer ever takes:
+
+```sh
+psql -c "SELECT setval('search_index_version', (SELECT last_value FROM search_index_version) + 1000000000000)"
+```
+
 ## What to watch
 
 | Metric | Act when |
@@ -73,9 +84,9 @@ short-lived queue entries and progress markers.
   holds. If a bulk request sent before the crash also lands after a newer
   write of the same message, the index keeps that message's older text
   until it changes again.
-- **Deletes applied late.** A delete the cluster applies more than 60
-  seconds (`gc_deletes`) after a newer write can bring a deleted document
-  back.
+- **Writes applied late.** OpenSearch forgets a delete's version after 60
+  seconds (`gc_deletes`), so an older write that lands later, such as a
+  previous lease holder's bulk request, brings the deleted document back.
 - **Removed text on disk.** A removed document can no longer be found, but
   its text stays in the index's files until OpenSearch merges them. The
   relay does not force that merge.
