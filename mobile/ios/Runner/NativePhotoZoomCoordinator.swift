@@ -309,6 +309,10 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     reply.frame = CGRect(x: centerX - 24, y: railBottom - 108, width: 48, height: 48)
     more.frame = CGRect(x: centerX - 24, y: railBottom - 48, width: 48, height: 48)
     share.frame = more.frame
+    guard videoIndices.contains(index) else { return }
+    // The video transport owns the bottom of the screen, so the page indicator moves to the top of the video beside the rail.
+    let video = bounds.inset(by: insets)
+    pageContainer.frame = CGRect(x: video.minX + 68, y: video.minY + 12, width: max(0, video.width - 136), height: 44)
   }
   // iOS 27.1 reports the hinge and camera housing, so the rail can center on and clear them.
   private func measuredRail(width: CGFloat, onRight right: Bool) -> (centerX: CGFloat, top: CGFloat?, bottom: CGFloat?)? {

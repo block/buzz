@@ -229,6 +229,7 @@ struct NativePhotoZoomTests {
                                                       page first: UIViewController, buttons videoButtons: [UIButton]) {
     let transport = descendants(first.view).compactMap { $0 as? NativeVideoTransport }.first!
     let slider = transport.slider
+    let pageStrip = viewer.view.subviews.first { descendants($0).contains { $0 is UIPageControl } }!
     for (size, insets) in [(CGSize(width: 390, height: 844), UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0)),
                            (CGSize(width: 844, height: 390), UIEdgeInsets(top: 0, left: 59, bottom: 21, right: 59))] {
       viewer.view.frame = CGRect(origin: .zero, size: size)
@@ -243,19 +244,30 @@ struct NativePhotoZoomTests {
       precondition(viewer.view.bounds.inset(by: insets).contains(bar) && bar.minY > viewer.view.bounds.midY, "The transport sits at the bottom of the safe area")
       precondition(bar.height >= 44 && transport.playPause.bounds.width >= 44 && transport.mute.bounds.width >= 44, "Transport keeps 44pt targets")
       precondition(slider.frame.width > 100, "The scrubber has room in portrait and landscape")
+      precondition(!pageStrip.frame.intersects(bar), "The page indicator stays clear of the transport")
       for (slot, button) in videoButtons.enumerated() where slot > 0 {
         precondition(!button.frame.intersects(videoButtons[slot - 1].frame), "Video actions must not overlap")
       }
     }
+    checkDuoVideoLayout(viewer: viewer, pager: pager, page: first, buttons: videoButtons)
+    viewer.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+    viewer.layoutGallery(insets: .zero)
+    precondition(videoButtons[1].isEnabled && videoButtons[1].alpha == 1, "A downloaded video can be shared")
+  }
+  // Unfolded Duo: the actions move to the hinge-side rail and the video takes the rest of the window.
+  @MainActor fileprivate static func checkDuoVideoLayout(viewer: NativePhotoZoomViewController, pager: UIPageViewController,
+                                                         page first: UIViewController, buttons videoButtons: [UIButton]) {
+    let transport = descendants(first.view).compactMap { $0 as? NativeVideoTransport }.first!
+    let pageStrip = viewer.view.subviews.first { descendants($0).contains { $0 is UIPageControl } }!
     viewer.view.frame = CGRect(x: 0, y: 0, width: 951, height: 669)
     viewer.layoutGallery(insets: UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 76))
     precondition(pager.view.frame == viewer.view.bounds, "Video spans the full Duo window beside the rail")
     precondition(videoButtons.allSatisfy { $0.center.x >= 875 }, "Duo video actions stay in the rail")
     first.view.layoutIfNeeded()
-    precondition(transport.convert(transport.bounds, to: viewer.view).maxX <= 875, "The Duo transport stays clear of the rail")
-    viewer.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
-    viewer.layoutGallery(insets: .zero)
-    precondition(videoButtons[1].isEnabled && videoButtons[1].alpha == 1, "A downloaded video can be shared")
+    let bar = transport.convert(transport.bounds, to: viewer.view)
+    precondition(bar.maxX <= 875, "The Duo transport stays clear of the rail")
+    precondition(!pageStrip.frame.intersects(bar), "The Duo page indicator stays clear of the transport")
+    precondition(pageStrip.frame.maxX <= 875, "The Duo page indicator stays clear of the rail")
   }
   @available(iOS 18.0, *)
   @MainActor fileprivate static func checkVideoChrome(viewer: NativePhotoZoomViewController, page: NativePhotoPage, buttons videoButtons: [UIButton]) {
