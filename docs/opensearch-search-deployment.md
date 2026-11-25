@@ -59,10 +59,12 @@ replication (which copies no sequence values), the version sequence can be
 far below the versions the index holds. The index then refuses changes to the
 messages it holds: `buzz_search_index_version_conflicts_total` rises and their
 rows stay in `search_outbox`. Rebuild the index (above), or move the sequence
-on by a trillion, more values than the indexer ever takes:
+past any version handed out before. The indexer takes far fewer than a
+million values a second, so a value tied to the clock works after every
+restore or cut-over:
 
 ```sh
-psql -c "SELECT setval('search_index_version', (SELECT last_value FROM search_index_version) + 1000000000000)"
+psql -c "SELECT setval('search_index_version', GREATEST((SELECT last_value FROM search_index_version) + 1000000000000, 10000000000000000 + (EXTRACT(EPOCH FROM now())::bigint * 1000000)))"
 ```
 
 ## What to watch
