@@ -3362,90 +3362,106 @@ void main() {
     );
   }
 
-  test('past one shared request, gap posts settle Active activity even when '
-      'the head deletion read fails', () async {
-    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final ids = [
-      for (var i = 0; i <= kMaxExplicitChannelValues ~/ 2; i++) 'gap-$i',
-    ];
-    final heads = {
-      for (final id in ids)
-        id: _signedPost(now - 100, channel: id, content: id),
-    };
-    final newer = _signedPost(now - 30, channel: ids[0], content: 'newer');
-    final deletion = NostrEvent.fromJson(
-      signNostrEvent(
-        kind: EventKind.deletion,
-        content: '',
-        secretKey: _activityKey,
-        createdAt: now - 50,
-        tags: [
-          ['h', ids[1]],
-          ['e', heads[ids[1]]!.id],
+  // Past one request's channel values, the head deletions go out on their
+  // own after the gap posts; below it, with them.
+  for (final empty in [0, 2]) {
+    test('gap posts settle Active activity even when the head deletion read '
+        'fails ($empty channels without a head)', () async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final ids = [
+        for (var i = 0; i <= kMaxExplicitChannelValues ~/ 2; i++) 'gap-$i',
+      ];
+      final heads = {
+        for (final id in ids.take(ids.length - empty))
+          id: _signedPost(now - 100, channel: id, content: id),
+      };
+      final newer = _signedPost(now - 30, channel: ids[0], content: 'newer');
+      final deletion = NostrEvent.fromJson(
+        signNostrEvent(
+          kind: EventKind.deletion,
+          content: '',
+          secretKey: _activityKey,
+          createdAt: now - 50,
+          tags: [
+            ['h', ids[1]],
+            ['e', heads[ids[1]]!.id],
+          ],
+        ).toMap(),
+      );
+      final session = _FakeRelaySession(
+        memberships: [for (final id in ids) _membership(id, _activityPk)],
+        metadata: [for (final id in ids) _meta(id: id, name: id)],
+        recentMessages: heads.values.toList(),
+        enforceHistoryLimits: true,
+      );
+      final container = _buildContainer(
+        session: session,
+        overrides: [
+          readStateProvider.overrideWith(_ActivityReadState.new),
+          _testPubkeyProvider.overrideWith(_ActivityPubkey.new),
         ],
-      ).toMap(),
-    );
-    final session = _FakeRelaySession(
-      memberships: [for (final id in ids) _membership(id, _activityPk)],
-      metadata: [for (final id in ids) _meta(id: id, name: id)],
-      recentMessages: heads.values.toList(),
-      enforceHistoryLimits: true,
-    );
-    final container = _buildContainer(
-      session: session,
-      overrides: [
-        readStateProvider.overrideWith(_ActivityReadState.new),
-        _testPubkeyProvider.overrideWith(_ActivityPubkey.new),
-      ],
-    );
-    addTearDown(container.dispose);
-    await container.read(channelsProvider.future);
-    final notifier = container.read(channelsProvider.notifier);
-    await notifier.waitForUnreadCatchUp();
-    for (final id in ids) {
-      final shown = container.listen(
-        channelFilterActivityProvider(id),
-        (_, _) {},
       );
-      addTearDown(shown.close);
-    }
-    Future<void> reconnect() async {
-      final batches = session.queryBatches.length;
-      session.setStatus(SessionStatus.reconnecting);
-      session.setStatus(SessionStatus.connected);
-      await _waitUntil(
-        () => session.queryBatches
-            .skip(batches)
-            .any((batch) => batch.every((filter) => filter.since != null)),
-      );
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      final notifier = container.read(channelsProvider.notifier);
       await notifier.waitForUnreadCatchUp();
-      await _settle();
-    }
+      for (final id in ids) {
+        final shown = container.listen(
+          channelFilterActivityProvider(id),
+          (_, _) {},
+        );
+        addTearDown(shown.close);
+      }
+      Future<void> reconnect() async {
+        final batches = session.queryBatches.length;
+        session.setStatus(SessionStatus.reconnecting);
+        session.setStatus(SessionStatus.connected);
+        await _waitUntil(
+          () => session.queryBatches
+              .skip(batches)
+              .any((batch) => batch.every((filter) => filter.since != null)),
+        );
+        await notifier.waitForUnreadCatchUp();
+        await _settle();
+      }
 
-    // Read on another device while disconnected, so every channel has a gap.
-    session.recentMessages = [...heads.values, newer, deletion];
-    for (final id in ids) {
-      (container.read(readStateProvider.notifier) as _ActivityReadState)
-          .markReadThrough(id, now - 15);
-    }
-    session.headDeletionBatchError = RelayException(
-      503,
-      '{"error":"query timed out"}',
-    );
-    await reconnect();
-    expect(notifier.activityFor(ids[0]), (known: true, at: newer.createdAt));
-    expect(notifier.activityFor(ids[1]).known, isFalse);
-    expect(notifier.activityFor(ids[2]).known, isFalse);
+      // Read on another device while disconnected, so every channel has a gap.
+      session.recentMessages = [...heads.values, newer, deletion];
+      for (final id in ids) {
+        (container.read(readStateProvider.notifier) as _ActivityReadState)
+            .markReadThrough(id, now - 15);
+      }
+      session.headDeletionBatchError = RelayException(
+        503,
+        '{"error":"query timed out"}',
+      );
+      final before = session.queryBatches.length;
+      await reconnect();
+      expect(
+        session.queryBatches
+            .skip(before)
+            .where(
+              (batch) =>
+                  _isGapBatch(batch) ||
+                  batch.every((filter) => filter.tags.containsKey('#e')),
+            ),
+        hasLength(empty == 0 ? 2 : 1),
+      );
+      expect(notifier.activityFor(ids[0]), (known: true, at: newer.createdAt));
+      expect(notifier.activityFor(ids[1]).known, isFalse);
+      // Only a separate deletion read can fail on its own.
+      expect(notifier.activityFor(ids[2]).known, empty > 0);
 
-    // Once the deletions are read, only the deleted head stays unknown.
-    session.headDeletionBatchError = null;
-    await reconnect();
-    expect(notifier.activityFor(ids[1]).known, isFalse);
-    expect(notifier.activityFor(ids[2]), (
-      known: true,
-      at: heads[ids[2]]!.createdAt,
-    ));
-  });
+      // Once the deletions are read, only the deleted head stays unknown.
+      session.headDeletionBatchError = null;
+      await reconnect();
+      expect(notifier.activityFor(ids[1]).known, isFalse);
+      expect(notifier.activityFor(ids[2]), (
+        known: true,
+        at: heads[ids[2]]!.createdAt,
+      ));
+    });
+  }
 
   test('live channel events update channel lastMessageAt', () async {
     final session = _FakeRelaySession(

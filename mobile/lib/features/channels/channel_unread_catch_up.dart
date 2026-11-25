@@ -1,8 +1,7 @@
 part of 'channels_provider.dart';
 
 // Channels per gap-head deletion filter: half the relay's per-request `#h`
-// cap, so up to that many gap channels' reads and deletion filter share one
-// request.
+// cap, so two such filters fit in one request.
 const _headDeletionChannels = kMaxExplicitChannelValues ~/ 2;
 
 extension _UnreadCatchUp on ChannelsNotifier {
@@ -429,7 +428,8 @@ extension _UnreadCatchUp on ChannelsNotifier {
     final since = filtersByChannel.values
         .map((filter) => filter.since!)
         .reduce(min);
-    final shared = channelIds.length <= _headDeletionChannels;
+    final shared =
+        channelIds.length + heads.length <= kMaxExplicitChannelValues;
     final failedChannelIds = <String>{};
     List<NostrEvent>? events;
     var headDeletions = const <NostrEvent>[];
