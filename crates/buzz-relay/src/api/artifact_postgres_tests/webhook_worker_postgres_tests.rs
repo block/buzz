@@ -70,7 +70,7 @@ async fn deliveries_become_records_once_per_subscription() {
     f.set_role(archived_channel, &f.owner, "owner").await;
     f.set_role(f.home, &f.peer, "admin").await;
 
-    let opened = r#"event.type == "pull_request" && payload.action == "opened""#;
+    let opened = r#"event.type == "pull_request.opened""#;
     for (key, channel, id, content) in [
         (
             &f.owner,
@@ -187,7 +187,7 @@ async fn deliveries_become_records_once_per_subscription() {
     assert_eq!(
         serde_json::from_str::<Value>(record["content"].as_str().unwrap()).unwrap(),
         json!({
-            "version": 1, "type": "pull_request",
+            "version": 1, "type": "pull_request.opened",
             "delivery_event_id": queued.id.to_hex(),
             "subscription_id": matched.to_string(),
             "subscription_revision": hex::encode(head),

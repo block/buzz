@@ -112,7 +112,7 @@ async fn webhook_subscriptions_need_channel_admins() {
     f.set_role(f.home, &member, "member").await;
     f.set_role(f.private, &member, "member").await;
     let d = Uuid::new_v4();
-    let open = r#"event.type == "pull_request""#;
+    let open = r#"event.type == "pull_request.opened""#;
 
     // Kind-9 writers who are not admins cannot create one, and nothing is stored.
     for key in [&f.peer, &member] {

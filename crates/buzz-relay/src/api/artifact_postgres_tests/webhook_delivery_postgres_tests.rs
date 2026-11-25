@@ -18,7 +18,7 @@ pub(super) async fn with_gateway() -> (Fixture, Keys) {
 
 pub(super) fn delivery(key: &Keys, delivery_id: &str, created_at: u64) -> Event {
     let content = json!({
-        "version": 1, "type": "pull_request", "delivery_id": delivery_id,
+        "version": 1, "type": "pull_request.opened", "delivery_id": delivery_id,
         "payload": {"action": "opened"},
     });
     EventBuilder::new(Kind::Custom(20701), content.to_string())

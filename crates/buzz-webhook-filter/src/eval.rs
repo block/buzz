@@ -228,7 +228,7 @@ mod tests {
         let items: Vec<u64> = (0..200).collect();
         Delivery::new(
             "github",
-            "pull_request",
+            "pull_request.opened",
             &json!({
                 "action": "opened", "number": 42, "big": u64::MAX, "ratio": 1.5,
                 "title": "Fix the build", "labels": [{"name": "sev1"}], "items": items,
@@ -241,7 +241,7 @@ mod tests {
         let delivery = delivery();
         for (source, expected) in [
             (
-                r#"event.provider == "github" && event.type == "pull_request""#,
+                r#"event.provider == "github" && event.type == "pull_request.opened""#,
                 Ok(true),
             ),
             (

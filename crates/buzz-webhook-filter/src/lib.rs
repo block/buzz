@@ -267,7 +267,7 @@ mod tests {
             .join(" && ");
         for source in [
             clauses.as_str(),
-            r#"event.type == "pull_request" && has(payload.action) && payload.action == "opened""#,
+            r#"event.type == "pull_request.opened" && has(payload.action)"#,
             r#"event.provider == "github""#,
             r#"payload.labels.exists(l, l.name.startsWith("sev"))"#,
             r#"size(payload.title) > 3 && payload.title.matches("^\\[P[0-2]\\]")"#,

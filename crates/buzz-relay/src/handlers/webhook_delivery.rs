@@ -192,7 +192,7 @@ mod tests {
 
     fn content(delivery_id: &str) -> String {
         serde_json::json!({
-            "version": 1, "type": "pull_request", "delivery_id": delivery_id,
+            "version": 1, "type": "pull_request.opened", "delivery_id": delivery_id,
             "payload": {"action": "opened"},
         })
         .to_string()
@@ -219,7 +219,7 @@ mod tests {
     /// The tags and content `buzz-ingress-gateway`'s forwarder builds, with an
     /// extra content field a later gateway may add.
     fn gateway_event(integration: Uuid) -> Event {
-        let content = r#"{"version":1,"type":"pull_request","delivery_id":"d-1","payload":{"n":1},"later":true}"#;
+        let content = r#"{"version":1,"type":"pull_request.opened","delivery_id":"d-1","payload":{"n":1},"later":true}"#;
         EventBuilder::new(Kind::Custom(20701), content)
             .tag(Tag::custom(
                 nostr::TagKind::custom("integration"),

@@ -61,11 +61,11 @@ Both expressions read two variables:
 | Variable | Value |
 |----------|-------|
 | `event.provider` | The integration's provider |
-| `event.type` | The provider's event type, e.g. `pull_request` |
+| `event.type` | The delivery's event type (see [Event types](#event-types)), e.g. `pull_request.opened` |
 | `payload` | The provider's JSON body |
 
 ```
-event.type == "pull_request" && has(payload.action) && payload.action == "opened"
+event.type == "pull_request.opened" && "sev1" in payload.pull_request.labels.map(l, l.name)
 ```
 
 The CEL standard library is available, except the `timestamp` and `duration` functions. Each expression is at most 4096 bytes and 64 levels deep, and names no variable but these two. CEL is dynamically typed here: the relay refuses a result that is a literal of the wrong type when the revision arrives, and treats any other wrong result as an evaluation error.
@@ -123,7 +123,7 @@ A delivery carries one provider webhook from the ingress gateway to the relay of
 ```typescript
 type DeliveryContent = {
   version: 1
-  type: string        // Provider event type, e.g. pull_request
+  type: string        // Event type, e.g. pull_request.opened
   delivery_id: string // Same as the delivery tag
   payload: unknown    // The provider's JSON body
 }
@@ -134,6 +134,17 @@ A delivery has exactly one of each of these tags. The integration ID is a UUID, 
 The gateway signs a delivery once and sends the same event on every retry, so its ID stays the same. It sends it with HTTP `POST /events` and a [NIP-98](98.md) header signed by the same key.
 
 A relay MUST accept a delivery only over HTTP, and only from a gateway key its operator configured. The relay keeps no integration records: it trusts that gateway to post each delivery only to the relay host of its integration's community. A delivery reaches only subscriptions of that community that name its integration. It MUST refuse one over WebSocket, where the ephemeral path would broadcast it, and MUST NOT serve a delivery to any client. Other ephemeral-range events are unaffected.
+
+### Event types
+
+The gateway derives `type` from the provider's own names, as `<event>.<action>` where the provider has an action:
+
+| Provider | `type` | Examples |
+|----------|--------|----------|
+| `github` | The `X-GitHub-Event` header, then `.` and the payload's `action` when it has one | `pull_request.opened`, `issues.closed`, `push`, `ping` |
+| `pagerduty` | The payload's `event.event_type`, unchanged | `incident.triggered`, `incident.resolved` |
+
+To match every action of one event, use `event.type.startsWith("pull_request.")`.
 
 ### Intake
 
@@ -180,7 +191,7 @@ When a subscription matches a delivery, the relay publishes one record to the su
 ```typescript
 type RecordContent = {
   version: 1
-  type: string                    // Provider event type
+  type: string                    // The delivery's event type
   delivery_event_id: string       // The delivery's event ID
   subscription_id: string         // The subscription's d
   subscription_revision: string   // The revision evaluated
