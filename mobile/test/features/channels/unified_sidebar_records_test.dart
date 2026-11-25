@@ -1,6 +1,9 @@
+import 'dart:convert';
+
 import 'package:buzz/features/channels/channel_sections/channel_sections_manager.dart';
 import 'package:buzz/features/channels/channel_sort/channel_sort_manager.dart';
 import 'package:buzz/features/channels/channel_sort/channel_sort_storage.dart';
+import 'package:buzz/features/channels/channels_page/messages_display.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -246,4 +249,52 @@ void main() {
       expect(relay.published, isEmpty);
     });
   }
+
+  // Builds before the null-register fix cached desktop's A–Z reset as an
+  // empty store, next to that head's cursor.
+  fakeAsyncTest('an upgraded cache re-reads desktop A–Z from the same head', (
+    clock,
+  ) {
+    final relay = SidebarRelay();
+    final head = relay.event('channel-workspace-sort', {
+      'version': 1,
+      'groups': <String, String>{},
+      'meta': {
+        'v': 1,
+        'g': {
+          'channels': [123, 'device', null],
+        },
+      },
+    }, nowSeconds());
+    relay.stored.add(head);
+    prefs.setString(
+      '${channelSortKey(relay.pubkey, 'wss://relay.example')}:workspace',
+      jsonEncode({
+        'store': const ChannelSortStore().toJson(),
+        'createdAt': head.createdAt,
+        'eventId': head.id,
+      }),
+    );
+    final m = ChannelSortManager(
+      pubkey: relay.pubkey,
+      relayUrl: 'wss://relay.example',
+      prefs: prefs,
+      crypto: ChannelSortCrypto(relay.keys.nsec, relay.pubkey),
+      relaySession: relay.session,
+      signedEventRelay: relay.signer,
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+    expect(m.editable, isFalse);
+    m.initialize();
+    clock.flushMicrotasks();
+
+    expect(
+      const MessagesDisplay().sortFor(m.store, 'channels'),
+      ChannelSortMode.alpha,
+    );
+    expect(relay.published, isEmpty);
+    m.dispose();
+    clock.flushMicrotasks();
+  });
 }
