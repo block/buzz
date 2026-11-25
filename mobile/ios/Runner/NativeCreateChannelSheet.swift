@@ -80,6 +80,7 @@ final class NativeCreateChannelViewController: UITableViewController, UITextView
   private var visibility = "open"
   private var ttl = 604800
   private var busy = false
+  private var error: String?
   private let expiry: [(String, Int)] = [
     ("30 minutes", 1800), ("1 hour", 3600), ("6 hours", 21600), ("12 hours", 43200),
     ("1 day", 86400), ("3 days", 259200), ("7 days", 604800), ("14 days", 1209600), ("30 days", 2592000),
@@ -163,7 +164,7 @@ final class NativeCreateChannelViewController: UITableViewController, UITextView
     let value = (name.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     guard !busy, !value.isEmpty else { return }
     busy = true
-    tableView.tableFooterView = nil
+    setError(nil)
     updateControls()
     var values: [String: Any] = ["name": value, "description": details.text.trimmingCharacters(in: .whitespacesAndNewlines), "visibility": visibility]
     if temporary { values["ttlSeconds"] = ttl }
@@ -172,23 +173,49 @@ final class NativeCreateChannelViewController: UITableViewController, UITextView
 
   func showError(_ error: String) {
     busy = false
+    setError(error)
     updateControls()
-    let label = UILabel()
-    label.text = error
-    label.textColor = .systemRed
-    label.font = .preferredFont(forTextStyle: .footnote)
-    label.adjustsFontForContentSizeCategory = true
-    label.numberOfLines = 0
-    label.textAlignment = .center
-    label.frame = CGRect(x: 20, y: 0, width: max(1, tableView.bounds.width - 40), height: 0)
-    label.sizeToFit()
-    tableView.tableFooterView = label
+    // The footer is below the fold in landscape and at large text sizes. The
+    // reload left the rows below the fold on their estimated height, so a
+    // pass can stop short; it brings more of them on screen for the next.
+    // The worst case is one pass per row, plus one.
+    for _ in 0...tableView.numberOfRows(inSection: 2) {
+      tableView.layoutIfNeeded()
+      tableView.scrollRectToVisible(tableView.rectForFooter(inSection: 2), animated: false)
+    }
     UIAccessibility.post(notification: .announcement, argument: error)
+  }
+
+  private func setError(_ error: String?) {
+    guard self.error != error else { return }
+    self.error = error
+    guard isViewLoaded else { return }
+    UIView.performWithoutAnimation { tableView.reloadSections(IndexSet(integer: 2), with: .none) }
   }
 
   override func numberOfSections(in tableView: UITableView) -> Int { 3 }
   override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { section == 2 ? (temporary ? 3 : 2) : 1 }
   override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? { section == 0 ? "Name" : section == 1 ? "Description · Optional" : nil }
+
+  // The error is the last section's footer, so UIKit gives it the headings'
+  // margins and rewraps it, and centring it in them centres it in the sheet.
+  // A table footer keeps its own x while UIKit stretches it to the table's
+  // width, which pushed the text off-centre and off-screen.
+  override func tableView(_ tableView: UITableView, viewForFooterInSection section: Int) -> UIView? {
+    guard section == 2, let error else { return nil }
+    let footer = UITableViewHeaderFooterView(reuseIdentifier: nil)
+    var content = UIListContentConfiguration.groupedFooter()
+    content.text = error
+    content.textProperties.color = .systemRed
+    content.textProperties.alignment = .center
+    // The first group has no footer, so its footer's height is the space UIKit
+    // leaves under a group. This puts the text that far below the rows. After
+    // a full reload UIKit asks this method for that footer from inside the
+    // query; the guard above answers nil, so it goes no deeper.
+    content.directionalLayoutMargins.top = tableView.rectForFooter(inSection: 0).height
+    footer.contentConfiguration = content
+    return footer
+  }
 
   override func tableView(_ tableView: UITableView, willDisplayHeaderView view: UIView, forSection section: Int) {
     // The editable field owns the label; its visual heading is decorative.
