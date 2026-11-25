@@ -122,6 +122,7 @@ enum NativeTabler {
     "doc.on.doc": 0xea7a, // copy
     "trash": 0xeb41, // trash
     "pin": 0xec9c, // pin
+    "pinned": 0xed60, // pinned
     "pin.slash": 0xed5f, // pinned-off
     "square.and.arrow.up": 0xeb21, // share
     "link": 0xeade, // link

@@ -411,7 +411,6 @@ void main() {
     expect(updatedLabels ?? await nativeMenu.labels.future, [
       'Mark unread',
       'Pin',
-      'Star',
       'Rename',
       'Change workspace',
       'Archive',

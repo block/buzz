@@ -103,6 +103,8 @@ internal class ConversationPopup(private val activity: Activity, messenger: Bina
                                 setPaddingRelative(dp(16), dp(12), dp(16), dp(12))
                                 val icon = when (label) {
                                     "Mark read", "Mark unread" -> R.drawable.menu_mail
+                                    "Pin" -> R.drawable.menu_pinned
+                                    "Unpin" -> R.drawable.menu_pinned_off
                                     "Rename" -> R.drawable.menu_rename
                                     "Archive", "Unarchive" -> R.drawable.menu_archive
                                     "Move to section…" -> R.drawable.menu_folder_input
