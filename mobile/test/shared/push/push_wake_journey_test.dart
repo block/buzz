@@ -663,8 +663,8 @@ void main() {
       // Storage that stalls on one claim past the budget doesn't hold the
       // wake. Messages not yet claimed stay unclaimed for the next wake. A
       // claim that only wins after the wake answered is recorded as shown but
-      // never returned, so its community is reported incomplete and the
-      // caller falls back.
+      // never returned, so its community is reported incomplete, the wake is
+      // marked unreported, and the caller falls back.
       relay.silent = false;
       final friend = relay.person('Friend');
       final sent = [
@@ -697,6 +697,7 @@ void main() {
       final partialIds = partial.notifications.map((n) => n.eventId).toList();
       expect(partialIds, isNot(contains(heldId)));
       expect(partial.failedCommunityIds, [relay.communityId]);
+      expect(partial.unreported, isTrue);
       final rest = await fixture.wake();
       expect(rest.incomplete, isFalse);
       expect(
