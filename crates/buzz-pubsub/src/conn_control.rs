@@ -693,6 +693,7 @@ mod tests {
                 pubkey_bytes: vec![7; 32],
                 until_unix: 1_900_000_000,
                 until_unix_nanos: 0,
+                revoke_through: None,
             };
             let payload = encode_nip_fi_disconnect(&cmd).unwrap();
             fake.push
