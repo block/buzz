@@ -31,6 +31,10 @@ async fn grant(
         None,
     )
     .map_err(|refusal| IngestError::AuthFailed(refusal.into()))?;
+    // Callers validate the signed community first. As at the Git door, a
+    // verified first owner is recorded before repository authorization and
+    // remains recorded even if that command or evidence is later refused.
+    // Otherwise a refused agent approval could leave the key looking human.
     if let Some(owner) = owner {
         match link_agent_owner(state, tenant, &event.pubkey, &owner).await {
             OwnerLink::Linked => {}
