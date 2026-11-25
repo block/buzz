@@ -1,12 +1,19 @@
-//! Members-only live checks for the three Git owner boundaries:
-//! the read door admits an agent only while its owner is admitted, a manage
-//! grant cannot consent to a rebind's destination, and an agent's approval
-//! carrying its owner tag is an agent's, not a person's. Each case has a
-//! control that must succeed on the same relay.
+//! Live checks for the three Git owner boundaries: the read door admits an
+//! agent only while its owner is admitted, a manage grant cannot consent to
+//! a rebind's destination, and an agent's approval carrying its owner tag is
+//! an agent's, not a person's. Each case has a control that must succeed on
+//! the same relay.
 //!
-//! Run against an isolated relay with `BUZZ_REQUIRE_RELAY_MEMBERSHIP=true`,
-//! NIP-OA enabled, `RELAY_OWNER_PUBKEY` set to the key in `BUZZ_E2E_ROOT_SECRET`,
-//! and its Postgres/S3 (same env as membership_or_grant):
+//! Owner admission at the read door is a members-only property: on an open
+//! relay admission is only "not banned", which membership_or_grant's
+//! `banned-owner` covers. So the test first proves the relay's mode, from
+//! whether the removed owner can still authenticate, against the relay's own
+//! `BUZZ_REQUIRE_RELAY_MEMBERSHIP` exported to the test, and runs that denial
+//! only when the relay is members-only.
+//!
+//! Run against an isolated relay with NIP-OA enabled, `RELAY_OWNER_PUBKEY`
+//! set to the key in `BUZZ_E2E_ROOT_SECRET`, and its Postgres/S3 (same env
+//! as membership_or_grant):
 //! `cargo test -p buzz-test-client --test e2e_git git_owner_boundaries -- --ignored --nocapture`.
 
 use buzz_core::governance::{command_builder, Evidence, EvidenceBody, ExpectedHead};
@@ -132,7 +139,7 @@ async fn announce(
 }
 
 #[tokio::test]
-#[ignore = "requires an isolated members-only live relay + MinIO + git"]
+#[ignore = "requires an isolated live relay + MinIO + git"]
 async fn git_owner_boundaries() {
     let community: uuid::Uuid = std::env::var("BUZZ_E2E_GIT_COMMUNITY_ID")
         .expect("BUZZ_E2E_GIT_COMMUNITY_ID required")
@@ -374,6 +381,18 @@ async fn git_owner_boundaries() {
     )
     .await
     .expect("root removes the owner from the community");
+    // The denial needs a members-only relay, where a key outside the
+    // community is refused at authentication. On an open relay admission is
+    // only "not banned" (ban-based owner admission is membership_or_grant's
+    // `banned-owner`). The relay's mode comes from the same variable the
+    // relay reads, and the removed owner's authentication must agree with it.
+    let members_only = std::env::var("BUZZ_REQUIRE_RELAY_MEMBERSHIP").as_deref() == Ok("true");
+    let owner_refused = BuzzTestClient::connect(&ws, &owner).await.is_err();
+    verdict(
+        "read: removed owner is refused exactly on a members-only relay",
+        owner_refused == members_only,
+        format!("members_only={members_only}, owner_refused={owner_refused}"),
+    );
     submit(
         &mut rc,
         signed(
@@ -406,14 +425,18 @@ async fn git_owner_boundaries() {
         (true, false, Some(owner.public_key().to_bytes().to_vec())),
         "precondition: the agent is admitted and still linked; its owner is not admitted"
     );
-    // Outlast the relay's membership cache (10 s) for the re-admitted agent.
-    tokio::time::sleep(std::time::Duration::from_secs(11)).await;
-    let out = clone("read-owner-removed");
-    verdict(
-        "read: agent admitted, owner not admitted, clone denied",
-        !out.status.success(),
-        "clone succeeded".into(),
-    );
+    if members_only {
+        // Outlast the relay's membership cache (10 s) for the re-admitted agent.
+        tokio::time::sleep(std::time::Duration::from_secs(11)).await;
+        let out = clone("read-owner-removed");
+        verdict(
+            "read: agent admitted, owner not admitted, clone denied",
+            !out.status.success(),
+            "clone succeeded".into(),
+        );
+    } else {
+        eprintln!("SKIP read: agent admitted, owner not admitted, clone denied (open relay)");
+    }
 
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
