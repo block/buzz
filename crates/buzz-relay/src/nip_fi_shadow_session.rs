@@ -19,7 +19,7 @@ use nostr::PublicKey;
 use tokio_util::sync::CancellationToken;
 
 use crate::nip_fi_core::NipFiSession;
-use crate::nip_fi_shadow::{Stage, WouldDeny, DENY_SET};
+use crate::nip_fi_shadow::{Stage, WouldDeny};
 use crate::state::AppState;
 
 #[derive(Clone, Copy)]
@@ -53,7 +53,7 @@ impl ShadowSessions {
     /// [`NipFiSession`] matches, at once if admitted or at its admit if still
     /// pending; a session already ended records nothing, so re-sent denies
     /// are idempotent.
-    pub(crate) fn would_close(&self, issuer: &str, pubkey: &[u8]) {
+    pub(crate) fn would_close(&self, issuer: &str, pubkey: &[u8], scope: buzz_auth::DenyScope) {
         let live: Vec<_> = self
             .registered()
             .values()
@@ -62,7 +62,12 @@ impl ShadowSessions {
         for session in live {
             let assertion = &session.assertion;
             if assertion.asserted_key().is_some_and(|key| {
-                NipFiSession::from_assertion(assertion).matches(issuer, &key.to_bytes(), pubkey)
+                NipFiSession::from_assertion(assertion).matches(
+                    issuer,
+                    &key.to_bytes(),
+                    pubkey,
+                    scope,
+                )
             }) {
                 session.revoke();
             }
@@ -167,8 +172,8 @@ impl ShadowSession {
         self.sessions
             .registered()
             .insert(self.id, Arc::downgrade(self));
-        if deny_listed(state, &self.assertion) {
-            self.decide(Err(DENY_SET.by(self.assertion.asserted_key())));
+        if let Some(refusal) = deny_refusal(state, &self.assertion) {
+            self.decide(Err(refusal));
         }
     }
 
@@ -318,19 +323,20 @@ pub(crate) fn upgrade_denied(
     community: &metrics::SharedString,
     assertion: &VerifiedAssertion,
 ) -> bool {
-    let denied = deny_listed(state, assertion);
-    if denied {
-        let verdict = Err(DENY_SET.by(assertion.asserted_key()));
-        crate::nip_fi_shadow::record_for("ws", community.clone(), verdict);
+    let refusal = deny_refusal(state, assertion);
+    if let Some(refusal) = refusal {
+        crate::nip_fi_shadow::record_for("ws", community.clone(), Err(refusal));
     }
-    denied
+    refusal.is_some()
 }
 
-fn deny_listed(state: &AppState, assertion: &VerifiedAssertion) -> bool {
+/// The deny-set step's would-deny: revoked for an active entry, unavailable
+/// while the deny map is still restoring.
+fn deny_refusal(state: &AppState, assertion: &VerifiedAssertion) -> Option<WouldDeny> {
     state
         .nip_fi_deny_map
         .as_deref()
-        .is_some_and(|map| crate::nip_fi_core::assertion_denied(map, assertion, chrono::Utc::now()))
+        .and_then(|map| crate::nip_fi_core::assertion_denied(map, assertion, chrono::Utc::now()))
 }
 
 #[cfg(test)]
@@ -427,7 +433,7 @@ pub(crate) mod tests {
                 "test-issuer",
                 &key,
                 Utc::now() + Duration::hours(1),
-                Utc::now(),
+                Utc::now,
             );
         }
         state.nip_fi_deny_map = Some(Arc::new(map));
@@ -465,9 +471,11 @@ pub(crate) mod tests {
     }
 
     fn revoke(state: &AppState, key: &PublicKey) {
-        state
-            .nip_fi_shadow_sessions
-            .would_close("test-issuer", &key.to_bytes());
+        state.nip_fi_shadow_sessions.would_close(
+            "test-issuer",
+            &key.to_bytes(),
+            buzz_auth::DenyScope::WholeKey,
+        );
     }
 
     // Mutation: recording on a repeated AUTH, or letting the re-sent deny
@@ -481,13 +489,51 @@ pub(crate) mod tests {
             auth(&s, &state, key);
             auth(&s, &state, key);
             revoke(&state, &Keys::generate().public_key());
-            state
-                .nip_fi_shadow_sessions
-                .would_close("other-issuer", &key.to_bytes());
+            state.nip_fi_shadow_sessions.would_close(
+                "other-issuer",
+                &key.to_bytes(),
+                buzz_auth::DenyScope::WholeKey,
+            );
             revoke(&state, &key);
             revoke(&state, &key);
         });
         assert_eq!(records, ["admit/admit", "end/revoked"]);
+    }
+
+    // Mutation: dropping the scope from the shadow match ends the fresh
+    // session too.
+    #[test]
+    fn cutoff_would_close_ends_only_sessions_issued_through_it() {
+        let records = shadow_records(async {
+            let state = shadow_state(None).await;
+            let key = Keys::generate().public_key();
+            let c = Utc::now().timestamp();
+            let issued = |secs| chrono::DateTime::from_timestamp(secs, 0).unwrap();
+            let mut live = Vec::new();
+            for iat in [c, c + 1] {
+                let assertion =
+                    VerifiedAssertion::for_test(Some(key), vec![Utc::now() + Duration::hours(1)])
+                        .with_issued_at_for_test(issued(iat));
+                let s = ShadowSession::start(
+                    &state,
+                    "ws",
+                    crate::nip_fi_shadow::BOUND.into(),
+                    assertion,
+                    Utc::now(),
+                );
+                auth(&s, &state, key);
+                live.push(s);
+            }
+            state.nip_fi_shadow_sessions.would_close(
+                "test-issuer",
+                &key.to_bytes(),
+                buzz_auth::DenyScope::IssuedThrough(c),
+            );
+            let ended = |s: &ShadowSession| matches!(*s.phase.lock().unwrap(), Phase::Ended);
+            assert!(ended(&live[0]), "the session issued at C ends");
+            assert!(!ended(&live[1]), "the session issued at C + 1 stays open");
+        });
+        assert_eq!(records, ["admit/admit", "admit/admit", "end/revoked"]);
     }
 
     // Mismatched and claimless keys are both pairing denials; nothing after a
@@ -521,6 +567,29 @@ pub(crate) mod tests {
         assert_eq!(records, ["deny_set/denied"]);
     }
 
+    /// While the deny map restores, the shadow upgrade records the deny set
+    /// as unavailable, never revoked, for a listed key and an unknown one.
+    #[test]
+    fn restoring_deny_map_records_unavailable_not_revoked() {
+        let key = Keys::generate().public_key();
+        let records = shadow_records(async move {
+            let state = shadow_state(Some(key)).await;
+            state.nip_fi_deny_map.as_deref().unwrap().begin_restore();
+            for target in [key, Keys::generate().public_key()] {
+                let assertion = VerifiedAssertion::for_test(
+                    Some(target),
+                    vec![Utc::now() + Duration::hours(1)],
+                );
+                assert!(upgrade_denied(
+                    &state,
+                    &crate::nip_fi_shadow::BOUND.into(),
+                    &assertion
+                ));
+            }
+        });
+        assert_eq!(records, ["deny_set/unavailable", "deny_set/unavailable"]);
+    }
+
     /// Delivers a real cross-pod disconnect for `key` to a shadow pod.
     pub(crate) fn deliver(state: &AppState, key: &PublicKey) -> buzz_auth::CrossPodMergeResult {
         let msg = buzz_pubsub::NipFiDisconnect {
@@ -528,8 +597,9 @@ pub(crate) mod tests {
             pubkey_bytes: key.to_bytes().to_vec(),
             until_unix: (Utc::now() + Duration::minutes(5)).timestamp(),
             until_unix_nanos: 0,
+            revoke_through: None,
         };
-        match crate::api::nip_fi::apply_nip_fi_disconnect(state, &msg, Utc::now()) {
+        match crate::api::nip_fi::apply_nip_fi_disconnect(state, &msg, Utc::now) {
             crate::api::nip_fi::NipFiDisconnectApplyResult::Applied(merged) => merged,
             other => panic!("disconnect not applied: {other:?}"),
         }
@@ -645,9 +715,11 @@ pub(crate) mod tests {
                 s.observe_pairing(agent);
                 s.observe_deny_set(&state);
             }
-            state
-                .nip_fi_shadow_sessions
-                .would_close("other-issuer", &owner.to_bytes());
+            state.nip_fi_shadow_sessions.would_close(
+                "other-issuer",
+                &owner.to_bytes(),
+                buzz_auth::DenyScope::WholeKey,
+            );
             for s in &admitted {
                 assert!(matches!(*s.phase.lock().unwrap(), Phase::Admitted));
             }

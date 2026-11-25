@@ -648,11 +648,7 @@ class _SliverChannelsList extends HookConsumerWidget {
           ],
       ],
     );
-    Widget content = _ActivityRecovery(
-      activity: activity,
-      toolbarInset: optionsKey == null ? 0 : kToolbarHeight,
-      child: inventory,
-    );
+    Widget content = inventory;
     if (optionsKey != null) {
       if (showMessagesLayoutBounds) {
         content = DecoratedSliver(

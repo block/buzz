@@ -23,6 +23,7 @@ import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
+import 'edit_authority.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
@@ -86,7 +87,6 @@ part 'thread_detail_page/app_bar.dart';
 const _landingHighlightDuration = Duration(seconds: 3);
 const _landingHighlightDelay = Duration(milliseconds: 50);
 const _landingHighlightTransitionDuration = Duration(milliseconds: 300);
-const _landingHighlightOpacity = 0.12;
 
 /// Full-screen thread detail page.
 ///

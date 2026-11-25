@@ -16,13 +16,32 @@ extension on _MessageList {
     final live = saved == null
         ? null
         : ref.watch(channelMessagesProvider(channelId)).value;
-    final head = useMemoized(() {
-      if (channelHead != null || saved == null) return channelHead;
-      return formatTimeline(
-        mergeThreadEvents(saved, live ?? const []),
-        currentPubkey: currentPubkey,
-      ).where((message) => message.id == rootId).firstOrNull;
-    }, [channelHead, saved, live, currentPubkey, rootId]);
+    final events = useMemoized(
+      () => channelHead != null || saved == null
+          ? const <NostrEvent>[]
+          : mergeThreadEvents(saved, live ?? const []),
+      [channelHead == null, saved, live],
+    );
+    final editAuthority = useEditAuthority(ref, events);
+    final head = useMemoized(
+      () {
+        if (channelHead != null || saved == null) return channelHead;
+        return formatTimeline(
+          events,
+          currentPubkey: currentPubkey,
+          agentOwners: editAuthority.owners,
+          relayPubkey: editAuthority.relayKey,
+        ).where((message) => message.id == rootId).firstOrNull;
+      },
+      [
+        channelHead,
+        events,
+        currentPubkey,
+        rootId,
+        editAuthority.owners,
+        editAuthority.relayKey,
+      ],
+    );
     useEffect(() {
       if (opened.value || head == null) return null;
       var cancelled = false;

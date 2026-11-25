@@ -85,6 +85,7 @@ void main() {
         http.Request('GET', Uri.parse('https://relay.example/')),
         maxBytes: 1024,
         timeout: const Duration(milliseconds: 10),
+        call: null,
       ),
       throwsA(isA<TimeoutException>()),
     );
@@ -109,6 +110,7 @@ void main() {
         http.Request('GET', Uri.parse('https://relay.example/')),
         maxBytes: 1024,
         timeout: const Duration(seconds: 5),
+        call: null,
       ),
       throwsA(isA<FormatException>()),
     );

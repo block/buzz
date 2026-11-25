@@ -1,11 +1,7 @@
-import 'package:buzz/features/channels/channels_provider.dart';
-import 'package:buzz/features/channels/channel.dart';
-import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:buzz/features/channels/channel_filter/channel_filter_manager.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_store.dart';
-import 'package:buzz/features/channels/channel_filter/channel_filter_activity.dart';
 import 'package:buzz/features/channels/channel_sort/channel_sort_manager.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -43,81 +39,6 @@ void main() {
         store = store.edit('channels', ChannelFilterMode.all);
         expect(store.countFor('channels'), count);
         expect(store.limitFor('dms'), 5);
-      }
-    },
-  );
-  test(
-    'activity provider reads history and excludes a quiet channel from Active',
-    () async {
-      final keys = nostr.Keys.generate();
-      final old = DateTime.now().millisecondsSinceEpoch ~/ 1000 - 8 * 86400;
-      NostrEvent activityEvent(int at) => NostrEvent.fromJson(
-        nostr.Event.from(
-          kind: EventKind.streamMessage,
-          tags: [
-            ['h', 'quiet-channel'],
-          ],
-          content: 'Earlier activity',
-          secretKey: nostr.Nip19.decode(payload: keys.nsec).data,
-          createdAt: at,
-          verify: false,
-        ).toMap(),
-      );
-      final session = _ActivitySession(activityEvent(old));
-      final container = ProviderContainer(
-        overrides: [
-          channelsProvider.overrideWith(_ActivityChannels.new),
-          relaySessionProvider.overrideWith(() => session),
-        ],
-      );
-      addTearDown(container.dispose);
-      await container.read(channelsProvider.future);
-      final subscription = container.listen(
-        channelFilterActivityProvider('quiet-channel'),
-        (_, _) {},
-      );
-      addTearDown(subscription.close);
-      final activity = await container.read(
-        channelFilterActivityProvider('quiet-channel').future,
-      );
-      expect(session.requests, 1);
-      expect(activity, old);
-      expect(
-        channelMatchesFilter(
-          mode: ChannelFilterMode.active,
-          unread: false,
-          activitySeconds: activity,
-          activityKnown: true,
-          nowSeconds: old + 8 * 86400,
-          windowSeconds: 7 * 86400,
-        ),
-        isFalse,
-      );
-      // A relay-accepted future head must stay unknown, not become known empty.
-      for (final drift in [450, 600, 900]) {
-        session.event = activityEvent(
-          DateTime.now().millisecondsSinceEpoch ~/ 1000 + drift,
-        );
-        container.invalidate(channelFilterActivityProvider('quiet-channel'));
-        await expectLater(
-          container.read(channelFilterActivityProvider('quiet-channel').future),
-          throwsFormatException,
-        );
-        final evidence = container.read(
-          channelFilterActivityProvider('quiet-channel'),
-        );
-        expect(evidence.hasError, isTrue);
-        expect(
-          channelMatchesFilter(
-            mode: ChannelFilterMode.active,
-            unread: false,
-            activitySeconds: evidence.asData?.value,
-            activityKnown: evidence.asData != null,
-            nowSeconds: old + 8 * 86400,
-            windowSeconds: 7 * 86400,
-          ),
-          isTrue,
-        );
       }
     },
   );
@@ -447,36 +368,4 @@ void main() {
       expect(subject.ready, isFalse);
     },
   );
-  test('activity accepts verified events and rejects a forged timestamp', () {
-    final event = signed('activity', 100);
-    expect(verifiedFilterActivity([event.toJson()]), 100);
-    expect(
-      () => verifiedFilterActivity([
-        {...event.toJson(), 'created_at': 200},
-      ]),
-      throwsA(anything),
-    );
-    expect(verifiedFilterActivity([]), isNull);
-  });
-}
-
-class _ActivityChannels extends ChannelsNotifier {
-  @override
-  Future<List<Channel>> build() async => [];
-}
-
-class _ActivitySession extends RelaySessionNotifier {
-  _ActivitySession(this.event);
-  NostrEvent event;
-  int requests = 0;
-  @override
-  SessionState build() => const SessionState(status: SessionStatus.connected);
-  @override
-  Future<List<NostrEvent>> fetchHistory(
-    NostrFilter filter, {
-    Duration timeout = const Duration(seconds: 8),
-  }) async {
-    requests++;
-    return [event];
-  }
 }

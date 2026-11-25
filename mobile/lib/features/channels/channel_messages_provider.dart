@@ -7,6 +7,7 @@ import '../../shared/channels/saved_message_store.dart';
 import '../../shared/relay/relay.dart';
 import 'channel_event_order.dart';
 import 'channel_open_timing.dart';
+import 'edit_authority.dart';
 import 'pending_local_messages_provider.dart';
 import 'saved_channel_page.dart';
 import 'channel_window.dart';
@@ -18,10 +19,6 @@ import 'timeline_message.dart';
 part 'channel_messages_provider/thread_summaries.dart';
 part 'channel_messages_provider/pagination.dart';
 part 'channel_messages_provider/notices.dart';
-
-// Channel history keeps partial reply evidence; full threads stay route-scoped.
-const _maxCachedRepliesPerRoot = 256;
-const _maxCachedReplies = 2048;
 
 /// How long a chat nobody shows keeps its live subscription. A brief cover,
 /// such as a profile pushed over the chat, returns without a catch-up fetch.
@@ -36,7 +33,8 @@ const _channelLiveEventKinds = [
 /// subscription first, then syncs history via the server-assembled channel
 /// window fast path, falling back to the legacy websocket history path when the
 /// relay does not return a valid NIP-CW bounds overlay.
-class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
+class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>>
+    with _SummaryEditAuthority {
   final String channelId;
   final bool flatTimeline;
   void Function()? _unsubscribe;
