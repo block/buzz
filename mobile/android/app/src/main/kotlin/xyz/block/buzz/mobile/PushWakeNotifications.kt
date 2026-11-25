@@ -4,6 +4,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Bundle
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -103,6 +104,7 @@ internal class WakeNotifier(private val context: Context) {
         private const val GENERIC_ID = 2
         private const val GENERIC_TAG = "generic"
         private const val EVENT_ID_EXTRA = "eventId"
+        private const val LOST_EXTRA = "xyz.block.buzz.mobile.lost"
 
         private fun conversationTag(conversationId: String) = "conversation:$conversationId"
     }
@@ -181,11 +183,16 @@ internal class WakeNotifier(private val context: Context) {
                     if (silent) NotificationCompat.GROUP_ALERT_SUMMARY else NotificationCompat.GROUP_ALERT_ALL,
                 )
                 .build()
-            manager.notify(tag, CONVERSATION_ID, notification)
+            AgeRestriction.unlessRestricted { manager.notify(tag, CONVERSATION_ID, notification) }
         }
     }
 
-    fun postGeneric() {
+    /**
+     * [silent] posts it without alerting, beside notifications that did.
+     * [lost] marks it as standing in for a message no wake can name, so
+     * [cancelGeneric] leaves it. Re-posting a marked one keeps the mark.
+     */
+    fun postGeneric(silent: Boolean = false, lost: Boolean = false) {
         val tap = PendingIntent.getActivity(
             context,
             GENERIC_ID,
@@ -193,21 +200,39 @@ internal class WakeNotifier(private val context: Context) {
                 ?: throw IllegalStateException("No launch intent"),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        manager.notify(
-            GENERIC_TAG,
-            GENERIC_ID,
-            NotificationCompat.Builder(context, OTHER_CHANNEL)
-                .setSmallIcon(R.drawable.ic_stat_buzz)
-                .setContentTitle(context.getString(R.string.app_name))
-                .setContentText(context.getString(R.string.notification_new_activity))
-                .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-                .setAutoCancel(true)
-                .setContentIntent(tap)
-                .build(),
-        )
+        val notification = NotificationCompat.Builder(context, OTHER_CHANNEL)
+            .setSmallIcon(R.drawable.ic_stat_buzz)
+            .setContentTitle(context.getString(R.string.app_name))
+            .setContentText(context.getString(R.string.notification_new_activity))
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setAutoCancel(true)
+            .setContentIntent(tap)
+            .setSilent(silent)
+            .addExtras(Bundle().apply { putBoolean(LOST_EXTRA, lost || genericLost()) })
+            .build()
+        AgeRestriction.unlessRestricted { manager.notify(GENERIC_TAG, GENERIC_ID, notification) }
     }
 
-    fun cancelGeneric() = manager.cancel(GENERIC_TAG, GENERIC_ID)
+    /** Leaves a generic notification that stands in for a lost message. */
+    fun cancelGeneric() {
+        if (!genericLost()) manager.cancel(GENERIC_TAG, GENERIC_ID)
+    }
+
+    /**
+     * Posts the generic notification marked lost, so later wakes leave it. A
+     * card this wake already showed ([shownThisWake]), and the user has since
+     * cleared, stays cleared. Returns whether it is showing.
+     */
+    fun keepGeneric(shownThisWake: Boolean, silent: Boolean): Boolean {
+        if (shownThisWake && activeGeneric() == null) return false
+        postGeneric(silent, lost = true)
+        return true
+    }
+
+    private fun genericLost(): Boolean = activeGeneric()?.notification?.extras?.getBoolean(LOST_EXTRA) == true
+
+    private fun activeGeneric() =
+        manager.activeNotifications.firstOrNull { it.tag == GENERIC_TAG && it.id == GENERIC_ID }
 
     private fun existingStyle(tag: String): NotificationCompat.MessagingStyle? =
         manager.activeNotifications

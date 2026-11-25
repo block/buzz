@@ -530,15 +530,20 @@ void reportPushLeaseCleanupError(Object error, StackTrace stackTrace) {
   debugPrintStack(stackTrace: stackTrace);
 }
 
+/// Platforms whose native push code honors a confirmed age restriction.
+bool get _ageRestrictionPlatform =>
+    defaultTargetPlatform == TargetPlatform.iOS ||
+    defaultTargetPlatform == TargetPlatform.android;
+
 /// Restores notification presentation without reading community storage.
 Future<void> restoreAgeRestrictedBuzzNotifications() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  if (!_ageRestrictionPlatform) return;
   await _channel.invokeMethod<void>('restoreAgeRestrictedNotifications');
 }
 
 /// Removes notifications rendered before a confirmed age restriction.
 Future<void> purgeAgeRestrictedBuzzNotifications() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  if (!_ageRestrictionPlatform) return;
   await _channel.invokeMethod<void>('purgeAgeRestrictedNotifications');
 }
 

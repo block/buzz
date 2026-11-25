@@ -52,6 +52,7 @@ Map<String, Object?> pushWakeChannelPayload(PushWakeResult result) => {
       },
   ],
   'incomplete': result.incomplete,
+  'unreported': result.unreported,
 };
 
 /// Answers the native handler's wake requests from a [PushWakeRunner].

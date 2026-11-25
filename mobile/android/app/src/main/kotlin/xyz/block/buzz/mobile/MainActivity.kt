@@ -155,7 +155,7 @@ class MainActivity : FlutterFragmentActivity() {
         identityFilePlugin = IdentityFilePlugin(this, flutterEngine.dartExecutor.binaryMessenger)
         browserAuthPlugin = BrowserAuthPlugin(this, flutterEngine.dartExecutor.binaryMessenger)
         hapticsPlugin = HapticsPlugin(this, flutterEngine.dartExecutor.binaryMessenger)
-        pushNotificationOpenPlugin = PushNotificationOpenPlugin(flutterEngine.dartExecutor.binaryMessenger)
+        pushNotificationOpenPlugin = PushNotificationOpenPlugin(this, flutterEngine.dartExecutor.binaryMessenger)
             .also { it.onLaunch(intent) }
 
         huddleMediaPlugin = HuddleMediaPlugin(
