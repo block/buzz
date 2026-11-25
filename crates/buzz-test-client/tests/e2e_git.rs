@@ -28,6 +28,8 @@ use s3::{Bucket, Region};
 
 #[path = "e2e_git/membership_or_grant.rs"]
 mod membership_or_grant;
+#[path = "e2e_git/owner_boundaries.rs"]
+mod owner_boundaries;
 
 fn relay_http_url() -> String {
     std::env::var("RELAY_HTTP_URL").unwrap_or_else(|_| "http://localhost:3000".to_string())
