@@ -354,6 +354,19 @@ pub(super) async fn ref_updates(
     before: &BTreeMap<String, String>,
     after: &BTreeMap<String, String>,
 ) -> Vec<RefUpdate> {
+    let deadline = tokio::time::Instant::now() + ANCESTRY_TIMEOUT;
+    classify(repo_path, before, after, deadline).await
+}
+
+/// Ancestry checks share one bound, like the other push-path Git work.
+const ANCESTRY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+async fn classify(
+    repo_path: &Path,
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+    deadline: tokio::time::Instant,
+) -> Vec<RefUpdate> {
     let mut updates = Vec::new();
     let names = before
         .keys()
@@ -365,7 +378,7 @@ pub(super) async fn ref_updates(
             continue;
         }
         let is_ancestor =
-            old != ZERO_OID && new != ZERO_OID && is_ancestor(repo_path, old, new).await;
+            old != ZERO_OID && new != ZERO_OID && is_ancestor(repo_path, old, new, deadline).await;
         updates.push(RefUpdate {
             ref_name: name.clone(),
             kind: UpdateKind::classify(old, new, is_ancestor),
@@ -376,9 +389,14 @@ pub(super) async fn ref_updates(
     updates
 }
 
-/// `git merge-base --is-ancestor`; anything but a yes is a no, which can
-/// only make the decision stricter.
-async fn is_ancestor(repo_path: &Path, old: &str, new: &str) -> bool {
+/// `git merge-base --is-ancestor` by `deadline`; anything but a yes in time
+/// is a no, which can only make the decision stricter.
+async fn is_ancestor(
+    repo_path: &Path,
+    old: &str,
+    new: &str,
+    deadline: tokio::time::Instant,
+) -> bool {
     let mut cmd = Command::new("git");
     cmd.args(["merge-base", "--is-ancestor", old, new])
         .current_dir(repo_path)
@@ -386,7 +404,11 @@ async fn is_ancestor(repo_path: &Path, old: &str, new: &str) -> bool {
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
     super::transport::harden_git_env(&mut cmd);
-    matches!(cmd.status().await, Ok(status) if status.success())
+    // On timeout the dropped child is killed (`kill_on_drop`).
+    matches!(
+        tokio::time::timeout_at(deadline, cmd.status()).await,
+        Ok(Ok(status)) if status.success()
+    )
 }
 
 /// Write the cache after a land committed. Losing the race is benign: the
@@ -696,4 +718,59 @@ fn opaque(
         .cloned()
         .map(buzz_conformance::OpaqueId)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use buzz_core::git_perms::UpdateKind;
+    use std::time::Duration;
+
+    async fn git(repo: &Path, args: &[&str]) -> String {
+        let mut cmd = Command::new("git");
+        cmd.current_dir(repo).args(args);
+        super::super::transport::harden_git_env(&mut cmd);
+        let out = cmd.output().await.expect("spawn git");
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    /// A Git that never answers ends at the deadline, as a no: the update is
+    /// classified as the rewrite it might be, never waited on forever.
+    #[tokio::test]
+    async fn a_stalled_ancestry_check_ends_at_its_deadline_as_a_no() {
+        let root = tempfile::TempDir::new().expect("tempdir");
+        let repo = root.path();
+        git(repo, &["init", "--bare", "--quiet"]).await;
+        let tree = git(repo, &["hash-object", "-t", "tree", "-w", "/dev/null"]).await;
+        let id = ["-c", "user.name=r", "-c", "user.email=r@example.invalid"];
+        let old = git(
+            repo,
+            &[&id[..], &["commit-tree", &tree, "-m", "old"]].concat(),
+        )
+        .await;
+        let new = git(
+            repo,
+            &[&id[..], &["commit-tree", &tree, "-p", &old, "-m", "new"]].concat(),
+        )
+        .await;
+        let name = "refs/heads/main".to_string();
+        let before = BTreeMap::from([(name.clone(), old)]);
+        let after = BTreeMap::from([(name, new)]);
+        let soon = || tokio::time::Instant::now() + Duration::from_millis(500);
+        let fast = classify(repo, &before, &after, soon()).await;
+        assert_eq!(fast[0].kind, UpdateKind::FastForward);
+
+        // Opening a FIFO blocks until a writer comes, and none will.
+        let fifo = repo.join("objects/info/alternates");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        assert!(made.expect("spawn mkfifo").success());
+        let stalled = tokio::time::timeout(
+            Duration::from_secs(10),
+            classify(repo, &before, &after, soon()),
+        )
+        .await
+        .expect("the ancestry check ends by its deadline");
+        assert_eq!(stalled[0].kind, UpdateKind::NonFastForward);
+    }
 }
