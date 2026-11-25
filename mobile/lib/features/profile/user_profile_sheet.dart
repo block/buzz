@@ -617,42 +617,45 @@ class _ProfileAvatar extends HookWidget {
         onLongPressHint: animatedAvatar != null && onEnlarge != null
             ? 'enlarge profile photo'
             : null,
-        child: InkWell(
-          key: const ValueKey('selected-profile-avatar'),
-          onLongPress: animatedAvatar == null ? null : onEnlarge,
-          onTap: animatedAvatar == null
-              ? onEnlarge
-              : () => stoppedAnimationUrl.value =
-                    stoppedAnimationUrl.value == animatedAvatar.animationUrl
-                    ? null
-                    : animatedAvatar.animationUrl,
-          child: ExcludeSemantics(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final fallback = transparentFallback
-                    ? const SizedBox.shrink()
-                    : _AvatarFallback(initial: initial);
-                final avatar = isPlaying
-                    ? ProgressiveAnimatedAvatar(
-                        key: ValueKey(animatedAvatar.animationUrl),
-                        descriptor: animatedAvatar,
-                        fallback: fallback,
-                      )
-                    : AvatarImageContent(
-                        imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
-                        preferThumbnail: true,
-                        fallback: fallback,
-                      );
-                return AvatarClip(
-                  isAgent: isAgent,
-                  child: !isAgent || !usesInsetAgentArtwork(avatarUrl)
-                      ? avatar
-                      : Transform.scale(
-                          scale: animatedAvatarArtworkScale,
-                          child: avatar,
-                        ),
-                );
-              },
+        child: Material(
+          type: MaterialType.transparency,
+          child: InkWell(
+            key: const ValueKey('selected-profile-avatar'),
+            onLongPress: animatedAvatar == null ? null : onEnlarge,
+            onTap: animatedAvatar == null
+                ? onEnlarge
+                : () => stoppedAnimationUrl.value =
+                      stoppedAnimationUrl.value == animatedAvatar.animationUrl
+                      ? null
+                      : animatedAvatar.animationUrl,
+            child: ExcludeSemantics(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final fallback = transparentFallback
+                      ? const SizedBox.shrink()
+                      : _AvatarFallback(initial: initial);
+                  final avatar = isPlaying
+                      ? ProgressiveAnimatedAvatar(
+                          key: ValueKey(animatedAvatar.animationUrl),
+                          descriptor: animatedAvatar,
+                          fallback: fallback,
+                        )
+                      : AvatarImageContent(
+                          imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
+                          preferThumbnail: true,
+                          fallback: fallback,
+                        );
+                  return AvatarClip(
+                    isAgent: isAgent,
+                    child: !isAgent || !usesInsetAgentArtwork(avatarUrl)
+                        ? avatar
+                        : Transform.scale(
+                            scale: animatedAvatarArtworkScale,
+                            child: avatar,
+                          ),
+                  );
+                },
+              ),
             ),
           ),
         ),
