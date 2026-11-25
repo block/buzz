@@ -100,8 +100,7 @@ class ChannelSheetContent extends HookWidget {
         .toList();
     final title = data['title'] as String? ?? '';
     final avatarUrl = data['heroAvatarUrl'] as String? ?? '';
-    final zoomArtwork = data['zoomArtwork'];
-    final nativeHero = zoomArtwork is Uint8List && onGeometry != null;
+    final nativeHero = data['hasNativeHero'] == true && onGeometry != null;
     final avatarKey = useMemoized(GlobalKey.new);
     final scroll = useScrollController();
     List<double>? bounds(GlobalKey key) {
@@ -132,8 +131,23 @@ class ChannelSheetContent extends HookWidget {
       return () => scroll.removeListener(scheduleGeometry);
     }, [scroll, nativeHero, title]);
     if (nativeHero) scheduleGeometry();
-    VoidCallback? select(Map<String, dynamic> row) =>
-        row['enabled'] == true ? () => onSelect(row['id'] as String) : null;
+    FutureOr<void> selectContent(String id) {
+      if (nativeHero && details != null) {
+        final copy = switch (id) {
+          'Copy channel name' => (details.name, 'Channel name copied'),
+          'Copy channel ID' => (details.id, 'Channel ID copied'),
+          _ => null,
+        };
+        if (copy case (final text, final message)) {
+          return copyToClipboard(context, text, message: message);
+        }
+      }
+      return onSelect(id);
+    }
+
+    VoidCallback? select(Map<String, dynamic> row) => row['enabled'] == true
+        ? () => selectContent(row['id'] as String)
+        : null;
     return Scaffold(
       backgroundColor: context.colors.surface,
       body: SafeArea(
@@ -157,21 +171,12 @@ class ChannelSheetContent extends HookWidget {
                 nativeTitle: nativeHero,
                 displayName: title,
                 showPrivateLock:
-                    zoomArtwork is Uint8List &&
+                    nativeHero &&
                     !solo &&
                     !details.isDm &&
                     details.visibility == 'private',
                 avatar: nativeHero
                     ? SizedBox.square(key: avatarKey, dimension: 80)
-                    : zoomArtwork is Uint8List
-                    ? ClipOval(
-                        child: Image.memory(
-                          zoomArtwork,
-                          width: 80,
-                          height: 80,
-                          fit: BoxFit.cover,
-                        ),
-                      )
                     : avatarUrl.isEmpty
                     ? null
                     : AvatarImage(

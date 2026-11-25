@@ -68,3 +68,31 @@ class ChannelDetailPage extends ConsumerWidget {
     );
   }
 }
+
+VoidCallback _useCloseChatAfterSettings(BuildContext context) {
+  final route = ModalRoute.of(context);
+  final paneOwner = ConversationPaneScope.isBaseRouteOf(context);
+  final closeOnReveal = useState(false);
+
+  useEffect(() {
+    if (closeOnReveal.value && route?.isCurrent == true) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (route?.isCurrent == true) route!.navigator?.pop();
+      });
+    }
+    return null;
+  }, [route, route?.isCurrent, closeOnReveal.value]);
+
+  return () {
+    if (route == null || !route.isActive) return;
+    if (route.isCurrent) {
+      route.navigator?.pop();
+    } else if (paneOwner || route.isFirst) {
+      // Keep the navigator and its visible page intact until the base chat
+      // is revealed again.
+      if (context.mounted) closeOnReveal.value = true;
+    } else {
+      route.navigator?.removeRoute(route);
+    }
+  };
+}

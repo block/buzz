@@ -18,6 +18,7 @@ dependencies:
   # Fakeable time for presence release ages. Already present transitively via
   # the Flutter SDK; declared here because we import it directly.
   clock: ^1.1.2
+  collection: ^1.19.1
   hooks_riverpod: ^3.0.3
   flutter_hooks: ^0.21.3
   http: ^1.4.0

@@ -206,19 +206,39 @@ void main() {
   );
 
   testWidgets(
-    'native zoom receives separate portrait and title bounds as settings scrolls',
+    'native zoom tracks its hero and copies channel details in place',
     (tester) async {
+      final channel = _channel();
       final frames = <Map<String, Object>>[];
+      final copies = <String>[];
+      final selections = <String>[];
+      final messenger = tester.binding.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copies.add((call.arguments as Map)['text'] as String);
+        }
+        return null;
+      });
+      addTearDown(
+        () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+      );
       await tester.pumpWidget(
         ProviderScope(
           child: MaterialApp(
             theme: AppTheme.light(),
             home: ChannelSheetContent(
               data: {
-                'details': _channel().toJson(),
+                'details': channel.toJson(),
                 'title': 'general',
-                'zoomArtwork': Uint8List(0),
+                'hasNativeHero': true,
                 'sections': [
+                  [
+                    for (final label in [
+                      'Copy channel name',
+                      'Copy channel ID',
+                    ])
+                      {'id': label, 'label': label, 'enabled': true},
+                  ],
                   for (var i = 0; i < 32; i++)
                     [
                       {'id': 'row$i', 'label': 'Row $i', 'enabled': true},
@@ -226,7 +246,7 @@ void main() {
                 ],
               },
               onGeometry: frames.add,
-              onSelect: (_) {},
+              onSelect: selections.add,
             ),
           ),
         ),
@@ -242,6 +262,15 @@ void main() {
       await tester.pump();
       expect((frames.last['portrait'] as List<double>)[1], portrait[1] - 40);
       expect((frames.last['name'] as List<double>)[1], name[1] - 40);
+      for (final field in ['name', 'ID']) {
+        await tester.tap(find.text('Copy channel $field'));
+        await tester.pumpAndSettle();
+        expect(find.text('Channel $field copied'), findsOneWidget);
+        expect(find.byType(ChannelSheetContent), findsOneWidget);
+      }
+      expect(copies, [channel.name, channel.id]);
+      expect(selections, isEmpty);
+      await tester.pumpWidget(const SizedBox.shrink());
     },
   );
 
@@ -253,12 +282,15 @@ void main() {
       final result = Completer<String?>();
       final messenger = tester.binding.defaultBinaryMessenger;
       final portraits = ValueNotifier<Uint8List?>(Uint8List.fromList([1]));
+      final members = Completer<List<ChannelMember>>();
+      final updates = <Map>[];
       Map? updated;
       Map? presented;
       final handoff = <String>[];
       messenger.setMockMethodCallHandler(bridge, (call) async {
         if (call.method == 'update') {
           updated = call.arguments as Map;
+          updates.add(updated!);
         }
         if (call.method == 'sourceRestored') {
           expect((call.arguments as Map)['session'], presented?['session']);
@@ -275,14 +307,7 @@ void main() {
       await tester.pumpWidget(
         _modalApp(
           channel: _channel(type: 'dm'),
-          loadMembers: () async => [
-            for (final pubkey in [_currentPubkey, 'other'])
-              ChannelMember(
-                pubkey: pubkey,
-                role: 'member',
-                joinedAt: DateTime(2025),
-              ),
-          ],
+          loadMembers: () => members.future,
           createChannelActions: (ref) => _FakeChannelActions(ref),
           portraitUpdates: portraits,
           zoomSource: const Rect.fromLTWH(150, 48, 64, 64),
@@ -294,6 +319,20 @@ void main() {
       await tester.pumpAndSettle();
       expect(presented?['zoomSource'], [150, 48, 64, 64]);
       expect(presented?['zoomArtwork'], [1]);
+      members.complete([
+        for (final pubkey in [_currentPubkey, 'other'])
+          ChannelMember(
+            pubkey: pubkey,
+            role: 'member',
+            joinedAt: DateTime(2025),
+          ),
+      ]);
+      await tester.pumpAndSettle();
+      expect(updates, isNotEmpty);
+      expect(
+        updates.where((model) => model.containsKey('zoomArtwork')),
+        isEmpty,
+      );
       final tiles = ((updated ?? presented)!['sections'] as List).first as List;
       expect(tiles, contains(containsPair('symbol', 'person.badge.plus')));
       expect(
@@ -314,6 +353,10 @@ void main() {
       portraits.value = Uint8List.fromList([2, 3]);
       await tester.pumpAndSettle();
       expect(updated?['zoomArtwork'], [2, 3]);
+      expect(
+        updates.where((model) => model.containsKey('zoomArtwork')),
+        hasLength(1),
+      );
       result.complete(null);
       await tester.pumpAndSettle();
       expect(handoff, ['hide', 'restore', 'release']);
@@ -322,6 +365,56 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     },
   );
+
+  for (final failure in ['engine_failed', 'content_timeout']) {
+    testWidgets('settings opens the Flutter page after $failure', (
+      tester,
+    ) async {
+      const bridge = MethodChannel('buzz/channel_actions_sheet');
+      final messenger = tester.binding.defaultBinaryMessenger;
+      final result = Completer<String?>();
+      String? session;
+      messenger.setMockMethodCallHandler(bridge, (call) async {
+        if (call.method != 'present') return null;
+        session = (call.arguments as Map)['session'] as String;
+        return result.future;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(bridge, null));
+      final hidden = <bool>[];
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          loadMembers: () async => [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+          zoomSource: const Rect.fromLTWH(150, 48, 64, 64),
+          setZoomSourceHidden: hidden.add,
+        ),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      expect(session, isNotNull);
+      if (failure == 'content_timeout') {
+        final covered = messenger.handlePlatformMessage(
+          'buzz/channel_actions_sheet/source/$session',
+          const StandardMethodCodec().encodeMethodCall(
+            const MethodCall('covered'),
+          ),
+          null,
+        );
+        await tester.pump();
+        await covered;
+        expect(hidden, [true]);
+      }
+      result.completeError(PlatformException(code: failure));
+      await tester.pumpAndSettle();
+      expect(hidden.last, isFalse);
+      expect(find.byType(ChannelDetailsPage), findsOneWidget);
+      expect(find.text('general').hitTestable(), findsWidgets);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(find.text('Open actions').hitTestable(), findsOneWidget);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+  }
 
   for (final size in [const Size(800, 390), const Size(669, 951)]) {
     testWidgets('Duo cover or portrait $size retains the Flutter sheet', (

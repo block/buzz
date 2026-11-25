@@ -43,6 +43,7 @@ class _NativeChannelActions extends HookConsumerWidget {
     required this.groups,
     this.title,
     this.detailsChannel,
+    this.detailsContext,
     this.zoomSource,
     this.showDetailsBehindPicker,
     this.zoomArtwork,
@@ -57,6 +58,7 @@ class _NativeChannelActions extends HookConsumerWidget {
   final bool solo;
   final MeChatSettings? settings;
   final Channel? detailsChannel;
+  final BuildContext? detailsContext;
   final Rect? zoomSource;
   final VoidCallback? showDetailsBehindPicker;
   final Uint8List? zoomArtwork;
@@ -78,7 +80,8 @@ class _NativeChannelActions extends HookConsumerWidget {
     final imageSources = <String, bool>{
       if (settings?.agentAvatarUrl?.isNotEmpty == true)
         settings!.agentAvatarUrl!: true,
-      if (heroAvatarUrl?.isNotEmpty == true) heroAvatarUrl!: heroIsAgent,
+      if (zoomSource == null && heroAvatarUrl?.isNotEmpty == true)
+        heroAvatarUrl!: heroIsAgent,
       for (final group in groups.whereType<SheetActionSection>())
         for (final row in group.children.whereType<_ChannelMemberPreviewRow>())
           if (row.avatarUrl?.isNotEmpty == true)
@@ -174,7 +177,10 @@ class _NativeChannelActions extends HookConsumerWidget {
             rows.add({
               ...entry(
                 row.member.pubkey,
-                () => row.onMemberTap(context, row.member.pubkey),
+                () => row.onMemberTap(
+                  detailsContext ?? context,
+                  row.member.pubkey,
+                ),
                 id: 'member:${row.member.pubkey}',
               ),
               'member': {
@@ -241,14 +247,13 @@ class _NativeChannelActions extends HookConsumerWidget {
     final artwork = useListenable(portraitUpdates)?.value ?? zoomArtwork;
     final payload = {
       'session': session,
-      'zoomArtwork': ?artwork,
       if (setZoomSourceHidden != null) 'holdsZoomSource': true,
       if (zoomSource case final rect?)
         'zoomSource': [rect.left, rect.top, rect.width, rect.height],
       'solo': solo,
       'title': title ?? '',
       if (detailsChannel != null) 'details': detailsChannel!.toJson(),
-      'heroAvatarUrl': imageSource(heroAvatarUrl),
+      if (zoomSource == null) 'heroAvatarUrl': imageSource(heroAvatarUrl),
       'heroIsAgent': heroIsAgent,
       'memberLabel': memberLabel ?? '',
       'tiles':
@@ -272,6 +277,9 @@ class _NativeChannelActions extends HookConsumerWidget {
       'sections': sections,
     };
     final latestPayload = useRef(payload)..value = payload;
+    final latestArtwork = useRef(artwork)..value = artwork;
+    final sentPayload = useRef<Map<String, Object?>?>(null);
+    final sentArtwork = useRef<Uint8List?>(null);
     useEffect(() {
       var disposed = false;
       final sourceChannel = MethodChannel(
@@ -292,11 +300,30 @@ class _NativeChannelActions extends HookConsumerWidget {
         if (disposed) return;
         final route = ModalRoute.of(context);
         var keepDetails = false;
+        var presenting = true;
+        Future<void> showFallback() async {
+          keepDetails = true;
+          presentationEnded.value = true;
+          setZoomSourceHidden?.call(false);
+          showDetailsBehindPicker!();
+          await WidgetsBinding.instance.endOfFrame;
+          try {
+            await _channelActionsBridge.invokeMethod<void>('sourceRestored', {
+              'session': session,
+            });
+          } on MissingPluginException {
+            // There is no native source to release in this build.
+          }
+        }
+
         try {
+          sentPayload.value = latestPayload.value;
+          sentArtwork.value = latestArtwork.value;
           final selected = await _channelActionsBridge.invokeMethod<String>(
             'present',
-            latestPayload.value,
+            {...latestPayload.value, 'zoomArtwork': ?latestArtwork.value},
           );
+          presenting = false;
           if (disposed || !context.mounted) return;
           presentationEnded.value = true;
           avatarCancellation.value?.value = true;
@@ -318,7 +345,16 @@ class _NativeChannelActions extends HookConsumerWidget {
           }
           if (action != null) await action();
         } on PlatformException catch (error) {
-          if (context.mounted) {
+          if (const {
+                'engine_failed',
+                'content_timeout',
+                'unavailable',
+              }.contains(error.code) &&
+              presenting &&
+              context.mounted &&
+              showDetailsBehindPicker != null) {
+            await showFallback();
+          } else if (context.mounted) {
             ScaffoldMessenger.of(context).showFeedbackSnackBar(
               SnackBar(
                 content: Text(
@@ -329,7 +365,11 @@ class _NativeChannelActions extends HookConsumerWidget {
             );
           }
         } on MissingPluginException {
-          if (route is _NativeChannelSheetRoute && route.hasFallback) {
+          if (presenting &&
+              context.mounted &&
+              showDetailsBehindPicker != null) {
+            await showFallback();
+          } else if (route is _NativeChannelSheetRoute && route.hasFallback) {
             route.unavailable = true;
           } else if (context.mounted) {
             ScaffoldMessenger.of(context).showFeedbackSnackBar(
@@ -362,13 +402,25 @@ class _NativeChannelActions extends HookConsumerWidget {
       };
     }, [session]);
     useEffect(() {
+      final previous = sentPayload.value;
+      if (previous == null || presentationEnded.value) return null;
+      final artworkChanged = !identical(sentArtwork.value, artwork);
+      if (!artworkChanged &&
+          const DeepCollectionEquality().equals(previous, payload)) {
+        return null;
+      }
+      sentPayload.value = payload;
+      sentArtwork.value = artwork;
       unawaited(
         _channelActionsBridge
-            .invokeMethod<void>('update', payload)
+            .invokeMethod<void>('update', {
+              ...payload,
+              if (artworkChanged) 'zoomArtwork': ?artwork,
+            })
             .catchError((Object _) {}),
       );
       return null;
-    }, [payload.toString()]);
+    });
     return openingHuddle.value
         ? const Center(
             child: BuzzLoadingIndicator(semanticLabel: 'Opening Huddle'),

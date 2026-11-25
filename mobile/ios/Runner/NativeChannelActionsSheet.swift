@@ -20,7 +20,7 @@ final class NativeChannelActionsSheetCoordinator: NSObject, UIAdaptivePresentati
   private var needsContentUpdate = false
 
   // The Duo cover reports the phone idiom even when it exposes no fold strip.
-  private static let supportsChatSettingsZoom: Bool = {
+  private static let hasChatSettingsZoomHardware: Bool = {
     guard UIDevice.current.userInterfaceIdiom == .phone else { return false }
     #if targetEnvironment(simulator)
     let model = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"]
@@ -33,6 +33,11 @@ final class NativeChannelActionsSheetCoordinator: NSObject, UIAdaptivePresentati
     #endif
     return model?.hasPrefix("iPhone") == true && model != "iPhone19,4"
   }()
+
+  private static var supportsChatSettingsZoom: Bool {
+    guard #available(iOS 18.0, *) else { return false }
+    return hasChatSettingsZoomHardware && !UIAccessibility.isReduceMotionEnabled
+  }
 
   init(messenger: FlutterBinaryMessenger, parentViewController: UIViewController?) {
     self.messenger = messenger
@@ -52,12 +57,12 @@ final class NativeChannelActionsSheetCoordinator: NSObject, UIAdaptivePresentati
       case "update":
         if request == self.session {
           if let bytes = (data["zoomArtwork"] as? FlutterStandardTypedData)?.data,
-             bytes != (self.payload["zoomArtwork"] as? FlutterStandardTypedData)?.data,
              let image = UIImage(data: bytes) {
             self.zoomAnchor?.image = image
             (self.navigation?.topViewController as? NativeChannelContentController)?.sharedPortrait.image = image
           }
-          self.payload = data.merging(self.payload.filter { $0.key == "zoomArtwork" }) { current, _ in current }
+          self.payload = data.filter { $0.key != "zoomArtwork" }
+          self.payload["hasNativeHero"] = self.zoomAnchor != nil
           if self.contentReady {
             self.contentChannel?.invokeMethod("update", arguments: self.payload)
           } else {
@@ -77,19 +82,30 @@ final class NativeChannelActionsSheetCoordinator: NSObject, UIAdaptivePresentati
         result(nil)
       case "present":
         if data["zoomSource"] != nil && !Self.supportsChatSettingsZoom {
-          result(FlutterMethodNotImplemented)
+          result(FlutterError(code: "unavailable", message: "Chat settings zoom is unavailable", details: nil))
           return
         }
         guard self.pending == nil else { result(FlutterError(code: "busy", message: "Channel actions are already open", details: nil)); return }
         var presenter = self.parent ?? UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
           .filter { $0.activationState == .foregroundActive }.flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController
         while let next = presenter?.presentedViewController { presenter = next }
-        guard let presenter, presenter.view.window != nil, !presenter.isBeingDismissed else {
+        guard let presenter, let window = presenter.view.window, !presenter.isBeingDismissed else {
           result(FlutterError(code: "unavailable", message: "Cannot present channel actions", details: nil)); return
+        }
+        var zoomRect: CGRect?
+        if data["zoomSource"] != nil {
+          guard let frame = data["zoomSource"] as? [CGFloat], frame.count == 4, frame.allSatisfy(\.isFinite) else {
+            result(FlutterError(code: "unavailable", message: "Chat settings source is unavailable", details: nil)); return
+          }
+          let rect = CGRect(x: frame[0], y: frame[1], width: frame[2], height: frame[3])
+          guard frame[2] > 0, frame[3] > 0, window.bounds.contains(rect) else {
+            result(FlutterError(code: "unavailable", message: "Chat settings source is unavailable", details: nil)); return
+          }
+          zoomRect = rect
         }
         self.landingSource?.view.removeFromSuperview()
         self.landingSource = nil
-        self.payload = data
+        self.payload = data.filter { $0.key != "zoomArtwork" }
         self.session = request
         self.pending = result
         self.finishing = false
@@ -98,29 +114,25 @@ final class NativeChannelActionsSheetCoordinator: NSObject, UIAdaptivePresentati
           return
         }
         var portraitImage: UIImage?
-        if let frame = data["zoomSource"] as? [CGFloat], frame.count == 4,
-           let window = presenter.view.window {
-          let rect = CGRect(x: frame[0], y: frame[1], width: frame[2], height: frame[3])
-          if rect.width > 0 && rect.height > 0 {
-            let artwork = (data["zoomArtwork"] as? FlutterStandardTypedData)?.data
-            let image = artwork.flatMap { UIImage(data: $0) } ?? UIGraphicsImageRenderer(size: rect.size).image { context in
-              context.cgContext.translateBy(x: -rect.minX, y: -rect.minY)
-              window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
-            }
-            let anchor = UIImageView(image: image)
-            anchor.frame = presenter.view.convert(rect, from: window)
-            presenter.view.addSubview(anchor)
-            portraitImage = image
-            anchor.contentMode = .scaleAspectFit
-            anchor.isUserInteractionEnabled = false
-            anchor.isAccessibilityElement = false
-            self.zoomAnchor = anchor
-            if let bytes = image.pngData() { self.payload["zoomArtwork"] = FlutterStandardTypedData(bytes: bytes) }
+        if let rect = zoomRect {
+          let artwork = (data["zoomArtwork"] as? FlutterStandardTypedData)?.data
+          let image = artwork.flatMap { UIImage(data: $0) } ?? UIGraphicsImageRenderer(size: rect.size).image { context in
+            context.cgContext.translateBy(x: -rect.minX, y: -rect.minY)
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
           }
+          let anchor = UIImageView(image: image)
+          anchor.frame = presenter.view.convert(rect, from: window)
+          presenter.view.addSubview(anchor)
+          portraitImage = image
+          anchor.contentMode = .scaleAspectFit
+          anchor.isUserInteractionEnabled = false
+          anchor.isAccessibilityElement = false
+          self.zoomAnchor = anchor
+          self.payload["hasNativeHero"] = true
         }
         // Supply the model without loading a second account.
-        let flutter = FlutterViewController(engine: engine, nibName: nil, bundle: nil)
-        let content = NativeChannelContentController(flutter: flutter, data: data)
+        let flutter = ChannelActionsFlutterViewController(engine: engine, nibName: nil, bundle: nil)
+        let content = NativeChannelContentController(flutter: flutter, data: self.payload)
         content.sharedPortrait.image = portraitImage
         content.finishPortraitReturn = { [weak self, weak content] in
           guard let self, let content, !self.finishing else { return }
@@ -130,16 +142,18 @@ final class NativeChannelActionsSheetCoordinator: NSObject, UIAdaptivePresentati
             self.navigation?.dismiss(animated: false) { self.resolve(nil) }
           }
         }
-        content.close = { [weak self] in self?.finish(nil) }
+        let close: () -> Void = { [weak self] in self?.finish(nil) }
+        content.close = close
+        flutter.onEscape = close
         let navigation = ChannelActionsNavigationController(rootViewController: content)
         let isPhone = presenter.traitCollection.userInterfaceIdiom == .phone && presenter.traitCollection.horizontalSizeClass == .compact
         navigation.overrideUserInterfaceStyle = data["dark"] as? Bool == true ? .dark : .light
         if let anchor = self.zoomAnchor {
           navigation.modalPresentationStyle = .overFullScreen
-          if #available(iOS 18.0, *), !UIAccessibility.isReduceMotionEnabled {
+          if #available(iOS 18.0, *) {
             let options = UIViewController.Transition.ZoomOptions()
             options.interactiveDismissShouldBegin = { [weak navigation] context in
-              guard let navigation else { return false }
+              guard let navigation, !UIAccessibility.isReduceMotionEnabled else { return false }
               let bar = navigation.navigationBar
               let inBar = bar.convert(bar.bounds, to: navigation.view).contains(context.location)
               let rtl = navigation.view.effectiveUserInterfaceLayoutDirection == .rightToLeft
@@ -182,6 +196,11 @@ final class NativeChannelActionsSheetCoordinator: NSObject, UIAdaptivePresentati
         DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: timeout)
         let present = {
           guard self.session == request, !self.finishing else { return }
+          guard presenter.view.window != nil, !presenter.isBeingDismissed, presenter.presentedViewController == nil,
+                zoomRect == nil || Self.supportsChatSettingsZoom else {
+            self.resolve(FlutterError(code: "unavailable", message: "Cannot present channel actions", details: nil))
+            return
+          }
           presenter.present(navigation, animated: !UIAccessibility.isReduceMotionEnabled) {
             navigation.presentationController?.delegate = self
           }
@@ -208,6 +227,7 @@ final class NativeChannelActionsSheetCoordinator: NSObject, UIAdaptivePresentati
       return false
     }
     contentEngine = engine
+    engine.registrar(forPlugin: "BuzzToastLayer")?.register(ToastLayerFactory(), withId: "buzz/toast_layer")
     // Flutter requires run() before installing message handlers.
     let bridge = FlutterMethodChannel(name: "buzz/channel_sheet_content", binaryMessenger: engine.binaryMessenger)
     contentChannel = bridge
@@ -298,9 +318,25 @@ final class NativeChannelActionsSheetCoordinator: NSObject, UIAdaptivePresentati
   }
 }
 
+private final class ChannelActionsFlutterViewController: FlutterViewController {
+  var onEscape: (() -> Void)?
+
+  override func accessibilityPerformEscape() -> Bool {
+    // Flutter's default sends popRoute to this engine's single root route.
+    guard let onEscape else { return super.accessibilityPerformEscape() }
+    onEscape()
+    return true
+  }
+}
+
 private final class ChannelActionsNavigationController: UINavigationController {
   var onDismiss: (() -> Void)?
   private(set) var hasAppeared = false
+
+  override func viewWillAppear(_ animated: Bool) {
+    super.viewWillAppear(animated)
+    view.accessibilityViewIsModal = onDismiss != nil
+  }
 
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
@@ -344,6 +380,7 @@ private final class NativeChannelContentController: UIViewController, UIGestureR
   private var isLanding = false
   private var measuredHero = false
   private var scrollOffset: CGFloat = 0
+  private let cropSurface = UIView()
   private let pullMask = CAShapeLayer()
   private var pullBackdrop: UIView?
   private lazy var pull = ChannelSettingsPan(target: self, action: #selector(pullSettings(_:)))
@@ -376,9 +413,23 @@ private final class NativeChannelContentController: UIViewController, UIGestureR
     }
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+  override func accessibilityPerformEscape() -> Bool {
+    guard let close else { return false }
+    close()
+    return true
+  }
+
   override func viewDidLoad() {
     super.viewDidLoad()
-    view.backgroundColor = background
+    view.backgroundColor = isZoom ? .clear : background
+    let contentSurface: UIView = isZoom ? cropSurface : view
+    if isZoom {
+      cropSurface.frame = view.bounds
+      cropSurface.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+      cropSurface.backgroundColor = background
+      view.addSubview(cropSurface)
+    }
     let dismiss = UIAction { [weak self] _ in
       self?.close?()
     }
@@ -402,7 +453,7 @@ private final class NativeChannelContentController: UIViewController, UIGestureR
     addChild(flutter)
     flutter.view.translatesAutoresizingMaskIntoConstraints = false
     flutter.view.backgroundColor = background
-    view.addSubview(flutter.view)
+    contentSurface.addSubview(flutter.view)
     contentPan.cancelsTouchesInView = false
     contentPan.delaysTouchesBegan = false
     contentPan.delaysTouchesEnded = false
@@ -415,21 +466,23 @@ private final class NativeChannelContentController: UIViewController, UIGestureR
       flutter.view.addGestureRecognizer(contentPan)
     }
     NSLayoutConstraint.activate([
-      flutter.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-      flutter.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-      flutter.view.topAnchor.constraint(equalTo: isZoom ? view.topAnchor : view.safeAreaLayoutGuide.topAnchor),
-      flutter.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+      flutter.view.leadingAnchor.constraint(equalTo: contentSurface.leadingAnchor),
+      flutter.view.trailingAnchor.constraint(equalTo: contentSurface.trailingAnchor),
+      flutter.view.topAnchor.constraint(equalTo: isZoom ? contentSurface.topAnchor : view.safeAreaLayoutGuide.topAnchor),
+      flutter.view.bottomAnchor.constraint(equalTo: contentSurface.bottomAnchor),
     ])
     flutter.didMove(toParent: self)
     if isZoom {
       heroOverlay.isUserInteractionEnabled = false
       heroOverlay.accessibilityElementsHidden = true
       heroOverlay.clipsToBounds = true
-      view.addSubview(heroOverlay)
+      cropSurface.addSubview(heroOverlay)
       heroOverlay.addSubview(sharedPortrait)
       heroOverlay.addSubview(sharedName)
       sharedPortrait.contentMode = .scaleAspectFit
       headerMaterial.isUserInteractionEnabled = false
+      headerMaterial.clipsToBounds = true
+      headerMaterial.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
       headerFade.colors = [UIColor.black.cgColor, UIColor.black.cgColor, UIColor.clear.cgColor]
       headerFade.locations = [0, 0.55, 1]
       headerMaterial.layer.mask = headerFade
@@ -488,20 +541,24 @@ private final class NativeChannelContentController: UIViewController, UIGestureR
         backdrop.isUserInteractionEnabled = false
         container.insertSubview(backdrop, belowSubview: card)
         pullBackdrop = backdrop
+        pullMask.removeAnimation(forKey: "return")
       }
       pullBackdrop?.alpha = min(0.13, progress * 0.6)
-      card.backgroundColor = background
+      card.backgroundColor = .clear
       let scale = 1 - 0.55 * progress
       CATransaction.begin()
       CATransaction.setDisableActions(true)
-      pullMask.frame = card.bounds
       // Scale the content uniformly, then crop the last rows independently.
       // In screen coordinates the visible height falls with scale squared.
       let bounds = card.bounds
       let visibleBounds = CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width,
                                  height: bounds.height * scale)
-      pullMask.path = UIBezierPath(roundedRect: visibleBounds, cornerRadius: min(48, distance * 0.5)).cgPath
-      card.layer.mask = pullMask
+      let radius = min(48, distance * 0.5)
+      pullMask.frame = cropSurface.bounds
+      pullMask.path = UIBezierPath(roundedRect: visibleBounds, cornerRadius: radius).cgPath
+      headerMaterial.layer.cornerRadius = radius
+      // UIKit's live blur and navigation glass must stay outside the mask.
+      cropSurface.layer.mask = pullMask
       CATransaction.commit()
       let bottomInset = progress * window.safeAreaInsets.bottom
       let top = bounds.height - visibleBounds.height * scale - bottomInset
@@ -513,15 +570,31 @@ private final class NativeChannelContentController: UIViewController, UIGestureR
       finishPortraitReturn?()
     case .ended, .cancelled, .failed:
       let backdrop = pullBackdrop
-      pullBackdrop = nil
-      UIView.animate(withDuration: 0.32, delay: 0, usingSpringWithDamping: 0.9,
+      let duration = 0.32
+      if let startPath = pullMask.presentation()?.path ?? pullMask.path {
+        let endPath = UIBezierPath(roundedRect: cropSurface.bounds, cornerRadius: 0.01).cgPath
+        let crop = CASpringAnimation(keyPath: "path")
+        crop.fromValue = startPath
+        crop.toValue = endPath
+        crop.stiffness = 230
+        crop.damping = 27.3
+        crop.duration = duration
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        pullMask.path = endPath
+        pullMask.add(crop, forKey: "return")
+        CATransaction.commit()
+      }
+      UIView.animate(withDuration: duration, delay: 0, usingSpringWithDamping: 0.9,
                      initialSpringVelocity: 0, options: [.beginFromCurrentState]) {
         backdrop?.alpha = 0
         card.transform = .identity
-        self.pullMask.path = UIBezierPath(roundedRect: card.bounds, cornerRadius: 0).cgPath
+        self.headerMaterial.layer.cornerRadius = 0
       } completion: { _ in
         backdrop?.removeFromSuperview()
-        card.layer.mask = nil
+        guard self.pullBackdrop === backdrop else { return }
+        self.pullBackdrop = nil
+        self.cropSurface.layer.mask = nil
       }
     default: break
     }
@@ -532,18 +605,19 @@ private final class NativeChannelContentController: UIViewController, UIGestureR
   func landPortrait(at target: CGRect, in window: UIWindow, completion: @escaping () -> Void) {
     guard let card = navigationController?.view, let container = card.superview,
           target.width > 0 else { completion(); return }
-    let startPath = card.layer.mask === pullMask ? pullMask.path : nil
-    pullMask.frame = card.bounds
-    card.layer.mask = pullMask
+    let startPath = pullMask.path ?? UIBezierPath(roundedRect: cropSurface.bounds, cornerRadius: 1).cgPath
+    pullMask.frame = cropSurface.bounds
+    cropSurface.layer.mask = pullMask
     let portrait = sharedPortrait.convert(sharedPortrait.bounds, to: card)
     guard portrait.width > 0 else { completion(); return }
     let destination = window.convert(target, to: container)
     let scale = destination.width / portrait.width
     let dx = destination.midX - card.center.x - (portrait.midX - card.bounds.midX) * scale
     let dy = destination.midY - card.center.y - (portrait.midY - card.bounds.midY) * scale
-    let endPath = UIBezierPath(roundedRect: portrait, cornerRadius: portrait.width / 2).cgPath
+    let cropPortrait = sharedPortrait.convert(sharedPortrait.bounds, to: cropSurface)
+    let endPath = UIBezierPath(roundedRect: cropPortrait, cornerRadius: cropPortrait.width / 2).cgPath
     let crop = CABasicAnimation(keyPath: "path")
-    crop.fromValue = startPath ?? UIBezierPath(roundedRect: card.bounds, cornerRadius: 1).cgPath
+    crop.fromValue = startPath
     crop.toValue = endPath
     let duration = 0.34
     crop.duration = duration
@@ -558,7 +632,7 @@ private final class NativeChannelContentController: UIViewController, UIGestureR
     // Flutter paints the sheet surface. Fade the rows, subtitle and native
     // name together before the compact chat caption becomes visible.
     card.backgroundColor = .clear
-    view.backgroundColor = .clear
+    cropSurface.backgroundColor = .clear
     UIView.animate(withDuration: duration * 0.46, delay: 0, options: [.curveEaseOut]) {
       self.flutter.view.alpha = 0
       self.sharedName.alpha = 0

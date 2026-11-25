@@ -607,8 +607,7 @@ class RunnerTests: XCTestCase {
     XCTAssertTrue(bar.view().bounds.contains(title.frame))
     XCTAssertFalse(bar.view().subviews.contains { $0 is UIImageView })
     XCTAssertEqual(title.accessibilityLabel, "Open settings for Alice")
-    XCTAssertTrue(title.accessibilityActivate())
-    XCTAssertEqual(messenger.actions, ["title"])
+    assertTitlePress(title, in: bar.view(), messenger: messenger)
     // The app appearance can differ from the surrounding iOS appearance.
     for dark in [true, false, true] {
       parent.overrideUserInterfaceStyle = dark ? .light : .dark
@@ -655,8 +654,7 @@ class RunnerTests: XCTestCase {
     bar.view().layoutIfNeeded()
     let animatedTitle = try XCTUnwrap(bar.view().subviews.compactMap { $0 as? NavigationTitleView }.first)
     XCTAssertEqual(animatedTitle.frame.minY, 62 + 56 - 14)
-    XCTAssertTrue(animatedTitle.accessibilityActivate())
-    XCTAssertEqual(messenger.actions, ["title", "title"])
+    assertTitlePress(animatedTitle, in: bar.view(), messenger: messenger)
     var groupArguments = arguments
     groupArguments["title"] = String(repeating: "Long participant name, ", count: 12)
     groupArguments["titleMaxWidth"] = 280.0
@@ -926,8 +924,7 @@ class RunnerTests: XCTestCase {
           XCTAssertTrue(title.accessibilityLabel?.contains(explanation) == true)
           XCTAssertFalse(descendants(of: title.contentView).contains { $0 is UIButton }, "Retention stays text-only")
         }
-        XCTAssertTrue(title.accessibilityActivate())
-        XCTAssertEqual(messenger.actions.last, "title")
+        assertTitlePress(title, in: bar.view(), messenger: messenger)
       }
       args["subtitle"] = "Online"
       args.removeValue(forKey: "ephemeralLabel")
@@ -1012,8 +1009,7 @@ class RunnerTests: XCTestCase {
       XCTAssertGreaterThanOrEqual(label.bounds.width, label.intrinsicContentSize.width)
       XCTAssertGreaterThanOrEqual(label.bounds.height, label.intrinsicContentSize.height)
     }
-    XCTAssertTrue(title.accessibilityActivate())
-    XCTAssertEqual(messenger.actions.last, "title")
+    assertTitlePress(title, in: bar.view(), messenger: messenger)
   }
 
   @MainActor
@@ -1038,8 +1034,7 @@ class RunnerTests: XCTestCase {
       title.layoutIfNeeded()
       XCTAssertEqual(title.layer.cornerRadius, title.bounds.height / 2)
       XCTAssertEqual(descendants(of: title.contentView).compactMap { $0 as? UILabel }.count, 2)
-      XCTAssertTrue(title.accessibilityActivate())
-      XCTAssertEqual(messenger.actions.last, "title")
+      assertTitlePress(title, in: bar.view(), messenger: messenger)
       for offset in [0.0, 6.0, 52.0, 0.0, -20.0] {
         messenger.scroll(to: offset)
         XCTAssertEqual(material.alpha, 1)
@@ -2474,6 +2469,7 @@ private final class NavigationTestMessenger: NSObject, FlutterBinaryMessenger {
   var metrics: [String: Any]?
   var avatarBounds: [String: Any]?
   var actions: [String] = []
+  var titlePresses: [CGRect] = []
   func send(onChannel channel: String, message: Data?) {
     guard let message else { return }
     let call = FlutterStandardMethodCodec.sharedInstance().decodeMethodCall(message)
@@ -2481,6 +2477,9 @@ private final class NavigationTestMessenger: NSObject, FlutterBinaryMessenger {
     if call.method == "metrics" { metrics = call.arguments as? [String: Any] }
     if call.method == "avatarBounds" { avatarBounds = call.arguments as? [String: Any] }
     if call.method == "action", let action = call.arguments as? String { actions.append(action) }
+    if call.method == "titlePressed", let frame = call.arguments as? [CGFloat], frame.count == 4 {
+      titlePresses.append(CGRect(x: frame[0], y: frame[1], width: frame[2], height: frame[3]))
+    }
   }
   func send(onChannel channel: String, message: Data?, binaryReply callback: FlutterBinaryReply?) {
     send(onChannel: channel, message: message)
@@ -2519,6 +2518,17 @@ private final class NavigationTestMessenger: NSObject, FlutterBinaryMessenger {
     )
     handler?(message) { _ in }
   }
+}
+
+@MainActor
+private func assertTitlePress(_ title: NavigationTitleView, in container: UIView,
+                              messenger: NavigationTestMessenger, file: StaticString = #filePath, line: UInt = #line) {
+  let frame = title.convert(title.bounds, to: container)
+  let previous = messenger.titlePresses
+  let actions = messenger.actions
+  XCTAssertTrue(title.accessibilityActivate(), file: file, line: line)
+  XCTAssertEqual(messenger.titlePresses, previous + [frame], file: file, line: line)
+  XCTAssertEqual(messenger.actions, actions, file: file, line: line)
 }
 
 private final class RejectedCommunityEntryPresenter: UIViewController {

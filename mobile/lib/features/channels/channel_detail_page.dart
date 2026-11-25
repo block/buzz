@@ -679,6 +679,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     final openingDetails = useRef(false);
     final portraitUpdates = useValueNotifier<Uint8List?>(null);
     final portraitRevision = useRef(0);
+    final closeAfterSettings = _useCloseChatAfterSettings(context);
     Future<Uint8List?> capturePortrait(double pixelRatio) async {
       final boundary = portraitCaptureKey.currentContext?.findRenderObject();
       if (boundary is! RenderRepaintBoundary || !boundary.hasSize) return null;
@@ -706,15 +707,27 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     }
 
     Future<void> openChannelDetails([Rect? bounds]) async {
-      if (!iosSettingsZoom) bounds = null;
-      if (iosSettingsZoom && openingDetails.value) return;
-      openingDetails.value = iosSettingsZoom;
+      if (openingDetails.value) return;
+      openingDetails.value = true;
+      final chatRoute = ModalRoute.of(context);
       try {
+        final box = headerKey.currentContext?.findRenderObject();
+        final source =
+            bounds ??
+            (box is RenderBox && box.hasSize
+                ? box.localToGlobal(Offset.zero) & box.size
+                : null);
+        final zoom =
+            source != null &&
+            !source.isEmpty &&
+            !MediaQuery.disableAnimationsOf(context) &&
+            await supportsChatSettingsZoom();
+        if (!context.mounted || chatRoute?.isCurrent == false) return;
         Uint8List? artwork;
         final pixelRatio = View.of(context).devicePixelRatio;
         // AVPlayerLayer is outside Flutter's repaint boundary. Use the same
         // poster that this portrait displays when playback is paused.
-        if (bounds != null &&
+        if (zoom &&
             dmHeader.avatars.any(
               (avatar) => DmHeaderPortrait.playsAnimation(
                 avatar.imageUrl,
@@ -725,25 +738,29 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           await WidgetsBinding.instance.endOfFrame;
           if (!context.mounted) return;
         }
-        if (bounds != null) artwork = await capturePortrait(pixelRatio);
-        if (!context.mounted) return;
+        if (zoom) artwork = await capturePortrait(pixelRatio);
+        if (!context.mounted || chatRoute?.isCurrent == false) return;
         portraitUpdates.value = artwork;
-        final box = headerKey.currentContext?.findRenderObject();
         VoidCallback? refreshSoloDetails;
         final shouldClose = await showChannelDetailsPage(
           zoomArtwork: artwork,
           portraitUpdates: portraitUpdates,
-          setZoomSourceHidden: (hidden) {
-            if (context.mounted) hideSettingsSource.value = hidden;
-          },
-          headerArtwork: iosSettingsZoom
-              ? _headerArtwork(dmHeader.avatars)
+          setZoomSourceHidden: zoom
+              ? (hidden) {
+                  if (context.mounted) hideSettingsSource.value = hidden;
+                }
               : null,
-          source:
-              bounds ??
-              (box is RenderBox
-                  ? box.localToGlobal(Offset.zero) & box.size
-                  : null),
+          headerArtwork: zoom && dmHeader.avatars.isNotEmpty
+              ? Builder(
+                  builder: (context) => MediaQuery(
+                    data: MediaQuery.of(
+                      context,
+                    ).copyWith(disableAnimations: true),
+                    child: _headerArtwork(dmHeader.avatars),
+                  ),
+                )
+              : null,
+          source: zoom ? source : null,
           context: context,
           channel: resolvedChannel,
           currentPubkey: currentPubkey,
@@ -761,7 +778,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
               .store
               .assignments[resolvedChannel.id],
           personalChat: personalChat,
-          sheetSoloSettings: personalChat && iosSettingsZoom
+          sheetSoloSettings: personalChat && zoom
               ? (row, present) => StatefulBuilder(
                   builder: (context, rebuild) {
                     refreshSoloDetails = () {
@@ -781,11 +798,9 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                 )
               : null,
         );
-        if (shouldClose == true && context.mounted) {
-          Navigator.of(context).pop();
-        }
+        if (shouldClose == true) closeAfterSettings();
       } finally {
-        if (iosSettingsZoom && context.mounted) {
+        if (context.mounted) {
           hideSettingsSource.value = false;
           portraitRevision.value++;
           portraitUpdates.value = null;
@@ -832,7 +847,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       relaySummaries: timeline.summaries,
     );
 
-    return FrostedScaffold(
+    final page = FrostedScaffold(
       extendHeaderUnderRail: true,
       foreground:
           !resolvedChannel.isForum &&
@@ -1163,5 +1178,6 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         ],
       ),
     );
+    return TickerMode(enabled: !hideSettingsSource.value, child: page);
   }
 }
