@@ -4968,11 +4968,14 @@ mod tests {
 
         let mut wire = Vec::new();
         if scan_first {
-            assert_eq!(registry.disconnect_nip_fi("test-issuer", &key), 1);
+            assert_eq!(
+                registry.disconnect_nip_fi("test-issuer", &key, buzz_auth::DenyScope::WholeKey),
+                1
+            );
         }
         deny_audio_authorization(&mut wire, &control, &mut terminal_rx).await;
         if !scan_first {
-            registry.disconnect_nip_fi("test-issuer", &key);
+            registry.disconnect_nip_fi("test-issuer", &key, buzz_auth::DenyScope::WholeKey);
         }
         (wire, terminal_rx)
     }
@@ -6895,8 +6898,7 @@ mod tests {
 
         if let Some(key) = denied_key {
             let until = chrono::Utc::now() + chrono::Duration::seconds(3600);
-            let result =
-                deny_map.merge_cross_pod_deny("test-issuer", key, until, chrono::Utc::now());
+            let result = deny_map.merge_cross_pod_deny("test-issuer", key, until, chrono::Utc::now);
             assert!(
                 matches!(result, buzz_auth::CrossPodMergeResult::Merged),
                 "audio_deny_state: deny entry must be inserted for test setup"
@@ -7181,7 +7183,7 @@ mod tests {
     //   - `after_deny_set_check_passed` hook holds the handler AFTER the terminal
     //     sender is registered and the deny-set check has passed (so the direct
     //     map-denial branch is not what produces the frame).
-    //   - Test calls `registry.disconnect_nip_fi("test-issuer", &pubkey)` while the hook holds.
+    //   - Test calls `registry.disconnect_nip_fi("test-issuer", &pubkey, buzz_auth::DenyScope::WholeKey)` while the hook holds.
     //     `CommunityConnectionControl::disconnect_nip_fi` enqueues the denial frame
     //     on `terminal_frame_tx`, publishes `AuthorizationDenied`, then cancels.
     //   - Hook is released; handler observes cancellation, drains the denial
@@ -7345,9 +7347,11 @@ mod tests {
         // CommunityConnectionControl::disconnect_nip_fi enqueues the denial frame on
         // the registered terminal sender, publishes AuthorizationDenied, then cancels.
         let pubkey_bytes = key.public_key().to_bytes().to_vec();
-        let closed = state
-            .community_connections
-            .disconnect_nip_fi("test-issuer", &pubkey_bytes);
+        let closed = state.community_connections.disconnect_nip_fi(
+            "test-issuer",
+            &pubkey_bytes,
+            buzz_auth::DenyScope::WholeKey,
+        );
         assert_eq!(
             closed, 1,
             "W_admin_disconnect: registry scan must find exactly 1 audio session \
@@ -7423,13 +7427,34 @@ mod tests {
     //   B) Remove `set_terminal_frame_sender` entirely → same outcome as (A).
     #[tokio::test]
     async fn w_admin_disconnect_at_deny_check_delivers_payload_then_terminates() {
+        w_admin_disconnect_at_deny_check_body(false).await;
+    }
+
+    // Cutoff variants: the session registers through production
+    // `from_assertion` with a signed `iat` two minutes before registration.
+    // `iat == C` is seen by the scan, cancelled and never admitted;
+    // `iat == C + 0.5` is skipped, admitted and survives redelivery.
+    #[tokio::test]
+    async fn w_cutoff_disconnect_at_deny_check_cancels_old_token() {
+        w_admin_disconnect_at_deny_check_body(true).await;
+    }
+
+    async fn w_admin_disconnect_at_deny_check_body(cutoff: bool) {
         use buzz_auth::VerifiedAssertion;
         use chrono::{Duration, Utc};
         use std::sync::Arc;
 
         let key = nostr::Keys::generate();
         let deadline = Utc::now() + Duration::hours(1);
-        let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+        let c = Utc::now().timestamp() - 120;
+        let mut assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+        let mut scope = buzz_auth::DenyScope::WholeKey;
+        if cutoff {
+            // iat == C: on the revoked side of the cutoff.
+            assertion =
+                assertion.with_issued_at_for_test(chrono::DateTime::from_timestamp(c, 0).unwrap());
+            scope = buzz_auth::DenyScope::IssuedThrough(c);
+        }
 
         // State with deny map; key is absent (not denied) — the check must pass.
         let state = audio_deny_state(None).await;
@@ -7554,12 +7579,21 @@ mod tests {
 
         // Simulate admin-disconnect at the exact old-gap position.
         let pubkey_bytes = key.public_key().to_bytes().to_vec();
-        let closed = state
-            .community_connections
-            .disconnect_nip_fi("test-issuer", &pubkey_bytes);
+        if cutoff {
+            let entry = buzz_auth::DenyEntry {
+                until: Utc::now() + Duration::hours(1),
+                scope,
+            };
+            let deny_map = state.nip_fi_deny_map.as_ref().unwrap();
+            deny_map.merge_cross_pod_deny("test-issuer", &key.public_key(), entry, Utc::now);
+        }
+        let closed =
+            state
+                .community_connections
+                .disconnect_nip_fi("test-issuer", &pubkey_bytes, scope);
         assert_eq!(
             closed, 1,
-            "W_addc: registry scan must find exactly 1 audio session \
+            "W_addc: registry scan must find exactly the revoked-side audio session \
              (proves audio_post_auth_register ran before the hook)"
         );
 
@@ -8131,7 +8165,7 @@ mod tests {
         // Insert the deny entry — handler is between registration and check.
         let until = Utc::now() + Duration::seconds(3600);
         let merge =
-            deny_map_for_insert.merge_cross_pod_deny("test-issuer", &target, until, Utc::now());
+            deny_map_for_insert.merge_cross_pod_deny("test-issuer", &target, until, Utc::now);
         assert!(
             matches!(merge, buzz_auth::CrossPodMergeResult::Merged),
             "W_audio_deny_straddle: deny entry must be inserted during hook window"
@@ -8148,9 +8182,11 @@ mod tests {
         //   disconnect_nip_fi returns 0 (not yet registered) → assertion panics.
         //   Causally falsifies the registration-before-check invariant.
         let pubkey_bytes = target.to_bytes().to_vec();
-        let closed = state
-            .community_connections
-            .disconnect_nip_fi("test-issuer", &pubkey_bytes);
+        let closed = state.community_connections.disconnect_nip_fi(
+            "test-issuer",
+            &pubkey_bytes,
+            buzz_auth::DenyScope::WholeKey,
+        );
         assert_eq!(
             closed, 1,
             "W_audio_deny_straddle: close scan must find exactly 1 registered audio session \
@@ -8196,6 +8232,177 @@ mod tests {
 
     mod postgres_tests {
         use super::*;
+
+        /// iat > C straddling a cutoff at the deny check: the scan skips it, the
+        /// handler completes a real audio join, and redelivery never closes it.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn w_cutoff_disconnect_at_deny_check_keeps_fresh_token_across_redelivery() {
+            use buzz_auth::{DenyEntry, DenyScope, VerifiedAssertion};
+            use chrono::{Duration, Utc};
+            use std::sync::Arc;
+
+            let mut state = (*audio_test_state_real_db()
+                .await
+                .expect("W_cutoff: PostgreSQL must be available"))
+            .clone();
+            let deny_map = Arc::new(buzz_auth::NipFiDenyMap::new(
+                16,
+                vec![buzz_auth::IssuerCapacity {
+                    issuer: "test-issuer".to_owned(),
+                    capacity: 16,
+                }],
+            ));
+            state.nip_fi_deny_map = Some(Arc::clone(&deny_map));
+            let state = Arc::new(state);
+            let (tenant, channel_id, key) = seed_audio_fixture(&state.db.pool().clone()).await;
+            let community = tenant.community();
+            let relay_url = format!("ws://{}", tenant.host());
+
+            let c = Utc::now().timestamp() - 120;
+            let scope = DenyScope::IssuedThrough(c);
+            let assertion = VerifiedAssertion::for_test(
+                Some(key.public_key()),
+                vec![Utc::now() + Duration::hours(1)],
+            )
+            .with_issued_at_for_test(chrono::DateTime::from_timestamp(c, 500_000_000).unwrap());
+
+            let conn_cancel = CancellationToken::new();
+            let control = crate::state::CommunityConnectionControl::new(conn_cancel.clone());
+            let _conn_guard = state.community_connections.register(
+                uuid::Uuid::new_v4(),
+                community,
+                control.clone(),
+            );
+
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("W_cutoff: bind");
+            let addr = listener.local_addr().expect("W_cutoff: addr");
+            let state_c = Arc::clone(&state);
+            let server = tokio::spawn(async move {
+                let app = Router::new().route(
+                    "/",
+                    get(move |ws: WebSocketUpgrade| async move {
+                        ws.on_upgrade(move |socket| {
+                            handle_active_audio_connection(
+                                socket,
+                                state_c,
+                                tenant,
+                                channel_id,
+                                control,
+                                Some(assertion),
+                                Utc::now(),
+                                None,
+                            )
+                        })
+                    }),
+                );
+                axum::serve(listener, app).await.expect("W_cutoff: server");
+            });
+
+            let (mut client, _) = connect_async(format!("ws://{addr}/"))
+                .await
+                .expect("W_cutoff: connect");
+            let (hook_arrived_rx, hook_release) =
+                crate::nip_fi_test_hooks::deny_set_check_hook::arm(community);
+
+            let challenge =
+                match tokio::time::timeout(std::time::Duration::from_secs(2), client.next())
+                    .await
+                    .expect("W_cutoff: challenge timeout")
+                    .expect("W_cutoff: challenge item")
+                    .expect("W_cutoff: challenge message")
+                {
+                    tokio_tungstenite::tungstenite::Message::Text(t) => {
+                        serde_json::from_str::<serde_json::Value>(&t)
+                            .expect("W_cutoff: challenge JSON")["challenge"]
+                            .as_str()
+                            .expect("W_cutoff: challenge field")
+                            .to_string()
+                    }
+                    other => panic!("W_cutoff: expected text challenge; got {other:?}"),
+                };
+            let auth_event = nostr::EventBuilder::new(nostr::Kind::Authentication, "")
+                .tag(nostr::Tag::parse(["relay", &relay_url]).unwrap())
+                .tag(nostr::Tag::parse(["challenge", &challenge]).unwrap())
+                .sign_with_keys(&key)
+                .unwrap();
+            let auth_msg = serde_json::json!({
+                "type": "auth",
+                "event": auth_event,
+                "parent_channel_id": null,
+                "protocol_version": 2,
+            })
+            .to_string();
+            client
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    auth_msg.into(),
+                ))
+                .await
+                .expect("W_cutoff: send auth");
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), hook_arrived_rx)
+                .await
+                .expect("W_cutoff: handler must reach before_deny_set_check within 5s")
+                .expect("W_cutoff: hook arrived channel closed");
+            let entry = DenyEntry {
+                until: Utc::now() + Duration::hours(1),
+                scope,
+            };
+            assert!(matches!(
+                deny_map.merge_cross_pod_deny("test-issuer", &key.public_key(), entry, Utc::now),
+                buzz_auth::CrossPodMergeResult::Merged
+            ));
+            let pubkey_bytes = key.public_key().to_bytes().to_vec();
+            assert_eq!(
+                state
+                    .community_connections
+                    .disconnect_nip_fi("test-issuer", &pubkey_bytes, scope),
+                0,
+                "W_cutoff: the scan must skip iat > C"
+            );
+            hook_release.notify_one();
+
+            // Sync point: the handler's own `joined` proves the audio join completed.
+            let joined = loop {
+                match tokio::time::timeout(std::time::Duration::from_secs(10), client.next())
+                    .await
+                    .expect("W_cutoff: `joined` must arrive within 10s")
+                    .expect("W_cutoff: stream closed before `joined`")
+                    .expect("W_cutoff: ws error")
+                {
+                    tokio_tungstenite::tungstenite::Message::Text(t) => break t.to_string(),
+                    _ => continue,
+                }
+            };
+            let joined: serde_json::Value = serde_json::from_str(&joined).expect("W_cutoff: JSON");
+            assert_eq!(
+                joined["type"], "joined",
+                "W_cutoff: iat > C must join: {joined}"
+            );
+            assert_eq!(
+                joined["pubkey"].as_str(),
+                Some(key.public_key().to_hex().as_str())
+            );
+
+            for _ in 0..3 {
+                assert_eq!(
+                    state.community_connections.disconnect_nip_fi(
+                        "test-issuer",
+                        &pubkey_bytes,
+                        scope
+                    ),
+                    0,
+                    "W_cutoff: redelivery must skip iat > C"
+                );
+            }
+            assert!(
+                !conn_cancel.is_cancelled(),
+                "W_cutoff: iat > C must stay open after redelivery"
+            );
+            server.abort();
+        }
 
         /// Joining a huddle is a write. For an ephemeral huddle the joiner
         /// needs a writing role in the huddle itself and in its lifecycle
@@ -16401,9 +16608,11 @@ mod tests {
 
             if issuer_first {
                 assert_eq!(
-                    state
-                        .community_connections
-                        .disconnect_nip_fi("test-issuer", &member_bytes),
+                    state.community_connections.disconnect_nip_fi(
+                        "test-issuer",
+                        &member_bytes,
+                        buzz_auth::DenyScope::WholeKey
+                    ),
                     1
                 );
             }
