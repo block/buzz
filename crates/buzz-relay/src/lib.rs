@@ -96,6 +96,8 @@ pub mod tenant;
 mod test_support;
 /// Relay-side tunnel session directory and routing.
 pub mod tunnel;
+/// NIP-WH delivery intake settings.
+pub mod webhook_config;
 /// Webhook secret generation and constant-time comparison.
 pub mod webhook_secret;
 /// Workflow action sink — relay-side implementation of [`buzz_workflow::ActionSink`].

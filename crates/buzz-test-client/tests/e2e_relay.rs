@@ -283,7 +283,7 @@ async fn test_client_submitted_webhook_records_and_deliveries_are_rejected() {
         .send()
         .await
         .expect("submit via HTTP");
-    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
     let body = response.text().await.expect("read HTTP rejection");
     assert!(
         body.contains("restricted: not an authorized webhook ingress"),

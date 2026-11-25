@@ -123,6 +123,8 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "search_outbox",
     "thread_metadata",
     "users",
+    "webhook_deliveries",
+    "webhook_records",
     "workflow_approvals",
     "workflow_runs",
     "workflows",
@@ -164,8 +166,6 @@ pub const PENDING_SCOPED_TABLES: &[&str] = &[
     "identity_retirement_workflows",
     "search_backfill",
     "thread_heads",
-    "webhook_deliveries",
-    "webhook_records",
 ];
 
 /// Tenant tables an expand migration may add between a deletion's approval
@@ -214,6 +214,8 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "workflow_runs",
     "push_wake_outbox",
     "search_outbox",
+    "webhook_records",
+    "webhook_deliveries",
     "join_policy_acceptances",
     "media_uploaders",
     "media_publications",
@@ -9784,6 +9786,72 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         assert_eq!(deleted.get("search_outbox"), Some(&1));
         assert_eq!(queued(community).await, 0);
         assert_eq!(queued(bystander).await, 1);
+    }
+
+    /// Once a community is fenced for deletion, intake refuses its deliveries;
+    /// the purge removes its delivery and record rows and keeps another
+    /// community's. Records have no writer yet, so the test inserts them.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn webhook_tables_are_fenced_and_purged() {
+        let (db, store) = store().await;
+        let (request, inventory) = inventoried_request(&db, &store).await;
+        let community = request.community_id;
+        let bystander = db
+            .ensure_configured_community(&format!("bystander-{}.example", Uuid::new_v4().simple()))
+            .await
+            .expect("bystander community")
+            .id;
+        let keys = nostr::Keys::generate();
+        let delivery = |content: &str| {
+            nostr::EventBuilder::new(nostr::Kind::Custom(20701), content)
+                .sign_with_keys(&keys)
+                .expect("sign")
+        };
+        let integration = Uuid::new_v4();
+        for owner in [community, bystander] {
+            let queued = delivery("queued");
+            db.enqueue_webhook_delivery(owner, &queued, integration, "github")
+                .await
+                .expect("enqueue");
+            sqlx::query(
+                "INSERT INTO webhook_records \
+                     (community_id, delivery_event_id, subscription_id, subscription_revision, outcome) \
+                 VALUES ($1, $2, $3, $4, 'error')",
+            )
+            .bind(owner.as_uuid())
+            .bind(queued.id.as_bytes().as_slice())
+            .bind(Uuid::new_v4())
+            .bind([7u8; 32].as_slice())
+            .execute(&db.pool)
+            .await
+            .expect("insert record");
+        }
+        let rows = |table: &'static str, owner: CommunityId| {
+            let pool = db.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(AssertSqlSafe(format!(
+                    "SELECT count(*) FROM {table} WHERE community_id = $1"
+                )))
+                .bind(owner.as_uuid())
+                .fetch_one(&pool)
+                .await
+                .expect("count rows")
+            }
+        };
+
+        let token = fence_and_drain(&store, &request, &inventory).await;
+        db.enqueue_webhook_delivery(community, &delivery("after fence"), integration, "github")
+            .await
+            .expect_err("a fenced community admits no deliveries");
+        assert_eq!(rows("webhook_deliveries", community).await, 1);
+
+        let deleted = store.purge_postgres(&token).await.expect("purge postgres");
+        for table in ["webhook_deliveries", "webhook_records"] {
+            assert_eq!(deleted.get(table), Some(&1), "{table}");
+            assert_eq!(rows(table, community).await, 0, "{table}");
+            assert_eq!(rows(table, bystander).await, 1, "{table}");
+        }
     }
 
     /// Approve, claim, fence, drain and remove bindings, leaving the request

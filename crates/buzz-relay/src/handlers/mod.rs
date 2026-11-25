@@ -78,6 +78,8 @@ mod system_channel_postgres_tests;
 pub(crate) mod system_channels;
 #[cfg(test)]
 mod tag_pushdown_postgres_tests;
+/// NIP-WH delivery intake from a configured ingress gateway.
+pub(crate) mod webhook_delivery;
 /// NIP-WH webhook subscriptions, a NIP-AR artifact type.
 pub(crate) mod webhook_subscription;
 

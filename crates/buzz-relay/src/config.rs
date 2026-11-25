@@ -311,6 +311,10 @@ pub struct Config {
     /// indexer keeps the index up to date; searches still use Postgres.
     pub opensearch: Option<buzz_search::opensearch::OpenSearchConfig>,
 
+    /// NIP-WH delivery intake: trusted gateway keys and the oldest accepted
+    /// delivery. No key configured turns intake off.
+    pub webhook: crate::webhook_config::WebhookIngressConfig,
+
     /// Allow NIP-OA owner attestation for relay membership.
     ///
     /// When `true` and `require_relay_membership` is also `true`, agents
@@ -1036,6 +1040,7 @@ impl Config {
             parse_bool("BUZZ_OPENSEARCH_PREVIEW", false)?,
         )
         .map_err(ConfigError::InvalidValue)?;
+        let webhook = crate::webhook_config::WebhookIngressConfig::from_env()?;
         if !operator_listener_delivery_urls.is_empty() && relay_operator_api_origin.is_none() {
             error!(
                 "BUZZ_OPERATOR_LISTENERS is set but RELAY_OPERATOR_API_ORIGIN is not — operator-listener registration requests will reject every request until RELAY_OPERATOR_API_ORIGIN is set"
@@ -1586,6 +1591,7 @@ impl Config {
             operator_listener_delivery_urls,
             storage_usage_delivery_url,
             opensearch,
+            webhook,
             allow_nip_oa_auth,
             klipy,
             media,
