@@ -193,7 +193,10 @@ database-source records `community="bound"` or `"unmapped"`, never a host.
     to deny; `community="unmapped"` comes only from hosts you do not serve.
   - `stage="owner"` counts as would-deny: each is an agent enforce will refuse
     for its token owner.
-- No-go: any of these fails. Return to `off` and investigate.
+- No-go: any of these fails. Stay in `shadow` with
+  `BUZZ_NIP_FI_ENFORCE_PERCENT=0` and investigate; stored-Required
+  communities stay required. Setting `mode=off` is an emergency action only:
+  it suspends NIP-FI for stored-Required communities.
 
 ### Staged enforce
 
@@ -216,7 +219,9 @@ rollout; a malformed or out-of-range value refuses startup.
   `requires_nip_fi: true`, and open sockets without valid evidence are closed.
   Its stored flag does not change.
 - A required admission, stored Required or inside the cohort, is refused when
-  the receiving pod holds an active deny for the key. A revocation closes open
+  the receiving pod holds an active deny that covers the assertion: one for
+  the key without `revoke_through`, or one whose `revoke_through` is at or
+  after the assertion's verified `iat`. A newer assertion is admitted. A revocation closes open
   connections only in `enforce`; in `shadow` an open connection stays until its
   deadline. Stored-Required communities already behave this way.
 - Denies are stored in Redis and restored on restart, but a healthy pod
@@ -289,16 +294,22 @@ added, so they usually arrive during normal growth, not at a deploy.
   (8 by default). Concurrent logins for the same host share one lookup, and a
   login waits up to 50 ms for a free slot; how many are shed depends on login
   load across distinct hosts and on lookup latency. In enforce, a shed login
-  gets 503 (`authorization_unavailable`); in shadow it
-  is only recorded as a would-deny.
+  gets 503 (`authorization_unavailable`). In shadow, a shed login for a
+  stored-Required or cohort community also gets 503; for an optional
+  community it is only recorded as a would-deny.
 
 Ways out, in order:
 
 1. Raise `BUZZ_NIP_FI_SNAPSHOT_MAX_ROWS` (up to 10,000,000) or
    `BUZZ_NIP_FI_SNAPSHOT_REFRESH_TIMEOUT_MS` (under 30,000), whichever the
    failure `reason` names, and roll out.
-2. If that cannot land quickly, set `BUZZ_NIP_FI_MODE=off`. `off` loads no
-   snapshot, so pods boot and admit as they did before NIP-FI.
+2. Emergency only, if that cannot land quickly: set `BUZZ_NIP_FI_MODE=off`.
+   `off` loads no snapshot, so pods boot and admit as they did before NIP-FI,
+   which suspends enforcement for stored-Required communities. `shadow` is
+   not a way out because it loads the snapshot too. Coming from `enforce`,
+   unset `BUZZ_NIP_FI_ACCEPT_SHADOW_DISCONNECTS` or set it to `false` in the
+   same rollout: `true` is invalid outside `enforce` and the pods refuse to
+   start.
 
 ## Revocation during a deploy
 
