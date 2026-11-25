@@ -19,3 +19,6 @@ xcrun --sdk iphonesimulator swiftc -parse-as-library \
   "$fixture/test.swift" \
   -o "$fixture/create-channel-tests"
 xcrun simctl spawn "$device" "$fixture/create-channel-tests"
+# Again at the largest text size, where rows outgrow their estimated height.
+xcrun simctl spawn "$device" "$fixture/create-channel-tests" \
+  -UIPreferredContentSizeCategoryName UICTContentSizeCategoryAccessibilityXXXL

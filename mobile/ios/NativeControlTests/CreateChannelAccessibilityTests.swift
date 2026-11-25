@@ -3,7 +3,12 @@ import UIKit
 
 @main
 struct CreateChannelAccessibilityTests {
+  // The insets stand in for the navigation bar and the home indicator.
+  private static let landscape = (CGSize(width: 852, height: 393), UIEdgeInsets(top: 56, left: 0, bottom: 21, right: 0))
+  private static let shortPortrait = (CGSize(width: 375, height: 667), UIEdgeInsets(top: 64, left: 0, bottom: 34, right: 0))
+
   @MainActor static func main() {
+    if CommandLine.arguments.contains("-UIPreferredContentSizeCategoryName") { return largeTextMain() }
     let controller = NativeCreateChannelViewController(configuration: [:])
     controller.loadViewIfNeeded()
     controller.tableView.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
@@ -78,18 +83,45 @@ struct CreateChannelAccessibilityTests {
     precondition(button.title == "Creating…" && !button.isEnabled)
     // A failure in landscape, where the footer starts below the fold, scrolls
     // the error into view.
-    table.frame.size = CGSize(width: 844, height: 390)
-    table.layoutIfNeeded()
-    table.contentOffset = CGPoint(x: 0, y: -table.adjustedContentInset.top)
-    let visible = { table.bounds.inset(by: table.adjustedContentInset).insetBy(dx: 0, dy: -0.5) }
-    precondition(table.contentSize.height > visible().height, "The form must overflow for this step to mean anything")
-    controller.showError(taken)
-    precondition(table.rectForFooter(inSection: 2).minY > 390 - 1, "The error must start below the fold for this step to mean anything")
-    precondition(visible().contains(table.rectForFooter(inSection: 2)), "A failed create must scroll its error into view")
-    table.layoutIfNeeded() // Materialize the views at the new offset.
-    precondition(labels(in: table.footerView(forSection: 2)!).first!.text == taken)
+    expectFailureScrolledIntoView(controller, screen: landscape, error: taken)
     precondition(button.title == "Create" && button.isEnabled)
     print("Create-channel accessibility passed: fields own labels before and after retry; the error aligns with them, clears on retry and scrolls into view")
+  }
+
+  // The script's second run, at the largest text size. Rows are then taller
+  // than their estimated height, and a first failed create leaves the ones
+  // below the fold on the estimate: every row in landscape, only the last on
+  // a short portrait screen. One layout and scroll pass stops short by the
+  // difference.
+  @MainActor private static func largeTextMain() {
+    let taken = "An open channel named \"general\" already exists"
+    for screen in [landscape, shortPortrait] {
+      let controller = NativeCreateChannelViewController(configuration: [:])
+      controller.loadViewIfNeeded()
+      controller.tableView.reloadData()
+      expectFailureScrolledIntoView(controller, screen: screen, error: taken)
+      let lastRow = controller.tableView.rectForRow(at: IndexPath(row: 1, section: 2)).height
+      precondition(lastRow > controller.tableView.estimatedRowHeight, "Rows must outgrow their estimate for this run to mean anything")
+    }
+    print("Create-channel accessibility passed at the largest text size: a failed create scrolls its whole error into view")
+  }
+
+  @MainActor private static func expectFailureScrolledIntoView(_ controller: NativeCreateChannelViewController, screen: (CGSize, UIEdgeInsets), error: String) {
+    let table = controller.tableView!
+    table.frame.size = screen.0
+    table.contentInset = screen.1
+    table.layoutIfNeeded()
+    table.contentOffset = CGPoint(x: 0, y: -table.adjustedContentInset.top)
+    table.layoutIfNeeded()
+    let visible = { table.bounds.inset(by: table.adjustedContentInset).insetBy(dx: 0, dy: -0.5) }
+    let fold = visible().maxY
+    precondition(table.contentSize.height > visible().height, "The form must overflow for this step to mean anything")
+    controller.showError(error)
+    table.layoutIfNeeded() // Measure the rows and materialize the views at the new offset.
+    let footer = table.rectForFooter(inSection: 2)
+    precondition(footer.minY > fold, "The error must start below the fold for this step to mean anything")
+    precondition(visible().contains(footer), "A failed create must scroll its whole error into view")
+    precondition(labels(in: table.footerView(forSection: 2)!).first!.text == error)
   }
 
   private static func labels(in view: UIView) -> [UILabel] {
