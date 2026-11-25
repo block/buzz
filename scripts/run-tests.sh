@@ -429,9 +429,13 @@ run_unit_tests() {
       state::tests::admitted_index_follows_every_key_change \
       shared_reads::tests::one_caller_reads_while_the_rest_wait_for_it \
       shared_reads::tests::a_waiter_stops_waiting_for_a_hung_read \
-      community_active::tests::concurrent_misses_share_one_read_and_expire_after_max_age \
-      community_active::tests::invalidation_fences_an_in_flight_fill_and_its_waiters \
-      community_active::tests::errors_are_not_cached \
+      fenced_cache::tests::concurrent_misses_share_one_read_and_expire_after_max_age \
+      fenced_cache::tests::invalidation_fences_an_in_flight_fill_and_its_waiters \
+      fenced_cache::tests::scoped_invalidation_drops_matches_and_fences_fills \
+      fenced_cache::tests::a_failed_read_falls_back_only_to_a_recent_accepted_entry \
+      fenced_cache::tests::a_successful_read_wins_and_invalidation_drops_the_fallback \
+      fenced_cache::tests::get_fresh_reads_past_the_entry_and_publishes_unless_fenced \
+      fenced_cache::tests::errors_are_not_cached \
       state::tests::concurrent_open_channel_misses_share_the_in_flight_read \
       state::tests::a_member_snapshot_ages_from_its_read_not_its_insert \
       state::tests::overlapping_member_reads_cache_the_first_to_finish \
@@ -439,7 +443,8 @@ run_unit_tests() {
       state::tests::concurrent_restriction_and_host_misses_share_the_in_flight_read \
       tenant::tests::app_state_resolver_serves_fresh_cached_hosts_only \
       tenant::tests::an_overlong_host_fails_closed_before_the_resolver \
-      state::tests::disconnect_drops_the_cached_restriction_row
+      state::tests::restriction_invalidation_drops_the_community_rows \
+      handlers::auth::tests::handler_admits_past_a_failed_ban_check_only_on_a_recent_clear_row
 
   run_test_step "buzz-relay member-channel invalidation route tests" \
     cargo test -p buzz-relay --lib state::tests::member_channel_invalidation_tests:: -- --nocapture
