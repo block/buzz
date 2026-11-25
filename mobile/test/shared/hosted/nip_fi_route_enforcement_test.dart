@@ -3,7 +3,6 @@ import 'dart:typed_data';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/native_media_headers.dart';
-import 'package:buzz/shared/http/app_http_client.dart';
 import 'package:buzz/shared/relay/media_image.dart';
 import 'package:buzz/shared/relay/media_upload.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
@@ -32,21 +31,12 @@ void main() {
       await f.container.read(relaySessionProvider.notifier).queryRelay([]);
       expect(f.sent('/query'), isNotEmpty);
     },
+    // The service the app itself uploads with, not one built for the test.
     'upload': (f) async {
-      final config = f.container.read(relayConfigProvider);
-      final client = f.container.read(hostedHttpClientFactoryProvider)(
-        traffic: HttpTraffic.media,
-      );
-      addTearDown(client.close);
-      final uploads = MediaUploadService(
-        httpClient: client,
-        baseUrl: config.baseUrl,
-        nsec: config.nsec,
-        pickGalleryImage: () async => null,
-        pickGalleryVideo: () async => null,
-      );
-      addTearDown(uploads.dispose);
-      await uploads.uploadBytes(Uint8List(4), mimeType: 'video/mp4');
+      await f.container
+          .read(mediaUploadServiceProvider)
+          .uploadBytes(Uint8List(4), mimeType: 'video/mp4');
+      expect(f.sent('/upload'), isNotEmpty);
     },
     'media': (f) async {
       final response = await f.container
@@ -78,7 +68,7 @@ void main() {
     );
     await f.storage.save(community);
     await f.storage.saveActiveId(community.id);
-    await f.mount(tester, openEntry: false);
+    await f.mount(tester, openEntry: false, realUploads: true);
     final session = f.container.listen(relaySessionProvider, (_, _) {});
     addTearDown(session.close);
     await f.settle(tester);
@@ -125,6 +115,21 @@ void main() {
       '/query: an assertion not minted for this relay',
       '/query: an expired assertion',
     ]);
+    f.relay.refusals.clear();
+  });
+
+  journey('a header from before a renewal stays refused', (f) async {
+    final config = f.container.read(relayConfigProvider);
+    final auth = f.container.read(hostedRelayAuthProvider);
+    final stale = auth.cachedHeaders(config)!;
+    f.assertionNow = f.assertionNow.add(const Duration(minutes: 6));
+    await f.container.read(relaySessionProvider.notifier).queryRelay([]);
+    final fresh = auth.cachedHeaders(config)!;
+    expect(f.relay.refusals, isEmpty);
+    final query = Uri.parse('https://$host/query');
+    expect((await http.post(query, headers: fresh)).statusCode, 200);
+    expect((await http.post(query, headers: stale)).statusCode, 401);
+    expect(f.relay.refusals, ['/query: an expired assertion']);
     f.relay.refusals.clear();
   });
 

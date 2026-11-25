@@ -85,6 +85,13 @@ class HostedJourneyFixture {
   /// after its own failures, unless it clears the refusals it expects.
   late final relay = StrictNipFiRelay(now: () => assertionNow);
   bool _checksRefusals = false;
+  final _latest = <String, String>{};
+  var _mints = 0;
+
+  /// The header carrying the assertion an issuer last minted under [label]
+  /// (`synthetic-assertion` or `organization-assertion`). Every mint has its
+  /// own bytes, so a header captured before a renewal no longer matches.
+  String bearer(String label) => 'Bearer ${_latest[label]}';
 
   /// What hosted relays' NIP-FI discovery answers; null fails discovery.
   bool? nipFiRequired = true;
@@ -384,8 +391,8 @@ class HostedJourneyFixture {
         assertionNow.add(const Duration(minutes: 5)).millisecondsSinceEpoch ~/
         1000;
     return {
-      'assertion': relay.issue(
-        testAssertion(label),
+      'assertion': _latest[label] = relay.issue(
+        testAssertion('$label-${++_mints}'),
         relayUrl: body['relay_url'] as String,
         expiresAt: expiresAt,
       ),
@@ -456,10 +463,13 @@ class HostedJourneyFixture {
     },
   );
 
+  /// Pumps the app over the synthetic boundaries. [realUploads] keeps the
+  /// app's own upload service instead of the stand-in that counts uploads.
   Future<void> mount(
     WidgetTester tester, {
     bool openEntry = true,
     bool addingCommunity = true,
+    bool realUploads = false,
     PairingCredentialValidator? pairingValidator,
     PairingSocketFactory? pairingSocketFactory,
   }) async {
@@ -488,11 +498,12 @@ class HostedJourneyFixture {
         disableAnimations: true,
         overrides: [
           hostedFlowProvider.overrideWith(createFlow),
-          mediaUploadServiceProvider.overrideWith((ref) {
-            final uploads = _Uploads(this);
-            ref.onDispose(uploads.dispose);
-            return uploads;
-          }),
+          if (!realUploads)
+            mediaUploadServiceProvider.overrideWith((ref) {
+              final uploads = _Uploads(this);
+              ref.onDispose(uploads.dispose);
+              return uploads;
+            }),
           if (pairingValidator != null || pairingSocketFactory != null)
             pairingProvider.overrideWith(
               () => PairingNotifier(

@@ -22,14 +22,19 @@ class StrictNipFiRelay {
   final upgrades = <HttpHeaders>[];
 
   /// Records [assertion] as minted for [relayUrl] until [expiresAt] (Unix
-  /// seconds), and returns it for the issuer's response.
+  /// seconds), and returns it for the issuer's response. Each issuance needs
+  /// its own bytes: re-issuing one would extend the life of every copy a
+  /// client captured before, so a stale header would pass after a renewal.
   String issue(
     String assertion, {
     required String relayUrl,
     required int expiresAt,
   }) {
-    _expiries[(Uri.parse(relayUrl).authority, assertion)] =
-        DateTime.fromMillisecondsSinceEpoch(expiresAt * 1000);
+    final key = (Uri.parse(relayUrl).authority, assertion);
+    if (_expiries.containsKey(key)) {
+      throw StateError('$assertion was already issued for $relayUrl');
+    }
+    _expiries[key] = DateTime.fromMillisecondsSinceEpoch(expiresAt * 1000);
     return assertion;
   }
 
