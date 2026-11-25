@@ -287,6 +287,7 @@ mod tests {
             rate_limiter: Arc::new(RateLimiter::new(per_minute)),
             now: Utc::now,
             accepting: Arc::new(AtomicBool::new(true)),
+            public_scheme: crate::config::RelayScheme::Https,
         };
         let (public, _) = crate::http::router(state);
         Fixture { public, store, id }

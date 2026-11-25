@@ -34,6 +34,8 @@ pub struct Config {
     pub relay_pubkeys: Vec<PublicKey>,
     /// `https` in production; `http` only for local development.
     pub relay_scheme: RelayScheme,
+    /// Scheme of the URL providers deliver to, reported as `delivery_url`.
+    pub public_scheme: RelayScheme,
     pub max_body_bytes: usize,
     /// Accepted skew between a provider's signed timestamp and gateway time.
     pub timestamp_tolerance_seconds: i64,
@@ -95,15 +97,8 @@ impl Config {
         if relay_pubkeys.is_empty() {
             return Err(ConfigError::Invalid("BUZZ_INGRESS_RELAY_PUBKEYS"));
         }
-        let relay_scheme = match env
-            .get("BUZZ_INGRESS_RELAY_SCHEME")
-            .map(String::as_str)
-            .unwrap_or("https")
-        {
-            "https" => RelayScheme::Https,
-            "http" => RelayScheme::Http,
-            _ => return Err(ConfigError::Invalid("BUZZ_INGRESS_RELAY_SCHEME")),
-        };
+        let relay_scheme = scheme(env, "BUZZ_INGRESS_RELAY_SCHEME")?;
+        let public_scheme = scheme(env, "BUZZ_INGRESS_PUBLIC_SCHEME")?;
         Ok(Self {
             listen_addr,
             private_addr,
@@ -112,6 +107,7 @@ impl Config {
             secret_keyring,
             relay_pubkeys,
             relay_scheme,
+            public_scheme,
             max_body_bytes: bounded_positive(env, "BUZZ_INGRESS_MAX_BODY_BYTES", 1 << 20, 16 << 20)?
                 as usize,
             timestamp_tolerance_seconds: bounded_positive(
@@ -198,6 +194,14 @@ pub fn parse_keyring(raw: &str, key: &'static str) -> Result<Vec<KeyConfig>, Con
     Ok(keys)
 }
 
+fn scheme(env: &HashMap<String, String>, name: &'static str) -> Result<RelayScheme, ConfigError> {
+    match env.get(name).map(String::as_str).unwrap_or("https") {
+        "https" => Ok(RelayScheme::Https),
+        "http" => Ok(RelayScheme::Http),
+        _ => Err(ConfigError::Invalid(name)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +237,7 @@ mod tests {
         assert_eq!(c.listen_addr.port(), 8080);
         assert_eq!(c.private_addr.port(), 8081);
         assert_eq!(c.relay_scheme, RelayScheme::Https);
+        assert_eq!(c.public_scheme, RelayScheme::Https);
         assert_eq!(c.max_body_bytes, 1 << 20);
         assert_eq!(c.timestamp_tolerance_seconds, 300);
         assert_eq!(c.forward_concurrency, 16);

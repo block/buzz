@@ -188,13 +188,47 @@ struct PutSecretBody {
     grace_seconds: u64,
 }
 
+/// Serialises an integration view with the `delivery_url` the provider must
+/// call. Added here rather than stored so replays of older operations carry it.
+fn integration_response(state: &AppState, view: IntegrationView) -> Response {
+    match integration_json(state, view) {
+        Ok(body) => (StatusCode::OK, Json(body)).into_response(),
+        Err(e) => store_error(e),
+    }
+}
+
+fn integration_json(
+    state: &AppState,
+    view: IntegrationView,
+) -> Result<serde_json::Value, StoreError> {
+    let delivery_url = view.delivery_url(state.public_scheme);
+    let mut body = match serde_json::to_value(view) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => return Err(StoreError::Invalid("integration view is not serializable")),
+    };
+    body.insert("delivery_url".to_owned(), delivery_url.into());
+    Ok(serde_json::Value::Object(body))
+}
+
+fn stored_integration_json(
+    state: &AppState,
+    response: serde_json::Value,
+) -> Result<serde_json::Value, StoreError> {
+    let view = serde_json::from_value::<IntegrationView>(response)
+        .map_err(|_| StoreError::Invalid("stored operation response"))?;
+    integration_json(state, view)
+}
+
 async fn apply(state: &AppState, operation: Operation) -> Response {
     if operation.revision <= 0 {
         return invalid();
     }
     match state.store.apply(operation, (state.now)()).await {
         Ok(ApplyOutcome::Applied(applied) | ApplyOutcome::Replayed(applied)) => {
-            (StatusCode::OK, Json(applied.response)).into_response()
+            match stored_integration_json(state, applied.response) {
+                Ok(body) => (StatusCode::OK, Json(body)).into_response(),
+                Err(e) => store_error(e),
+            }
         }
         Ok(ApplyOutcome::Conflict) => error(StatusCode::CONFLICT, "operation_conflict"),
         Ok(ApplyOutcome::StaleRevision { current }) => (
@@ -344,7 +378,7 @@ async fn get_integration(
     let now = (state.now)();
     match state.store.integration_with_secrets(id, now).await {
         Ok(Some((integration, secrets))) => {
-            Json(IntegrationView::new(&integration, &secrets, now)).into_response()
+            integration_response(&state, IntegrationView::new(&integration, &secrets, now))
         }
         Ok(None) => error(StatusCode::NOT_FOUND, "not_found"),
         Err(e) => store_error(e),
@@ -428,14 +462,17 @@ async fn get_operation(
         return reject.into_response();
     }
     match state.store.applied_operation(operation_id).await {
-        Ok(Some(applied)) => Json(serde_json::json!({
-            "operation_id": applied.operation_id,
-            "integration_id": applied.integration_id,
-            "revision": applied.revision,
-            "applied_at": applied.applied_at,
-            "response": applied.response,
-        }))
-        .into_response(),
+        Ok(Some(applied)) => match stored_integration_json(&state, applied.response) {
+            Ok(response) => Json(serde_json::json!({
+                "operation_id": applied.operation_id,
+                "integration_id": applied.integration_id,
+                "revision": applied.revision,
+                "applied_at": applied.applied_at,
+                "response": response,
+            }))
+            .into_response(),
+            Err(e) => store_error(e),
+        },
         Ok(None) => error(StatusCode::NOT_FOUND, "not_found"),
         Err(e) => store_error(e),
     }
@@ -476,6 +513,7 @@ mod tests {
             rate_limiter: Arc::new(crate::intake::RateLimiter::new(100)),
             now: chrono::Utc::now,
             accepting: Arc::new(AtomicBool::new(true)),
+            public_scheme: crate::config::RelayScheme::Https,
         };
         let (_, private) = crate::http::router(state);
         Fixture {
@@ -558,6 +596,10 @@ mod tests {
         assert_eq!(body["provider"], "github");
         assert_eq!(body["enabled"], true);
         assert_eq!(body["has_secret"], false);
+        assert_eq!(
+            body["delivery_url"],
+            format!("https://acme.communities.example.org/webhooks/{id}")
+        );
 
         let (status, replay) =
             call(&fx, &fx.relay, "PUT", &path, &path, Some(put_body(op, 1))).await;
