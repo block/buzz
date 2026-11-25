@@ -245,7 +245,7 @@ class _SliverChannelsList extends HookConsumerWidget {
     final filters = ref.watch(channelFilterProvider);
     useListenable(filters);
     final display = optionsKey == null
-        ? const MessagesDisplay(messages: false)
+        ? const MessagesDisplay()
         : ref.watch(messagesDisplayProvider);
     final selectedChannel = useState<String?>(null);
     final clock = useState(0);
@@ -519,7 +519,7 @@ class _SliverChannelsList extends HookConsumerWidget {
     Widget? sectionFor(String key) {
       final rows = buckets[key] ?? const <Channel>[];
       final group = sidebarGroupKey(key);
-      ChannelSortMode mode() => display.sortFor(sortState.store, group);
+      ChannelSortMode mode() => display.sort ?? sortState.sortModeFor(group);
       if (key == 'solo') return soloSliver;
       final previewLimit = display.limitFor(filters?.store, group);
       if (key == 'starred' || key == 'channels' || key == 'dms') {

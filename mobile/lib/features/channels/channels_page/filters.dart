@@ -99,9 +99,6 @@ Future<String?> showSectionViewSheet(
         return _SectionViewSheet(
           centralized:
               group == null || context.widget is MessagesSectionOptions,
-          messages:
-              context.widget is MessagesSectionOptions ||
-              MessagesSectionOptions.active(context),
           canReorder: orderScope != null,
           title: title,
           group: group,
@@ -137,11 +134,9 @@ class _SectionViewSheet extends HookConsumerWidget {
   final ChannelSortMode? initialSort;
   final ValueChanged<ChannelSortMode>? onSort;
   final bool custom;
-  final bool messages;
 
   const _SectionViewSheet({
     required this.centralized,
-    required this.messages,
     required this.canReorder,
     required this.title,
     required this.group,
@@ -156,7 +151,7 @@ class _SectionViewSheet extends HookConsumerWidget {
     final global = group == null;
     final display = global
         ? ref.watch(messagesDisplayProvider)
-        : MessagesDisplay(messages: messages);
+        : const MessagesDisplay();
     final scope = global ? ref.watch(mobileSectionOrderKeyProvider) : null;
     final initialScope = useRef(scope);
     final manager = global
@@ -178,7 +173,9 @@ class _SectionViewSheet extends HookConsumerWidget {
     final originalManager = useRef(manager);
     final sort = useState(global ? display.sort : initialSort);
     final mode = useState(
-      global ? display.mode : display.modeFor(manager?.store, group),
+      global
+          ? display.mode
+          : manager?.store.modeFor(group) ?? ChannelFilterMode.all,
     );
     final count = useState(
       global
@@ -186,7 +183,10 @@ class _SectionViewSheet extends HookConsumerWidget {
           : manager?.store.countFor(group) ?? sectionCounts.first,
     );
     final days = useState(
-      global ? display.days : display.windowFor(manager?.store, group) ~/ 86400,
+      global
+          ? display.days
+          : (manager?.store.windowFor(group) ?? defaultActiveWindowSeconds) ~/
+                86400,
     );
     final filterDirty = useState(false);
     final saving = useState(false);
@@ -195,8 +195,10 @@ class _SectionViewSheet extends HookConsumerWidget {
     useEffect(() {
       if (!global && !filterDirty.value && !saving.value) {
         count.value = manager?.store.countFor(group) ?? sectionCounts.first;
-        mode.value = display.modeFor(manager?.store, group);
-        days.value = display.windowFor(manager?.store, group) ~/ 86400;
+        mode.value = manager?.store.modeFor(group) ?? ChannelFilterMode.all;
+        days.value =
+            (manager?.store.windowFor(group) ?? defaultActiveWindowSeconds) ~/
+            86400;
       }
       return null;
     }, [manager, manager?.ready, manager?.store]);
@@ -230,12 +232,12 @@ class _SectionViewSheet extends HookConsumerWidget {
     bool filterChanged() =>
         !global &&
         filterDirty.value &&
-        (mode.value != (display.modeFor(manager?.store, group)) ||
+        (mode.value !=
+                (manager?.store.modeFor(group) ?? ChannelFilterMode.all) ||
             (mode.value != ChannelFilterMode.active &&
                 count.value != manager?.store.countFor(group)) ||
             (mode.value == ChannelFilterMode.active &&
-                days.value! * 86400 !=
-                    display.windowFor(manager?.store, group)));
+                days.value! * 86400 != manager?.store.windowFor(group)));
 
     Future<void> apply([String? nextAction]) async {
       saving.value = true;

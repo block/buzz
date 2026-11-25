@@ -6,30 +6,14 @@ import '../channel_filter/channel_filter_store.dart';
 import '../channel_sort/channel_sort_storage.dart';
 
 class MessagesDisplay {
-  const MessagesDisplay({
-    this.mode,
-    this.count,
-    this.days,
-    this.sort,
-    this.messages = true,
-  });
-  final bool messages;
+  const MessagesDisplay({this.mode, this.count, this.days, this.sort});
   final ChannelSortMode? sort;
-
-  ChannelSortMode sortFor(ChannelSortStore store, String group) =>
-      sort ??
-      store.groups[group] ??
-      (messages ? ChannelSortMode.recent : defaultSortModeFor(group));
   final ChannelFilterMode? mode;
   final int? count;
   final int? days;
 
-  ChannelFilterMode modeFor(ChannelFilterStore? store, String group) {
-    final fallback = messages
-        ? ChannelFilterMode.active
-        : ChannelFilterMode.all;
-    return mode ?? store?.modeFor(group, fallback: fallback) ?? fallback;
-  }
+  ChannelFilterMode modeFor(ChannelFilterStore? store, String group) =>
+      mode ?? store?.modeFor(group) ?? ChannelFilterMode.all;
 
   int? limitFor(ChannelFilterStore? store, String group) {
     final n = count ?? store?.countFor(group) ?? sectionCounts.first;
@@ -38,12 +22,9 @@ class MessagesDisplay {
         : n;
   }
 
-  int windowFor(ChannelFilterStore? store, String group) {
-    final fallback = messages ? 7 * 86400 : defaultActiveWindowSeconds;
-    return days == null
-        ? store?.windowFor(group, fallback: fallback) ?? fallback
-        : days! * 86400;
-  }
+  int windowFor(ChannelFilterStore? store, String group) => days == null
+      ? store?.windowFor(group) ?? defaultActiveWindowSeconds
+      : days! * 86400;
 }
 
 class _DisplayPreferences extends Notifier<MessagesDisplay> {

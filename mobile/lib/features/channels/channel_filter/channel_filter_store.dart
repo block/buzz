@@ -95,13 +95,8 @@ class ChannelFilterStore {
   static bool _key(Object? k) =>
       k is String && k.trim().isNotEmpty && k.length <= 264 && k != '__proto__';
   static bool _mode(Object? v) => v == 'all' || v == 'unreads' || v == 'active';
-  ChannelFilterMode modeFor(
-    String group, {
-    ChannelFilterMode fallback = ChannelFilterMode.all,
-  }) {
+  ChannelFilterMode modeFor(String group) {
     final meta = _record['meta'];
-    final choices = (meta == null ? _record['groups'] : meta['g']) as Map;
-    if (!choices.containsKey(group)) return fallback;
     final value = meta == null
         ? (_record['groups'] as Map)[group]
         : ((meta['g'] as Map)[group] as List?)?[2];
@@ -122,8 +117,9 @@ class ChannelFilterStore {
         : count;
   }
 
-  int windowFor(String group, {int fallback = defaultActiveWindowSeconds}) =>
-      (_record['activeWindowSeconds'] as Map?)?[group] as int? ?? fallback;
+  int windowFor(String group) =>
+      (_record['activeWindowSeconds'] as Map?)?[group] as int? ??
+      defaultActiveWindowSeconds;
   Map<String, dynamic> toJson() =>
       jsonDecode(jsonEncode(_record)) as Map<String, dynamic>;
 
@@ -149,11 +145,12 @@ class ChannelFilterStore {
           'v': 1,
           'g': <String, dynamic>{
             for (final entry in (data['groups'] as Map).entries)
-              entry.key as String: [
-                remoteCreatedAt * 1000,
-                '0000000000000000',
-                entry.value == 'all' ? null : entry.value,
-              ],
+              if (entry.value != 'all')
+                entry.key as String: [
+                  remoteCreatedAt * 1000,
+                  '0000000000000000',
+                  entry.value,
+                ],
           },
         };
     final registers = (meta['g'] as Map).cast<String, dynamic>();

@@ -465,7 +465,7 @@ class _SoloFilterSection extends HookConsumerWidget {
     useListenable(manager);
     final display = MessagesSectionOptions.active(context)
         ? ref.watch(messagesDisplayProvider)
-        : const MessagesDisplay(messages: false);
+        : const MessagesDisplay();
     final mode = display.modeFor(manager?.store, group);
     final window = display.windowFor(manager?.store, group);
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;

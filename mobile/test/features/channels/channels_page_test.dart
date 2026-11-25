@@ -472,14 +472,6 @@ void main() {
         buildTestable(
           realHome: true,
           overrides: [
-            channelFilterProvider.overrideWithValue(
-              _filterTestManager(
-                cached: ChannelFilterStore.empty().edit(
-                  'channels',
-                  ChannelFilterMode.all,
-                ),
-              ),
-            ),
             channelsProvider.overrideWith(() => _FakeNotifier(channels)),
           ],
         ),

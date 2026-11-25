@@ -28,13 +28,9 @@ SectionChatContent _watchSectionChats(
         ) ==
         key;
   }).toList();
-  final display = messages
-      ? ref.watch(messagesDisplayProvider)
-      : const MessagesDisplay(messages: false);
-  final sort = display.sortFor(
-    ref.watch(channelSortProvider).store,
-    sidebarGroupKey(key),
-  );
+  final sort =
+      (messages ? ref.watch(messagesDisplayProvider).sort : null) ??
+      ref.watch(channelSortProvider).sortModeFor(sidebarGroupKey(key));
   final ordered = key == 'dms' && sort == ChannelSortMode.alpha
       ? sortDmChannelsByDisplayLabel(
           rows,

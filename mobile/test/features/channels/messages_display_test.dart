@@ -35,32 +35,6 @@ void main() {
       expect(inherited.modeFor(store, 'channels'), ChannelFilterMode.unreads);
       expect(inherited.limitFor(store, 'channels'), 15);
       expect(inherited.sort, isNull);
-      expect(inherited.modeFor(store, 'dms'), ChannelFilterMode.active);
-      expect(inherited.windowFor(store, 'dms'), 7 * 86400);
-      expect(
-        inherited.sortFor(const ChannelSortStore(), 'dms'),
-        ChannelSortMode.recent,
-      );
-      final saved = store.edit('dms', ChannelFilterMode.all);
-      expect(inherited.modeFor(saved, 'dms'), ChannelFilterMode.all);
-      expect(
-        inherited.sortFor(
-          const ChannelSortStore(groups: {'dms': ChannelSortMode.alpha}),
-          'dms',
-        ),
-        ChannelSortMode.alpha,
-      );
-      expect(
-        inherited.windowFor(
-          saved.edit(
-            'dms',
-            ChannelFilterMode.active,
-            windowSeconds: 30 * 86400,
-          ),
-          'dms',
-        ),
-        30 * 86400,
-      );
       await first
           .read(messagesDisplayProvider.notifier)
           .update(
