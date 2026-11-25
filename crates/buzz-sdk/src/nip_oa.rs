@@ -432,10 +432,13 @@ pub fn verify_git_grant(
             "auth event created_at {auth_event_created_at} is outside the git grant's window"
         )));
     }
+    let level = c
+        .level
+        .ok_or_else(|| SdkError::InvalidInput("invalid git grant: no git= level".into()))?;
     Ok(GitGrant {
         owner,
         repo: c.repo.flatten(),
-        level: c.level.unwrap_or(GrantAction::Read),
+        level,
         after: c.after,
         before: c.before,
     })

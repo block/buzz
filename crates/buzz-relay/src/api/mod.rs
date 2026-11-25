@@ -213,10 +213,12 @@ pub mod relay_members {
 
     /// The one owner, and the Git grant if any, that a Git request proves.
     ///
-    /// A verified agent token names the owner; a Git grant alongside it must
-    /// name the same one. Otherwise the tag does: a Git grant, or a plain tag
-    /// (an owner with no grant). An unverifiable tag supplies no authority;
-    /// independent membership and a verified token remain usable.
+    /// A verified agent token names the owner, and a Git grant alongside it
+    /// must name the same one. A plain tag (an owner with no grant) carries
+    /// no authority of its own, so a verified token's owner wins over it.
+    /// Without a token the tag names the owner: a Git grant, or a plain tag.
+    /// An unverifiable tag supplies no authority; independent membership and
+    /// a verified token remain usable.
     pub(crate) fn git_owner(
         agent: &nostr::PublicKey,
         tag: Option<&str>,

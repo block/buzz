@@ -11,9 +11,8 @@ pub(super) fn grant(args: RepoGrantArgs, client: &BuzzClient) -> Result<(), CliE
 }
 
 fn duration_seconds(value: &str) -> Result<u64, CliError> {
-    let bad = || {
-        CliError::Usage("--for must be a positive duration such as 30s, 30m, 2h, 7d or 1w".into())
-    };
+    let bad =
+        || CliError::Usage("--for must be a positive duration such as 30m, 2h, 7d or 1w".into());
     if !value.is_ascii() {
         return Err(bad());
     }

@@ -17,7 +17,8 @@ fn db_error(error: buzz_db::DbError) -> IngestError {
 }
 
 /// The Git grant an event carries, as a Git door proves one: a tag that
-/// verifies as neither kind is refused.
+/// verifies as neither kind supplies no grant and no owner, and the signer's
+/// own membership still decides.
 async fn grant(
     tenant: &TenantContext,
     state: &AppState,

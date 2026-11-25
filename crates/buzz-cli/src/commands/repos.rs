@@ -219,6 +219,12 @@ pub(crate) fn build_create_announcement(
     channel: Option<&str>,
 ) -> Result<EventBuilder, CliError> {
     validate_repo_id(repo_id)?;
+    // The relay strips one `.git` from a Git URL, so it refuses a new id
+    // ending in one; refuse it here first.
+    if repo_id.ends_with(".git") {
+        return Err(CliError::Usage("repo ID must not end in '.git'".into()));
+    }
+
     let clone_refs: Vec<&str> = clone_urls.iter().map(|s| s.as_str()).collect();
     let relay_refs: Vec<&str> = relays.iter().map(|s| s.as_str()).collect();
 
@@ -850,6 +856,13 @@ mod tests {
                 .any(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz-channel")),
             "no --channel means no binding tag (vanilla NIP-34 stays possible)"
         );
+    }
+
+    #[test]
+    fn create_rejects_a_git_suffixed_id() {
+        let error = build_create_announcement("demo.git", None, None, &[], None, &[], None)
+            .expect_err("the relay refuses a .git-suffixed announcement");
+        assert!(matches!(error, crate::error::CliError::Usage(_)));
     }
 
     #[test]
