@@ -280,6 +280,7 @@ gcheck gov-governance    pass governance
 gcheck gov-roles         pass roles
 gcheck gov-repush        pass repush
 gcheck gov-fence         pass fence
+gcheck gov-attest        pass attest
 
 echo
 echo "Seeded governance errors (each must violate the property named)"
@@ -297,6 +298,7 @@ gcheck no-receipt-on-refusal     ReceiptsMatchDecisions        authority  no-rec
 gcheck agent-is-own-principal    LandsUnderCurrentAuthority    review     agent-is-own-principal
 gcheck self-approval             LandsUnderCurrentAuthority    review     self-approval
 gcheck agent-approves            LandsUnderCurrentAuthority    review     agent-approves
+gcheck evidence-drops-owner      LandsUnderCurrentAuthority    attest     evidence-drops-owner
 gcheck ci-as-human               LandsUnderCurrentAuthority    review     ci-as-human
 gcheck stale-approval            LandsUnderCurrentAuthority    review     stale-approval
 gcheck evidence-any-repo         LandsUnderCurrentAuthority    review     evidence-any-repo
@@ -320,11 +322,13 @@ gcheck any-ref-decides           LandsUnderCurrentAuthority    secrets    any-re
 gcheck evidence-for-community    ReadsAreGovernedAndRecorded   reads      evidence-for-community
 gcheck state-for-community       ReadsAreGovernedAndRecorded   reads      state-for-community
 gcheck unrecorded-read           ReadsAreGovernedAndRecorded   reads      unrecorded-read
+gcheck read-skips-owner-admission ReadsAreGovernedAndRecorded authority read-skips-owner-admission
 gcheck archive-drops-record      RecordOnlyGrows               reads      archive-drops-record
 gcheck repo-admin-floor          GovernanceByCurrentAuthority  governance repo-admin-floor
 gcheck repo-admin-labels         GovernanceByCurrentAuthority  governance repo-admin-labels
 gcheck head-by-maintainer        GovernanceByCurrentAuthority  governance head-by-maintainer
 gcheck announcer-rebinds         GovernanceByCurrentAuthority  governance announcer-rebinds
+gcheck bind-dest-by-grant        GovernanceByCurrentAuthority  governance bind-dest-by-grant
 gcheck authority-at-sign         GovernanceByCurrentAuthority  governance authority-at-sign
 gcheck channel-tags-protect      GovernedDocsOnlyByCommand     governance channel-tags-protect
 gcheck freshness-window-only     CommandsApplyOnceWhereMeant   governance freshness-window-only
@@ -355,6 +359,7 @@ gcheck lands-owner-outside NeverLandsWithOwnerOutside authority
 gcheck lands-by-unowned-agent NeverLandsByUnownedAgent authority
 gcheck reads-by-grant-only-agent NeverReadsByGrantOnlyAgent fence
 gcheck rebinds             NeverRebinds       governance
+gcheck owned-by-approval   NeverOwnedByApproval attest
 gcheck stale-base-counts   NeverCountsOldBase staleok
 gcheck aborts              NeverAborts               fence
 gcheck publish-after-expiry NeverPublishesAfterExpiry fence

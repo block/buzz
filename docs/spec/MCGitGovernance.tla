@@ -27,6 +27,10 @@
 (* at two levels and one for r2, so each grant fault has a wrong grant to  *)
 (* credit.                                                                 *)
 (*                                                                         *)
+(* "governance" adds g, owned by a, under a manage grant for r1, trying  *)
+(* to rebind r1 to ch2, where a is admin and g is not.  "attest" has g    *)
+(* unowned, approving with b's attestation, under a review floor.         *)
+(*                                                                         *)
 (* The history:   c0 ── c1 ── c2        c0 ── s1 ── s2   (s1 has a secret) *)
 (*                  └── x1                                                 *)
 (***************************************************************************)
@@ -71,7 +75,7 @@ S == Scenario
 
 StartFloor ==
     CASE S \in {"review", "fresh", "check", "owners", "rules", "secrets"} -> S
-      [] S \in {"staleok", "repush"} -> "review"
+      [] S \in {"staleok", "repush", "attest"} -> "review"
       [] OTHER -> "none"
 
 MCInit ==
@@ -85,9 +89,11 @@ MCInit ==
                                                    [] OTHER -> "member"
                        [] ch = ch2 /\ k = a -> "admin"
                        [] OTHER -> "none"]],
-     owner    |-> [x \in Agents |-> IF S = "authority" THEN None ELSE b],
+     owner    |-> [x \in Agents |-> CASE S \in {"authority", "attest"} -> None
+                                     [] S = "governance" -> a
+                                     [] OTHER -> b],
      grants   |-> CASE S \in {"review", "fence"} -> {<<g, r1, "member">>}
-                    [] S = "roles" -> {<<g, r1, "admin">>}
+                    [] S \in {"roles", "governance"} -> {<<g, r1, "admin">>}
                     [] OTHER -> {},
      gov      |-> [x \in DocIds |->
                      CASE x[1] = "floor"   -> StartFloor
@@ -98,7 +104,7 @@ MCInit ==
                        [] x[1] = "head"    -> "main"],
      refs     |-> [r \in Repos |-> [f \in Refs |->
                      IF r = r2 /\ f = main THEN c1 ELSE c0]],
-     visible  |-> [r \in Repos |-> IF r = r2 \/ S = "repush" THEN {c0, c1} ELSE {c0}],
+     visible  |-> [r \in Repos |-> IF r = r2 \/ S \in {"repush", "attest"} THEN {c0, c1} ELSE {c0}],
      pushed   |-> IF S = "repush" THEN {<<a, r1, c1>>} ELSE {}]
 
 Push(k, cmds) == <<k, r1, cmds>>
@@ -116,16 +122,19 @@ MCProposals ==
                              Push(b, {<<feat, c1>>, <<main, c1>>})}
       [] S = "reads"     -> {Push(b, One(feat, c1))}
       [] S = "repush"    -> {Push(b, One(feat, c1)), Push(c, One(main, c1))}
+      [] S = "attest"    -> {Push(c, One(main, c1))}
       [] S = "fence"     -> {Push(b, One(main, c1)), Push(g, One(main, x1))}
       [] OTHER -> {}
 
-Approves(keys, f, x) == {<<k, r1, f, x>> : k \in keys}
+\* An agent's approval carries its owner's attestation (see HumanSlot).
+Approves(keys, f, x) == {<<k, r1, f, x, IF k \in Agents THEN b ELSE None>> : k \in keys}
 MCReviews ==
     CASE S = "review" -> Approves({b, c, d, g, ci}, main, c1) \cup Approves({d}, feat, c2)
-                         \cup Approves({b}, main, c2) \cup {<<d, r2, main, c1>>}
+                         \cup Approves({b}, main, c2) \cup {<<d, r2, main, c1, None>>}
       [] S \in {"fresh", "staleok"} -> Approves({c}, main, c1) \cup Approves({c}, main, c2)
       [] S = "owners" -> Approves({c, d}, main, c1)
       [] S = "repush" -> Approves({b}, main, c1)
+      [] S = "attest" -> Approves({g}, main, c1)
       [] OTHER -> {}
 
 MCPosts ==
@@ -150,6 +159,7 @@ MCGrantChoices ==
 
 MCReadChoices ==
     CASE S = "reads"   -> {<<k, r1, x>> : k \in {b, m}, x \in Doors}
+      [] S = "authority" -> {<<g, r1, "fetch">>}
       [] S = "secrets" -> {<<c, r1, "evidence">>}
       [] S = "fence"   -> {<<g, r1, "fetch">>}
       [] OTHER -> {}
@@ -161,7 +171,8 @@ MCGovChoices ==
           <<b, <<"labels", r1>>, "pay">>, <<b, <<"rules", r1>>, "repo">>,
           <<b, <<"rules", r2>>, "repo">>, <<a, <<"rules", r2>>, "repo2">>,
           <<m, <<"head", r1>>, "feat">>, <<m, <<"bind", r1>>, "bind2">>,
-          <<b, <<"bind", r1>>, "bind2">>, <<a, <<"bind", r1>>, "bind2">>}
+          <<b, <<"bind", r1>>, "bind2">>, <<a, <<"bind", r1>>, "bind2">>,
+          <<g, <<"bind", r1>>, "bind2">>}
       [] OTHER -> {}
 
 MCTagChoices == IF S = "governance" THEN {<<b, r1, "pay">>} ELSE {}
@@ -170,6 +181,8 @@ MCArchives == IF S = "reads" THEN {r1} ELSE {}
 \* RepoKey: the agent announced r1, so both shortcut errors are reachable;
 \* in "governance" an outsider announced it.
 MCRepoKey == [r \in Repos |-> IF S = "governance" THEN m ELSE g]
+
+ASSUME \A e \in MCReviews : e[1] \in Agents => e[5] # None
 
 Bounded ==
     /\ Cardinality(receipts) <= MaxDecisions /\ Cardinality(audit) <= MaxDecisions

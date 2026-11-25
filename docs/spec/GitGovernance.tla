@@ -94,7 +94,8 @@ CONSTANTS
     Registrations, \* <<agent, person>>: attestations an agent may present
     GrantChoices,  \* <<agent, repo, level>> an owner may grant
     Proposals,     \* <<key, repo, {<<ref, new commit>>, ...}>>: pushes
-    Reviews,       \* <<key, repo, ref, commit>>: approvals
+    Reviews,       \* <<key, repo, ref, commit, owner>>: approvals; owner is the
+                   \* person an attestation on the approval names, or None
     Posts,         \* <<key, check, repo, commit, result>>: check results
     ReadChoices,   \* <<key, repo, door>>
     TagChoices,    \* <<key, repo, labels body>>: channel topic edits
@@ -245,10 +246,14 @@ MayCommand(k, d) ==
       [] d[1] = "bind" ->
             Holds(k, r, "admin") \/ ("announcer-rebinds" \in Faults /\ k = RepoKey[r])
 
-\* A rebind must also come from an admin of the channel it binds to.
-MayBindTo(k, ch) ==
+\* A rebind of r must also come from an admin of the channel it binds to,
+\* in its own right: a grant for r reaches r, not that channel.
+MayBindTo(k, r, ch) ==
     \/ commRole[k] # "none" /\ chanRole[ch][k] = "admin"
     \/ "announcer-rebinds" \in Faults
+    \/ /\ "bind-dest-by-grant" \in Faults /\ Owned(k) /\ commRole[owner[k]] # "none"
+       /\ chanRole[ch][owner[k]] = "admin"
+       /\ \E x \in grants : x[1] = k /\ x[2] = r /\ x[3] = "admin"
 
 FloorOn(r, f) ==
     {x \in Floor : /\ x.ref = f
@@ -300,11 +305,15 @@ Bound(a, p, c) ==
     /\ a.head = c.new \/ ("stale-approval" \in Faults /\ a.head \in Ancestry(c.new))
     /\ FreshTarget(p.repo, c.ref) /\ "target-tip-ignored" \notin Faults => a.base = c.old
 
-\* Who may fill a human approval: a key with no owner attestation that is
-\* not a trusted check, may write the repo now, and did none of the work.
-\* Distinct keys count as distinct people: the relay knows no more.
+\* Who may fill a human approval: a key with no recorded owner that is not
+\* a trusted check, may write the repo now, and did none of the work.
+\* Distinct keys count as distinct people: the relay knows no more.  It
+\* knows an agent only by its recorded owner, so this is the property's
+\* People only if every agent's first approval carries its attestation,
+\* which records the owner (Approve).  An agent that never presents one is
+\* a person to the relay; MCGitGovernance assumes none does.
 HumanSlot(a, p, c) ==
-    /\ a.by \in People \/ "agent-approves" \in Faults
+    /\ ~Owned(a.by) \/ "agent-approves" \in Faults
     /\ ~IsCheckKey(a.by) \/ "ci-as-human" \in Faults
     /\ IF "eligibility-at-approve" \in Faults THEN a.held ELSE Holds(a.by, p.repo, "member")
     /\ Principal(a.by) \notin Authors(p, c) \/ "self-approval" \in Faults
@@ -376,7 +385,7 @@ Deliver(m, d) ==
     /\ d = m.doc \/ ("command-unbound" \in Faults /\ d[1] = m.doc[1])
     /\ m.prev = ver[d] \/ "freshness-window-only" \in Faults
     /\ IF "authority-at-sign" \in Faults THEN m.could ELSE MayCommand(m.by, d)
-    /\ d[1] = "bind" => MayBindTo(m.by, Content[m.body])
+    /\ d[1] = "bind" => MayBindTo(m.by, d[2], Content[m.body])
     /\ IF d[2] = None /\ "fence-nominal" \notin Faults THEN reserved = {} ELSE ~Fenced(d[2])
     /\ gov' = [gov EXCEPT ![d] = m.body]
     /\ ver' = [ver EXCEPT ![d] = @ + 1]
@@ -484,15 +493,22 @@ Propose(e) ==
 
 \* A review approves a commit for a ref.  It records the ref's tip as the
 \* reviewer saw it, and whether the reviewer could write the repo then
-\* (only the seeded error "eligibility-at-approve" reads that).
+\* (only the seeded error "eligibility-at-approve" reads that).  An
+\* attestation on it records the agent's owner if none is recorded, as
+\* Register does and under the same fence.
 Approve(e) ==
+    LET mint == /\ e[1] \in Agents /\ e[5] # None /\ owner[e[1]] = None
+                /\ "evidence-drops-owner" \notin Faults IN
     /\ e[4] \in visible[e[2]]
+    /\ mint => reserved = {}
+    /\ owner' = IF mint THEN [owner EXCEPT ![e[1]] = e[5]] ELSE owner
     /\ approvals' = approvals \cup
          {[by |-> e[1], repo |-> e[2], ref |-> e[3], head |-> e[4],
            base |-> refs[e[2]][e[3]],
            held |-> "eligibility-at-approve" \in Faults /\ Holds(e[1], e[2], "member")]}
     /\ act' = [kind |-> "approve"]
-    /\ UNCHANGED <<govVars, refs, visible, pushed, brought, pending, reserved, posts, receipts, audit>>
+    /\ UNCHANGED <<commRole, chanRole, grants, gov, ver, sent, govlog,
+                   refs, visible, pushed, brought, pending, reserved, posts, receipts, audit>>
 
 \* Anyone can post a check result.  Only a trusted one counts.
 Post(e) ==
@@ -588,7 +604,10 @@ Doors == {"fetch", "evidence", "state"}
 MayRead(k, r, door) ==
     CASE door = "evidence" /\ "evidence-for-community" \in Faults -> commRole[k] # "none"
       [] door = "state" /\ "state-for-community" \in Faults       -> commRole[k] # "none"
-      [] OTHER -> Holds(k, r, "guest")
+      [] OTHER -> IF "read-skips-owner-admission" \in Faults
+                  THEN commRole[k] # "none"
+                       /\ Rank[MaxRole(chanRole[ChanOf(r)][k], ViaGrant(k, r))] >= Rank["guest"]
+                  ELSE Holds(k, r, "guest")
 
 Shown(r, door) ==
     IF door = "evidence" /\ "evidence-shows-quarantine" \in Faults
@@ -892,6 +911,8 @@ NeverReadsByGrantOnlyAgent ==
     [][act'.kind = "read" /\ act'.by \in Agents =>
           chanRole[ChanOf(act'.repo)][act'.by] # "none"]_vars
 NeverRebinds == ~\E x \in govlog : x.doc[1] = "bind"
+\* An approval's attestation records the agent's owner.
+NeverOwnedByApproval == [][act'.kind = "approve" => owner' = owner]_vars
 \* A push accepted and then abandoned.
 NeverAborts == [][act'.kind # "abort"]_vars
 
