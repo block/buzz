@@ -7,8 +7,9 @@
 //! for every searchable message Postgres holds, and nothing else.
 //!
 //! The seed fixes the plan, not the thread interleaving, so a failing seed
-//! may need a few runs to reproduce. Every run checks the whole outbox, so
-//! `BUZZ_TEST_DATABASE_URL` must name a database of its own. Settings:
+//! may need a few runs to reproduce. Every run clears and checks the whole
+//! outbox, so it runs only through `scripts/postgres-test-run.sh`, which
+//! gives it a database of its own. Settings:
 //!
 //! - `BUZZ_TEST_CONSISTENCY_SEEDS`: a seed (`7`) or an inclusive range
 //!   (`1-300`); default `1-3`;
@@ -866,11 +867,19 @@ async fn writer(db: Db, world: Arc<World>, author: usize, seed: u64, ops: usize)
 // ---------------------------------------------------------------------------
 
 async fn connect() -> Db {
+    // A run clears the whole outbox and completes every backfill, so it never
+    // falls back to the development database.
+    let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+        .expect("Postgres wrapper must provide an isolated database URL");
+    assert_eq!(
+        std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref(),
+        Ok("desired"),
+        "run through scripts/postgres-test-run.sh, which gives each test a database of its own"
+    );
     let (pool, _) = search_suite::setup().await;
     pool.close().await;
     let db = Db::new(&DbConfig {
-        database_url: std::env::var("BUZZ_TEST_DATABASE_URL")
-            .unwrap_or_else(|_| search_suite::TEST_DB_URL.into()),
+        database_url,
         max_connections: 48,
         ..DbConfig::default()
     })
