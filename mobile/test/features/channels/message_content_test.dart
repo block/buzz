@@ -3979,6 +3979,54 @@ Photos
         expect(code.codeStyle.borderColor, CodeStyle.border(scheme));
       });
 
+      testWidgets('scales a standalone fence like inline code', (tester) async {
+        // A blank line lifts the fence out of the paragraph, so it renders
+        // as its own block and has to apply the system text size itself.
+        await tester.pumpWidget(
+          _testable(
+            Builder(
+              builder: (context) => MediaQuery(
+                data: MediaQuery.of(
+                  context,
+                ).copyWith(textScaler: const TextScaler.linear(2)),
+                child: MessageContent(
+                  content: 'Run `just test` now\n\n```\nfenced code\n```',
+                  baseStyle: chatBodyTextStyle,
+                ),
+              ),
+            ),
+          ),
+        );
+
+        double renderedSize(bool Function(InlineSpan span) matches) {
+          for (final rich in tester.widgetList<RichText>(
+            find.byWidgetPredicate((widget) => widget is RichText),
+          )) {
+            double? size;
+            rich.text.visitChildren((span) {
+              if (span is TextSpan && matches(span)) {
+                size = rich.textScaler.scale(span.style!.fontSize!);
+              }
+              return size == null;
+            });
+            if (size case final size?) return size;
+          }
+          throw StateError('span not rendered');
+        }
+
+        final inline = renderedSize(
+          (span) => span is CodeTextSpan && span.text == 'just test',
+        );
+        final fence = renderedSize(
+          (span) => span.toPlainText() == 'fenced code',
+        );
+        expect(
+          inline,
+          closeTo(chatBodyTextStyle.fontSize! * 13 / 15 * 2, 0.01),
+        );
+        expect(fence, closeTo(inline, 0.01));
+      });
+
       testWidgets('renders code block between paragraphs', (tester) async {
         await tester.pumpWidget(
           _testable(
