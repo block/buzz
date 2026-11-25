@@ -208,9 +208,11 @@ final class NativeCreateChannelViewController: UITableViewController, UITextView
     content.text = error
     content.textProperties.color = .systemRed
     content.textProperties.alignment = .center
-    // UIKit leaves 17.5 points, rounded down to a pixel, under a group with no
-    // footer. This puts the text that far below the rows at 2x and at 3x.
-    content.directionalLayoutMargins.top = 17.33
+    // The first group has no footer, so its footer's height is the space UIKit
+    // leaves under a group. This puts the text that far below the rows. After
+    // a full reload UIKit asks this method for that footer from inside the
+    // query; the guard above answers nil, so it goes no deeper.
+    content.directionalLayoutMargins.top = tableView.rectForFooter(inSection: 0).height
     footer.contentConfiguration = content
     return footer
   }

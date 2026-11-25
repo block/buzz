@@ -62,10 +62,11 @@ struct CreateChannelAccessibilityTests {
       precondition(abs(frame.minX - inset) < 0.5 && abs(width - frame.maxX - inset) < 0.5, "Error must keep the field headings' margin on both sides")
       precondition(abs(frame.midX - width / 2) < 0.5, "Error must be centred in the table")
       precondition(label.textAlignment == .center && label.numberOfLines == 0, "Each line of the error must be centred")
-      // UIKit leaves 17.5 points, rounded down to a pixel, under a group with
-      // no footer.
+      // The first group has no footer, so its footer's height is the space
+      // UIKit leaves under a group.
       let rows = table.rectForRow(at: IndexPath(row: 1, section: 2))
-      precondition(abs(frame.minY - rows.maxY - 17.5) < 0.5, "Error must start a group's spacing below the rows")
+      let spacing = table.rectForFooter(inSection: 0).height
+      precondition(abs(frame.minY - rows.maxY - spacing) < 0.5, "Error must start a group's spacing below the rows")
       let needed = label.sizeThatFits(CGSize(width: frame.width, height: .greatestFiniteMagnitude)).height
       precondition(frame.height >= needed - 0.5, "The error must not be clipped")
       let footerRect = table.rectForFooter(inSection: 2)
