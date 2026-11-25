@@ -54,6 +54,63 @@ void swipeReplyTests() {
     expect(find.text('Reply'), findsNothing);
   });
 
+  testWidgets('own message without replies offers a semantic Reply', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    final events = [
+      _textMsg(id: threadIdRoot, pubkey: 'self', content: 'My message'),
+    ];
+    await tester.pumpWidget(
+      _buildTestable(
+        signingPubkey: 'self',
+        messages: events,
+        home: ChannelDetailPage(channel: _testChannel),
+      ),
+    );
+    await tester.pumpAndSettle();
+    const reply = CustomSemanticsAction(label: 'Reply');
+    final replyId = CustomSemanticsAction.getIdentifier(reply);
+    final nodes = <SemanticsNode>[];
+    void collect(SemanticsNode node) {
+      if (node.getSemanticsData().customSemanticsActionIds?.contains(replyId) ??
+          false) {
+        nodes.add(node);
+      }
+      node.visitChildren((child) {
+        collect(child);
+        return true;
+      });
+    }
+
+    collect(
+      tester
+          .binding
+          .renderViews
+          .single
+          .owner!
+          .semanticsOwner!
+          .rootSemanticsNode!,
+    );
+    expect(nodes, hasLength(1));
+    final node = nodes.single;
+    // One stop: the action sits on the row's own node, with its long press.
+    expect(
+      node.getSemanticsData().hasAction(SemanticsAction.longPress),
+      isTrue,
+    );
+    node.owner!.performAction(node.id, SemanticsAction.customAction, replyId);
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<ThreadDetailPage>(find.byType(ThreadDetailPage))
+          .threadHead
+          .id,
+      threadIdRoot,
+    );
+    semantics.dispose();
+  });
+
   testWidgets('Solo thread is read-only', (tester) async {
     final channel = soloChannel();
     final events = [

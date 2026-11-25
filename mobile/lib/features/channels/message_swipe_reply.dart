@@ -12,6 +12,7 @@ import '../../shared/theme/theme.dart';
 import 'channels_provider.dart';
 import 'thread_detail_page.dart';
 import 'message_reply_drag_target.dart';
+import 'message_reply_semantics.dart';
 import 'timeline_message.dart';
 
 /// Reveals the existing reply action as a message is dragged to the left.
@@ -82,9 +83,28 @@ class MessageSwipeReply extends HookConsumerWidget {
       }
     }
 
+    void openReply() {
+      if (onReply != null) {
+        onReply!();
+        return;
+      }
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: message,
+            allMessages: messages,
+            channelId: channelId,
+            currentPubkey: currentPubkey,
+            isMember: isMember,
+            isArchived: isArchived,
+          ),
+        ),
+      );
+    }
+
     // Flutter ends an accepted drag on PointerCancel too. Preserve the raw
     // cancellation signal so an interrupted gesture cannot open a reply.
-    return Listener(
+    final swipe = Listener(
       onPointerCancel: (_) => cancelled.value = true,
       child: RawGestureDetector(
         behavior: HitTestBehavior.translucent,
@@ -154,23 +174,7 @@ class MessageSwipeReply extends HookConsumerWidget {
                   ..onEnd = (_) {
                     final reply = !cancelled.value && offset.value >= 72;
                     reset();
-                    if (!reply) return;
-                    if (onReply != null) {
-                      onReply!();
-                      return;
-                    }
-                    Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => ThreadDetailPage(
-                          threadHead: message,
-                          allMessages: messages,
-                          channelId: channelId,
-                          currentPubkey: currentPubkey,
-                          isMember: isMember,
-                          isArchived: isArchived,
-                        ),
-                      ),
-                    );
+                    if (reply) openReply();
                   },
               ),
         },
@@ -269,6 +273,7 @@ class MessageSwipeReply extends HookConsumerWidget {
         ),
       ),
     );
+    return MessageReplySemantics(onReply: openReply, child: swipe);
   }
 }
 
