@@ -1,8 +1,10 @@
 //! In-memory NIP-FI deny set.
 //!
-//! Holds `(iss, pubkey) → until` entries.  The map itself is RAM; the relay
-//! restores it from the shared store ([`super::CommandReplayGuard`]) at
-//! startup and after every lost subscription.  While a restore is pending,
+//! Holds `(iss, pubkey) → (until, scope)` entries.  A [`DenyScope`] is the
+//! whole key or, from a command's `revoke_through`, only assertions issued at
+//! or before a cutoff.  The map itself is RAM; the relay restores it from the
+//! shared store ([`super::CommandReplayGuard`]) at startup and after every
+//! lost subscription.  While a restore is pending,
 //! [`NipFiDenyMap::is_denied`] fails closed for every key.
 //!
 //! * **Restore fence**: [`NipFiDenyMap::begin_restore`] opens a new generation
@@ -12,13 +14,13 @@
 //!
 //! ## Invariants
 //!
-//! * **Merge rule**: inserting a new `until` for an existing key retains
-//!   `max(existing_until, new_until)` — an accepted disconnect MUST NOT shorten
-//!   an active deny. [FI-TRACE-DENY-SET]
-//! * **Past-`until` commands**: close sessions but MUST NOT create or shorten
-//!   entries.  Concretely, when `new_until < now` the merge still applies the
-//!   `max` rule, which preserves any active entry and lets a "no active entry"
-//!   case insert with an already-expired value (immediately inactive). [FI-TRACE-DENY-SET]
+//! * **Merge rule** ([`DenyEntry::merge`]): two active entries keep
+//!   `max(until)`, whole-key scope beats a cutoff, and two cutoffs keep the
+//!   larger one — an accepted disconnect MUST NOT shorten or narrow an active
+//!   deny.  An expired entry contributes nothing. [FI-TRACE-DENY-SET]
+//! * **Past-`until` commands**: close sessions but MUST NOT create, shorten or
+//!   strengthen an active entry.  With no active entry the expired value is
+//!   stored, immediately inactive. [FI-TRACE-DENY-SET]
 //! * **Per-issuer capacity cap**: each issuer has a hard ceiling on live entries.
 //!   A capacity failure returns `Err(DenySetFull)` without inserting anything —
 //!   the spec requires `503` here and neither the jti nor the deny entry is
@@ -59,6 +61,110 @@ use std::sync::{Arc, Mutex};
 #[error("deny set full for issuer")]
 pub struct DenySetFull;
 
+// ── Deny entries ──────────────────────────────────────────────────────────────
+
+/// Which assertions naming a denied key an entry refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenyScope {
+    /// Every assertion: a command without `revoke_through`.
+    WholeKey,
+    /// Assertions whose verified signed `iat` is at or before this
+    /// NumericDate: a command's `revoke_through`.
+    IssuedThrough(i64),
+}
+
+impl DenyScope {
+    /// The scope of a command's optional `revoke_through`.
+    pub fn from_revoke_through(revoke_through: Option<i64>) -> Self {
+        revoke_through.map_or(Self::WholeKey, Self::IssuedThrough)
+    }
+
+    /// The `revoke_through` this scope carries, `None` for the whole key.
+    pub const fn revoke_through(self) -> Option<i64> {
+        match self {
+            Self::WholeKey => None,
+            Self::IssuedThrough(cutoff) => Some(cutoff),
+        }
+    }
+
+    /// True when an assertion issued at `issued_at` is on the revoked side.
+    /// Compares the full instant, so a fractional `iat` just after C is not
+    /// covered.
+    pub fn covers(self, issued_at: DateTime<Utc>) -> bool {
+        match self {
+            Self::WholeKey => true,
+            Self::IssuedThrough(cutoff) => match DateTime::from_timestamp(cutoff, 0) {
+                Some(cutoff) => issued_at <= cutoff,
+                // Beyond the representable range: past every instant, or before it.
+                None => cutoff > 0,
+            },
+        }
+    }
+
+    /// The stronger of two scopes: whole-key wins, else the later cutoff.
+    pub fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::IssuedThrough(a), Self::IssuedThrough(b)) => Self::IssuedThrough(a.max(b)),
+            _ => Self::WholeKey,
+        }
+    }
+}
+
+/// One `(iss, pubkey)` deny: active while `now < until`, over `scope`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DenyEntry {
+    /// End of the deny, exact.
+    pub until: DateTime<Utc>,
+    /// The assertions it refuses.
+    pub scope: DenyScope,
+}
+
+impl DenyEntry {
+    /// A whole-key deny until `until`.
+    pub const fn whole_key(until: DateTime<Utc>) -> Self {
+        Self {
+            until,
+            scope: DenyScope::WholeKey,
+        }
+    }
+
+    /// True while the entry is in force.
+    pub fn is_active(&self, now: DateTime<Utc>) -> bool {
+        now < self.until
+    }
+
+    /// True when the entry refuses an assertion issued at `issued_at`.
+    pub fn denies(&self, issued_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+        self.is_active(now) && self.scope.covers(issued_at)
+    }
+
+    /// `incoming` merged over `existing` at `now`.  Two active entries keep
+    /// `max(until)` and the [`DenyScope::union`] of their scopes; an expired
+    /// entry contributes nothing, so an expired `incoming` leaves an active
+    /// `existing` unchanged and otherwise `incoming` replaces it.
+    pub fn merge(existing: Option<Self>, incoming: Self, now: DateTime<Utc>) -> Self {
+        match existing {
+            Some(existing) if existing.is_active(now) => {
+                if !incoming.is_active(now) {
+                    return existing;
+                }
+                Self {
+                    until: existing.until.max(incoming.until),
+                    scope: existing.scope.union(incoming.scope),
+                }
+            }
+            _ => incoming,
+        }
+    }
+}
+
+/// A bare `until` is a whole-key deny.
+impl From<DateTime<Utc>> for DenyEntry {
+    fn from(until: DateTime<Utc>) -> Self {
+        Self::whole_key(until)
+    }
+}
+
 // ── Per-issuer shard ──────────────────────────────────────────────────────────
 
 /// One issuer's worth of deny entries and jti deduplication state.
@@ -66,8 +172,8 @@ pub struct DenySetFull;
 /// Reserve and commit each take the shard mutex separately; the pending slot
 /// held between them keeps the jti and deny entry both-or-neither.
 struct IssuerShard {
-    /// Active deny entries: hex-encoded pubkey → until.
-    entries: HashMap<String, DateTime<Utc>>,
+    /// Deny entries: hex-encoded pubkey → entry.
+    entries: HashMap<String, DenyEntry>,
     /// Reserved jtis: jti string → effective_expiry.  Expired jtis are evicted
     /// when the jti budget is full so the map never grows to replay-corpus size.
     jtis: HashMap<String, DateTime<Utc>>,
@@ -125,7 +231,7 @@ impl IssuerShard {
     fn evict_expired(&mut self, now: DateTime<Utc>) {
         let (pending_keys, pending_jtis) = (&self.pending_keys, &self.pending_jtis);
         self.entries
-            .retain(|k, until| *until > now || pending_keys.contains_key(k));
+            .retain(|k, entry| entry.is_active(now) || pending_keys.contains_key(k));
         self.jtis
             .retain(|j, exp| *exp > now || pending_jtis.contains(j));
     }
@@ -140,12 +246,21 @@ impl IssuerShard {
         full(self)
     }
 
-    /// True if `(iss, pubkey_hex)` has an active deny entry (`now < until`).
-    fn is_denied(&self, pubkey_hex: &str, now: DateTime<Utc>) -> bool {
+    /// The active entry for `pubkey_hex`, if any.
+    fn active(&self, pubkey_hex: &str, now: DateTime<Utc>) -> Option<DenyEntry> {
         self.entries
             .get(pubkey_hex)
-            .map(|until| now < *until)
-            .unwrap_or(false)
+            .copied()
+            .filter(|entry| entry.is_active(now))
+    }
+
+    /// Merge `entry` into the stored entry for `pubkey_hex`.  Returns `true`
+    /// when the stored entry changed: new, extended, or widened in scope.
+    fn put(&mut self, pubkey_hex: &str, entry: DenyEntry, now: DateTime<Utc>) -> bool {
+        let existing = self.entries.get(pubkey_hex).copied();
+        let merged = DenyEntry::merge(existing, entry, now);
+        self.entries.insert(pubkey_hex.to_owned(), merged);
+        existing != Some(merged)
     }
 
     /// Run every fallible check and hold a pending slot for `(jti, key)`.
@@ -208,18 +323,15 @@ impl IssuerShard {
         jti: &str,
         jti_effective_expiry: DateTime<Utc>,
         pubkey_hex: &str,
-        until: DateTime<Utc>,
+        entry: DenyEntry,
+        now: DateTime<Utc>,
     ) {
         self.release(jti, pubkey_hex);
-        let effective_until = match self.entries.get(pubkey_hex) {
-            Some(&existing) => existing.max(until),
-            None => until,
-        };
-        self.entries.insert(pubkey_hex.to_owned(), effective_until);
+        self.put(pubkey_hex, entry, now);
         self.jtis.insert(jti.to_owned(), jti_effective_expiry);
     }
 
-    /// Insert or `max(existing_until, until)`-merge a deny entry.
+    /// Insert or [`DenyEntry::merge`] a deny entry.
     ///
     /// Used directly for cross-pod propagation, where replay idempotency is
     /// achieved by the merge rule alone — no jti tracking needed.
@@ -228,7 +340,7 @@ impl IssuerShard {
     fn merge_entry(
         &mut self,
         pubkey_hex: &str,
-        until: DateTime<Utc>,
+        entry: DenyEntry,
         now: DateTime<Utc>,
     ) -> Result<bool, CapacityExceeded> {
         // Overwriting an existing (active or expired) entry never grows the
@@ -239,15 +351,7 @@ impl IssuerShard {
         {
             return Err(CapacityExceeded);
         }
-
-        // Changed when the entry is new or `until` extends it.
-        match self.entries.get(pubkey_hex) {
-            Some(&existing) if existing >= until => Ok(false),
-            _ => {
-                self.entries.insert(pubkey_hex.to_owned(), until);
-                Ok(true)
-            }
-        }
+        Ok(self.put(pubkey_hex, entry, now))
     }
 }
 
@@ -265,13 +369,22 @@ pub(crate) struct Reservation {
 }
 
 impl Reservation {
-    /// Record the jti and max-merge the deny entry.  Cannot fail on capacity.
-    pub(crate) fn commit(mut self, jti_effective_expiry: DateTime<Utc>, until: DateTime<Utc>) {
+    /// Record the jti and merge the deny entry.  Cannot fail on capacity.
+    pub(crate) fn commit(
+        mut self,
+        jti_effective_expiry: DateTime<Utc>,
+        entry: DenyEntry,
+        now: impl FnOnce() -> DateTime<Utc>,
+    ) {
         let pubkey_hex = self
             .pubkey_hex
             .take()
             .expect("reservation not yet committed");
-        self.with_shard(|shard| shard.commit(&self.jti, jti_effective_expiry, &pubkey_hex, until));
+        // `now` is read under the lock: an entry that expired while this
+        // commit waited must contribute nothing to the merge.
+        self.with_shard(|shard| {
+            shard.commit(&self.jti, jti_effective_expiry, &pubkey_hex, entry, now())
+        });
     }
 
     /// Shards are never removed, so the reserved shard exists.  A poisoned
@@ -417,7 +530,8 @@ impl NipFiDenyMap {
         self.shards.iter().map(|s| s.key().clone()).collect()
     }
 
-    /// Returns `true` when `(iss, pubkey)` has an active deny entry at `now`.
+    /// Returns `true` when `(iss, pubkey)` has an active deny entry at `now`,
+    /// whatever its scope.
     ///
     /// Used by S4 (WS admission step 6) and S5 (HTTP admission step 5).
     /// [FI-TRACE-DENY-SET]
@@ -428,21 +542,45 @@ impl NipFiDenyMap {
     /// Also fails closed (returns `true` for every key) while a restore is
     /// pending.
     pub fn is_denied(&self, issuer: &str, pubkey: &PublicKey, now: DateTime<Utc>) -> bool {
-        self.deny_status(issuer, pubkey, now) != DenyStatus::Allowed
+        self.denies(issuer, pubkey, DateTime::<Utc>::MIN_UTC, now)
     }
 
-    /// The deny-set verdict for `(iss, pubkey)` at `now`, read once:
+    /// Returns `true` when an active entry for `(iss, pubkey)` covers an
+    /// assertion with verified signed `iat` `issued_at`, or while a restore
+    /// is pending.  Fails closed on a poisoned shard.
+    pub fn denies(
+        &self,
+        issuer: &str,
+        pubkey: &PublicKey,
+        issued_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        self.deny_status(issuer, pubkey, issued_at, now) != DenyStatus::Allowed
+    }
+
+    /// The deny-set verdict for an assertion naming `(iss, pubkey)` with
+    /// verified signed `iat` `issued_at`, read once:
     /// [`DenyStatus::Unavailable`] while a restore is pending, else
-    /// [`DenyStatus::Denied`] for an active entry or a poisoned shard (fail
-    /// closed), else [`DenyStatus::Allowed`].  [FI-TRACE-DENY-SET]
-    pub fn deny_status(&self, issuer: &str, pubkey: &PublicKey, now: DateTime<Utc>) -> DenyStatus {
+    /// [`DenyStatus::Denied`] for an active entry covering it or a poisoned
+    /// shard (fail closed), else [`DenyStatus::Allowed`].  [FI-TRACE-DENY-SET]
+    pub fn deny_status(
+        &self,
+        issuer: &str,
+        pubkey: &PublicKey,
+        issued_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> DenyStatus {
         if !self.is_restored() {
             return DenyStatus::Unavailable;
         }
         let denied = match self.shards.get(issuer) {
             Some(shard) => shard
                 .lock()
-                .map(|guard| guard.is_denied(&pubkey.to_hex(), now))
+                .map(|guard| {
+                    guard
+                        .active(&pubkey.to_hex(), now)
+                        .is_some_and(|entry| entry.scope.covers(issued_at))
+                })
                 .unwrap_or(true), // poisoned shard → fail closed (deny)
             None => false,
         };
@@ -487,6 +625,26 @@ impl NipFiDenyMap {
         })
     }
 
+    /// The scope a close scan for `(iss, pubkey)` applies after a command of
+    /// scope `command`: its union with any active stored entry, so a stronger
+    /// merged deny also closes.  A poisoned shard closes the whole key.
+    pub fn close_scope(
+        &self,
+        issuer: &str,
+        pubkey: &PublicKey,
+        command: DenyScope,
+        now: DateTime<Utc>,
+    ) -> DenyScope {
+        let stored = match self.shards.get(issuer) {
+            Some(shard) => match shard.lock() {
+                Ok(guard) => guard.active(&pubkey.to_hex(), now).map(|entry| entry.scope),
+                Err(_) => Some(DenyScope::WholeKey),
+            },
+            None => None,
+        };
+        stored.map_or(command, |stored| stored.union(command))
+    }
+
     /// Reserve and immediately commit, for tests of the local map alone.
     #[cfg(test)]
     pub(crate) fn atomic_reserve_and_insert(
@@ -498,15 +656,18 @@ impl NipFiDenyMap {
         until: DateTime<Utc>,
         now: DateTime<Utc>,
     ) -> Result<(), ReserveError> {
-        self.reserve(issuer, jti, pubkey, now)?
-            .commit(jti_effective_expiry, until);
+        self.reserve(issuer, jti, pubkey, now)?.commit(
+            jti_effective_expiry,
+            DenyEntry::whole_key(until),
+            || now,
+        );
         Ok(())
     }
 
     /// Merge a cross-pod deny entry (e.g. from Redis propagation).
     ///
-    /// Idempotent: repeated delivery of the same `(issuer, pubkey, until)` is
-    /// a no-op due to the `max(until)` merge rule.  No synthetic jti is
+    /// Idempotent: repeated delivery of the same `(issuer, pubkey, entry)` is
+    /// a no-op under the [`DenyEntry::merge`] rule.  No synthetic jti is
     /// allocated — replay idempotency is structural, not tracked.
     ///
     /// Only merges into **locally-configured** issuer shards.  An unknown
@@ -521,9 +682,10 @@ impl NipFiDenyMap {
         &self,
         issuer: &str,
         pubkey: &PublicKey,
-        until: DateTime<Utc>,
-        now: DateTime<Utc>,
+        entry: impl Into<DenyEntry>,
+        now: impl FnOnce() -> DateTime<Utc>,
     ) -> CrossPodMergeResult {
+        let entry = entry.into();
         let pubkey_hex = pubkey.to_hex();
         // Only operate on pre-configured shards — never allocate for unknown issuers.
         match self.shards.get(issuer) {
@@ -536,7 +698,7 @@ impl NipFiDenyMap {
                     // fail-closed without any explicit write.
                     CrossPodMergeResult::ShardPoisoned
                 }
-                Ok(mut guard) => match guard.merge_entry(&pubkey_hex, until, now) {
+                Ok(mut guard) => match guard.merge_entry(&pubkey_hex, entry, now()) {
                     Ok(true) => CrossPodMergeResult::Merged,
                     Ok(false) => CrossPodMergeResult::Unchanged,
                     Err(CapacityExceeded) => {
@@ -600,7 +762,7 @@ mod tests {
             "closed while restoring"
         );
         assert_eq!(
-            m.deny_status("iss", &key, Utc::now()),
+            m.deny_status("iss", &key, DateTime::<Utc>::MIN_UTC, Utc::now()),
             DenyStatus::Unavailable,
             "closed as unavailable, not revoked"
         );
@@ -982,12 +1144,12 @@ mod tests {
 
         // First merge: longer.
         assert_eq!(
-            m.merge_cross_pod_deny(iss(), &k, longer, now),
+            m.merge_cross_pod_deny(iss(), &k, longer, || now),
             CrossPodMergeResult::Merged
         );
         // Second merge: shorter — must not shorten.
         assert_eq!(
-            m.merge_cross_pod_deny(iss(), &k, shorter, now),
+            m.merge_cross_pod_deny(iss(), &k, shorter, || now),
             CrossPodMergeResult::Unchanged
         );
         // At 400s: still denied (longer wins).
@@ -1013,11 +1175,11 @@ mod tests {
 
         // Deliver twice.
         assert_eq!(
-            m.merge_cross_pod_deny(iss(), &k, until, now),
+            m.merge_cross_pod_deny(iss(), &k, until, || now),
             CrossPodMergeResult::Merged
         );
         assert_eq!(
-            m.merge_cross_pod_deny(iss(), &k, until, now),
+            m.merge_cross_pod_deny(iss(), &k, until, || now),
             CrossPodMergeResult::Unchanged
         );
         // Still denied at 200s (no spurious second-insert count growth).
@@ -1033,7 +1195,7 @@ mod tests {
         let k = key();
         let until = Utc::now() + Duration::seconds(300);
         assert_eq!(
-            m.merge_cross_pod_deny("https://unknown.example.com", &k, until, Utc::now()),
+            m.merge_cross_pod_deny("https://unknown.example.com", &k, until, Utc::now),
             CrossPodMergeResult::UnknownIssuer,
             "unknown issuer must be rejected without allocating state"
         );
@@ -1076,14 +1238,14 @@ mod tests {
         let pending = m.reserve(iss(), "jti-local", &k, now).expect("slot free");
 
         assert_eq!(
-            m.merge_cross_pod_deny(iss(), &k, until, now),
+            m.merge_cross_pod_deny(iss(), &k, until, || now),
             CrossPodMergeResult::Merged
         );
         drop(pending);
 
         assert!(m.is_denied(iss(), &k, now), "the remote deny must survive");
         assert_eq!(
-            m.merge_cross_pod_deny(iss(), &other, until, now),
+            m.merge_cross_pod_deny(iss(), &other, until, || now),
             CrossPodMergeResult::CapacityExceeded,
             "k still holds the only slot"
         );
@@ -1104,10 +1266,10 @@ mod tests {
         );
         let pending = m.reserve(iss(), "jti-local", &k, now).expect("slot free");
         assert_eq!(
-            m.merge_cross_pod_deny(iss(), &k, remote_until, now),
+            m.merge_cross_pod_deny(iss(), &k, remote_until, || now),
             CrossPodMergeResult::Merged
         );
-        pending.commit(local_until, local_until);
+        pending.commit(local_until, DenyEntry::whole_key(local_until), || now);
 
         assert!(
             m.is_denied(iss(), &k, local_until + Duration::seconds(1)),
@@ -1115,7 +1277,7 @@ mod tests {
         );
         assert!(!m.is_denied(iss(), &k, remote_until));
         assert_eq!(
-            m.merge_cross_pod_deny(iss(), &other, remote_until, now),
+            m.merge_cross_pod_deny(iss(), &other, remote_until, || now),
             CrossPodMergeResult::CapacityExceeded,
             "still one entry"
         );
@@ -1149,7 +1311,7 @@ mod tests {
 
         // Pod A map: has k_a, receives k_b cross-pod.
         let map_a = make_map(&k_a);
-        let result_a = map_a.merge_cross_pod_deny(iss(), &k_b, until, now);
+        let result_a = map_a.merge_cross_pod_deny(iss(), &k_b, until, || now);
         assert_eq!(
             result_a,
             CrossPodMergeResult::CapacityExceeded,
@@ -1173,7 +1335,7 @@ mod tests {
 
         // Pod B map: has k_b, receives k_a cross-pod.
         let map_b = make_map(&k_b);
-        let result_b = map_b.merge_cross_pod_deny(iss(), &k_a, until, now);
+        let result_b = map_b.merge_cross_pod_deny(iss(), &k_a, until, || now);
         assert_eq!(
             result_b,
             CrossPodMergeResult::CapacityExceeded,
@@ -1202,7 +1364,7 @@ mod tests {
         // must not alter the live entry or deny the expired target / unrelated key.
         let expired_until = now - Duration::seconds(1);
         let map_c = make_map(&k_a); // pre-filled with k_a active
-        let result_c = map_c.merge_cross_pod_deny(iss(), &k_b, expired_until, now);
+        let result_c = map_c.merge_cross_pod_deny(iss(), &k_b, expired_until, || now);
         // Expired remote entry is treated as a new (already-expired) entry; since
         // the shard is at capacity merge_cross_pod_deny returns CapacityExceeded.
         // The live k_a entry must remain; k_b and k_unrelated must not be denied.
@@ -1250,7 +1412,7 @@ mod tests {
         .join();
 
         assert_eq!(
-            m.merge_cross_pod_deny(iss, &k, until, Utc::now()),
+            m.merge_cross_pod_deny(iss, &k, until, Utc::now),
             CrossPodMergeResult::ShardPoisoned,
             "poisoned shard must return ShardPoisoned"
         );
@@ -1405,7 +1567,7 @@ mod tests {
             );
             // The deny deadline must NOT have been extended (still t0+10s from
             // the last successful insert — the max-merge should not have applied X).
-            let stored_until = *guard.entries.get(&k.to_hex()).unwrap();
+            let stored_until = guard.entries.get(&k.to_hex()).unwrap().until;
             assert_eq!(
                 stored_until, deny_deadline,
                 "deny deadline must not be extended by a rejected JTI-budget command"
@@ -1552,7 +1714,7 @@ mod tests {
 
         let t_live = t0 + Duration::seconds(5);
         assert_eq!(
-            m.merge_cross_pod_deny(iss(), &k_b, t_live + Duration::seconds(60), t_live),
+            m.merge_cross_pod_deny(iss(), &k_b, t_live + Duration::seconds(60), || t_live),
             CrossPodMergeResult::CapacityExceeded,
             "full shard with a live entry must still reject a new key"
         );
@@ -1560,10 +1722,217 @@ mod tests {
 
         let t_expired = t0 + Duration::seconds(20);
         assert_eq!(
-            m.merge_cross_pod_deny(iss(), &k_b, t_expired + Duration::seconds(60), t_expired),
+            m.merge_cross_pod_deny(iss(), &k_b, t_expired + Duration::seconds(60), || t_expired),
             CrossPodMergeResult::Merged,
             "an expired entry must not hold the slot"
         );
         assert!(m.is_denied(iss(), &k_b, t_expired), "k_b must be denied");
+    }
+
+    // ── revoke_through scopes ────────────────────────────────────────────────
+
+    fn scoped_map() -> NipFiDenyMap {
+        NipFiDenyMap::new(
+            100,
+            vec![IssuerCapacity {
+                issuer: iss().to_owned(),
+                capacity: 100,
+            }],
+        )
+    }
+
+    fn at(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(secs, 0).unwrap()
+    }
+
+    fn cutoff(until: DateTime<Utc>, c: i64) -> DenyEntry {
+        DenyEntry {
+            until,
+            scope: DenyScope::IssuedThrough(c),
+        }
+    }
+
+    #[test]
+    fn cutoff_entry_refuses_old_assertions_and_admits_fresh_ones() {
+        let m = scoped_map();
+        let k = key();
+        let now = at(1_000);
+        m.merge_cross_pod_deny(iss(), &k, cutoff(at(2_000), 1_000), || now);
+        assert!(m.denies(iss(), &k, at(1_000), now), "iat == C is refused");
+        assert!(m.denies(iss(), &k, at(999), now));
+        assert!(!m.denies(iss(), &k, at(1_001), now), "iat > C is admitted");
+        assert!(
+            !m.denies(iss(), &k, at(1_000), at(2_000)),
+            "now == until admits"
+        );
+    }
+
+    #[test]
+    fn fractional_iat_just_after_the_cutoff_is_not_covered() {
+        let scope = DenyScope::IssuedThrough(1_000);
+        assert!(scope.covers(at(1_000)), "iat == C is covered");
+        let half = DateTime::from_timestamp(1_000, 500_000_000).unwrap();
+        assert!(!scope.covers(half), "iat == C + 0.5 is not covered");
+        let m = scoped_map();
+        let k = key();
+        m.merge_cross_pod_deny(iss(), &k, cutoff(at(2_000), 1_000), || at(1_000));
+        assert!(m.denies(iss(), &k, at(1_000), at(1_001)));
+        assert!(!m.denies(iss(), &k, half, at(1_001)));
+    }
+
+    #[test]
+    fn same_deadline_whole_key_overrides_a_cutoff_in_either_order() {
+        let now = at(1_000);
+        for whole_first in [true, false] {
+            let m = scoped_map();
+            let k = key();
+            let whole = DenyEntry::whole_key(at(2_000));
+            let cut = cutoff(at(2_000), 1_000);
+            let (a, b) = if whole_first {
+                (whole, cut)
+            } else {
+                (cut, whole)
+            };
+            m.merge_cross_pod_deny(iss(), &k, a, || now);
+            m.merge_cross_pod_deny(iss(), &k, b, || now);
+            assert!(m.denies(iss(), &k, at(1_500), now), "whole key wins");
+        }
+    }
+
+    #[test]
+    fn same_deadline_later_cutoff_wins_in_either_order() {
+        let now = at(1_000);
+        for later_first in [true, false] {
+            let m = scoped_map();
+            let k = key();
+            let (a, b) = (cutoff(at(2_000), 1_100), cutoff(at(2_000), 1_000));
+            let (a, b) = if later_first { (a, b) } else { (b, a) };
+            m.merge_cross_pod_deny(iss(), &k, a, || now);
+            m.merge_cross_pod_deny(iss(), &k, b, || now);
+            assert!(m.denies(iss(), &k, at(1_100), now));
+            assert!(!m.denies(iss(), &k, at(1_101), now));
+        }
+    }
+
+    #[test]
+    fn entry_expiring_while_a_commit_waits_on_the_shard_lock_contributes_nothing() {
+        use std::sync::atomic::{AtomicI64, Ordering};
+        use std::sync::mpsc;
+        let m = scoped_map();
+        let k = key();
+        m.merge_cross_pod_deny(iss(), &k, DenyEntry::whole_key(at(1_500)), || at(1_000));
+        let clock = AtomicI64::new(1_000);
+        let reservation = m.reserve(iss(), "jti-lock", &k, at(1_000)).unwrap();
+        let shard = m.shards.get(iss()).unwrap();
+        let guard = shard.lock().unwrap();
+        let (attempting_tx, attempting_rx) = mpsc::channel();
+        let (read_tx, read_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                attempting_tx.send(()).unwrap();
+                reservation.commit(at(2_500), cutoff(at(2_500), 1_600), || {
+                    read_tx.send(()).unwrap();
+                    at(clock.load(Ordering::SeqCst))
+                });
+            });
+            // The worker is now attempting the held lock. A clock read before
+            // the lock would arrive here while the lock is still held.
+            attempting_rx.recv().unwrap();
+            assert!(
+                read_rx
+                    .recv_timeout(std::time::Duration::from_millis(200))
+                    .is_err(),
+                "the merge clock must not be read before the shard lock"
+            );
+            // The old entry expires while the commit is still waiting.
+            clock.store(1_600, Ordering::SeqCst);
+            drop(guard);
+        });
+        drop(shard);
+        let now = at(1_600);
+        assert!(
+            !m.denies(iss(), &k, at(1_601), now),
+            "expired whole-key not carried over"
+        );
+        assert!(m.denies(iss(), &k, at(1_600), now));
+    }
+
+    #[test]
+    fn expired_whole_key_contributes_nothing_to_a_later_cutoff() {
+        let m = scoped_map();
+        let k = key();
+        m.merge_cross_pod_deny(iss(), &k, DenyEntry::whole_key(at(1_500)), || at(1_000));
+        let now = at(1_600);
+        m.merge_cross_pod_deny(iss(), &k, cutoff(at(2_500), 1_600), || now);
+        assert!(!m.denies(iss(), &k, at(1_601), now), "fresh token admitted");
+        assert!(m.denies(iss(), &k, at(1_600), now));
+    }
+
+    #[test]
+    fn past_until_cutoff_never_weakens_or_strengthens_an_active_entry() {
+        let m = scoped_map();
+        let k = key();
+        let now = at(1_000);
+        m.merge_cross_pod_deny(iss(), &k, cutoff(at(2_000), 900), || now);
+        m.merge_cross_pod_deny(iss(), &k, DenyEntry::whole_key(at(500)), || now);
+        assert!(
+            !m.denies(iss(), &k, at(901), now),
+            "expired whole key adds nothing"
+        );
+        assert!(m.denies(iss(), &k, at(900), now));
+        assert_eq!(
+            m.close_scope(iss(), &k, DenyScope::IssuedThrough(100), now),
+            DenyScope::IssuedThrough(900),
+            "close scope widens to the stronger active entry"
+        );
+    }
+
+    #[test]
+    fn poisoned_shard_close_scope_is_whole_key() {
+        let m = scoped_map();
+        let k = key();
+        let now = at(1_000);
+        m.merge_cross_pod_deny(iss(), &k, cutoff(at(2_000), 900), || now);
+        m.poison_shard_for_test(iss());
+        assert_eq!(
+            m.close_scope(iss(), &k, DenyScope::IssuedThrough(100), now),
+            DenyScope::WholeKey,
+            "a poisoned shard fails closed to the whole key"
+        );
+    }
+
+    /// Widening the scope at the same `until` is a change, so a restore
+    /// closes the sessions it newly covers; the same entry again is not.
+    #[test]
+    fn same_until_scope_widening_is_merged_not_unchanged() {
+        let m = NipFiDenyMap::new(
+            100,
+            vec![IssuerCapacity {
+                issuer: iss().to_owned(),
+                capacity: 100,
+            }],
+        );
+        let k = key();
+        let now = Utc::now();
+        let until = now + Duration::seconds(600);
+        let scoped = |c| DenyEntry {
+            until,
+            scope: DenyScope::IssuedThrough(c),
+        };
+        let merge = |entry: DenyEntry| m.merge_cross_pod_deny(iss(), &k, entry, || now);
+        assert_eq!(merge(scoped(10)), CrossPodMergeResult::Merged);
+        assert_eq!(merge(scoped(10)), CrossPodMergeResult::Unchanged);
+        assert_eq!(merge(scoped(5)), CrossPodMergeResult::Unchanged);
+        assert_eq!(
+            merge(scoped(20)),
+            CrossPodMergeResult::Merged,
+            "later cutoff"
+        );
+        assert_eq!(
+            merge(DenyEntry::whole_key(until)),
+            CrossPodMergeResult::Merged,
+            "whole key"
+        );
+        assert_eq!(merge(scoped(30)), CrossPodMergeResult::Unchanged);
     }
 }
