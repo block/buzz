@@ -1705,6 +1705,7 @@ name = "buzz-webhook-filter"
 version = "0.1.0"
 dependencies = [
  "cel",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -1845,11 +1846,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "058e87eba1938be49be5785de8d2eff3004a70f8e8f9158b52b1177c93d6c869"
 dependencies = [
  "antlr4rust",
+ "base64 0.22.1",
  "lazy_static",
  "nom",
  "pastey",
  "regex",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
