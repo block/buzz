@@ -518,7 +518,7 @@ async fn growing_does_not_reveal_a_dm_the_actor_is_not_in() {
             &agent.public_key().to_bytes(),
             &[c_bytes.as_slice()],
             &|_: &str, _: &[u8]| Ok(()),
-            false,
+            buzz_db::dm::DmGrowMode::Include,
         )
         .await;
 
@@ -1892,6 +1892,51 @@ async fn agents_only_refuses_a_person_and_changes_nothing() {
         assert_eq!(members(&state, &tenant, dm).await, before);
     }
     assert_eq!(members(&state, &tenant, theirs).await, set_of(&[&a, &c]));
+}
+
+/// An agents-only add checks everyone it names, members included, before
+/// anything else: naming a person already in the DM alongside a new agent is
+/// refused, and the agent does not join.
+/// Mutation: check only those not yet in the DM → the agent joins → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn agents_only_refuses_a_person_already_in_the_dm() {
+    let state = state().await;
+    let tenant = community(&state, "dm-agents-only-member").await;
+    let (a, b, agent) = (Keys::generate(), Keys::generate(), Keys::generate());
+    make_agent(&state, &tenant, &agent, &a, "anyone").await;
+    let dm = open(&state, &tenant, &a, &[&b]).await.expect("open");
+
+    let refused = agents_only(&state, &tenant, &a, dm, &[&b, &agent]).await;
+    assert!(
+        matches!(&refused, Err(IngestError::Rejected(m)) if m == "invalid: only agents join this DM in place"),
+        "{refused:?}"
+    );
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &b]));
+}
+
+/// The person check comes before the capacity check: a full DM (nine people)
+/// asked to take a new person gives the agents-only refusal, not the limit.
+/// Mutation: check capacity first → "at most 9 people" → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn agents_only_refuses_a_person_before_the_limit() {
+    let state = state().await;
+    let tenant = community(&state, "dm-agents-only-full").await;
+    let a = Keys::generate();
+    let people: Vec<Keys> = (0..8).map(|_| Keys::generate()).collect();
+    let eight: Vec<&Keys> = people.iter().collect();
+    let dm = open(&state, &tenant, &a, &eight).await.expect("open nine");
+    let mut nine = eight.clone();
+    nine.push(&a);
+    let tenth = Keys::generate();
+
+    let refused = agents_only(&state, &tenant, &a, dm, &[&tenth]).await;
+    assert!(
+        matches!(&refused, Err(IngestError::Rejected(m)) if m == "invalid: only agents join this DM in place"),
+        "{refused:?}"
+    );
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&nine));
 }
 
 /// An agent cannot send the tag, and only adds take it.

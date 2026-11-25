@@ -21,7 +21,7 @@ use uuid::Uuid;
 use buzz_core::kind::*;
 use buzz_core::tenant::{CommunityId, TenantContext};
 use buzz_datastore_tracing::datastore_span;
-use buzz_db::dm::{DmGrowth, MAX_DM_PEOPLE};
+use buzz_db::dm::{DmGrowMode, DmGrowth, MAX_DM_PEOPLE};
 use buzz_db::workflow::{ApprovalStatus, RunStatus};
 use buzz_db::DbError;
 use buzz_workflow::executor::TriggerContext;
@@ -623,14 +623,24 @@ async fn grow_with_agents(
     let policy = agent_add_policy(actor);
     match state
         .db
-        .grow_dm(tenant.community(), channel_id, actor, &refs, &policy, false)
+        .grow_dm(
+            tenant.community(),
+            channel_id,
+            actor,
+            &refs,
+            &policy,
+            DmGrowMode::Include,
+        )
         .await
         .map_err(dm_write_error)?
     {
         DmGrowth::Grown { added } => Ok(added),
-        DmGrowth::Existing(_) | DmGrowth::PeopleStartNewDm | DmGrowth::NeedsChoice => Err(
-            IngestError::Internal("error: adding agents changed the DM's people".into()),
-        ),
+        DmGrowth::Existing(_)
+        | DmGrowth::PeopleStartNewDm
+        | DmGrowth::NeedsChoice
+        | DmGrowth::NotAllAgents => Err(IngestError::Internal(
+            "error: adding agents changed the DM's people".into(),
+        )),
     }
 }
 
@@ -759,7 +769,11 @@ async fn handle_dm_add_member(
                     &self_bytes,
                     &addition_refs,
                     &policy,
-                    matches!(history, History::Ask | History::Agents),
+                    match history {
+                        History::Ask => DmGrowMode::Ask,
+                        History::Agents => DmGrowMode::AgentsOnly,
+                        _ => DmGrowMode::Include,
+                    },
                 )
                 .await
                 .map_err(dm_write_error)?,
@@ -768,8 +782,7 @@ async fn handle_dm_add_member(
         None
     };
     let (target, was_created, added, moved_elsewhere, participants) = match growth {
-        // Asking leaves people out of every write, so only agents were added.
-        Some(DmGrowth::NeedsChoice | DmGrowth::PeopleStartNewDm) if history == History::Agents => {
+        Some(DmGrowth::NotAllAgents) => {
             return Err(IngestError::Rejected(ONLY_AGENTS_JOIN.into()));
         }
         // Dropping `tx` uncommitted forgets this command, so the add can be
