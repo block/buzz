@@ -267,6 +267,10 @@ impl RelayInfo {
             "buzz-unlisted-channels".to_string(),
             // kind:9050 edits an existing Solo member's access.
             "buzz-solo-member-role".to_string(),
+            // kind:41011 `["history","agents"]`: agents join this DM in place,
+            // or nothing changes. A relay without it ignores or refuses the
+            // tag, so a client checks this before sending it.
+            "buzz-dm-agents".to_string(),
         ];
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
@@ -837,6 +841,7 @@ mod tests {
         assert!(extensions.contains(&"buzz-search-sort".to_string()));
         assert!(extensions.contains(&"buzz-unlisted-channels".to_string()));
         assert!(extensions.contains(&"buzz-solo-member-role".to_string()));
+        assert!(extensions.contains(&"buzz-dm-agents".to_string()));
     }
 
     /// NIP-WP → NIP-11 mirror: a set workspace icon is served in the standard
