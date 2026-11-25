@@ -8,6 +8,7 @@ import 'dart:developer' as developer;
 import 'dart:math';
 
 import 'package:buzz/shared/crypto/event_signing.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -21,8 +22,11 @@ import '../push/push_bridge.dart';
 import '../push/push_lease_revocation_outbox.dart';
 import '../push/push_subscription.dart';
 import '../relay/media_disk_cache.dart';
+import '../relay/nostr_models.dart';
+import '../relay/relay_session.dart';
 import '../relay/signed_event_relay.dart';
-import '../relay/relay_provider.dart' show RelayConfig, pubkeyFromNsec;
+import '../relay/relay_provider.dart'
+    show RelayConfig, pubkeyFromNsec, relayConfigProvider;
 import 'community.dart';
 import 'community_storage.dart';
 
@@ -103,18 +107,42 @@ final _communitySnapshotSyncProvider = Provider<_CommunitySnapshotSync>((ref) {
   return _CommunitySnapshotSync(ref.read(communitySnapshotWriterProvider));
 });
 
+/// Publishes a community's inactive push lease. With a [deadline], the
+/// attempt fails once it passes, and an EVENT not yet sent by then never is.
 typedef CommunityPushLeaseDeactivator =
-    Future<void> Function(Community community, {int? generation});
+    Future<void> Function(
+      Community community, {
+      int? generation,
+      DateTime? deadline,
+    });
 
 final communityPushLeaseDeactivatorProvider =
     Provider<CommunityPushLeaseDeactivator>((ref) {
-      return (community, {generation}) => _deactivateCommunityPushLease(
-        community,
-        generation: generation,
-        relayAuth: ref.read(hostedRelayAuthProvider),
-        diagnostics: ref.read(diagnosticReporterProvider),
-      );
+      return (community, {generation, deadline}) =>
+          _deactivateCommunityPushLease(
+            community,
+            generation: generation,
+            deadline: deadline,
+            relayAuth: ref.read(hostedRelayAuthProvider),
+            diagnostics: ref.read(diagnosticReporterProvider),
+          );
     });
+
+/// Reads the push lease the active community's relay holds for this
+/// installation, or null when it holds none. Throws when the relay doesn't
+/// answer, or when the active community changes while the read is out.
+typedef CommunityPushLeaseReader =
+    Future<BuzzPushLeaseState?> Function(Community community);
+
+final communityPushLeaseReaderProvider = Provider<CommunityPushLeaseReader>((
+  ref,
+) {
+  return (community) => readCommunityPushLease(
+    community,
+    query: ref.read(relaySessionProvider.notifier).queryRelay,
+    currentRelay: () => ref.read(relayConfigProvider),
+  );
+});
 
 typedef CommunityPushLeaseRevocationEnqueuer =
     Future<bool> Function(Community community);
@@ -131,36 +159,120 @@ final communityPushLeaseRevocationTriggerProvider =
       return ref.watch(buzzPushLeaseRevocationOutboxProvider).trigger;
     });
 
-Future<void> _deactivateCommunityPushLease(
+/// The relay key, member and installation a community's push lease is for.
+typedef _PushLeaseTarget = ({
+  BuzzPushLeaseDescriptor descriptor,
+  String nsec,
+  String memberPubkey,
+  String installationId,
+});
+
+Future<_PushLeaseTarget> _pushLeaseTarget(
   Community community, {
-  int? generation,
-  required HostedRelayAuth relayAuth,
-  required DiagnosticReporter diagnostics,
+  DateTime? deadline,
 }) async {
-  final state = community.pushSubscriptionState;
-  final acceptedGeneration = state.acceptedGeneration;
   final nsec = community.nsec;
-  if (acceptedGeneration == null && generation == null) {
-    return;
-  }
   if (nsec == null || nsec.isEmpty) {
-    throw StateError('Push lease tombstone requires community signing key.');
+    throw StateError('Push lease requires community signing key.');
   }
   final decoded = nostr.Nip19.decode(payload: nsec);
   final memberPubkey = community.pubkey ?? derivePublicKeyHex(decoded.data);
   final descriptor = await fetchBuzzPushLeaseDescriptor(
     canonicalBuzzPushRelayHttpUrl(community.relayUrl),
+    timeout: _within(deadline, const Duration(seconds: 8)),
   );
-  final matchingGrant = (await readBuzzPushEndpointGrants())
-      .where((grant) => grant.relayOrigin == descriptor.origin)
-      .firstOrNull;
+  _checkDeadline(deadline);
   // A gateway change leaves no grant for the relay, but the lease the relay
   // holds is still addressed by the id the community saved.
-  if (matchingGrant == null && community.pushLeaseInstallationId == null) {
-    throw StateError('No endpoint grant exists for push lease tombstone.');
+  var installationId = community.pushLeaseInstallationId;
+  if (installationId == null) {
+    final matchingGrant = (await readBuzzPushEndpointGrants())
+        .where((grant) => grant.relayOrigin == descriptor.origin)
+        .firstOrNull;
+    _checkDeadline(deadline);
+    if (matchingGrant == null) {
+      throw StateError('No endpoint grant exists for the push lease.');
+    }
+    installationId = matchingGrant.installationId;
   }
-  final installationId =
-      community.pushLeaseInstallationId ?? matchingGrant!.installationId;
+  return (
+    descriptor: descriptor,
+    nsec: nsec,
+    memberPubkey: memberPubkey,
+    installationId: installationId,
+  );
+}
+
+/// [limit], or less when [deadline] comes sooner.
+Duration _within(DateTime? deadline, Duration limit) {
+  if (deadline == null) return limit;
+  final remaining = deadline.difference(DateTime.now());
+  if (remaining.isNegative) return Duration.zero;
+  return remaining < limit ? remaining : limit;
+}
+
+void _checkDeadline(DateTime? deadline) {
+  if (deadline != null && !DateTime.now().isBefore(deadline)) {
+    throw TimeoutException('The push opt-out ran out of time');
+  }
+}
+
+/// Reads [community]'s push lease through [query], which sends to whichever
+/// relay [currentRelay] names when it runs. Throws when that relay or key is
+/// no longer [community]'s: a switch while the read waits would otherwise
+/// settle one community from another's relay.
+@visibleForTesting
+Future<BuzzPushLeaseState?> readCommunityPushLease(
+  Community community, {
+  required Future<List<NostrEvent>> Function(List<NostrFilter> filters) query,
+  required RelayConfig Function() currentRelay,
+}) async {
+  final expected = RelayConfig(baseUrl: community.relayUrl).baseUrl;
+  void checkStillCurrent() {
+    final relay = currentRelay();
+    if (relay.baseUrl != expected || relay.nsec != community.nsec) {
+      throw StateError('The active community changed during the lease read.');
+    }
+  }
+
+  final target = await _pushLeaseTarget(community);
+  checkStillCurrent();
+  final events = await query([
+    NostrFilter(
+      kinds: const [buzzPushLeaseKind],
+      authors: [target.memberPubkey],
+      tags: {
+        '#d': [target.installationId],
+      },
+      limit: 1,
+      // A replica can lag the write that replaced the lease.
+      extensions: const {'consistency': 'strong'},
+    ),
+  ]);
+  checkStillCurrent();
+  final event = events.firstOrNull;
+  if (event == null) return null;
+  return decryptBuzzPushLease(
+    event: event,
+    descriptor: target.descriptor,
+    nsec: target.nsec,
+  );
+}
+
+Future<void> _deactivateCommunityPushLease(
+  Community community, {
+  int? generation,
+  DateTime? deadline,
+  required HostedRelayAuth relayAuth,
+  required DiagnosticReporter diagnostics,
+}) async {
+  final state = community.pushSubscriptionState;
+  final acceptedGeneration = state.acceptedGeneration;
+  if (acceptedGeneration == null && generation == null) {
+    return;
+  }
+  final (:descriptor, :nsec, :memberPubkey, :installationId) =
+      await _pushLeaseTarget(community, deadline: deadline);
   final uri = Uri.parse(community.relayUrl);
   final httpScheme = switch (uri.scheme) {
     'wss' => 'https',
@@ -187,21 +299,25 @@ Future<void> _deactivateCommunityPushLease(
     nsec: nsec,
     memberPubkey: memberPubkey,
     submit:
-        ({required kind, required content, required tags, createdAt}) async =>
-            submitSignedEventOnce(
-              wsUrl: wsUrl,
-              headers: await relayAuth.headers(
-                relayConfig,
-                background: true,
-                fresh: true,
-              ),
-              nsec: nsec,
-              kind: kind,
-              content: content,
-              tags: tags,
-              createdAt: createdAt,
-              diagnostics: diagnostics,
-            ),
+        ({required kind, required content, required tags, createdAt}) async {
+          final headers = await relayAuth.headers(
+            relayConfig,
+            background: true,
+            fresh: true,
+          );
+          _checkDeadline(deadline);
+          return submitSignedEventOnce(
+            wsUrl: wsUrl,
+            headers: headers,
+            nsec: nsec,
+            kind: kind,
+            content: content,
+            tags: tags,
+            createdAt: createdAt,
+            deadline: deadline,
+            diagnostics: diagnostics,
+          );
+        },
   );
   pushLeaseCleanupError.value = null;
 }
@@ -262,9 +378,48 @@ Future<void> syncStoredCommunitySnapshot(Ref ref) async {
   await syncCommunitySnapshot(ref, communities);
 }
 
+/// How long an opt-out may stay pending, counted from the tap, before it
+/// fails (docs/mobile-push-suppression.md, rule 29).
+const pushOptOutTimeout = Duration(seconds: 10);
+
+/// Lets the deactivator's own deadline, which knows whether the tombstone was
+/// sent, fire before the backstop.
+const _pushOptOutBackstopGrace = Duration(milliseconds: 500);
+
+/// Where an opt-out started in this app run stands.
+enum PushOptOutStatus {
+  /// Its tombstone is being published. Settings shows it pending.
+  turningOff,
+
+  /// It failed or went unconfirmed. Settings shows the relay's last confirmed
+  /// setting and warns that notifications may continue.
+  failed,
+}
+
+/// The opt-out status of each community, by id. A community with none either
+/// has no opt-out under way, or has one left unconfirmed by an earlier run.
+class PushOptOutStatusNotifier extends Notifier<Map<String, PushOptOutStatus>> {
+  @override
+  Map<String, PushOptOutStatus> build() => const {};
+
+  bool isTurningOff(String id) => state[id] == PushOptOutStatus.turningOff;
+
+  void set(String id, PushOptOutStatus status) =>
+      state = {...state, id: status};
+
+  void clear(String id) {
+    if (!state.containsKey(id)) return;
+    state = {...state}..remove(id);
+  }
+}
+
+final pushOptOutStatusProvider =
+    NotifierProvider<PushOptOutStatusNotifier, Map<String, PushOptOutStatus>>(
+      PushOptOutStatusNotifier.new,
+    );
+
 class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   Future<void> _pushMutationTail = Future.value();
-  final Map<String, Future<void>> _tombstoneAttempts = {};
 
   Future<T> _serializePushMutation<T>(Future<T> Function() operation) {
     final result = _pushMutationTail.then((_) => operation());
@@ -594,6 +749,34 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   });
 
   Future<void> setPushNotificationsEnabled(String id, bool enabled) async {
+    final statuses = ref.read(pushOptOutStatusProvider.notifier);
+    if (enabled) {
+      statuses.clear(id);
+      await _setPushNotificationsEnabled(id, enabled: true);
+      return;
+    }
+    if (statuses.isTurningOff(id)) return;
+    // The deadline runs from the tap, across every step of the attempt.
+    final deadline = DateTime.now().add(pushOptOutTimeout);
+    // Set before the opt-out is saved, so Settings shows it pending from the
+    // first frame where push is off.
+    statuses.set(id, PushOptOutStatus.turningOff);
+    var journaled = false;
+    try {
+      journaled = await _setPushNotificationsEnabled(id, enabled: false);
+    } finally {
+      if (!journaled) statuses.clear(id);
+    }
+    if (journaled) {
+      await _publishOptOut(id, deadline: deadline, advanceGeneration: false);
+    }
+  }
+
+  /// Saves the switch. Returns whether an opt-out tombstone is now pending.
+  Future<bool> _setPushNotificationsEnabled(
+    String id, {
+    required bool enabled,
+  }) async {
     var shouldDeactivate = false;
     await _serializePushMutation(() async {
       final storage = ref.read(communityStorageProvider);
@@ -622,47 +805,83 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       shouldDeactivate =
           !enabled && pushState.pendingTombstoneGeneration != null;
     });
-    if (shouldDeactivate) {
-      try {
-        await retryPendingPushLeaseTombstone(id);
-      } catch (_) {
-        // The durable journal remains pending. BuzzPushBootstrap retries it
-        // after reconnect while all registration/enrollment paths stay off.
-      }
-    }
+    return shouldDeactivate;
   }
 
-  /// Publishes a durably journaled opt-out tombstone.
+  /// Makes one explicit attempt to finish a failed opt-out, for the user's
+  /// Retry. Nothing retries an opt-out on its own.
+  Future<void> retryPushOptOut(String id) async {
+    final community = (state.value ?? const <Community>[])
+        .where((community) => community.id == id)
+        .firstOrNull;
+    if (community == null) return;
+    // A failure the relay never saw restored push on; turn it off afresh.
+    if (community.pushNotificationsEnabled) {
+      return setPushNotificationsEnabled(id, false);
+    }
+    final statuses = ref.read(pushOptOutStatusProvider.notifier);
+    if (statuses.isTurningOff(id)) return;
+    final deadline = DateTime.now().add(pushOptOutTimeout);
+    statuses.set(id, PushOptOutStatus.turningOff);
+    await _publishOptOut(id, deadline: deadline, advanceGeneration: true);
+  }
+
+  /// Publishes the saved opt-out tombstone and records how it ended. A
+  /// failure is never retried automatically.
+  Future<void> _publishOptOut(
+    String id, {
+    required DateTime deadline,
+    required bool advanceGeneration,
+  }) async {
+    final statuses = ref.read(pushOptOutStatusProvider.notifier);
+    final int? accepted;
+    try {
+      accepted = await _publishPendingTombstone(
+        id,
+        deadline: deadline,
+        advanceGeneration: advanceGeneration,
+      );
+    } catch (error, stackTrace) {
+      reportPushLeaseCleanupError(error, stackTrace);
+      try {
+        await _settleFailedOptOut(
+          id,
+          // A Retry only runs on an opt-out an earlier attempt left pending,
+          // which that attempt's relay may hold. Its own failure, even before
+          // sending, can't show the relay never received an opt-out.
+          maybeReceived:
+              advanceGeneration || error is SignedEventUnacknowledged,
+        );
+      } finally {
+        statuses.set(id, PushOptOutStatus.failed);
+      }
+      return;
+    }
+    if (accepted != null) {
+      try {
+        await _markPushLeaseTombstoneAccepted(id, accepted);
+      } catch (error, stackTrace) {
+        // The relay accepted the tombstone; only recording that failed. The
+        // opt-out stays pending, never reversed, until a lease read settles it.
+        reportPushLeaseCleanupError(error, stackTrace);
+        statuses.set(id, PushOptOutStatus.failed);
+        return;
+      }
+    }
+    pushLeaseCleanupError.value = null;
+    statuses.clear(id);
+  }
+
+  /// Publishes a durably journaled opt-out tombstone. Returns the generation
+  /// the relay accepted, which the caller records, or null when no opt-out
+  /// was pending.
   ///
   /// A retry advances the generation before network I/O. That makes an
   /// ambiguous relay-commit/local-save failure idempotent in effect: the next
   /// inactive replacement wins even if the prior tombstone already committed.
-  Future<void> retryPendingPushLeaseTombstone(
+  Future<int?> _publishPendingTombstone(
     String id, {
-    bool advanceGeneration = false,
-  }) {
-    final existing = _tombstoneAttempts[id];
-    if (existing != null) return existing;
-    final attempt = _retryPendingPushLeaseTombstone(
-      id,
-      advanceGeneration: advanceGeneration,
-    );
-    _tombstoneAttempts[id] = attempt;
-    void clearAttempt() {
-      if (identical(_tombstoneAttempts[id], attempt)) {
-        _tombstoneAttempts.remove(id);
-      }
-    }
-
-    attempt.then<void>(
-      (_) => clearAttempt(),
-      onError: (_, _) => clearAttempt(),
-    );
-    return attempt;
-  }
-
-  Future<void> _retryPendingPushLeaseTombstone(
-    String id, {
+    required DateTime deadline,
     required bool advanceGeneration,
   }) async {
     Community? pendingCommunity;
@@ -692,17 +911,110 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     });
     final community = pendingCommunity;
     final generation = pendingGeneration;
-    if (community == null || generation == null) return;
-    try {
-      await ref.read(communityPushLeaseDeactivatorProvider)(
-        community,
-        generation: generation,
-      );
-      await _markPushLeaseTombstoneAccepted(id, generation);
-      pushLeaseCleanupError.value = null;
-    } catch (error, stackTrace) {
-      reportPushLeaseCleanupError(error, stackTrace);
-      rethrow;
+    if (community == null || generation == null) return null;
+    // The deactivator honors the deadline itself and says whether the relay
+    // could have seen the tombstone. This backstop only catches a step that
+    // hangs past it, and can't tell, so it keeps the opt-out unconfirmed.
+    await ref
+        .read(communityPushLeaseDeactivatorProvider)(
+          community,
+          generation: generation,
+          deadline: deadline,
+        )
+        .timeout(
+          _within(deadline, pushOptOutTimeout) + _pushOptOutBackstopGrace,
+          onTimeout: () => throw SignedEventUnacknowledged(
+            TimeoutException('The push opt-out ran out of time'),
+          ),
+        );
+    return generation;
+  }
+
+  /// Shows the relay's last confirmed setting after a failed opt-out.
+  ///
+  /// When the relay never received the tombstone and its confirmed lease is
+  /// active, push is on again for real. Otherwise the relay may already be off
+  /// ([maybeReceived]), or its confirmed state is off, so the pending
+  /// tombstone stays: nothing republishes an active lease until a lease read
+  /// ([reconcilePushOptOut]) settles it.
+  Future<void> _settleFailedOptOut(String id, {required bool maybeReceived}) =>
+      _serializePushMutation(() async {
+        if (maybeReceived) return;
+        final storage = ref.read(communityStorageProvider);
+        final current = state.value ?? await storage.loadAll();
+        final index = current.indexWhere((community) => community.id == id);
+        if (index < 0) return;
+        final community = current[index];
+        final pushState = community.pushSubscriptionState;
+        if (community.pushNotificationsEnabled ||
+            pushState.pendingTombstoneGeneration == null ||
+            pushState.accepted == null) {
+          return;
+        }
+        final updated = community.copyWith(
+          pushNotificationsEnabled: true,
+          pushSubscriptionState: pushState.withoutPendingTombstone(),
+        );
+        await storage.save(updated);
+        final updatedList = [...current]..[index] = updated;
+        state = AsyncData(updatedList);
+        await syncCommunitySnapshot(ref, updatedList);
+      });
+
+  /// Settles an unconfirmed opt-out from the lease the relay actually holds,
+  /// on the next successful sync. An inactive lease, or none, confirms push
+  /// is off. An active one turns push back on and keeps the warning. Throws
+  /// when the relay doesn't answer, leaving the opt-out unconfirmed until the
+  /// next read.
+  Future<void> reconcilePushOptOut(String id) async {
+    final statuses = ref.read(pushOptOutStatusProvider.notifier);
+    bool unsettled(Community? community) =>
+        community != null &&
+        !community.pushNotificationsEnabled &&
+        community.pushSubscriptionState.pendingTombstoneGeneration != null;
+    final community = (state.value ?? const <Community>[])
+        .where((community) => community.id == id)
+        .firstOrNull;
+    if (statuses.isTurningOff(id) || !unsettled(community)) return;
+    final generation =
+        community!.pushSubscriptionState.pendingTombstoneGeneration;
+    final lease = await ref.read(communityPushLeaseReaderProvider)(community);
+    final active = lease?.active ?? false;
+    final settled = await _serializePushMutation(() async {
+      // A Retry may have started while the read was out. Even once it has
+      // ended, the read predates its tombstone, so it can't settle it.
+      if (statuses.isTurningOff(id)) return false;
+      final storage = ref.read(communityStorageProvider);
+      final current = state.value ?? await storage.loadAll();
+      final index = current.indexWhere((community) => community.id == id);
+      if (index < 0 || !unsettled(current[index])) return false;
+      if (current[index].pushSubscriptionState.pendingTombstoneGeneration !=
+          generation) {
+        return false;
+      }
+      final community = current[index];
+      final pushState = community.pushSubscriptionState;
+      final updated = active
+          ? community.copyWith(
+              pushNotificationsEnabled: true,
+              pushSubscriptionState: pushState.withoutPendingTombstone(),
+            )
+          : community.copyWith(
+              pushSubscriptionState: pushState.withAcceptedTombstone(
+                pushState.pendingTombstoneGeneration!,
+              ),
+            );
+      await storage.save(updated);
+      final updatedList = [...current]..[index] = updated;
+      state = AsyncData(updatedList);
+      await syncCommunitySnapshot(ref, updatedList);
+      return true;
+    });
+    if (!settled) return;
+    if (active) {
+      statuses.set(id, PushOptOutStatus.failed);
+    } else {
+      statuses.clear(id);
     }
   }
 

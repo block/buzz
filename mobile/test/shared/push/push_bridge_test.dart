@@ -61,17 +61,27 @@ void main() {
     },
   );
 
-  test('purges notifications delivered before age restriction', () async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(_channel, (call) async {
-          expect(call.method, 'purgeAgeRestrictedNotifications');
-          expect(call.arguments, isNull);
-          return null;
-        });
+  for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
+    test('purges and restores age-restricted notifications on '
+        '${platform.name}', () async {
+      debugDefaultTargetPlatformOverride = platform;
+      final methods = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_channel, (call) async {
+            methods.add(call.method);
+            expect(call.arguments, isNull);
+            return null;
+          });
 
-    await purgeAgeRestrictedBuzzNotifications();
-  });
+      await purgeAgeRestrictedBuzzNotifications();
+      await restoreAgeRestrictedBuzzNotifications();
+
+      expect(methods, [
+        'purgeAgeRestrictedNotifications',
+        'restoreAgeRestrictedNotifications',
+      ]);
+    });
+  }
 
   test('reads and exposes persisted endpoint grants on iOS', () async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;

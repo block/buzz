@@ -4623,7 +4623,7 @@ mod tests {
         ));
         let until = chrono::Utc::now() + chrono::Duration::seconds(3600);
         let merge_result =
-            deny_map.merge_cross_pod_deny(DENY_TEST_ISS, denied_key, until, chrono::Utc::now());
+            deny_map.merge_cross_pod_deny(DENY_TEST_ISS, denied_key, until, chrono::Utc::now);
         assert!(
             matches!(merge_result, buzz_auth::CrossPodMergeResult::Merged),
             "deny entry must be inserted for test setup"

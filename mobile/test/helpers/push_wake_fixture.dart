@@ -312,6 +312,43 @@ class SlowShownMessageStore implements ShownMessageStore {
   }
 }
 
+/// A store that holds the claim for [eventId] until [release] completes, then
+/// records it, as when storage stalls on one message past the wake's end.
+class HeldClaimShownMessageStore implements ShownMessageStore {
+  HeldClaimShownMessageStore(this._inner, this.eventId, this.release);
+
+  final ShownMessageStore _inner;
+  final String eventId;
+  final Future<void> release;
+
+  /// Whether the resolver has started the held claim.
+  bool entered = false;
+
+  /// Completes once the held claim has been recorded.
+  Future<bool> get recorded => _recorded.future;
+  final _recorded = Completer<bool>();
+
+  @override
+  Future<DateTime?> newestShown(String community) =>
+      _inner.newestShown(community);
+
+  @override
+  Future<bool> claim(
+    String community,
+    String eventId,
+    DateTime createdAt,
+  ) async {
+    if (eventId != this.eventId) {
+      return _inner.claim(community, eventId, createdAt);
+    }
+    entered = true;
+    await release;
+    final won = await _inner.claim(community, eventId, createdAt);
+    _recorded.complete(won);
+    return won;
+  }
+}
+
 /// A store whose claims for [community] fail after [succeed] of them, as when
 /// storage fills midway through a wake.
 class FailingShownMessageStore implements ShownMessageStore {
