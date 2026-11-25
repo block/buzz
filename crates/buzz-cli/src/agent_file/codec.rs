@@ -896,8 +896,9 @@ fn take_text(
     key: &str,
 ) -> Result<Option<String>, CodecError> {
     match settings.remove(key) {
+        // An empty setting is the type's default, as a left-out one is.
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) => Ok(Some(text)),
+        Some(Value::String(text)) => Ok(Some(text).filter(|text| !text.is_empty())),
         Some(other) => fail(format!("The agent's {key} is not text: {other}")),
     }
 }

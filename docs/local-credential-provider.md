@@ -258,7 +258,10 @@ that matches no agent or more than one.
   changes whenever the agent's configuration does.
 - `agent_apply` takes the whole desired configuration. With an empty agent, it
   creates one. With an agent, `revision` MUST be the one `agent_read` returned;
-  if the agent changed since, the provider answers `conflict`. Options are
+  if the agent changed since, the provider answers `conflict`. It answers
+  `not_found`, before asking, when the document adds the agent to a channel
+  the community doesn't have or that is archived, and `declined` when the human
+  declines the change. Options are
   `prune_channels` (leave channels the document doesn't list) and `workspace`
   (an absolute folder for a new agent). The provider MUST show the human the
   change and apply it only after they approve, holding the request open for at
@@ -389,6 +392,8 @@ paired token SHOULD delete it and tell the human to pair again.
 | `unsupported_version` | 400 | See [Versions](#versions) | Retry with a common version |
 | `unknown_method` | 400 | The provider does not implement the method | Degrade (see below) |
 | `conflict` | 409 | The agent changed since the caller read it | Read again and retry |
+| `declined` | 403 | The human declined the change when asked to approve it | Fail with the message; do not retry |
+| `not_found` | 404 | Something the request needs doesn't exist, such as a channel an agent document adds the agent to | Fail with the message |
 | `invalid_request` | 400 | Malformed envelope or params. For `nip44_decrypt`, also a payload that is not valid ciphertext for this identity | Fail; for `nip44_decrypt`, treat the payload as invalid (NIP-AE filters it) |
 
 Callers MUST decide on `error`, not on the HTTP status, and MUST treat an

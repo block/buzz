@@ -13,7 +13,7 @@ only after you approve it there.
 
 | Command | What it does |
 |---|---|
-| `buzz agents export <agent> [--out <dir>] [--name <name>] [--force]` | Writes `<dir>/AGENT.md`. `<dir>` defaults to `./<name>`, and `<name>` to the agent's display name as a slug. |
+| `buzz agents export <agent> [--out <dir>] [--name <name>] [--force]` | Writes `<dir>/AGENT.md`. `<dir>` defaults to `./<name>`. `<name>` defaults to the name of `<dir>` when you pass `--out`, and otherwise to the agent's display name as a slug. |
 | `buzz agents import <dir> --dry` | Prints what an import would change, and changes nothing. |
 | `buzz agents import <dir> [--new] [--workspace <path>] [--prune-channels]` | Prints the change, then asks the desktop to apply it. |
 | `buzz agents edit <agent>` | Opens the agent as `AGENT.md` in `$VISUAL` or `$EDITOR`. When you save and quit, it imports the file. Quit without saving to cancel. |
@@ -51,6 +51,13 @@ It is `CREATE`, `UPDATE` with the fields that change, or `NO_CHANGE`.
   file without `identity.buzz` creates a new agent, and import writes the new
   npub into the file. `--new` creates a new agent from any file and leaves the
   file as it is.
+- **Channels must exist.** Import adds the agent to channels but never creates
+  them. If `buzz.channels` names a channel the community doesn't have, or one
+  that is archived, the desktop refuses the import before asking and names the
+  channel. Create the channel in Buzz, put its ID in the file, and import
+  again.
+- **Declining changes nothing.** If you choose Decline in the prompt, the
+  command fails with `declined` and the agent stays as it was.
 - **No stale changes.** If the agent changed after the CLI read it, for
   example because it edited its own attention, the desktop refuses the change.
   Run the command again.
@@ -77,7 +84,7 @@ model: model-large
 effort: high
 buzz:
   community: wss://relay.example.org
-  runtime: claude-code
+  runtime: buzz.claude-code/claude-code
   settings:
     scope: community
   channels:
@@ -128,7 +135,7 @@ feeds.
 |---|---|
 | Body before the first `## When` | Persona prompt |
 | `model`, `effort`, `buzz.settings` | Settings that sync for the agent type |
-| `buzz.runtime` | Agent type |
+| `buzz.runtime` | Agent type, such as `buzz.claude-code/claude-code` (export shows the key) |
 | `display_name`, `description`, `avatar` | Profile |
 | `## When` sections, `buzz.interests` | Interests |
 | `wake.timers`, `wake.events` | Timers and event watches |
@@ -157,7 +164,7 @@ the agent's memory.
 {
   "version": 1,
   "agent": {"pubkey": "<hex>", "community": "wss://relay.example.org", "owner": "<hex>"},
-  "type": "claude-code",
+  "type": "buzz.claude-code/claude-code",
   "profile": {"name": "Triage Bot", "about": "First responder for pages.", "picture": "https://..."},
   "instructions": "You are Triage Bot.",
   "settings": {"model": "model-large", "effort": "high", "scope": "community"},

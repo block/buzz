@@ -98,7 +98,10 @@ impl ProviderError {
                 message,
                 retry_after,
             } => {
-                let detail = message.map(|m| format!(": {m}")).unwrap_or_default();
+                let detail = message
+                    .as_deref()
+                    .map(|m| format!(": {m}"))
+                    .unwrap_or_default();
                 match code {
                     "approval_required" => {
                         CliError::Auth(format!("approve this request in Buzz, then retry{detail}"))
@@ -110,12 +113,22 @@ impl ProviderError {
                     "unavailable" => {
                         CliError::Auth(format!("the Buzz desktop cannot act now{detail}"))
                     }
-                    "invalid_request" => CliError::Other(format!(
-                        "the Buzz desktop rejected `{method}` as malformed{detail}"
-                    )),
-                    "conflict" => CliError::Conflict(format!(
-                        "the agent changed since it was read; run the command again{detail}"
-                    )),
+                    // With a message the desktop says why; without one, the
+                    // request itself was malformed.
+                    "invalid_request" => CliError::Other(match &message {
+                        Some(why) => format!("the Buzz desktop refused `{method}`: {why}"),
+                        None => format!("the Buzz desktop rejected `{method}` as malformed"),
+                    }),
+                    "declined" => CliError::Declined(message.unwrap_or_else(|| {
+                        format!("you declined `{method}` in Buzz, so nothing changed")
+                    })),
+                    "not_found" => CliError::NotFound(
+                        message.unwrap_or_else(|| format!("`{method}` found nothing to act on")),
+                    ),
+                    // The desktop's message already says what changed and what to do.
+                    "conflict" => CliError::Conflict(message.unwrap_or_else(|| {
+                        "the agent changed since it was read; run the command again".into()
+                    })),
                     _ => CliError::Auth(format!("the Buzz desktop refused `{method}`{detail}")),
                 }
             }
@@ -170,6 +183,8 @@ fn known_code(code: &str) -> &'static str {
         "invalid_request" => "invalid_request",
         "unsupported_version" => "unsupported_version",
         "conflict" => "conflict",
+        "declined" => "declined",
+        "not_found" => "not_found",
         _ => "denied",
     }
 }
@@ -1886,6 +1901,22 @@ pub(crate) mod tests {
         assert!(matches!(err, ProviderError::Code { code: "denied", .. }));
     }
 
+    #[test]
+    fn a_declined_or_missing_answer_keeps_the_desktops_explanation() {
+        let code = |code, message: &str| ProviderError::Code {
+            code,
+            message: Some(message.into()),
+            retry_after: None,
+        };
+        let declined = code("declined", "You chose Decline").into_cli("agent_apply");
+        assert!(matches!(&declined, CliError::Declined(m) if m == "You chose Decline"));
+        assert_eq!(crate::error::exit_code(&declined), 1);
+        let missing = code("not_found", "This agent needs channel x").into_cli("agent_apply");
+        assert!(matches!(&missing, CliError::NotFound(m) if m == "This agent needs channel x"));
+        assert_eq!(known_code("declined"), "declined");
+        assert_eq!(known_code("not_found"), "not_found");
+    }
+
     #[tokio::test]
     async fn same_user_check_accepts_this_users_provider() {
         let (endpoint, _) = provider(|_, _| describe(&[RELAY])).await;
@@ -2591,7 +2622,11 @@ pub(crate) mod tests {
         let err = pair_with(&store, "i".into(), endpoint, Some(RELAY), "cli")
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("malformed"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("refused `pair`: Wrong parameters for pair"),
+            "{err}"
+        );
     }
 
     /// A crashed desktop's leftover advertisement reads as not running, and

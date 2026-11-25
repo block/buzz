@@ -149,6 +149,17 @@ fn comments_reordering_and_spacing_are_no_change() {
 }
 
 #[test]
+fn an_empty_model_is_the_default_one_a_file_leaves_out() {
+    let mut live = live();
+    live.settings.insert("model".into(), json!(""));
+    let text = render(&live, "triage-bot").unwrap();
+    assert!(!text.contains("model:"));
+    let desired = parse(&text).unwrap().document;
+    let plan = plan(Some(&live), &desired, "triage-bot").unwrap();
+    assert_eq!(plan.action, Action::NoChange);
+}
+
+#[test]
 fn a_dry_run_shows_the_change_as_an_agent_md_diff() {
     let text = rendered()
         .replace("    - 9\n", "    - 9\n    - 1111\n")

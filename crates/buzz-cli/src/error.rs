@@ -32,6 +32,11 @@ pub enum CliError {
     #[error("{0}")]
     NotFound(String),
 
+    /// The owner declined the change when the Buzz desktop asked. Nothing
+    /// was changed; it is their decision, so it is never retried.
+    #[error("{0}")]
+    Declined(String),
+
     /// A non-idempotent command's outcome is unknown: the request may have
     /// reached the relay, but the response was lost. Never auto-retried and
     /// never labeled retryable — the relay executes these commands before any
@@ -123,7 +128,7 @@ pub fn exit_code(e: &CliError) -> i32 {
         CliError::Auth(_) => 3,
         CliError::Key(_) => 3,
         CliError::Conflict(_) => 5,
-        CliError::NotFound(_) => 1,
+        CliError::NotFound(_) | CliError::Declined(_) => 1,
         CliError::DeliveryUnknown(_) => 2,
         CliError::Adapter(_) | CliError::Throttled(_) | CliError::Unavailable(_) => 2,
         CliError::Other(_) => 4,
@@ -147,6 +152,7 @@ pub fn print_error(e: &CliError) {
         CliError::Key(_) => "key_error",
         CliError::Conflict(_) => "conflict",
         CliError::NotFound(_) => "not_found",
+        CliError::Declined(_) => "declined",
         CliError::DeliveryUnknown(_) => "delivery_unknown",
         CliError::Adapter(_) => "adapter_error",
         CliError::Throttled(_) => "rate_limited",

@@ -37,7 +37,16 @@ pub async fn export(
             codec::check_name(&name).map_err(usage)?;
             name
         }
-        None => agent_file::slug_name(&read.document.profile.name),
+        // Import wants the name to match the directory, so --out names it.
+        None => match out.as_deref().and_then(Path::file_name) {
+            Some(dir) => {
+                let dir = dir.to_string_lossy().into_owned();
+                codec::check_name(&dir)
+                    .map_err(|e| CliError::Usage(format!("{}; pass --name", e.0)))?;
+                dir
+            }
+            None => agent_file::slug_name(&read.document.profile.name),
+        },
     };
     let text = exportable(&read.document, &name)?;
     let dir = out.unwrap_or_else(|| PathBuf::from(&name));
@@ -158,6 +167,15 @@ async fn apply(
             owner: None,
             ..have.clone()
         });
+        // Without --prune-channels the import leaves channels the file omits,
+        // so the plan keeps them too and shows only what will change.
+        if !options.prune_channels {
+            for kept in &live.document.channels {
+                if !desired.channels.iter().any(|c| c.channel == kept.channel) {
+                    desired.channels.push(kept.clone());
+                }
+            }
+        }
     } else {
         desired.agent = None;
     }
@@ -321,10 +339,14 @@ fn with_error(saved: &str, error: &str) -> String {
 }
 
 fn run_editor(path: &Path) -> Result<(), CliError> {
-    let editor = std::env::var("VISUAL")
-        .ok()
-        .or_else(|| std::env::var("EDITOR").ok())
-        .filter(|e| !e.trim().is_empty())
+    // An empty $VISUAL falls through to $EDITOR, as in git.
+    let set = |name| {
+        std::env::var(name)
+            .ok()
+            .filter(|e: &String| !e.trim().is_empty())
+    };
+    let editor = set("VISUAL")
+        .or_else(|| set("EDITOR"))
         .unwrap_or_else(|| "vi".to_owned());
     // Through the shell, so an editor with arguments, such as `code --wait`,
     // works as it does for git.
