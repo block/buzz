@@ -774,8 +774,12 @@ void main() {
 
       // Unreachable discovery fails transiently, never as a denial.
       f.nipFiRequired = null;
+      final connects = f.socketHeaders.length;
       await session.reconnect();
       await f.settle(tester);
+      // A new connection waits for discovery instead of guessing from the
+      // last answer, so no socket opens during the outage.
+      expect(f.socketHeaders, hasLength(connects));
       expect(f.container.read(hostedRelayAuthProvider).failure, isNull);
       // Requests keep the last answer instead of failing with discovery.
       await session.queryRelay(const []);
