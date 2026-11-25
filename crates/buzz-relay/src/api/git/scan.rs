@@ -124,7 +124,7 @@ async fn objects(
 /// Read `cat-file --batch` output to its end, or to the first match.
 async fn scan_batch(out: &mut (impl AsyncBufReadExt + Unpin)) -> std::io::Result<bool> {
     let mut header = String::new();
-    let mut buf = vec![0u8; OVERLAP + CHUNK];
+    let mut buf = vec![0u8; OVERLAP + 1 + CHUNK];
     loop {
         header.clear();
         if out.read_line(&mut header).await? == 0 {
@@ -144,11 +144,17 @@ async fn scan_batch(out: &mut (impl AsyncBufReadExt + Unpin)) -> std::io::Result
             let want = CHUNK.min(usize::try_from(left).unwrap_or(CHUNK));
             out.read_exact(&mut buf[kept..kept + want]).await?;
             left -= want as u64;
-            if SECRETS.is_match(&buf[..kept + want]) {
-                return Ok(true);
-            }
             let end = kept + want;
-            let tail = end.min(OVERLAP);
+            // A window's edges are not the object's. The carried tail's first
+            // byte is only context for the overlap after it, and a match that
+            // ends at a cut waits for the next window, which carries it whole
+            // with its right context.
+            if let Some(m) = SECRETS.find_at(&buf[..end], usize::from(kept > 0)) {
+                if left == 0 || m.end() < end || m.len() >= OVERLAP {
+                    return Ok(true);
+                }
+            }
+            let tail = end.min(OVERLAP + 1);
             buf.copy_within(end - tail..end, 0);
             kept = tail;
         }
@@ -234,6 +240,38 @@ mod tests {
         assert!(!scan(batch(&[b"clean", &vec![0u8; CHUNK + 7]]))
             .await
             .unwrap());
+    }
+
+    /// A window edge is not a word boundary: a longer token that only looks
+    /// like a secret where a chunk edge cuts it passes, on either side of
+    /// the cut; the real secret at the same place is still found.
+    #[tokio::test]
+    async fn a_chunk_edge_is_not_a_word_boundary() {
+        let secret = &secrets()[2];
+        let object = |at: usize, before: &[u8], after: &[u8]| {
+            let mut body = vec![b' '; at - before.len()];
+            body.extend(before);
+            body.extend(secret.as_bytes());
+            body.extend(after);
+            body.extend(vec![b' '; CHUNK]);
+            assert_eq!(SECRETS.is_match(&body), before.is_empty() && after == b" ");
+            body
+        };
+        // Ending at the first cut, and starting where the next window does.
+        for at in [CHUNK - secret.len(), CHUNK - OVERLAP] {
+            for (before, after, found) in [
+                (&b""[..], &b"q"[..], false),
+                (b"q", b" ", false),
+                (b"", b" ", true),
+            ] {
+                let body = object(at, before, after);
+                assert_eq!(
+                    scan(batch(&[&body])).await.unwrap(),
+                    found,
+                    "at {at}, {before:?}..{after:?}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
