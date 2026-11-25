@@ -88,7 +88,7 @@ _Avoid_: App Store build, external build
 
 ### Diagnostic reporting
 
-Sending crash, error and performance data from a mobile installation to a [reporting destination](#reporting-destination). It exists to diagnose faults: it is not a record of how people use the app (beyond the SDK's session records, which say when each session started, how long it lasted from start to end, how it ended and how many errors it had), and it never includes what they write. See [ADR 0007](docs/adr/0007-diagnostic-reporting-follows-the-destination.md).
+Sending crash, error and performance data from a mobile installation to a [reporting destination](#reporting-destination). It exists to diagnose faults: it is not a record of how people use the app (beyond the SDK's session records, which say when each session started, how long it lasted from start to end, how it ended and how many errors it had), and it never includes what they write, except a value some code interpolates into a programmer error's message, which the filter can't always recognize. See [ADR 0007](docs/adr/0007-diagnostic-reporting-follows-the-destination.md).
 
 _Avoid_: Telemetry, analytics, tracking, observability
 

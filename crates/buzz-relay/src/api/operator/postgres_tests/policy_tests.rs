@@ -331,6 +331,20 @@ mod postgres_tests {
         assert_eq!(response["receipt"]["state"], "applied");
         assert_eq!(response["receipt"]["current_requires_nip_fi"], false);
         assert_eq!(response["effective_required"], true);
+        // Shadow reports the rollout cohort while the stored flag stays false.
+        for (percent, expected) in [(0, false), (100, true)] {
+            let config = Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config);
+            config.nip_fi.mode = buzz_auth::NipFiMode::Shadow;
+            config.nip_fi.enforce_percent = percent;
+            let current = read_json(
+                fresh_upgrade_request(state.clone(), &operator, "GET", &current_path, None).await,
+            )
+            .await;
+            assert_eq!(current["effective_required"], expected, "{percent}");
+        }
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config)
+            .nip_fi
+            .mode = buzz_auth::NipFiMode::Enforce;
         let invalid = fresh_upgrade_request(
             state.clone(),
             &operator,

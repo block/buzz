@@ -530,15 +530,20 @@ void reportPushLeaseCleanupError(Object error, StackTrace stackTrace) {
   debugPrintStack(stackTrace: stackTrace);
 }
 
+/// Platforms whose native push code honors a confirmed age restriction.
+bool get _ageRestrictionPlatform =>
+    defaultTargetPlatform == TargetPlatform.iOS ||
+    defaultTargetPlatform == TargetPlatform.android;
+
 /// Restores notification presentation without reading community storage.
 Future<void> restoreAgeRestrictedBuzzNotifications() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  if (!_ageRestrictionPlatform) return;
   await _channel.invokeMethod<void>('restoreAgeRestrictedNotifications');
 }
 
 /// Removes notifications rendered before a confirmed age restriction.
 Future<void> purgeAgeRestrictedBuzzNotifications() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  if (!_ageRestrictionPlatform) return;
   await _channel.invokeMethod<void>('purgeAgeRestrictedNotifications');
 }
 
@@ -547,9 +552,14 @@ Future<void> registerBuzzPushCommunitySnapshot(
 ) async {
   if (defaultTargetPlatform != TargetPlatform.iOS) return;
   try {
+    // An unconfirmed opt-out stays in: until the relay confirms it,
+    // notifications may still arrive, and the extension must resolve them.
+    bool exported(Community community) =>
+        community.pushNotificationsEnabled ||
+        community.pushSubscriptionState.pendingTombstoneGeneration != null;
     final snapshots = [
       for (final community in communities)
-        if (community.pushNotificationsEnabled)
+        if (exported(community))
           BuzzPushCommunitySnapshot(
             id: community.id,
             name: community.name,
@@ -560,7 +570,7 @@ Future<void> registerBuzzPushCommunitySnapshot(
     ];
     final signingKeys = <String, String>{};
     for (final community in communities) {
-      if (!community.pushNotificationsEnabled) continue;
+      if (!exported(community)) continue;
       final nsec = community.nsec;
       if (nsec == null || nsec.isEmpty) continue;
       try {

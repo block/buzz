@@ -390,6 +390,40 @@ void main() {
       submitted!['content'] as String,
     );
     expect(jsonDecode(plaintext), jsonDecode(publication.plaintext));
+
+    // The member can read back what the relay holds for its lease, and only
+    // its own lease.
+    NostrEvent stored({required String pubkey, int kind = buzzPushLeaseKind}) =>
+        NostrEvent(
+          id: 'e' * 64,
+          pubkey: pubkey,
+          createdAt: 0,
+          kind: kind,
+          tags: const [],
+          content: submitted!['content'] as String,
+          sig: '',
+        );
+    expect(
+      decryptBuzzPushLease(
+        event: stored(pubkey: signer.public),
+        descriptor: descriptor,
+        nsec: signer.nsec,
+      ),
+      (active: false, generation: 3),
+    );
+    for (final forged in [
+      stored(pubkey: relay.public),
+      stored(pubkey: signer.public, kind: 1),
+    ]) {
+      expect(
+        () => decryptBuzzPushLease(
+          event: forged,
+          descriptor: descriptor,
+          nsec: signer.nsec,
+        ),
+        throwsFormatException,
+      );
+    }
   });
 
   group('NIP-11 forward compatibility', () {

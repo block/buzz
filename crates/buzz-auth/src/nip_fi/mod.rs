@@ -33,7 +33,8 @@ pub use command::{
 #[cfg(any(test, feature = "test-utils"))]
 pub use command_replay::InMemoryCommandReplayGuard;
 pub use command_replay::{
-    command_replay_key, namespaced_command_replay_key, CommandReplayGuard, COMMAND_REPLAY_PREFIX,
+    command_replay_key, namespaced_command_replay_key, ClaimOutcome, CommandClaim,
+    CommandReplayGuard, LoadDenies, LoadDeniesError, COMMAND_REPLAY_PREFIX,
     SHADOW_COMMAND_REPLAY_PREFIX,
 };
 pub use community::{CommunityBinding, CommunityBindingError};
@@ -43,7 +44,10 @@ pub use config::{
     NOSTR_OWNER_PUBKEY_CLAIM, NOSTR_PUBKEY_CLAIM, OAUTH_CLIENT_ID_CLAIM,
 };
 pub use denial::DenialClass;
-pub use deny_map::{CrossPodMergeResult, DenySetFull, IssuerCapacity, NipFiDenyMap};
+pub use deny_map::{
+    CrossPodMergeResult, DenyEntry, DenyScope, DenySetFull, DenyStatus, IssuerCapacity,
+    NipFiDenyMap,
+};
 pub use discovery::{
     AssertionFreshnessDiscovery, FederatedIdentityDiscovery, FreshnessClassDiscovery,
 };

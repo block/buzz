@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'package:buzz/shared/http/app_http_client.dart';
+import 'relay_call_error.dart';
 
 import 'relay_query_response.dart' show RelayResponseTooLarge;
 
@@ -38,6 +39,18 @@ class RelayHttpQueryClient {
   _ClientGeneration? _currentGeneration;
   final Set<_ClientGeneration> _generations = {};
 
+  /// The error for a request that outlived [timeout]: a [call] when the
+  /// request is one, otherwise a plain [TimeoutException]. Its stack is the
+  /// caller's, since the timer that raises it has no frames from the app.
+  static TimeoutException _timedOut(Duration timeout, RelayCall? call) =>
+      call == null
+      ? TimeoutException('Relay request timed out after $timeout', timeout)
+      : RelayTimeoutException(
+          call,
+          'Relay query timed out after $timeout',
+          timeout,
+        );
+
   Future<http.Response> post(
     Uri url, {
     required Map<String, String> headers,
@@ -45,6 +58,7 @@ class RelayHttpQueryClient {
     required Duration timeout,
     http.Client Function(http.Client, bool Function())? decorate,
   }) async {
+    final callSite = StackTrace.current;
     final generation = _injectedClient == null
         ? (_currentGeneration ??= _createGeneration())
         : null;
@@ -73,7 +87,7 @@ class RelayHttpQueryClient {
         _currentGeneration = null;
       }
       generation?.retire();
-      rethrow;
+      Error.throwWithStackTrace(_timedOut(timeout, RelayCall.query), callSite);
     } finally {
       active = false;
       generation?.release();
@@ -81,13 +95,16 @@ class RelayHttpQueryClient {
   }
 
   /// Sends a non-redirecting request, bounding bytes before buffering or parsing.
-  /// The deadline includes headers and the entire response body.
+  /// The deadline includes headers and the entire response body. A timeout is
+  /// a [RelayTimeoutException] for [call], or untyped when [call] is null.
   Future<http.Response> sendBounded(
     http.Request request, {
     required int maxBytes,
     required Duration timeout,
+    required RelayCall? call,
     http.Client Function(http.Client, bool Function())? decorate,
   }) async {
+    final callSite = StackTrace.current;
     // As in [post], a timed-out request on a shared session is aborted.
     final abort = Completer<void>();
     final sent =
@@ -145,7 +162,7 @@ class RelayHttpQueryClient {
         _currentGeneration = null;
       }
       generation?.retire();
-      rethrow;
+      Error.throwWithStackTrace(_timedOut(timeout, call), callSite);
     } finally {
       finished = true;
       // Cancelling an iterator that never listened leaves the body

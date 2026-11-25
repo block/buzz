@@ -28,7 +28,9 @@ abstract interface class ShownMessageStore {
   ///
   /// Callers claim before they post, so a message is posted at most once. If
   /// posting then fails, the message is not offered again, which is better
-  /// than repeating it.
+  /// than repeating it. For the same reason, a caller that stops waiting for a
+  /// claim must report it as lost (`PushWakeResult.unreported`), even though
+  /// the claim may yet return false and cost only a needless fallback.
   Future<bool> claim(String community, String eventId, DateTime createdAt);
 }
 

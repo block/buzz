@@ -455,6 +455,22 @@ pub fn build_edit_with_media(
     new_content: &str,
     media_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
+    build_edit_with_tags(channel_id, target_event_id, new_content, media_tags, &[])
+}
+
+/// Build an edit with the complete replacement attachment set and the NIP-30
+/// `["emoji", shortcode, url]` tags for custom emoji in the new content
+/// (kind 40003).
+///
+/// Clients render an edit's custom emoji from the edit's own emoji tags, so
+/// pass one for every `:shortcode:` the new content uses.
+pub fn build_edit_with_tags(
+    channel_id: Uuid,
+    target_event_id: nostr::EventId,
+    new_content: &str,
+    media_tags: &[Vec<String>],
+    emoji_tags: &[Vec<String>],
+) -> Result<EventBuilder, SdkError> {
     check_content(new_content, 64 * 1024)?;
     let mut tags = vec![
         tag(&["h", &channel_id.to_string()])?,
@@ -469,6 +485,7 @@ pub fn build_edit_with_media(
         return Err(SdkError::InvalidTag("expected imeta attachment tag".into()));
     }
     imeta_tags(media_tags, &mut tags)?;
+    nip30_emoji_tags(emoji_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(40003), new_content).tags(tags))
 }
 
@@ -3486,6 +3503,31 @@ mod tests {
         assert!(build_edit_with_media(cid, eid, "bad", &[vec!["e".into(), eid.to_hex()]]).is_err());
         assert!(build_edit_with_media(cid, eid, "bad", &[vec![]]).is_err());
         assert!(build_edit_with_media(cid, eid, &"x".repeat(64 * 1024 + 1), &media).is_err());
+    }
+
+    #[test]
+    fn edit_attaches_emoji_tags() {
+        let cid = uuid();
+        let eid = event_id();
+        let emoji = vec![vec![
+            "emoji".into(),
+            "wave".into(),
+            "https://cdn.example.com/wave.png".into(),
+        ]];
+        let event = sign(build_edit_with_tags(cid, eid, ":wave: hi", &[], &emoji).unwrap());
+        assert_eq!(event.kind.as_u16(), 40003);
+        assert!(has_tag(&event, "e", &eid.to_hex()));
+        assert_eq!(
+            event
+                .tags
+                .iter()
+                .find(|t| t.as_slice()[0] == "emoji")
+                .unwrap()
+                .as_slice(),
+            emoji[0]
+        );
+        let plain = sign(build_edit_with_media(cid, eid, ":wave: hi", &[]).unwrap());
+        assert!(!plain.tags.iter().any(|t| t.as_slice()[0] == "emoji"));
     }
 
     #[test]

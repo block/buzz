@@ -660,9 +660,11 @@ void main() {
       expect(watch.elapsed, lessThan(const Duration(seconds: 2)));
       expect(result.failedCommunityIds, [relay.communityId]);
 
-      // Slow storage and a slow name lookup spend the budget too. Messages
-      // not yet claimed stay unclaimed for the next wake, and those already
-      // claimed are returned, not lost.
+      // Storage that stalls on one claim past the budget doesn't hold the
+      // wake. Messages not yet claimed stay unclaimed for the next wake. A
+      // claim that only wins after the wake answered is recorded as shown but
+      // never returned, so its community is reported incomplete, the wake is
+      // marked unreported, and the caller falls back.
       relay.silent = false;
       final friend = relay.person('Friend');
       final sent = [
@@ -677,21 +679,30 @@ void main() {
         metadata: Duration(seconds: 30),
         total: Duration(milliseconds: 700),
       );
-      final slowStore = SlowShownMessageStore(
+      // The oldest is claimed first, so the resolver always reaches it
+      // before the deadline, however slow the runner.
+      final heldId = sent.first;
+      final release = Completer<void>();
+      final heldStore = HeldClaimShownMessageStore(
         fixture.openStore(),
-        const Duration(milliseconds: 100),
+        heldId,
+        release.future,
       );
       final stopped = Stopwatch()..start();
-      final partial = await fixture.wake(store: slowStore, timeouts: tight);
+      final partial = await fixture.wake(store: heldStore, timeouts: tight);
       expect(stopped.elapsed, lessThan(const Duration(seconds: 2)));
-      expect(partial.incomplete, isTrue);
-      expect(partial.notifications, isNotEmpty);
-      expect(partial.notifications.length, lessThan(sent.length));
+      expect(heldStore.entered, isTrue);
+      release.complete();
+      expect(await heldStore.recorded, isTrue);
+      final partialIds = partial.notifications.map((n) => n.eventId).toList();
+      expect(partialIds, isNot(contains(heldId)));
+      expect(partial.failedCommunityIds, [relay.communityId]);
+      expect(partial.unreported, isTrue);
       final rest = await fixture.wake();
       expect(rest.incomplete, isFalse);
       expect(
-        [...partial.notifications, ...rest.notifications].map((n) => n.eventId),
-        unorderedEquals(sent),
+        [...partialIds, ...rest.notifications.map((n) => n.eventId)]..sort(),
+        [...sent.where((id) => id != heldId)]..sort(),
       );
 
       relay.slowProfiles = true;
@@ -700,6 +711,8 @@ void main() {
       final unnamed = await fixture.wake(timeouts: tight);
       expect(lookup.elapsed, lessThan(const Duration(seconds: 2)));
       expect(unnamed.notifications.map((n) => n.eventId), [late.id]);
+      // Cut short outside any claim, everything it claimed is returned.
+      expect(unnamed.unreported, isFalse);
 
       // Storage that never answers for one community holds back neither the
       // others nor what it claimed before it stalled, and the community is
@@ -730,6 +743,26 @@ void main() {
         fine.id,
         claimedFirst.id,
       });
+      // The claim still running may yet win, recording a message the wake
+      // never returned, so the wake says so.
+      expect(cutShort.unreported, isTrue);
+
+      // A stalled claim for a message with nothing to show would not have
+      // been returned anyway, so nothing is lost.
+      final blank = fixture.addCommunity();
+      blank.message(blank.dmChannel(), blank.person('Friend'), '  \n\t ');
+      final blankStall = await fixture
+          .wake(
+            store: StalledShownMessageStore(
+              fixture.openStore(),
+              blank.communityId,
+              succeed: 0,
+            ),
+            timeouts: tight,
+          )
+          .timeout(const Duration(seconds: 3));
+      expect(blankStall.failedCommunityIds, [blank.communityId]);
+      expect(blankStall.unreported, isFalse);
 
       // Once the budget is spent, nothing more is sent to a relay.
       final gate = Completer<void>();
@@ -901,8 +934,36 @@ void main() {
       for (final result in await Future.wait([eighth, ninth])) {
         expect(result.notifications, isEmpty);
         expect(result.incomplete, isTrue);
+        expect(result.unreported, isFalse);
       }
       expect(failingPasses, 2);
+
+      // A message lost by one pass stays lost, so a clean rerun still
+      // reports it.
+      var lostPasses = 0;
+      final losing = PushWakeRunner((budget) async {
+        final result = await fixture.wake(
+          timeouts: PushWakeTimeouts(total: budget),
+        );
+        return ++lostPasses > 1
+            ? result
+            : PushWakeResult(
+                notifications: result.notifications,
+                unreported: true,
+              );
+      });
+      final lostHeld = relay.hold = Completer<void>();
+      final lostBefore = relay.queries.length;
+      final tenth = losing.wake();
+      await untilQueries(relay, lostBefore + 1);
+      final eleventh = losing.wake();
+      lostHeld.complete();
+      relay.hold = null;
+      for (final result in await Future.wait([tenth, eleventh])) {
+        expect(result.incomplete, isFalse);
+        expect(result.unreported, isTrue);
+      }
+      expect(lostPasses, 2);
     });
   });
 }
