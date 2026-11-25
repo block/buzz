@@ -26,11 +26,12 @@ import 'reply_summary_link.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' show cos, max, min, pi;
-import 'dart:ui' show FontFeature, ImageFilter, lerpDouble;
+import 'dart:ui' show FontFeature, ImageFilter, ImageByteFormat, lerpDouble;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show ScrollCacheExtent, ScrollDirection;
+import 'package:flutter/rendering.dart'
+    show RenderRepaintBoundary, ScrollCacheExtent, ScrollDirection;
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -641,7 +642,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       workspace: workspace,
     ));
     chatSettingsControls.value = (assistant: assistant, workspace: workspace);
-    Widget chatSettings(VoidCallback refresh, Widget renameRow) {
+    MeChatSettings chatSettings(VoidCallback refresh, Widget renameRow) {
       final controls = chatSettingsControls.value;
       Future<void> open(bool agent) async {
         if (agent) {
@@ -669,35 +670,127 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       );
     }
 
-    Future<void> openChannelDetails() async {
-      final shouldClose = await showChannelDetailsPage(
-        context: context,
-        channel: resolvedChannel,
-        currentPubkey: currentPubkey,
-        onMemberTap: (context, pubkey) => showUserProfileSheet(
-          context,
-          pubkey,
-          names: channelIdentityNamesProvider(resolvedChannel.id),
-          contextualActions: (_) => ChannelMemberProfileActions(
-            channel: resolvedChannel,
-            pubkey: pubkey,
+    final iosSettingsZoom =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+    final headerKey = useMemoized(GlobalKey.new);
+    final portraitCaptureKey = useMemoized(GlobalKey.new);
+    final freezeSettingsPortrait = useState(false);
+    final hideSettingsSource = useState(false);
+    final openingDetails = useRef(false);
+    final portraitUpdates = useValueNotifier<Uint8List?>(null);
+    final portraitRevision = useRef(0);
+    Future<Uint8List?> capturePortrait(double pixelRatio) async {
+      final boundary = portraitCaptureKey.currentContext?.findRenderObject();
+      if (boundary is! RenderRepaintBoundary || !boundary.hasSize) return null;
+      final image = await boundary.toImage(pixelRatio: pixelRatio);
+      try {
+        return (await image.toByteData(
+          format: ImageByteFormat.png,
+        ))?.buffer.asUint8List();
+      } finally {
+        image.dispose();
+      }
+    }
+
+    Future<void> refreshHiddenPortrait() async {
+      if (!context.mounted || !hideSettingsSource.value) return;
+      final revision = ++portraitRevision.value;
+      final bytes = await capturePortrait(View.of(context).devicePixelRatio);
+      if (context.mounted &&
+          revision == portraitRevision.value &&
+          hideSettingsSource.value &&
+          bytes != null &&
+          !listEquals(bytes, portraitUpdates.value)) {
+        portraitUpdates.value = bytes;
+      }
+    }
+
+    Future<void> openChannelDetails([Rect? bounds]) async {
+      if (iosSettingsZoom && openingDetails.value) return;
+      openingDetails.value = iosSettingsZoom;
+      try {
+        Uint8List? artwork;
+        final pixelRatio = View.of(context).devicePixelRatio;
+        // AVPlayerLayer is outside Flutter's repaint boundary. Use the same
+        // poster that this portrait displays when playback is paused.
+        if (bounds != null &&
+            dmHeader.avatars.any(
+              (avatar) => DmHeaderPortrait.playsAnimation(
+                avatar.imageUrl,
+                avatar.avatarIsAgent,
+              ),
+            )) {
+          freezeSettingsPortrait.value = true;
+          await WidgetsBinding.instance.endOfFrame;
+          if (!context.mounted) return;
+        }
+        if (bounds != null) artwork = await capturePortrait(pixelRatio);
+        if (!context.mounted) return;
+        portraitUpdates.value = artwork;
+        final box = headerKey.currentContext?.findRenderObject();
+        VoidCallback? refreshSoloDetails;
+        final shouldClose = await showChannelDetailsPage(
+          zoomArtwork: artwork,
+          portraitUpdates: portraitUpdates,
+          setZoomSourceHidden: (hidden) {
+            if (context.mounted) hideSettingsSource.value = hidden;
+          },
+          headerArtwork: iosSettingsZoom
+              ? _headerArtwork(dmHeader.avatars)
+              : null,
+          source:
+              bounds ??
+              (box is RenderBox
+                  ? box.localToGlobal(Offset.zero) & box.size
+                  : null),
+          context: context,
+          channel: resolvedChannel,
+          currentPubkey: currentPubkey,
+          onMemberTap: (context, pubkey) => showUserProfileSheet(
+            context,
+            pubkey,
+            names: channelIdentityNamesProvider(resolvedChannel.id),
+            contextualActions: (_) => ChannelMemberProfileActions(
+              channel: resolvedChannel,
+              pubkey: pubkey,
+            ),
           ),
-        ),
-        sectionId: ref
-            .read(channelSectionsProvider)
-            .store
-            .assignments[resolvedChannel.id],
-        personalChat: personalChat,
-        soloSettings: personalChat
-            ? (renameRow) => StatefulBuilder(
-                builder: (context, rebuild) => chatSettings(() {
-                  if (context.mounted) rebuild(() {});
-                }, renameRow),
-              )
-            : null,
-      );
-      if (shouldClose == true && context.mounted) {
-        Navigator.of(context).pop();
+          sectionId: ref
+              .read(channelSectionsProvider)
+              .store
+              .assignments[resolvedChannel.id],
+          personalChat: personalChat,
+          sheetSoloSettings: personalChat && iosSettingsZoom
+              ? (row, present) => StatefulBuilder(
+                  builder: (context, rebuild) {
+                    refreshSoloDetails = () {
+                      if (context.mounted) rebuild(() {});
+                    };
+                    return present(
+                      chatSettings(() => refreshSoloDetails?.call(), row),
+                    );
+                  },
+                )
+              : null,
+          soloSettings: personalChat
+              ? (renameRow) => StatefulBuilder(
+                  builder: (context, rebuild) => chatSettings(() {
+                    if (context.mounted) rebuild(() {});
+                  }, renameRow),
+                )
+              : null,
+        );
+        if (shouldClose == true && context.mounted) {
+          Navigator.of(context).pop();
+        }
+      } finally {
+        if (iosSettingsZoom && context.mounted) {
+          hideSettingsSource.value = false;
+          portraitRevision.value++;
+          portraitUpdates.value = null;
+          freezeSettingsPortrait.value = false;
+        }
+        openingDetails.value = false;
       }
     }
 
@@ -802,6 +895,10 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                           timeline.isShowingPreview)) ||
                   messagesNotifier.isCatchingUp,
         onNativeTitlePressed: openChannelDetails,
+        portraitCaptureKey: portraitCaptureKey,
+        onHiddenPortraitPainted: refreshHiddenPortrait,
+        hideSettingsSource: hideSettingsSource.value,
+        freezeSettingsPortrait: freezeSettingsPortrait.value,
         nativeActions: [
           if (!personalChat && resolvedChannel.isDm && showsHuddleAction)
             _huddleNavigationAction(context, ref, resolvedChannel, [
@@ -814,6 +911,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         titleStyle: channelTitleTextStyle,
         centerTitle: defaultTargetPlatform != TargetPlatform.android,
         title: _ConversationAppBarTitle(
+          key: iosSettingsZoom ? headerKey : null,
           channel: resolvedChannel,
           avatars: dmHeader.avatars,
           label: dmHeader.label,

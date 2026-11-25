@@ -35,6 +35,7 @@ import 'dart:async';
 
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/features/channels/channel_actions_sheet.dart';
+import 'package:buzz/shared/widgets/dm_header_cluster.dart';
 
 import '../profile/presence_snapshot_test.dart'
     show PresenceTestRelay, presenceEvent;
@@ -6353,7 +6354,7 @@ void main() {
         if (defaultTargetPlatform == TargetPlatform.iOS) {
           tester
               .widget<IosNavigationBar>(find.byType(IosNavigationBar))
-              .onTitlePressed!();
+              .onTitlePressed!(null);
         } else {
           await tester.tap(
             find.byKey(const ValueKey('channel-header-settings-trigger')),
@@ -17012,8 +17013,15 @@ void main() {
             findsOneWidget,
           );
           expect(
-            find.byKey(const ValueKey('dm-details-avatar')),
-            participants.length == 2 ? findsOneWidget : findsNothing,
+            tester
+                .widget<DmHeaderCluster>(
+                  find.descendant(
+                    of: find.byType(ChannelDetailsPage),
+                    matching: find.byType(DmHeaderCluster),
+                  ),
+                )
+                .count,
+            participants.length - 1,
           );
           expect(
             find.byKey(const ValueKey('channel-details-members-card')),

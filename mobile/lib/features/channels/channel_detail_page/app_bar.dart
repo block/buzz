@@ -18,6 +18,7 @@ double _twoLineAppBarTitleContentHeight(BuildContext context) {
 
 class _ConversationAppBarTitle extends StatelessWidget {
   const _ConversationAppBarTitle({
+    super.key,
     required this.channel,
     required this.label,
     required this.subtitle,
@@ -274,16 +275,9 @@ class _ConversationAppBarTitle extends StatelessWidget {
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
                 onTap: onTap,
-                child: DmHeaderCluster(
+                child: _headerArtwork(
+                  avatars,
                   key: const ValueKey('dm-header-avatar'),
-                  count: avatars.length,
-                  builder: (i, size) => DmHeaderPortrait(
-                    imageUrl: avatars[i].imageUrl,
-                    size: size,
-                    standalone: avatars.length == 1,
-                    isAgent: avatars[i].avatarIsAgent,
-                    initial: avatars[i].avatarInitial ?? '?',
-                  ),
                 ),
               ),
             ),
@@ -295,6 +289,19 @@ class _ConversationAppBarTitle extends StatelessWidget {
 }
 
 // Both renderers subscribe to the same conversation identities.
+Widget _headerArtwork(List<IosNavigationAction> avatars, {Key? key}) =>
+    DmHeaderCluster(
+      key: key,
+      count: avatars.length,
+      builder: (i, size) => DmHeaderPortrait(
+        imageUrl: avatars[i].imageUrl,
+        size: size,
+        standalone: avatars.length == 1,
+        isAgent: avatars[i].avatarIsAgent,
+        initial: avatars[i].avatarInitial ?? '?',
+      ),
+    );
+
 ({String label, List<IosNavigationAction> avatars}) _watchDmHeader(
   WidgetRef ref,
   Channel channel,

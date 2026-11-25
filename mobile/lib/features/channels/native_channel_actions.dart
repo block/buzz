@@ -29,6 +29,11 @@ class _NativeChannelActions extends HookConsumerWidget {
     required this.groups,
     this.title,
     this.detailsChannel,
+    this.zoomSource,
+    this.showDetailsBehindPicker,
+    this.zoomArtwork,
+    this.portraitUpdates,
+    this.setZoomSourceHidden,
     this.heroAvatarUrl,
     this.heroIsAgent = false,
     this.memberLabel,
@@ -38,6 +43,11 @@ class _NativeChannelActions extends HookConsumerWidget {
   final bool solo;
   final MeChatSettings? settings;
   final Channel? detailsChannel;
+  final Rect? zoomSource;
+  final VoidCallback? showDetailsBehindPicker;
+  final Uint8List? zoomArtwork;
+  final ValueListenable<Uint8List?>? portraitUpdates;
+  final ValueChanged<bool>? setZoomSourceHidden;
   final String? heroAvatarUrl;
   final bool heroIsAgent;
   final String? memberLabel;
@@ -214,8 +224,13 @@ class _NativeChannelActions extends HookConsumerWidget {
       }
     }
     final latest = useRef(callbacks)..value = callbacks;
+    final artwork = useListenable(portraitUpdates)?.value ?? zoomArtwork;
     final payload = {
       'session': session,
+      'zoomArtwork': ?artwork,
+      if (setZoomSourceHidden != null) 'holdsZoomSource': true,
+      if (zoomSource case final rect?)
+        'zoomSource': [rect.left, rect.top, rect.width, rect.height],
       'solo': solo,
       'title': title ?? '',
       if (detailsChannel != null) 'details': detailsChannel!.toJson(),
@@ -245,9 +260,24 @@ class _NativeChannelActions extends HookConsumerWidget {
     final latestPayload = useRef(payload)..value = payload;
     useEffect(() {
       var disposed = false;
+      final sourceChannel = MethodChannel(
+        'buzz/channel_actions_sheet/source/$session',
+      );
+      if (zoomSource != null) {
+        sourceChannel.setMethodCallHandler((call) async {
+          if (disposed) return;
+          if (call.method == 'selectInPlace') {
+            await latest.value[call.arguments]?.call();
+          } else if (call.method == 'covered') {
+            setZoomSourceHidden?.call(true);
+            await WidgetsBinding.instance.endOfFrame;
+          }
+        });
+      }
       WidgetsBinding.instance.addPostFrameCallback((_) async {
         if (disposed) return;
         final route = ModalRoute.of(context);
+        var keepDetails = false;
         try {
           final selected = await _channelActionsBridge.invokeMethod<String>(
             'present',
@@ -257,7 +287,21 @@ class _NativeChannelActions extends HookConsumerWidget {
           presentationEnded.value = true;
           avatarCancellation.value?.value = true;
           if (selected == 'huddle') openingHuddle.value = true;
+          if (setZoomSourceHidden != null) {
+            setZoomSourceHidden!(false);
+            await WidgetsBinding.instance.endOfFrame;
+            await _channelActionsBridge.invokeMethod<void>('sourceRestored', {
+              'session': session,
+            });
+            if (disposed || !context.mounted) return;
+          }
           final action = latest.value[selected];
+          // Hand navigation back to the full settings page so nested routes
+          // return there and each action keeps its ordinary pop behavior.
+          if (zoomSource != null && action != null && selected != 'huddle') {
+            keepDetails = true;
+            showDetailsBehindPicker?.call();
+          }
           if (action != null) await action();
         } on PlatformException catch (error) {
           if (context.mounted) {
@@ -282,13 +326,20 @@ class _NativeChannelActions extends HookConsumerWidget {
             );
           }
         } finally {
-          if (!disposed && context.mounted && route != null && route.isActive) {
+          if (!keepDetails &&
+              !disposed &&
+              context.mounted &&
+              route != null &&
+              route.isActive) {
             route.navigator!.removeRoute(route);
           }
         }
       });
       return () {
         disposed = true;
+        if (zoomSource != null) {
+          sourceChannel.setMethodCallHandler(null);
+        }
         unawaited(
           _channelActionsBridge
               .invokeMethod<void>('dismiss', {'session': session})
@@ -325,7 +376,8 @@ String _channelActionSymbol(IconData? icon) => switch (icon) {
   BuzzIcons.mail => 'envelope',
   BuzzIcons.folder => 'workspaceFolder',
   BuzzIcons.headphones => 'headphones',
-  BuzzIcons.starOff => 'star',
+  BuzzIcons.star || BuzzIcons.starOff => 'star',
+  BuzzIcons.userPlus => 'person.badge.plus',
   BuzzIcons.folderInput => 'folder',
   BuzzIcons.bell => 'bell',
   BuzzIcons.bellOff => 'bell.slash',

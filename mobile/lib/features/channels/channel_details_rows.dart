@@ -7,6 +7,8 @@ class _ChannelDetailsHero extends StatelessWidget {
     required this.nameKey,
     required this.displayName,
     this.avatar,
+    this.showPrivateLock = false,
+    this.nativeTitle = false,
   });
 
   final Channel channel;
@@ -14,10 +16,28 @@ class _ChannelDetailsHero extends StatelessWidget {
   final GlobalKey nameKey;
   final String displayName;
   final Widget? avatar;
+  final bool showPrivateLock;
+  final bool nativeTitle;
 
   @override
   Widget build(BuildContext context) {
     final description = channel.description.trim();
+    final name = Text(
+      displayName,
+      key: nameKey,
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+      textAlign: TextAlign.center,
+      style: context.textTheme.headlineSmall?.copyWith(
+        fontWeight: FontWeight.w600,
+      ),
+    );
+    final title = KeyedSubtree(
+      key: const ValueKey('channel-details-name'),
+      child: nativeTitle
+          ? Opacity(opacity: 0, alwaysIncludeSemantics: true, child: name)
+          : name,
+    );
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         Grid.gutter,
@@ -43,19 +63,21 @@ class _ChannelDetailsHero extends StatelessWidget {
                 ),
               ),
           const SizedBox(height: Grid.xxs),
-          KeyedSubtree(
-            key: const ValueKey('channel-details-name'),
-            child: Text(
-              displayName,
-              key: nameKey,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.center,
-              style: context.textTheme.headlineSmall?.copyWith(
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
+          if (showPrivateLock)
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(
+                  BuzzIcons.lock,
+                  size: 16,
+                  semanticLabel: 'Private channel',
+                ),
+                const SizedBox(width: Grid.quarter),
+                Flexible(child: title),
+              ],
+            )
+          else
+            title,
           if (description.isNotEmpty) ...[
             const SizedBox(height: Grid.half),
             Text(

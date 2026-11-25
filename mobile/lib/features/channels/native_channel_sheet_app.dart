@@ -62,6 +62,8 @@ class _ChannelSheetApp extends HookWidget {
       theme: theme,
       home: ChannelSheetContent(
         data: data.value,
+        onGeometry: (geometry) =>
+            bridge.invokeMethod<void>('heroGeometry', geometry),
         onSelect: (id) => bridge.invokeMethod<void>('select', id),
       ),
     );
@@ -74,7 +76,9 @@ class ChannelSheetContent extends HookWidget {
     super.key,
     required this.data,
     required this.onSelect,
+    this.onGeometry,
   });
+  final ValueChanged<Map<String, Object>>? onGeometry;
   final Map<String, dynamic> data;
   final FutureOr<void> Function(String id) onSelect;
 
@@ -96,6 +100,38 @@ class ChannelSheetContent extends HookWidget {
         .toList();
     final title = data['title'] as String? ?? '';
     final avatarUrl = data['heroAvatarUrl'] as String? ?? '';
+    final zoomArtwork = data['zoomArtwork'];
+    final nativeHero = zoomArtwork is Uint8List && onGeometry != null;
+    final avatarKey = useMemoized(GlobalKey.new);
+    final scroll = useScrollController();
+    List<double>? bounds(GlobalKey key) {
+      final box = key.currentContext?.findRenderObject();
+      if (box is! RenderBox || !box.attached || !box.hasSize) return null;
+      final origin = box.localToGlobal(Offset.zero);
+      return [origin.dx, origin.dy, box.size.width, box.size.height];
+    }
+
+    void reportGeometry() {
+      if (!context.mounted || !nativeHero) return;
+      onGeometry!({
+        'scrollOffset': scroll.hasClients ? scroll.offset : 0.0,
+        'portrait': ?bounds(avatarKey),
+        'name': ?bounds(nameKey),
+        'title': title,
+        'fontSize': MediaQuery.textScalerOf(
+          context,
+        ).scale(context.textTheme.headlineSmall!.fontSize!),
+      });
+    }
+
+    void scheduleGeometry() =>
+        WidgetsBinding.instance.addPostFrameCallback((_) => reportGeometry());
+    useEffect(() {
+      if (!nativeHero) return null;
+      scroll.addListener(scheduleGeometry);
+      return () => scroll.removeListener(scheduleGeometry);
+    }, [scroll, nativeHero, title]);
+    if (nativeHero) scheduleGeometry();
     VoidCallback? select(Map<String, dynamic> row) =>
         row['enabled'] == true ? () => onSelect(row['id'] as String) : null;
     return Scaffold(
@@ -105,15 +141,38 @@ class ChannelSheetContent extends HookWidget {
         left: false,
         right: false,
         child: ListView(
-          padding: const EdgeInsets.only(bottom: Grid.xs),
+          controller: scroll,
+          padding: EdgeInsets.only(
+            top: data['zoomSource'] != null
+                ? MediaQuery.viewPaddingOf(context).top
+                : 0,
+            bottom: Grid.xs,
+          ),
           children: [
             if (details != null)
               _ChannelDetailsHero(
                 channel: details,
                 icon: solo ? BuzzIcons.messageCircle : null,
                 nameKey: nameKey,
+                nativeTitle: nativeHero,
                 displayName: title,
-                avatar: avatarUrl.isEmpty
+                showPrivateLock:
+                    zoomArtwork is Uint8List &&
+                    !solo &&
+                    !details.isDm &&
+                    details.visibility == 'private',
+                avatar: nativeHero
+                    ? SizedBox.square(key: avatarKey, dimension: 80)
+                    : zoomArtwork is Uint8List
+                    ? ClipOval(
+                        child: Image.memory(
+                          zoomArtwork,
+                          width: 80,
+                          height: 80,
+                          fit: BoxFit.cover,
+                        ),
+                      )
+                    : avatarUrl.isEmpty
                     ? null
                     : AvatarImage(
                         imageUrl: avatarUrl,
@@ -292,6 +351,8 @@ IconData _sheetIcon(Object? symbol) => switch (symbol) {
   'trash' => BuzzIcons.trash2,
   'pencil' => BuzzIcons.pencil,
   'plus' => BuzzIcons.plus,
+  'person.badge.plus' => BuzzIcons.userPlus,
+  'star' => BuzzIcons.star,
   'person.2' => BuzzIcons.users,
   'loading' => BuzzIcons.loaderCircle,
   'warning' => BuzzIcons.triangleAlert,
