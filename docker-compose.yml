@@ -149,6 +149,37 @@ services:
       com.buzz.env: "dev"
     restart: "no"
 
+  # Opt-in message index; see docs/opensearch-search-deployment.md.
+  opensearch:
+    image: opensearchproject/opensearch:2.19.3@sha256:e96cc6ae1500a073d973c0906f30f7cf4d9c461f32f855f9242a2da933660cdd
+    container_name: buzz-opensearch
+    profiles: ["search"]
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    networks:
+      - buzz-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=1s"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    labels:
+      com.buzz.service: "opensearch"
+      com.buzz.env: "dev"
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:latest
     container_name: buzz-prometheus
@@ -183,6 +214,10 @@ volumes:
     name: buzz-prometheus-data
     labels:
       com.buzz.volume: "prometheus"
+  opensearch-data:
+    name: buzz-opensearch-data
+    labels:
+      com.buzz.volume: "opensearch"
 
 networks:
   buzz-net:

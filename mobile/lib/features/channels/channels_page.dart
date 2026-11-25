@@ -32,7 +32,7 @@ import '../../shared/hosted/organization_sign_in.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math' show Random, max, min;
+import 'dart:math' show max, min;
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
@@ -64,8 +64,6 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
-import '../../shared/widgets/buzz_toast.dart';
-import '../../shared/widgets/ios_composition_layer.dart';
 import '../../shared/widgets/buzz_setting_menu.dart';
 import '../../shared/widgets/buzz_titled_sheet_layout.dart';
 import '../../shared/widgets/ios_glass_navigation_action.dart';
@@ -115,7 +113,6 @@ import '../../shared/read_state/read_state_time.dart';
 
 part 'channels_page/body.dart';
 part 'channels_page/home_buckets.dart';
-part 'channels_page/activity_recovery.dart';
 part 'channels_page/sections.dart';
 part 'channels_page/section_chats.dart';
 part 'channels_page/rename_section.dart';
@@ -663,7 +660,6 @@ class ChannelsPage extends HookConsumerWidget {
         onRefresh: () async {
           // Restart the reader for Solo chat and project placement.
           if (soloSliver != null) ref.invalidate(meGroupsProvider);
-          ref.invalidate(channelFilterActivityProvider);
           await Future.wait([
             ref.read(channelsProvider.notifier).refresh(),
             if (ref.read(channelFilterProvider) case final manager?)

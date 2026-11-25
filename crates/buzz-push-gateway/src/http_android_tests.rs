@@ -58,6 +58,16 @@ fn gateway(with_android: bool) -> Gateway {
 }
 
 fn gateway_limited(with_android: bool, signed_calls_per_window: i64) -> Gateway {
+    gateway_with(
+        with_android.then(|| Arc::new(TestAttestationVerifier) as _),
+        signed_calls_per_window,
+    )
+}
+
+fn gateway_with(
+    attestation: Option<Arc<dyn AndroidAttestationVerifier>>,
+    signed_calls_per_window: i64,
+) -> Gateway {
     let fcm = Arc::new(FakeFcm::default());
     let grant_keyring =
         Arc::new(GrantKeyring::new(vec![GrantKey::new("test", &[1; 32]).unwrap()]).unwrap());
@@ -76,8 +86,8 @@ fn gateway_limited(with_android: bool, signed_calls_per_window: i64) -> Gateway 
                 .unwrap(),
             ),
             transport: Arc::new(NeverApns),
-            android: with_android.then(|| AndroidRuntime {
-                attestation: Arc::new(TestAttestationVerifier),
+            android: attestation.map(|attestation| AndroidRuntime {
+                attestation,
                 transport: fcm.clone(),
             }),
         }),
@@ -667,4 +677,56 @@ async fn signed_installation_calls_are_limited_per_attested_key() {
             .unwrap()
     };
     call_ok(&g, other_handle, &delegate(1), &other).await;
+}
+
+/// The test verifier behind a revocation list that may not be loaded yet, as
+/// right after a gateway restart.
+struct ListGatedVerifier {
+    list_loaded: AtomicBool,
+}
+
+impl AndroidAttestationVerifier for ListGatedVerifier {
+    fn verify(
+        &self,
+        chain: &[Vec<u8>],
+        client_data: &[u8],
+    ) -> Result<crate::android_attestation::VerifiedAndroidKey, AndroidAttestationError> {
+        if !self.list_loaded.load(Ordering::SeqCst) {
+            return Err(AndroidAttestationError::Unavailable);
+        }
+        TestAttestationVerifier.verify(chain, client_data)
+    }
+}
+
+#[tokio::test]
+async fn enrollment_waits_out_a_missing_revocation_list_without_spending_anything() {
+    let verifier = Arc::new(ListGatedVerifier {
+        list_loaded: AtomicBool::new(false),
+    });
+    let g = gateway_with(Some(verifier.clone()), 1_000);
+    let phone = Phone::new(7);
+    let ch = challenge(&g.app).await;
+    let body = enroll_body(&phone, &ch, FCM_TOKEN);
+
+    // A fresh enrollment before the first list: retryable, challenge unspent.
+    let (status, reply) = post(&g.app, "/v1/installations", &body).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{reply}");
+    assert_eq!(reply["error"], "temporarily_unavailable");
+    verifier.list_loaded.store(true, Ordering::SeqCst);
+    let (status, created) = post(&g.app, "/v1/installations", &body).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    // A restart empties the list again. The exact replay of the committed
+    // enrollment (a lost response) is retryable, not an attestation refusal
+    // that would make the phone discard the key the installation holds.
+    verifier.list_loaded.store(false, Ordering::SeqCst);
+    let (status, _) = post(&g.app, "/v1/installations", &body).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    verifier.list_loaded.store(true, Ordering::SeqCst);
+    let (status, replayed) = post(&g.app, "/v1/installations", &body).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        replayed["installation_handle"],
+        created["installation_handle"]
+    );
 }

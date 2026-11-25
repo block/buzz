@@ -944,13 +944,15 @@ async fn nip11_or_ws_handler(
     // [FI-TRACE-DENY-SET]
     if let Some(assertion) = &nip_fi_assertion {
         if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
-            if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now()) {
+            if let Some(refusal) =
+                crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now())
+            {
                 crate::nip_fi_shadow::record_denial(
                     "ws",
                     crate::nip_fi_shadow::enforce_label(&state, raw_host),
-                    crate::nip_fi_shadow::DENY_SET.by(assertion.asserted_key()),
+                    refusal,
                 );
-                return http_denial(buzz_auth::DenialClass::AuthorizationDenied).into_response();
+                return http_denial(refusal.class).into_response();
             }
         }
     }
@@ -2669,6 +2671,7 @@ mod tests {
         // a token-carrying request.
         config.nip_fi = NipFiRelayConfig {
             profile_policies: Vec::new(),
+            accept_shadow_disconnects: false,
             source: Default::default(),
             mode,
             registry: IssuerRegistry::new(),
@@ -4533,6 +4536,7 @@ mod tests {
 
         config.nip_fi = NipFiRelayConfig {
             profile_policies: Vec::new(),
+            accept_shadow_disconnects: false,
             source: Default::default(),
             mode: NipFiMode::Enforce,
             registry: {
@@ -4619,7 +4623,7 @@ mod tests {
         ));
         let until = chrono::Utc::now() + chrono::Duration::seconds(3600);
         let merge_result =
-            deny_map.merge_cross_pod_deny(DENY_TEST_ISS, denied_key, until, chrono::Utc::now());
+            deny_map.merge_cross_pod_deny(DENY_TEST_ISS, denied_key, until, chrono::Utc::now);
         assert!(
             matches!(merge_result, buzz_auth::CrossPodMergeResult::Merged),
             "deny entry must be inserted for test setup"
@@ -4698,6 +4702,30 @@ mod tests {
             status, expected,
             "WS admission for a key NOT in the deny map must reach the no-map downstream outcome"
         );
+    }
+
+    /// While the deny map restores, the upgrade is refused
+    /// 503 `authorization unavailable`, for a revoked key and an unknown one.
+    #[tokio::test]
+    async fn restoring_deny_map_refuses_ws_admission_as_unavailable() {
+        let denied_key = nostr::Keys::generate().public_key();
+        for key in [denied_key, nostr::Keys::generate().public_key()] {
+            let state = nip_fi_deny_state(&denied_key).await;
+            state
+                .nip_fi_deny_map
+                .as_deref()
+                .expect("deny map")
+                .begin_restore();
+            let bearer = format!("Bearer {}", mint_deny_test_token(&key.to_hex()));
+            let resp =
+                nip_fi_gate_response(state, "/", Some("Nostr-Federated-Identity"), Some(&bearer))
+                    .await;
+            assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+            let body = axum::body::to_bytes(resp.into_body(), 64)
+                .await
+                .expect("body");
+            assert_eq!(body.as_ref(), b"authorization unavailable\n");
+        }
     }
 
     #[tokio::test]

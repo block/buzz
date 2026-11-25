@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:isolate';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/crypto/event_signing.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/channels/channel_list_snapshot.dart';
 import '../../shared/channels/open_channel_directory_storage.dart';
@@ -34,11 +36,11 @@ part 'channel_unread_deletions.dart';
 part 'channel_unread_catch_up.dart';
 part 'channel_snapshot.dart';
 part 'channel_member_snapshots.dart';
-part 'channel_history_evidence.dart';
 part 'channels_provider_lifecycle.dart';
 part 'channel_list_changes.dart';
 part 'channels_provider_joins.dart';
 part 'channel_thread_follows.dart';
+part 'channel_latest_activity.dart';
 
 const _channelTypeOrder = {'stream': 0, 'forum': 1, 'dm': 2};
 const _unreadCatchUpLimit = 1000;
@@ -108,15 +110,15 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   bool _listNoticesReopened = false;
   final Set<String> _reopenedLiveChunks = {};
   final Map<String, int> _latestObservedByChannel = {};
-  final Map<String, int> _activityRevisions = {};
-  // A present entry with a null event is a successful empty history response.
-  final _filterEvidence = <String, ({NostrEvent? event})>{};
-  ({NostrEvent? event})? filterEvidenceFor(String id) => _filterEvidence[id];
+  final _activity = _ChannelActivity();
 
-  /// Invalidates verified activity reads for every live message, including
-  /// self-authored or muted messages, without changing unread or sort state.
-  int activityRevisionFor(String channelId) =>
-      _activityRevisions[channelId] ?? 0;
+  /// When anyone last posted in [channelId]; see [_ChannelActivity].
+  ({bool known, int? at}) activityFor(String channelId) =>
+      _activity.lookup(channelId);
+
+  /// Marks [channelId] as shown in an Active section until the result is
+  /// called, so the reconnect catch-up reads its activity gap.
+  void Function() watchActivity(String channelId) => _activity.watch(channelId);
 
   // Per channel, when an earlier unread catch-up in this session was sent, and
   // the read timestamp and mute state it used. See [_UnreadCatchUp].
@@ -245,6 +247,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _hasLoaded = false;
       _hasCachedSnapshot = false;
       _needsSnapshotRevalidation = false;
+      _activity.clear();
       _memberSnapshotRelayBaseUrl = relayBaseUrl;
       _memberSnapshotPubkey = pubkey;
       _memberSnapshotsByChannelId = const {};
@@ -337,8 +340,6 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _refreshCoordinator.retireInFlight();
       _clearLiveSubscriptions();
       _latestObservedByChannel.clear();
-      _activityRevisions.clear();
-      _filterEvidence.clear();
       _observedUnreadEventsByChannel.clear();
       _observedUnreadRevisions.touchAll();
       _unreadCaughtUpByChannel.clear();
@@ -519,23 +520,23 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     final listed = {
       if (!fetchLastMessage)
         for (final c in state.value ?? const <Channel>[])
-          if (c.isMember) c.id,
+          if (c.isMember &&
+              (_activity.hasBaseline(c.id) || !_activity.isWatched(c.id)))
+            c.id,
     };
-    final requestedHistory = [
+    final latestRequested = [
       for (final entry in visibleMetas)
         if (memberChannelIds.contains(entry.value.id) &&
             !entry.value.isArchived &&
             !listed.contains(entry.value.id))
           entry.value,
     ];
-    final initialRevisions = {
-      for (final c in requestedHistory) c.id: activityRevisionFor(c.id),
-    };
-    final failedHistory = <String>{};
+    final latestFailedIds = <String>{};
+    final latestRead = _activity.beginRead();
     final latestEventsRequest = _fetchLastMessageEvents(
       session,
-      requestedHistory,
-      failedHistory,
+      latestRequested,
+      failedChannelIds: latestFailedIds,
     );
     final (displayNames, latestEvents) = await _fenced(fence, () async {
       await Future.wait(eagerError: true, [
@@ -590,15 +591,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     final channelById = {
       for (final channel in activeChannels) channel.id: channel,
     };
-    final events = latestEvents;
-    if (events != null) {
-      _cacheFilterEvidence(
-        events,
-        requestedHistory,
-        failedHistory,
-        initialRevisions,
-      );
-    }
+    final events = latestEvents?.events;
     final lastMessageMap = <String, int>{};
     // An unavailable batch keeps the timestamps already known rather than
     // installing channels whose latest message looks absent.
@@ -610,6 +603,14 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         }
       }
     }
+    _activity.noteRead(
+      latestRead,
+      latestRequested.map((c) => c.id),
+      latestFailedIds,
+      events,
+      latestEvents?.authentic ?? const {},
+      deletedIds: _deletedAmong(events),
+    );
     final mutedChannelIds = _mutedChannelIds();
     for (final event in events ?? const <NostrEvent>[]) {
       final channelId = event.channelId;
@@ -717,12 +718,14 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   ///
   /// The relay rejects a request whose filters name more than
   /// [kMaxExplicitChannelValues] channels in aggregate, so larger batches are
-  /// split into requests within that cap.
+  /// split into requests within that cap. An [optional] batch has no
+  /// fallback: any failed request makes it unavailable.
   Future<List<NostrEvent>?> _fetchChannelHistoryBatch(
     RelaySessionNotifier session,
     List<NostrFilter> filters, {
     required String operation,
     Set<String>? failedChannelIds,
+    bool optional = false,
   }) async {
     final requests = <List<NostrFilter>>[];
     var channelValues = 0;
@@ -776,6 +779,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       }
     }
     if (fallback.isEmpty) return events;
+    if (optional) return null;
 
     // Fallback starts once every request has settled, so the batch never has
     // more than the request concurrency in flight.
@@ -893,6 +897,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       return;
     }
     if (_applyUnreadDeletion(event)) {
+      _activity.forgetHeads(_deletionTargets(event));
       state = state.whenData((channels) => List<Channel>.of(channels));
       return;
     }
@@ -911,11 +916,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       }
       final updated = List<Channel>.of(channels);
       final channel = updated[idx];
-      _activityRevisions[channelId] = activityRevisionFor(channelId) + 1;
-      if (EventKind.channelMessageEventKinds.contains(event.kind) &&
-          event.createdAt >
-              (_filterEvidence[channelId]?.event?.createdAt ?? -1)) {
-        _filterEvidence[channelId] = (event: event);
+      if (EventKind.channelMessageEventKinds.contains(event.kind)) {
+        _activity.noteLive(event);
       }
 
       _noteThreadEvent(event, channel.id, myPk);
@@ -997,8 +999,6 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
   void clearObservedUnreadForChannel(String channelId) {
     _latestObservedByChannel.remove(channelId);
-    _activityRevisions.remove(channelId);
-    _filterEvidence.remove(channelId);
     if (_observedUnreadEventsByChannel.remove(channelId) != null) {
       _observedUnreadRevisions.touch(channelId);
     }
