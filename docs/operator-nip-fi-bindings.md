@@ -249,7 +249,17 @@ Watch the same signals, plus the rate of 503 responses on login.
   rollback at 100 still requires every community: it restores only the staged
   revocation behavior, not optional admission. Stored-Required communities stay
   required either way. Never roll back with `mode=off`: `off` also turns off
-  stored-Required enforcement.
+  stored-Required enforcement. In the same rollout, unset
+  `BUZZ_NIP_FI_ACCEPT_SHADOW_DISCONNECTS` or set it to `false`: `true` is
+  invalid in `shadow` and the pods refuse to start.
+
+  Shadow pods restore active denies from both stores. Those denies still
+  reject admission for stored-Required and remaining cohort communities;
+  optional communities only record the would-deny verdict. Shadow does not
+  close existing sessions. When returning to `enforce`, set
+  `BUZZ_NIP_FI_ACCEPT_SHADOW_DISCONNECTS=true` and follow
+  [Switching shadow → enforce](#switching-shadow--enforce) again, measuring the
+  bridge-retention interval from the latest shadow pods.
 
 ### Alerts
 
