@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:buzz/shared/http/app_http_client.dart';
@@ -12,9 +13,63 @@ final relayInformationClientProvider = Provider<http.Client>((ref) {
 });
 
 /// NIP-11 `self` identifies the relay signer; `pubkey` is only a contact key.
-final relayAuthorProvider = FutureProvider.autoDispose.family<String?, String>((
-  ref,
-  relayUrl,
+final relayAuthorProvider = FutureProvider.autoDispose.family<String?, String>(
+  (ref, relayUrl) async => _relayAuthor(
+    await _fetchRelayInformation(
+      ref.watch(relayInformationClientProvider),
+      relayUrl,
+    ),
+  ),
+);
+
+/// What a send needs from a relay's NIP-11 document: its signer and the
+/// extensions it advertises.
+@immutable
+class RelayInformation {
+  const RelayInformation({required this.author, required this.extensions});
+
+  /// The relay signer (`self`), or null when none is valid.
+  final String? author;
+  final Set<String> extensions;
+
+  /// Whether a DM add can bring agents in place (`buzz-dm-agents`).
+  bool get addsAgentsToDm => extensions.contains('buzz-dm-agents');
+}
+
+/// [relayUrl]'s NIP-11 document, read once and kept for the session so a send
+/// can consult it without waiting. Watch it ahead of the send; a send reads
+/// only what has loaded, and treats nothing loaded as nothing advertised. Only
+/// a document is kept: after a failed read the next watcher retries.
+final relayInformationProvider = FutureProvider.autoDispose
+    .family<RelayInformation?, String>((ref, relayUrl) async {
+      final info = await _fetchRelayInformation(
+        ref.watch(relayInformationClientProvider),
+        relayUrl,
+      );
+      if (info is! Map) return null;
+      ref.keepAlive();
+      final advertised = info['supported_extensions'];
+      return RelayInformation(
+        author: _relayAuthor(info),
+        extensions: {
+          if (advertised is List)
+            for (final extension in advertised)
+              if (extension is String) extension,
+        },
+      );
+    });
+
+String? _relayAuthor(Object? info) {
+  final author = info is Map ? info['self'] : null;
+  return author is String && RegExp(r'^[0-9a-f]{64}$').hasMatch(author)
+      ? author
+      : null;
+}
+
+/// The decoded NIP-11 document at [relayUrl], or null on a non-200 status.
+Future<Object?> _fetchRelayInformation(
+  http.Client client,
+  String relayUrl,
 ) async {
   final source = Uri.parse(relayUrl);
   final uri = source.replace(
@@ -24,7 +79,6 @@ final relayAuthorProvider = FutureProvider.autoDispose.family<String?, String>((
       final scheme => scheme,
     },
   );
-  final client = ref.watch(relayInformationClientProvider);
   // Completed on every exit, so a dropped, refused or timed-out response
   // stops downloading on a shared session instead of staying in flight.
   final abort = Completer<void>();
@@ -66,9 +120,5 @@ final relayAuthorProvider = FutureProvider.autoDispose.family<String?, String>((
   } finally {
     if (!abort.isCompleted) abort.complete();
   }
-  final info = jsonDecode(utf8.decode(bytes));
-  final author = info is Map ? info['self'] : null;
-  return author is String && RegExp(r'^[0-9a-f]{64}$').hasMatch(author)
-      ? author
-      : null;
-});
+  return jsonDecode(utf8.decode(bytes));
+}

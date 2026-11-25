@@ -19,6 +19,10 @@ import 'local_message_send_animation_provider.dart';
 class SendMessage {
   final SignedEventRelay _signedEventRelay;
   final Future<List<ChannelMember>> Function(String channelId) _fetchMembers;
+
+  /// DM members the relay just confirmed, which a membership read may not
+  /// show yet: see [DmConfirmedJoins].
+  final Set<String> Function(String channelId)? _takeConfirmedJoins;
   final Map<String, UserProfile> Function() _readUserCache;
   final void Function(String channelId, NostrEvent event) _addLocalMessage;
   final void Function(String channelId, String eventId)
@@ -39,7 +43,9 @@ class SendMessage {
     completeLocalMessage,
     required void Function(String channelId, String eventId) removeLocalMessage,
     bool Function()? isDeliveryValid,
+    Set<String> Function(String channelId)? takeConfirmedJoins,
   }) : _signedEventRelay = signedEventRelay,
+       _takeConfirmedJoins = takeConfirmedJoins,
        _fetchMembers = fetchMembers,
        _readUserCache = readUserCache,
        _addLocalMessage = addLocalMessage,
@@ -173,6 +179,7 @@ class SendMessage {
         if (participant.trim().isNotEmpty &&
             participant.toLowerCase() != author)
           participant.toLowerCase(),
+      ...?_takeConfirmedJoins?.call(channelId),
     };
   }
 
@@ -288,6 +295,7 @@ SendMessage _sender(Ref ref, {bool personal = false}) {
     ),
     fetchMembers: (channelId) =>
         ref.read(channelMembersProvider(channelId).future),
+    takeConfirmedJoins: ref.read(dmConfirmedJoinsProvider).take,
     readUserCache: () => ref.read(userCacheProvider),
     addLocalMessage: (channelId, event) =>
         ref.read(messages(channelId).notifier).addLocalMessage(event),

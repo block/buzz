@@ -232,6 +232,7 @@ class ComposeBar extends HookConsumerWidget {
     final userCache = ref.watch(userCacheProvider);
     final composeChannel = ref.watch(channelByIdProvider(channelId));
     final isDmChannel = composeChannel?.isDm ?? false;
+    _preloadDmRelayInformation(ref, composeChannel);
 
     // Preload profiles for channel members, mentionable agents, and their
     // owners so @mention suggestions show names ("managed by …" included).
@@ -597,17 +598,10 @@ class ComposeBar extends HookConsumerWidget {
       final _NonMemberMentionScan scan;
       try {
         scan = draftMembers != null
-            ? _NonMemberMentionScan(
-                channelId: channelId,
-                outside: selectedMentions
-                    .where(
-                      (candidate) => !draftMembers!.any(
-                        (member) => member.pubkey == candidate.pubkey,
-                      ),
-                    )
-                    .toList(),
-                canAddMembers: false,
-                isDm: true,
+            ? _NonMemberMentionScan.draft(
+                channelId,
+                selectedMentions,
+                draftMembers!,
               )
             : await _scanNonMemberMentions(
                 ref,
@@ -650,19 +644,24 @@ class ComposeBar extends HookConsumerWidget {
 
       final queuedAttachments = List<_PendingAttachment>.of(attachments.value);
 
-      // A channel add that was refused doesn't block the message: it is
-      // reported and the un-added mentions become references. A refused DM add
-      // stops the send and keeps the draft.
-      Future<void> addMentionedNonMembers() => outgoing.addNonMembers(
-        channelActions,
-        scan: scan,
-        messenger: messenger,
-      );
-
       // Another submission may have finished the same asynchronous checks.
       if (!context.mounted || isSending.value) return;
       isSending.value = true;
       try {
+        Future<void> add() =>
+            outgoing.addNonMembers(channelActions, scan, messenger);
+        // A DM add runs before the draft clears or uploads; a channel's after.
+        final addsFirst = scan.isDm || queuedAttachments.isEmpty;
+        if (addsFirst &&
+            !await _addBeforeSend(
+              context: context,
+              draftRevision: draftRevision,
+              submittedDraftRevision: submittedDraftRevision,
+              add: add,
+              messenger: messenger,
+            )) {
+          return;
+        }
         if (queuedAttachments.isEmpty) {
           if (!context.mounted) return;
           await _sendTextOnlyDraft(
@@ -673,7 +672,6 @@ class ComposeBar extends HookConsumerWidget {
             cleanupStoredDraft: cleanupStoredDraft,
             focusNode: focusNode,
             clearComposer: clearComposer,
-            addMentionedNonMembers: addMentionedNonMembers,
             payload: _ComposeDraftPayload.fromDraft(
               text: text,
               attachments: const [],
@@ -729,7 +727,7 @@ class ComposeBar extends HookConsumerWidget {
               customEmoji: customEmoji,
             );
             if (queueGeneration != uploadGeneration.value) return;
-            await addMentionedNonMembers();
+            if (!addsFirst) await add();
             if (queueGeneration != uploadGeneration.value) return;
             await delivery(
               payload.content,
@@ -738,7 +736,9 @@ class ComposeBar extends HookConsumerWidget {
             );
           } catch (error) {
             if (cancellation.isCancelled) return;
-            if (context.mounted) uploadError.value = _formatUploadError(error);
+            if (context.mounted) {
+              uploadError.value = outgoing.afterJoin(_formatUploadError(error));
+            }
             if (context.mounted &&
                 queueGeneration == uploadGeneration.value &&
                 draftRevision.value == clearedDraftRevision) {

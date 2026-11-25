@@ -21,9 +21,6 @@ const _onlyPeopleShareHistory =
 /// Why the relay refuses [DmHistory.agents] when anyone named is a person.
 const _onlyAgentsJoin = 'invalid: only agents join this DM in place';
 
-/// How a relay from before [DmHistory.agents] refuses it.
-const _agentsUnsupported = 'invalid: history must be "include", got "agents"';
-
 /// Re-read schedule while confirming a join, matching desktop's.
 const _joinConfirmationDelays = [
   Duration.zero,
@@ -305,6 +302,48 @@ class ChannelActions {
     required List<String> pubkeys,
     required DmHistory history,
   }) async {
+    final id = await _addToDm(
+      channelId: channelId,
+      pubkeys: pubkeys,
+      history: history,
+    );
+    await _refreshChannelState(channelId);
+    if (id == channelId) {
+      return (await _ref.read(channelsProvider.future)).firstWhere(
+        (channel) => channel.id == channelId,
+        orElse: () => throw Exception('DM is not visible yet'),
+      );
+    }
+    return openAddedDm(id);
+  }
+
+  /// Adds the agents [pubkeys] to the DM [channelId] in place, or throws and
+  /// changes nothing: [DmHistory.agents]. Once this returns they are members,
+  /// and the DM's next send counts them as members ([DmConfirmedJoins]). Only
+  /// this DM's details are reloaded; the channel list catches up in the
+  /// background, so the send can follow at once.
+  Future<void> addAgentsToDm({
+    required String channelId,
+    required List<String> pubkeys,
+  }) async {
+    final id = await _addToDm(
+      channelId: channelId,
+      pubkeys: pubkeys,
+      history: DmHistory.agents,
+    );
+    // The relay never moves this add; anything else is not this DM.
+    if (id != channelId) throw Exception(dmAgentsOnlyMessage);
+    _ref.read(dmConfirmedJoinsProvider).record(channelId, pubkeys);
+    _invalidateChannelDetails(channelId);
+    unawaited(_ref.read(channelsProvider.notifier).refresh());
+  }
+
+  /// Submits a kind:41011 add and returns the id of the DM it landed in.
+  Future<String> _addToDm({
+    required String channelId,
+    required List<String> pubkeys,
+    required DmHistory history,
+  }) async {
     _ensureCommunityValid();
     Future<NostrEvent> submit(DmHistory history) => _signedEventRelay.submit(
       kind: 41011,
@@ -350,12 +389,6 @@ class ChannelActions {
         if (reason == _onlyAgentsJoin) {
           throw Exception(dmAgentsOnlyMessage);
         }
-        if (reason == _agentsUnsupported) {
-          throw Exception(
-            'Couldn’t add them. This community can’t add agents to a DM from '
-            'a mention yet.',
-          );
-        }
       }
       await _throwIfAgentRefused(
         reason,
@@ -380,14 +413,7 @@ class ChannelActions {
     if (id == null || id.isEmpty) {
       throw Exception('Relay did not return a DM channel id');
     }
-    await _refreshChannelState(channelId);
-    if (id == channelId) {
-      return (await _ref.read(channelsProvider.future)).firstWhere(
-        (channel) => channel.id == channelId,
-        orElse: () => throw Exception('DM is not visible yet'),
-      );
-    }
-    return openAddedDm(id);
+    return id;
   }
 
   /// Throws [DmAgentRefused] naming the agent when [reason] is an agent's

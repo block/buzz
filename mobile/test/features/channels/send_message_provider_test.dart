@@ -115,6 +115,46 @@ void main() {
     await result;
   });
 
+  test(
+    'addresses an agent the relay just added, ahead of the roster',
+    () async {
+      final session = _PendingPublishRelaySession();
+      final signingKey = nostr.Keys.generate().nsec;
+      final sender = nostr.Keys(
+        nostr.Nip19.decode(payload: signingKey).data,
+      ).public;
+      final human = 'b' * 64;
+      final joined = 'c' * 64;
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(session: session, nsec: signingKey),
+        // The membership read lags the add.
+        fetchMembers: (_) async => [_member(sender), _member(human)],
+        takeConfirmedJoins: (channelId) =>
+            channelId == _channelId ? {joined} : const {},
+        readUserCache: () => const {},
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        removeLocalMessage: (_, _) {},
+      );
+
+      final result = send(
+        channelId: _channelId,
+        content: 'hello agent',
+        channel: _dmChannel([sender, human]),
+        mentionPubkeys: [joined],
+      );
+      await session.published;
+
+      expect(session.event.tags.where((tag) => tag.first == 'p').toList(), [
+        ['p', joined],
+        ['p', human],
+      ]);
+
+      session.accept();
+      await result;
+    },
+  );
+
   test('final signed event addresses a human DM recipient', () async {
     final session = _PendingPublishRelaySession();
     final signingKey = nostr.Keys.generate().nsec;

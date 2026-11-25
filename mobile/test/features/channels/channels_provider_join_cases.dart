@@ -433,10 +433,9 @@ void _confirmedJoinCases() {
             ),
           ),
         );
-        Future<void> add() => actions.addToDm(
+        Future<void> add() => actions.addAgentsToDm(
           channelId: _otherJoinedChannel,
           pubkeys: const ['robin'],
-          history: DmHistory.agents,
         );
         Matcher refused(String message) => throwsA(
           isA<Exception>().having(
@@ -447,14 +446,7 @@ void _confirmedJoinCases() {
         );
 
         await expectLater(add(), refused(dmAgentsOnlyMessage));
-        // A relay from before the agents-only add refuses it by name.
-        await expectLater(
-          add(),
-          refused(
-            'Couldn’t add them. This community can’t add agents to a DM '
-            'from a mention yet.',
-          ),
-        );
+        await expectLater(add(), refused('Couldn’t add them. Try again.'));
         // Resending without the tag could start another DM, so it is not.
         await expectLater(add(), refused('Couldn’t add them. Try again.'));
         expect(
@@ -466,6 +458,54 @@ void _confirmedJoinCases() {
             ['history', 'agents'],
           ]),
         );
+      },
+    );
+
+    test(
+      'agents added in place count as members of the next send, once',
+      () async {
+        final keys = nostr.Keys.generate();
+        final session = _WriterReplicaRelaySession(memberships: const []);
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        final actions = container.read(
+          Provider<ChannelActions>(
+            (ref) => ChannelActions(
+              ref: ref,
+              session: session,
+              signedEventRelay: SignedEventRelay(
+                session: session,
+                nsec: keys.nsec,
+              ),
+              currentPubkey: 'me',
+            ),
+          ),
+        );
+        Future<void> add() => actions.addAgentsToDm(
+          channelId: _otherJoinedChannel,
+          pubkeys: const ['ROBIN'],
+        );
+        final joins = container.read(dmConfirmedJoinsProvider);
+
+        session.dmAddResponse =
+            'response:{"channel_id":"$_otherJoinedChannel"}';
+        await add();
+        expect(joins.take(_otherJoinedChannel), {'robin'});
+        expect(joins.take(_otherJoinedChannel), isEmpty);
+
+        // A relay that moved the add did not add them to this DM.
+        session.dmAddResponse = 'response:{"channel_id":"$_joinedChannel"}';
+        await expectLater(
+          add(),
+          throwsA(
+            isA<Exception>().having(
+              (error) => error.toString(),
+              'message',
+              'Exception: $dmAgentsOnlyMessage',
+            ),
+          ),
+        );
+        expect(joins.take(_otherJoinedChannel), isEmpty);
       },
     );
 

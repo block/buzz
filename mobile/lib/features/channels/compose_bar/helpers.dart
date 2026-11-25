@@ -765,20 +765,16 @@ Future<void> _addMentionedAgentsToDm(
   required List<String> agentPubkeys,
 }) async {
   if (agentPubkeys.isEmpty) return;
-  final Channel dm;
   try {
-    dm = await channelActions.addToDm(
+    await channelActions.addAgentsToDm(
       channelId: channelId,
       pubkeys: agentPubkeys,
-      history: DmHistory.agents,
     );
   } on StateError {
     rethrow;
   } catch (error) {
     throw _DmAddRefused(relayErrorText(error));
   }
-  // The relay never moves this add; anything else is not this DM.
-  if (dm.id != channelId) throw const _DmAddRefused(dmAgentsOnlyMessage);
 }
 
 /// Mentioned identities that aren't in the channel yet, plus whether the sender
@@ -795,22 +791,46 @@ class _NonMemberMentionScan {
   /// so its outside people are sent as references without a prompt.
   final bool isDm;
 
+  /// Whether this is a Solo draft with no channel yet. Nobody joins it from a
+  /// mention, so everyone outside is sent as a reference without a prompt.
+  final bool isDraft;
+
   const _NonMemberMentionScan({
     required this.channelId,
     required this.outside,
     required this.canAddMembers,
     required this.isDm,
-  });
+  }) : isDraft = false;
 
-  /// Who the mention prompt asks about: everyone outside a channel, or the
-  /// agents outside a DM.
-  List<MentionCandidate> get asked => isDm
-      ? [
-          for (final candidate in outside)
-            if (candidate.isAgent) candidate,
-        ]
-      : outside;
+  /// A Solo draft's scan: [selectedMentions] outside [members].
+  _NonMemberMentionScan.draft(
+    this.channelId,
+    List<MentionCandidate> selectedMentions,
+    List<ChannelMember> members,
+  ) : outside = [
+        for (final candidate in selectedMentions)
+          if (!members.any((member) => member.pubkey == candidate.pubkey))
+            candidate,
+      ],
+      canAddMembers = false,
+      isDm = true,
+      isDraft = true;
+
+  /// Who the mention prompt asks about: everyone outside a channel, the
+  /// agents outside a DM, or nobody outside a draft.
+  List<MentionCandidate> get asked =>
+      isDraft ? const [] : _asked(outside, isDm: isDm);
 }
+
+List<MentionCandidate> _asked(
+  List<MentionCandidate> outside, {
+  required bool isDm,
+}) => isDm
+    ? [
+        for (final candidate in outside)
+          if (candidate.isAgent) candidate,
+      ]
+    : outside;
 
 /// Resolves which mentioned identities are non-members, and whether this
 /// identity may add them (see [Channel.canAddMembers]). Any member may add
@@ -879,27 +899,37 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
   return _NonMemberMentionScan(
     channelId: channelId,
     outside: outside,
-    canAddMembers: channel.isDm
-        ? selfRole != null &&
+    // Checked only when someone would be asked, so other sends never wait.
+    canAddMembers: !channel.isDm
+        ? channel.canAddMembers(selfRole)
+        : _asked(outside, isDm: true).isNotEmpty &&
+              selfRole != null &&
               !channel.isArchived &&
-              !await _isModerationDm(ref, memberPubkeys)
-        : channel.canAddMembers(selfRole),
+              _dmAddsAgentsInPlace(ref, memberPubkeys),
     isDm: channel.isDm,
   );
 }
 
-/// Whether a DM of [memberPubkeys] is the relay's moderation DM, which only
-/// carries its notices. An unknown relay author is not one: the relay still
-/// refuses that add, and the refusal is reported.
-Future<bool> _isModerationDm(WidgetRef ref, Set<String> memberPubkeys) async {
+/// Loads the community relay's information while a DM composer is open, so
+/// its send can read it without waiting: see [relayInformationProvider].
+void _preloadDmRelayInformation(WidgetRef ref, Channel? channel) {
+  final relayUrl = ref.watch(activeCommunityProvider).asData?.value?.relayUrl;
+  if (channel?.isDm == true && relayUrl != null) {
+    ref.watch(relayInformationProvider(relayUrl));
+  }
+}
+
+/// Whether this community's relay adds agents to a DM of [memberPubkeys] in
+/// place, from relay information already loaded; nothing loaded means no.
+/// The relay's moderation DM only carries its notices, so nobody joins it.
+bool _dmAddsAgentsInPlace(WidgetRef ref, Set<String> memberPubkeys) {
   final relayUrl = ref.read(activeCommunityProvider).asData?.value?.relayUrl;
   if (relayUrl == null) return false;
-  try {
-    final author = await ref.read(relayAuthorProvider(relayUrl).future);
-    return author != null && memberPubkeys.contains(author.toLowerCase());
-  } catch (_) {
-    return false;
-  }
+  final info = ref.read(relayInformationProvider(relayUrl)).asData?.value;
+  final author = info?.author;
+  return info != null &&
+      info.addsAgentsToDm &&
+      (author == null || !memberPubkeys.contains(author.toLowerCase()));
 }
 
 /// The p-tags and `mention` reference tags an outgoing message should carry.
@@ -911,6 +941,13 @@ class _OutgoingMentions {
   List<String> pubkeys;
   final List<List<String>> referenceTags = [];
   List<MentionCandidate> _invited = const [];
+
+  /// Agents the relay confirmed joined this DM before the send.
+  List<String> joined = const [];
+
+  /// [failure], saying first that the invite went through when it did.
+  String afterJoin(String failure) =>
+      joined.isEmpty ? failure : 'Added to the DM. $failure';
 
   _OutgoingMentions(List<MentionCandidate> selectedMentions)
     : pubkeys = LinkedHashSet<String>.from(
@@ -947,18 +984,21 @@ class _OutgoingMentions {
   /// Adds the scanned non-members. In a channel, whatever didn't land is
   /// demoted and reported; in a DM, a refusal throws and the send stops.
   Future<void> addNonMembers(
-    ChannelActions channelActions, {
-    required _NonMemberMentionScan scan,
-    required ScaffoldMessengerState? messenger,
-  }) async {
+    ChannelActions channelActions,
+    _NonMemberMentionScan scan,
+    ScaffoldMessengerState? messenger,
+  ) async {
     if (scan.isDm) {
-      return _addMentionedAgentsToDm(
+      final agents = [
+        for (final candidate in _invited) candidate.pubkey.toLowerCase(),
+      ];
+      await _addMentionedAgentsToDm(
         channelActions,
         channelId: scan.channelId,
-        agentPubkeys: [
-          for (final candidate in _invited) candidate.pubkey.toLowerCase(),
-        ],
+        agentPubkeys: agents,
       );
+      joined = agents;
+      return;
     }
     final outcome = await _addMentionedNonMembers(
       channelActions,

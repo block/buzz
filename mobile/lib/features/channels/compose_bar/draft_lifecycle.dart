@@ -8,7 +8,6 @@ Future<void> _sendTextOnlyDraft({
   required VoidCallback cleanupStoredDraft,
   required FocusNode focusNode,
   required VoidCallback clearComposer,
-  required Future<void> Function() addMentionedNonMembers,
   required _ComposeDraftPayload payload,
   required _OutgoingMentions outgoing,
   required ComposeBarOnSend onSend,
@@ -38,16 +37,6 @@ Future<void> _sendTextOnlyDraft({
   }
 
   try {
-    await addMentionedNonMembers();
-    // A draft that changed while adding ran is not the draft the user sent.
-    // Keep it and send nothing.
-    if (context.mounted && draftRevision.value != submittedDraftRevision) {
-      messenger?.showFeedbackSnackBar(
-        const SnackBar(content: Text('Not sent. Message changed.')),
-        kind: ToastKind.error,
-      );
-      return;
-    }
     void clearSubmittedDraft() {
       if (!context.mounted || draftRevision.value != submittedDraftRevision) {
         return;
@@ -80,10 +69,41 @@ Future<void> _sendTextOnlyDraft({
     // sent draft unless the user has already started a new one.
     restoreClearedDraft();
     messenger?.showFeedbackSnackBar(
-      SnackBar(content: Text(_sendFailureMessage(error))),
+      SnackBar(content: Text(outgoing.afterJoin(_sendFailureMessage(error)))),
       kind: ToastKind.error,
     );
   }
+}
+
+/// Runs a send's mention adds ([add]) before its draft clears or anything
+/// uploads, and returns whether the send goes on. When an add fails, or the
+/// draft changed meanwhile, it says why and the draft stays as it is.
+Future<bool> _addBeforeSend({
+  required BuildContext context,
+  required ObjectRef<int> draftRevision,
+  required int submittedDraftRevision,
+  required Future<void> Function() add,
+  required ScaffoldMessengerState? messenger,
+}) async {
+  void report(String message) => messenger?.showFeedbackSnackBar(
+    SnackBar(content: Text(message)),
+    kind: ToastKind.error,
+  );
+  try {
+    await add();
+  } on ActiveCommunityChangedError {
+    _reportSendCancelledByCommunitySwitch(messenger);
+    return false;
+  } catch (error) {
+    report(_sendFailureMessage(error));
+    return false;
+  }
+  // A draft that changed while adding ran is not the draft the user sent.
+  if (context.mounted && draftRevision.value != submittedDraftRevision) {
+    report('Not sent. Message changed.');
+    return false;
+  }
+  return true;
 }
 
 void _useComposeDraftLifecycle({
