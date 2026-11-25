@@ -22,9 +22,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../community/community_storage_test.dart';
 
-const _turningOff =
-    'Turning off. Notifications may continue until this finishes.';
-
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   group('artifact without a gateway define', () {
@@ -195,6 +192,7 @@ void main() {
               communityPushLeaseDeactivatorProvider.overrideWithValue((
                 community, {
                 generation,
+                deadline,
               }) async {
                 if (!relayAccepts) throw StateError('relay rejected');
               }),
@@ -218,31 +216,22 @@ void main() {
         await tester.tap(find.byType(Switch));
         await tester.pumpAndSettle();
 
-        // The relay rejected the tombstone: the row stays, inert, and says so
-        // until a retry gets through.
+        // The relay rejected the tombstone: the row stays, back On, with the
+        // warning and a Retry.
         expect(find.text('Notifications'), findsOneWidget);
-        expect(find.text(_turningOff), findsOneWidget);
-        final offSwitch = tester.widget<Switch>(find.byType(Switch));
-        expect(offSwitch.value, isFalse);
-        expect(offSwitch.onChanged, isNull);
+        expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+        expect(
+          find.text('Could not confirm that notifications were turned off.'),
+          findsOneWidget,
+        );
 
         relayAccepts = true;
-        final container = ProviderScope.containerOf(
-          tester.element(find.byType(SettingsPage)),
-        );
-        await container
-            .read(communityListProvider.notifier)
-            .retryPendingPushLeaseTombstone(community.id);
+        await tester.tap(find.widgetWithText(TextButton, 'Retry'));
         await tester.pumpAndSettle();
 
-        expect(
-          (await storage.loadAll())
-              .single
-              .pushSubscriptionState
-              .pendingTombstoneGeneration,
-          isNull,
-        );
-        expect(find.text(_turningOff), findsNothing);
+        final stored = (await storage.loadAll()).single;
+        expect(stored.pushNotificationsEnabled, isFalse);
+        expect(stored.pushSubscriptionState.pendingTombstoneGeneration, isNull);
         expect(find.text('Notifications'), findsNothing);
         expect(tester.takeException(), isNull);
         debugDefaultTargetPlatformOverride = null;

@@ -1,9 +1,11 @@
 import 'package:sentry_flutter/sentry_flutter.dart';
 
 import '../relay/relay_call_error.dart';
+import '../relay/signed_event_relay.dart' show SignedEventUnacknowledged;
 
 /// Says which relay call an error came from and why it failed, on a report
-/// whose error is a [RelayCallError].
+/// whose error is a [RelayCallError], or a [SignedEventUnacknowledged] caused
+/// by one.
 ///
 /// An error that escapes uncaught reaches the SDK from the zone's handler,
 /// not through the reporter, and the filter replaces its text, so without
@@ -20,7 +22,8 @@ abstract final class RelayErrorTags {
   /// of the usual grouping by stack, so a rate limit and an invalid request
   /// from the same call site are not one issue. Other events pass unchanged.
   static SentryEvent apply(SentryEvent event) {
-    final error = event.throwable;
+    final thrown = event.throwable;
+    final error = thrown is SignedEventUnacknowledged ? thrown.cause : thrown;
     if (error is! RelayCallError) return event;
     final call = error.call.name;
     final reason = error.reason.tag;
