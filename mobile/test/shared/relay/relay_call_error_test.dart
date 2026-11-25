@@ -132,7 +132,9 @@ void main() {
   });
 
   group('the stack an escaped error carries', () {
-    int frames(StackTrace trace) => trace.toString().trim().split('\n').length;
+    List<String> lines(StackTrace trace) =>
+        trace.toString().trimRight().split('\n');
+    const gap = '<asynchronous suspension>';
 
     Future<StackTrace> completedWith(StackTrace callSite) async {
       final completer = Completer<void>();
@@ -145,19 +147,42 @@ void main() {
       throw StateError('the completer did not fail');
     }
 
-    test('is cut to the innermost $maxCallSiteFrames frames', () async {
+    test('is cut to the innermost $maxCallSiteFrames lines', () async {
       final deep = _stackFromDepth(maxCallSiteFrames * 3);
-      expect(frames(deep), greaterThan(maxCallSiteFrames));
+      final deepLines = lines(deep);
+      expect(deepLines.indexOf(gap), greaterThan(maxCallSiteFrames));
 
       final trace = await completedWith(deep);
 
-      expect(frames(trace), maxCallSiteFrames);
-      expect(
-        deep.toString(),
-        startsWith(trace.toString().trimRight()),
-        reason: 'the cut keeps the frames nearest the call',
-      );
+      expect(lines(trace), [...deepLines.take(maxCallSiteFrames), gap]);
     });
+
+    // A stack whose kept lines hold no async gap gets one after them, so
+    // Sentry's parser reads it as a VM stack without first trying other
+    // formats. A gap it already keeps needs none: a second one would parse as
+    // an extra frame.
+    for (final (gapLine, appended) in [
+      (null, true),
+      (30, false),
+      (maxCallSiteFrames, false),
+      (maxCallSiteFrames + 1, true),
+      (maxCallSiteFrames + 40, true),
+    ]) {
+      test('with its first gap on line $gapLine '
+          '${appended ? 'gets one after the cut' : 'gets no other'}', () async {
+        final callSite = _TextStackTrace(
+          List.generate(
+            maxCallSiteFrames + 60,
+            (i) => i + 1 == gapLine ? gap : '#$i frame$i (file.dart:$i)',
+          ),
+        );
+
+        expect(lines(await completedWith(callSite)), [
+          ...callSite.lines.take(maxCallSiteFrames),
+          if (appended) gap,
+        ]);
+      });
+    }
 
     test('is formatted only when read, and only once', () async {
       final callSite = _CountingStackTrace(maxCallSiteFrames + 36);
@@ -166,7 +191,7 @@ void main() {
       expect(callSite.formats, 0);
 
       trace.toString();
-      expect(frames(trace), maxCallSiteFrames);
+      expect(lines(trace), hasLength(maxCallSiteFrames + 1));
       expect(callSite.formats, 1);
     });
 
@@ -195,4 +220,13 @@ final class _CountingStackTrace implements StackTrace {
       (i) => '#$i frame$i (file.dart:$i)',
     ).join('\n');
   }
+}
+
+final class _TextStackTrace implements StackTrace {
+  _TextStackTrace(this.lines);
+
+  final List<String> lines;
+
+  @override
+  String toString() => '${lines.join('\n')}\n';
 }

@@ -1,10 +1,14 @@
 import 'dart:async';
 
-/// The most frames of a call site that an error carries. Sentry parses a whole
-/// stack synchronously and has no cap of its own.
+/// The most lines of a call site's stack that an error carries, counting
+/// `<asynchronous suspension>` gaps and any symbolication header. Sentry parses
+/// a whole stack synchronously and has no cap of its own.
 const maxCallSiteFrames = 64;
 
-/// [callSite] cut to its [maxCallSiteFrames] innermost frames. The cut is made
+/// The line the Dart VM writes for an async gap in a stack.
+const _asyncGap = '<asynchronous suspension>';
+
+/// [callSite] cut to its [maxCallSiteFrames] innermost lines. The cut is made
 /// only when the stack is first formatted, so an error its caller discards
 /// costs no formatting.
 StackTrace trimCallSite(StackTrace callSite) => _TrimmedCallSite(callSite);
@@ -18,7 +22,13 @@ final class _TrimmedCallSite implements StackTrace {
     final text = _callSite.toString();
     final lines = text.trimRight().split('\n');
     if (lines.length <= maxCallSiteFrames) return text;
-    return '${lines.take(maxCallSiteFrames).join('\n')}\n';
+    final kept = lines.take(maxCallSiteFrames).toList();
+    // stack_trace's `Chain.parse`, which Sentry uses, reads a VM stack
+    // directly only when it holds a gap line; without one it first tries
+    // other formats with whole-text regex scans. When the kept lines hold no
+    // gap, one after them keeps that fast path; a trailing gap adds no frame.
+    if (!kept.contains(_asyncGap)) kept.add(_asyncGap);
+    return '${kept.join('\n')}\n';
   }();
 
   @override
