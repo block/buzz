@@ -555,9 +555,10 @@ impl Db {
         if let Some(ch) = channel {
             tags.push(tag("h", ch.to_string())?);
         }
+        // Sign the validated bytes so serialization cannot expand the accepted document.
         let state = EventBuilder::new(
             Kind::Custom(KIND_GOVERNANCE_STATE as u16),
-            serde_json::to_string(&command.body)?,
+            event.content.clone(),
         )
         .tags(tags)
         .custom_created_at(Timestamp::from(next))
@@ -606,3 +607,7 @@ impl Db {
 
 #[cfg(test)]
 mod postgres_tests;
+
+#[cfg(test)]
+#[path = "governance/document_bytes_tests.rs"]
+mod document_bytes_postgres_tests;
