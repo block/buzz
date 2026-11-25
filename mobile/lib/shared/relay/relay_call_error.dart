@@ -4,11 +4,26 @@ import 'dart:async';
 /// stack synchronously and has no cap of its own.
 const maxCallSiteFrames = 64;
 
-/// [callSite] cut to its [maxCallSiteFrames] innermost frames.
-StackTrace trimCallSite(StackTrace callSite) {
-  final lines = callSite.toString().trimRight().split('\n');
-  if (lines.length <= maxCallSiteFrames) return callSite;
-  return StackTrace.fromString('${lines.take(maxCallSiteFrames).join('\n')}\n');
+/// [callSite] cut to its [maxCallSiteFrames] innermost frames. The cut is made
+/// only when the stack is first formatted, so an error its caller discards
+/// costs no formatting.
+StackTrace trimCallSite(StackTrace callSite) =>
+    callSite is _TrimmedCallSite ? callSite : _TrimmedCallSite(callSite);
+
+final class _TrimmedCallSite implements StackTrace {
+  _TrimmedCallSite(this._callSite);
+
+  final StackTrace _callSite;
+
+  late final String _text = () {
+    final text = _callSite.toString();
+    final lines = text.trimRight().split('\n');
+    if (lines.length <= maxCallSiteFrames) return text;
+    return '${lines.take(maxCallSiteFrames).join('\n')}\n';
+  }();
+
+  @override
+  String toString() => _text;
 }
 
 extension RelayCallSiteCompleter<T> on Completer<T> {

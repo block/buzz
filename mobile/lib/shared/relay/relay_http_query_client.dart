@@ -87,7 +87,10 @@ class RelayHttpQueryClient {
         _currentGeneration = null;
       }
       generation?.retire();
-      Error.throwWithStackTrace(_timedOut(timeout, RelayCall.query), callSite);
+      Error.throwWithStackTrace(
+        _timedOut(timeout, RelayCall.query),
+        trimCallSite(callSite),
+      );
     } finally {
       active = false;
       generation?.release();
@@ -162,7 +165,10 @@ class RelayHttpQueryClient {
         _currentGeneration = null;
       }
       generation?.retire();
-      Error.throwWithStackTrace(_timedOut(timeout, call), callSite);
+      Error.throwWithStackTrace(
+        _timedOut(timeout, call),
+        trimCallSite(callSite),
+      );
     } finally {
       finished = true;
       // Cancelling an iterator that never listened leaves the body

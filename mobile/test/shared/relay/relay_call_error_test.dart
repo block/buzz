@@ -162,7 +162,7 @@ void main() {
     test('is kept whole when it is short', () async {
       final shallow = _stackFromDepth(3);
 
-      expect(await completedWith(shallow), same(shallow));
+      expect((await completedWith(shallow)).toString(), shallow.toString());
     });
   });
 }
