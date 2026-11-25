@@ -2485,6 +2485,10 @@ pub enum MemCmd {
         /// Agent pubkey (hex) to read as this key's owner.
         #[arg(long)]
         agent: Option<String>,
+        /// Emit JSON with the value and the provenance of the copy returned
+        /// (event id, author, owner, write time).
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     /// Print sha256(value) in hex (use as `--base-hash` for `mem patch`).
     Hash {

@@ -17,6 +17,7 @@
 use std::io::Read;
 use std::time::SystemTime;
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use buzz_core::engram::{self, normalize_slug, select_head, Body, Listing};
@@ -287,6 +288,8 @@ pub async fn cmd_ls(
                     slug: slug.clone(),
                     event_id: head.id.to_hex(),
                     created_at: head.created_at.as_secs(),
+                    author: head.pubkey.to_hex(),
+                    owner: owner.to_hex(),
                 });
             }
         }
@@ -305,6 +308,49 @@ pub async fn cmd_ls(
     Ok(())
 }
 
+/// The JSON shape of `buzz mem get --json`: the value plus the provenance of
+/// the copy that was returned — which event it came from, which agent
+/// authored it, which owner it is addressed to and when it was written.
+#[derive(Debug, Serialize)]
+struct GetOutput {
+    /// The slug that was read.
+    slug: String,
+    /// The stored value (the `core` profile for the `core` slug).
+    value: String,
+    /// Event id of the head that was read.
+    event_id: String,
+    /// Pubkey of the agent that authored the head.
+    author: String,
+    /// Owner pubkey the head is addressed to.
+    owner: String,
+    /// `created_at` of the head.
+    created_at: u64,
+}
+
+/// Build the JSON shape of a read: the value plus the provenance of the copy
+/// that was returned — which event it came from, which agent authored it,
+/// which owner it is addressed to and when it was written.
+fn get_output_json(
+    slug: &str,
+    value: &str,
+    head: Option<&nostr::Event>,
+    owner: &PublicKey,
+) -> Result<String, CliError> {
+    let (event_id, author, created_at) = match head {
+        Some(ev) => (ev.id.to_hex(), ev.pubkey.to_hex(), ev.created_at.as_secs()),
+        None => (String::new(), String::new(), 0),
+    };
+    let out = GetOutput {
+        slug: slug.to_string(),
+        value: value.to_string(),
+        event_id,
+        author,
+        owner: owner.to_hex(),
+        created_at,
+    };
+    serde_json::to_string(&out).map_err(|e| CliError::Other(e.to_string()))
+}
+
 /// `buzz mem get <slug>` — print value (memory) or profile (core) to stdout.
 ///
 /// Exit codes: 0 on found, 1 on absent or tombstoned.
@@ -313,11 +359,12 @@ pub async fn cmd_get(
     raw_slug: &str,
     owner_flag: Option<&str>,
     agent_flag: Option<&str>,
+    json: bool,
 ) -> Result<(), CliError> {
     let slug =
         normalize_slug(raw_slug).map_err(|e| CliError::Usage(format!("invalid slug: {e}")))?;
     let (agent, owner, _) = resolve_reader(client, owner_flag, agent_flag)?;
-    let (_head, body) = fetch_head(client, &agent, &owner, &slug).await?;
+    let (head, body) = fetch_head(client, &agent, &owner, &slug).await?;
     use std::io::Write;
     match body {
         None => Err(CliError::NotFound(format!("not found: {slug}"))),
@@ -325,14 +372,27 @@ pub async fn cmd_get(
             Err(CliError::NotFound(format!("tombstoned: {slug}")))
         }
         Some(Body::Memory { value: Some(v), .. }) => {
+            if json {
+                println!("{}", get_output_json(&slug, &v, head.as_ref(), &owner)?);
+                return Ok(());
+            }
             // Raw stdout, no trailing newline — round-trips with `buzz mem set foo -`.
             std::io::stdout()
                 .write_all(v.as_bytes())
                 .map_err(|e| CliError::Other(e.to_string()))
         }
-        Some(Body::Core { profile }) => std::io::stdout()
-            .write_all(profile.as_bytes())
-            .map_err(|e| CliError::Other(e.to_string())),
+        Some(Body::Core { profile }) => {
+            if json {
+                println!(
+                    "{}",
+                    get_output_json(&slug, &profile, head.as_ref(), &owner)?
+                );
+                return Ok(());
+            }
+            std::io::stdout()
+                .write_all(profile.as_bytes())
+                .map_err(|e| CliError::Other(e.to_string()))
+        }
     }
 }
 
@@ -768,9 +828,12 @@ pub async fn dispatch(cmd: crate::MemCmd, client: &BuzzClient) -> Result<(), Cli
         MemCmd::Ls { owner, agent, json } => {
             cmd_ls(client, owner.as_deref(), agent.as_deref(), json).await
         }
-        MemCmd::Get { slug, owner, agent } => {
-            cmd_get(client, &slug, owner.as_deref(), agent.as_deref()).await
-        }
+        MemCmd::Get {
+            slug,
+            owner,
+            agent,
+            json,
+        } => cmd_get(client, &slug, owner.as_deref(), agent.as_deref(), json).await,
         MemCmd::Hash { slug, owner, agent } => {
             cmd_hash(client, &slug, owner.as_deref(), agent.as_deref()).await
         }
@@ -941,6 +1004,44 @@ mod tests {
             crate::credentials::Credentials::from_keys(keys),
         )
         .unwrap()
+    }
+
+    /// A read must be able to say which copy it returned: the event it came
+    /// from, who authored it, which owner it is addressed to and when it was
+    /// written. Two agents addressing the same owner and slug each keep
+    /// their own copy, so the provenance is what makes a read self-describing.
+    #[test]
+    fn a_read_reports_the_provenance_of_the_copy_it_returned() {
+        let agent = nostr::Keys::generate();
+        let owner = nostr::Keys::generate().public_key();
+        let body = Body::Memory {
+            slug: "mem/a".into(),
+            value: Some("v".into()),
+        };
+        let event = engram::build_event(&agent, &owner, &body, 1_700_000_000).unwrap();
+        let json = get_output_json("mem/a", "v", Some(&event), &owner).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["slug"], "mem/a");
+        assert_eq!(parsed["value"], "v");
+        assert_eq!(parsed["event_id"], event.id.to_hex());
+        assert_eq!(parsed["author"], agent.public_key().to_hex());
+        assert_eq!(parsed["owner"], owner.to_hex());
+        assert_eq!(parsed["created_at"], 1_700_000_000u64);
+    }
+
+    /// A self-owned copy reports the author and the owner as the same key.
+    #[test]
+    fn a_self_owned_read_reports_the_author_as_the_owner() {
+        let agent = nostr::Keys::generate();
+        let body = Body::Memory {
+            slug: "mem/a".into(),
+            value: Some("v".into()),
+        };
+        let event = engram::build_event(&agent, &agent.public_key(), &body, 1_700_000_000).unwrap();
+        let json = get_output_json("mem/a", "v", Some(&event), &agent.public_key()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["author"], agent.public_key().to_hex());
+        assert_eq!(parsed["owner"], agent.public_key().to_hex());
     }
 
     #[test]
