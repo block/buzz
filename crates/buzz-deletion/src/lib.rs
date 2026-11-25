@@ -146,6 +146,14 @@ impl ServingWriteGuard {
         &self.lease
     }
 
+    /// Bind all upload PUTs, including sidecars and thumbnails, to this lease.
+    pub fn guard_media_storage(&self, storage: &MediaStorage) -> MediaStorage {
+        storage.with_upload_write_guard(Arc::new(MediaUploadWriteLease {
+            store: self.store.clone(),
+            lease: self.lease.clone(),
+        }))
+    }
+
     /// Release the lease after the side effect completes.
     pub async fn finish(mut self) -> Result<()> {
         self.cancel.cancel();
@@ -170,7 +178,7 @@ impl Drop for ServingWriteGuard {
         let store = self.store.clone();
         let lease = self.lease.clone();
         tokio::spawn(async move {
-            let _ = store.release_serving_write_lease(&lease).await;
+            let _ = store.abandon_serving_write_lease(&lease).await;
         });
     }
 }
@@ -200,6 +208,42 @@ async fn acquire_serving_write_with_heartbeat(
     let lease = store
         .acquire_serving_write_lease(community, operation, &owner, DEFAULT_LEASE_DURATION)
         .await?;
+    Ok(start_serving_write_guard(store, lease, heartbeat_period))
+}
+
+/// Register a media upload with its verified signer before the final access check.
+/// Dropping this guard retains unresolved work; callers must explicitly finish
+/// only after the upload has settled or was rejected before storage work began.
+pub async fn acquire_media_upload(
+    db: &Db,
+    community: buzz_core::CommunityId,
+    actor: &nostr::PublicKey,
+    verified_owner: Option<&nostr::PublicKey>,
+) -> Result<ServingWriteGuard> {
+    let store = store(db);
+    let lease = store
+        .acquire_media_upload_lease(
+            community,
+            actor.as_bytes(),
+            verified_owner
+                .map(nostr::PublicKey::as_bytes)
+                .map(|key| key.as_slice()),
+            &default_executor_id(),
+            DEFAULT_LEASE_DURATION,
+        )
+        .await?;
+    Ok(start_serving_write_guard(
+        store,
+        lease,
+        heartbeat_interval(),
+    ))
+}
+
+fn start_serving_write_guard(
+    store: DeletionStore,
+    lease: buzz_db::deletion::ServingWriteLease,
+    heartbeat_period: Duration,
+) -> ServingWriteGuard {
     let heartbeat_store = store.clone();
     let mut heartbeat_lease = lease.clone();
     let cancel = CancellationToken::new();
@@ -229,13 +273,33 @@ async fn acquire_serving_write_with_heartbeat(
             }
         }
     });
-    Ok(ServingWriteGuard {
+    ServingWriteGuard {
         store,
         lease,
         cancel,
         lost,
         finished: false,
-    })
+    }
+}
+
+struct MediaUploadWriteLease {
+    store: DeletionStore,
+    lease: buzz_db::deletion::ServingWriteLease,
+}
+
+impl buzz_media::UploadWriteGuard for MediaUploadWriteLease {
+    fn before_write(
+        &self,
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = std::result::Result<(), buzz_media::MediaError>> + Send + '_>,
+    > {
+        Box::pin(async {
+            self.store
+                .begin_media_upload_write(&self.lease)
+                .await
+                .map_err(|_| buzz_media::MediaError::ServiceUnavailable)
+        })
+    }
 }
 
 /// CLI-only whole-community deletion commands.

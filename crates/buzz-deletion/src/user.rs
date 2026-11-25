@@ -8,6 +8,8 @@ use uuid::Uuid;
 /// Inspect user data, run account cleanup or execute persisted workflows.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Fail immediately if this user's media uploads have not drained.
+    WaitForDraining(wait_for_draining::Args),
     /// Inspect or delete one human's community content.
     ContentBatches(content_batches::Args),
     /// Run media cleanup directly, without a workflow request.
@@ -102,6 +104,7 @@ pub enum Command {
 /// Run the selected user-deletion command against PostgreSQL.
 pub async fn run(command: Command) -> Result<i32> {
     let command = match command {
+        Command::WaitForDraining(args) => return wait_for_draining::run(args).await,
         Command::ContentBatches(args) => return content_batches::run_command(args).await,
         Command::MediaBatches(args) => return media::run(args).await,
         Command::ProfileBatches(args) => return profile_batches::run(args).await,
@@ -153,7 +156,10 @@ pub async fn run(command: Command) -> Result<i32> {
     };
     let store = db.entity_deletion_store();
     match command {
-        Command::ContentBatches(_) | Command::MediaBatches(_) | Command::ProfileBatches(_) => {
+        Command::WaitForDraining(_)
+        | Command::ContentBatches(_)
+        | Command::MediaBatches(_)
+        | Command::ProfileBatches(_) => {
             bail!("direct cleanup command dispatched above")
         }
         Command::AccountBatches(_) => anyhow::bail!("account command dispatched above"),
@@ -256,3 +262,6 @@ pub mod summary;
 mod transition;
 mod worker;
 mod workflow;
+
+/// One-shot observation of outstanding user media uploads after admission is blocked.
+pub mod wait_for_draining;

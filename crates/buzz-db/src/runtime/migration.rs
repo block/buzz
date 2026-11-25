@@ -1056,7 +1056,8 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 106);
+        assert_eq!(migrations.len(), 107);
+        assert_eq!(migrations[106].version, 107);
         assert_eq!(migrations[105].version, 106);
         assert!(
             strip_sql_comments(migrations[105].sql.as_str()).contains("CREATE TABLE search_outbox")
@@ -2896,10 +2897,38 @@ mod postgres_tests {
                 .tables
                 .get(table)
                 .unwrap_or_else(|| panic!("schema.sql is missing deletion table {table}"));
+            // 0107 adds upload attribution. Compare the original surface here;
+            // live admin_schema_parity checks all new columns and constraints.
+            let original_schema = if table == "community_serving_write_leases" {
+                let open = in_schema.find('(').expect("table body");
+                let close = find_matching_paren(in_schema, open).expect("table body end");
+                let elements: Vec<_> = split_top_level_csv(&in_schema[open + 1..close])
+                    .into_iter()
+                    .filter(|element| {
+                        ![
+                            "actor_pubkey ",
+                            "actor_owner_pubkey ",
+                            "media_lease_until ",
+                            "media_write_started ",
+                            "check ((actor_pubkey is null)",
+                        ]
+                        .iter()
+                        .any(|prefix| element.starts_with(prefix))
+                    })
+                    .collect();
+                format!(
+                    "{}({}){}",
+                    &in_schema[..open],
+                    elements.join(", "),
+                    &in_schema[close + 1..]
+                )
+            } else {
+                in_schema.clone()
+            };
             // 0102-0104 dropped every foreign key; the rest must not drift.
             if table != "community_deletion_requests" && table != "community_deletion_approvals" {
                 assert_eq!(
-                    without_foreign_keys(in_schema),
+                    without_foreign_keys(&original_schema),
                     without_foreign_keys(definition),
                     "schema.sql definition of {table} drifted from migration 0029"
                 );
@@ -3508,6 +3537,7 @@ mod postgres_tests {
             .expect("apply migrations for schema parity");
 
         for table in [
+            "community_serving_write_leases",
             "media_uploaders",
             "audit_log",
             "media_publications",

@@ -4,6 +4,9 @@
 //! retries, tombstoning, and logical verification. CLI claim-loop policy and
 //! external storage adapters live above it; they never implement state changes.
 
+mod media_uploads;
+pub use media_uploads::MediaUploadActivity;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
@@ -797,6 +800,8 @@ pub struct ServingWriteLease {
     pub operation: String,
     /// Process/executor identity.
     pub owner: String,
+    /// Verified media signer, absent for legacy and non-media operations.
+    pub actor_pubkey: Option<Vec<u8>>,
     /// Monotonic lease generation.
     pub generation: i64,
     /// Community fence generation observed when the lease was acquired.
@@ -3050,7 +3055,7 @@ impl DeletionStore {
              JOIN communities community ON community.id = lease.community_id \
              WHERE lease.id = $1 AND lease.community_id = $2 AND lease.owner = $3 \
                AND lease.generation = $4 AND lease.fence_generation = $5 \
-               AND lease.lease_until >= now() AND community.deleted_at IS NULL \
+               AND COALESCE(lease.media_lease_until, lease.lease_until) >= now() AND community.deleted_at IS NULL \
                AND community.deletion_state IN ('active', 'quiescing') \
                AND community.deletion_fence_generation = lease.fence_generation)",
         )
@@ -3127,6 +3132,26 @@ impl DeletionStore {
         owner: &str,
         lease_duration: Duration,
     ) -> Result<ServingWriteLease> {
+        self.acquire_attributed_serving_write_lease(
+            community,
+            operation,
+            owner,
+            lease_duration,
+            None,
+            None,
+        )
+        .await
+    }
+
+    async fn acquire_attributed_serving_write_lease(
+        &self,
+        community: CommunityId,
+        operation: &str,
+        owner: &str,
+        lease_duration: Duration,
+        actor: Option<&[u8]>,
+        verified_owner: Option<&[u8]>,
+    ) -> Result<ServingWriteLease> {
         let lease_seconds = i64::try_from(lease_duration.as_secs()).unwrap_or(i64::MAX);
         self.bounded_serving_lease_sql(SERVING_WRITE_LEASE_SQL_TIMEOUT, async |connection| {
             let mut tx = serving_lease_transaction(connection).await?;
@@ -3136,17 +3161,21 @@ impl DeletionStore {
             guard_community_write(&mut tx, community).await?;
             let row = sqlx::query(
                 "INSERT INTO community_serving_write_leases \
-             (community_id, operation, owner, fence_generation, lease_until) \
+             (community_id, operation, owner, fence_generation, lease_until, actor_pubkey, actor_owner_pubkey, media_lease_until) \
              SELECT id, $2, $3, deletion_fence_generation, \
-                    now() + make_interval(secs => $4) \
+                    now() + make_interval(secs => $4), $5, \
+                    COALESCE($6, (SELECT agent_owner_pubkey FROM users WHERE community_id = $1 AND pubkey = $5)), \
+                    CASE WHEN $5::bytea IS NOT NULL THEN now() + make_interval(secs => $4) END \
              FROM communities WHERE id = $1 AND deletion_state = 'active' \
                AND deleted_at IS NULL \
-             RETURNING id, generation, fence_generation, lease_until",
+             RETURNING id, generation, fence_generation, COALESCE(media_lease_until, lease_until) AS lease_until",
             )
             .bind(community.as_uuid())
             .bind(operation)
             .bind(owner)
             .bind(lease_seconds)
+            .bind(actor)
+            .bind(verified_owner)
             .fetch_optional(&mut *tx)
             .await?
             .ok_or_else(|| {
@@ -3157,6 +3186,7 @@ impl DeletionStore {
                 community_id: community,
                 operation: operation.to_owned(),
                 owner: owner.to_owned(),
+                actor_pubkey: actor.map(<[u8]>::to_vec),
                 generation: row.try_get("generation")?,
                 fence_generation: row.try_get("fence_generation")?,
                 lease_until: row.try_get("lease_until")?,
@@ -3190,16 +3220,17 @@ impl DeletionStore {
         lock_community_deletion_shared(&mut tx, lease.community_id).await?;
         let lease_until: Option<DateTime<Utc>> = sqlx::query_scalar(
             "UPDATE community_serving_write_leases lease \
-             SET lease_until = now() + make_interval(secs => $6), heartbeat_at = now() \
+             SET lease_until = CASE WHEN lease.media_write_started THEN 'infinity'::timestamptz ELSE now() + make_interval(secs => $6) END, \
+                 media_lease_until = CASE WHEN lease.actor_pubkey IS NOT NULL THEN now() + make_interval(secs => $6) END, heartbeat_at = now() \
              FROM communities community \
              WHERE lease.id = $1 AND lease.community_id = $2 AND lease.owner = $3 \
                AND lease.generation = $4 AND lease.fence_generation = $5 \
-               AND lease.lease_until >= now() \
+               AND COALESCE(lease.media_lease_until, lease.lease_until) >= now() \
                AND community.id = lease.community_id \
                AND community.deletion_state IN ('active', 'quiescing') \
                AND community.deleted_at IS NULL \
                AND community.deletion_fence_generation = lease.fence_generation \
-             RETURNING lease.lease_until",
+             RETURNING COALESCE(lease.media_lease_until, lease.lease_until)",
         )
         .bind(lease.id)
         .bind(lease.community_id.as_uuid())
@@ -3219,18 +3250,32 @@ impl DeletionStore {
 
     /// Release a serving side-effect lease. A stale release is harmless.
     pub async fn release_serving_write_lease(&self, lease: &ServingWriteLease) -> Result<bool> {
+        self.release_serving_write(lease, false).await
+    }
+
+    /// Release abandoned preparatory work, retaining any upload that may have written remotely.
+    pub async fn abandon_serving_write_lease(&self, lease: &ServingWriteLease) -> Result<bool> {
+        self.release_serving_write(lease, true).await
+    }
+
+    async fn release_serving_write(
+        &self,
+        lease: &ServingWriteLease,
+        abandoned: bool,
+    ) -> Result<bool> {
         self.bounded_serving_lease_sql(SERVING_WRITE_LEASE_SQL_TIMEOUT, async |connection| {
             let mut tx = serving_lease_transaction(connection).await?;
             let deleted = sqlx::query(
                 "DELETE FROM community_serving_write_leases \
              WHERE id = $1 AND community_id = $2 AND owner = $3 AND generation = $4 \
-               AND fence_generation = $5",
+               AND fence_generation = $5 AND (NOT $6 OR NOT media_write_started)",
             )
             .bind(lease.id)
             .bind(lease.community_id.as_uuid())
             .bind(&lease.owner)
             .bind(lease.generation)
             .bind(lease.fence_generation)
+            .bind(abandoned)
             .execute(&mut *tx)
             .await?
             .rows_affected();
@@ -3254,7 +3299,7 @@ impl DeletionStore {
              JOIN communities community ON community.id = lease.community_id \
              WHERE lease.id = $1 AND lease.community_id = $2 AND lease.owner = $3 \
                AND lease.generation = $4 AND lease.fence_generation = $5 \
-               AND lease.lease_until >= now() \
+               AND COALESCE(lease.media_lease_until, lease.lease_until) >= now() \
                AND community.deleted_at IS NULL \
                AND community.deletion_state IN ('active', 'quiescing') \
                AND community.deletion_fence_generation = lease.fence_generation)",
@@ -3289,7 +3334,7 @@ impl DeletionStore {
         let affected = sqlx::query(
             "WITH expired AS ( \
                  SELECT id FROM community_serving_write_leases \
-                 WHERE lease_until < now() ORDER BY lease_until LIMIT $1 \
+                 WHERE lease_until < now() AND NOT media_write_started ORDER BY lease_until LIMIT $1 \
                  FOR UPDATE SKIP LOCKED \
              ) DELETE FROM community_serving_write_leases lease \
                USING expired WHERE lease.id = expired.id",
@@ -4856,6 +4901,20 @@ pub(crate) mod postgres_tests {
         assert_eq!(retired, (false, false, false));
     }
 
+    // Keep the old guard objects for these compatibility tests, but include the
+    // additive columns required by current serving writers.
+    async fn expand_media_lease_fixture(pool: &PgPool) {
+        let mut tx = pool.begin().await.expect("begin additive lease schema");
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/0107_media_upload_lease_attribution.sql"
+        )))
+        .execute(&mut *tx)
+        .await
+        .expect("add current upload lease fields");
+        tx.commit().await.expect("commit additive lease schema");
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn migration_schema_fence_objects_are_optional_for_serving_and_deletion() {
@@ -4875,6 +4934,7 @@ pub(crate) mod postgres_tests {
         crate::migration::create_tenant_tables_added_after_fence_retirement(&db.pool)
             .await
             .expect("tenant tables added since");
+        expand_media_lease_fixture(&db.pool).await;
         let store = db.deletion_store();
         let community = db
             .ensure_configured_community("optional-fences.example")
@@ -5023,6 +5083,7 @@ DROP FUNCTION community_deletion_lock_key(UUID);
         crate::migration::create_tenant_tables_added_after_fence_retirement(&db.pool)
             .await
             .expect("tenant tables added since");
+        expand_media_lease_fixture(&db.pool).await;
         let community = db
             .ensure_configured_community("optional-guards.example")
             .await
@@ -8284,6 +8345,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         // Never acquired: under READ COMMITTED this lease is refused as stale,
         // so a stale-lease error here means the isolation check did not run.
         let lease = ServingWriteLease {
+            actor_pubkey: None,
             id: Uuid::new_v4(),
             community_id: community,
             operation: "isolation-probe".to_owned(),

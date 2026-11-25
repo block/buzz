@@ -63,6 +63,8 @@ impl FromRequestParts<Arc<AppState>> for UploadContext {
 
 pub(crate) struct AuthenticatedUpload {
     auth_event: nostr::Event,
+    /// Registered before the final access check; retained through storage and metadata.
+    serving_write: buzz_deletion::ServingWriteGuard,
     /// Community resolved from the request host at extraction time (row zero for
     /// this HTTP door), identical to the WS door in `router.rs` and the bridge
     /// door in `bridge.rs`. Server-resolved, never client-supplied.
@@ -389,6 +391,7 @@ pub(crate) async fn upload_blob(
     admission.record(&slot, AuthMethod::Blossom);
     slot.in_community(ctx.tenant.community());
     let token_owner = admission.token_owner();
+    let assertion = admission.assertion().cloned();
     let auth_event = admission.into_extra();
 
     // Post-admission: validate X-SHA-256 header and hash binding.
@@ -456,10 +459,41 @@ pub(crate) async fn upload_blob(
             return e.into_response();
         }
     };
+    let serving_write = match buzz_deletion::acquire_media_upload(
+        &state.db,
+        ctx.tenant.community(),
+        &auth_event.pubkey,
+        token_owner.as_ref(),
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(error) => return media_denial(serving_write_error(error), strictness).into_response(),
+    };
+    // Register before the final synchronous deny check: a pre-gate upload is
+    // visible to drain; a request stalled before registration is rejected here.
+    let refusal = assertion
+        .as_ref()
+        .and_then(|assertion| match state.nip_fi_deny_map.as_deref() {
+            None => None,
+            Some(map)
+                if crate::nip_fi_core::assertion_denied(map, assertion, chrono::Utc::now()) =>
+            {
+                Some(DenialClass::AuthorizationDenied)
+            }
+            Some(_) => None,
+        });
+    if let Some(class) = refusal {
+        slot.finish(AuthResult::Denied(crate::access::AuthReason::DenySet));
+        if serving_write.finish().await.is_err() {
+            return crate::nip_fi_core::http_denial(DenialClass::AuthorizationUnavailable);
+        }
+        return crate::nip_fi_core::http_denial(class);
+    }
     slot.finish(AuthResult::Success);
-
     let auth = AuthenticatedUpload {
         auth_event,
+        serving_write,
         tenant: ctx.tenant,
         route_mode: ctx.route_mode,
         strictness,
@@ -486,14 +520,48 @@ async fn upload_blob_result(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Result<Json<BlobDescriptor>, MediaDenial> {
-    let strictness = auth.strictness;
-    let attribution = upload_attribution(&state, &auth, &headers).await;
-
-    let serving_write =
-        buzz_deletion::acquire_serving_write(&state.db, auth.tenant.community(), "media_upload")
+    let result = auth
+        .serving_write
+        .protect(process_admitted_upload(
+            &state,
+            &auth,
+            headers,
+            body,
+            &auth.serving_write,
+        ))
+        .await
+        .map_err(serving_lease_lost)?;
+    // A storage error or interrupted future may have left remote work in flight.
+    // Keep its row for reconciliation; expiry/reaping must not certify completion.
+    let uncertain = matches!(
+        &result,
+        Err(MediaDenial(
+            MediaError::StorageError(_)
+                | MediaError::ServiceUnavailable
+                | MediaError::Internal
+                | MediaError::AuthorizationUnavailable,
+            _
+        ))
+    );
+    if !uncertain {
+        auth.serving_write
+            .finish()
             .await
-            .map_err(serving_write_error)
-            .map_err(|e| media_denial(e, strictness))?;
+            .map_err(serving_lease_lost)?;
+    }
+    result
+}
+
+async fn process_admitted_upload(
+    state: &Arc<AppState>,
+    auth: &AuthenticatedUpload,
+    headers: HeaderMap,
+    body: axum::body::Body,
+    serving_write: &buzz_deletion::ServingWriteGuard,
+) -> Result<Json<BlobDescriptor>, MediaDenial> {
+    let strictness = auth.strictness;
+    let attribution = upload_attribution(state, auth, &headers).await;
+    let storage = serving_write.guard_media_storage(&state.media_storage);
 
     if auth.route_mode == UploadRouteMode::LegacyMedia {
         metrics::counter!("buzz_media_legacy_upload_route_total").increment(1);
@@ -537,7 +605,7 @@ async fn upload_blob_result(
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.parse::<u64>().ok());
                 buzz_media::process_video_upload(
-                    &state.media_storage,
+                    &storage,
                     &state.config.media,
                     &auth.tenant,
                     &auth.auth_event,
@@ -569,7 +637,7 @@ async fn upload_blob_result(
 
                 if is_image {
                     buzz_media::process_upload(
-                        &state.media_storage,
+                        &storage,
                         &state.config.media,
                         &auth.tenant,
                         &auth.auth_event,
@@ -584,7 +652,7 @@ async fn upload_blob_result(
                     return Err(MediaError::DisallowedContentType(mime));
                 } else {
                     buzz_media::process_file_upload(
-                        &state.media_storage,
+                        &storage,
                         &state.config.media,
                         &auth.tenant,
                         &auth.auth_event,
@@ -660,11 +728,8 @@ async fn upload_blob_result(
             }
             state
                 .db
-                .record_media_upload(
-                    auth.tenant.community(),
-                    &descriptor.sha256,
-                    auth.auth_event.pubkey.as_bytes(),
-                )
+                .deletion_store()
+                .record_admitted_media_upload(serving_write.lease(), &descriptor.sha256)
                 .await
                 .map_err(|_| media_denial(MediaError::AuthorizationUnavailable, strictness))?;
             Ok(())
@@ -698,29 +763,21 @@ async fn upload_blob_result(
     )
     .increment(1);
 
-    // Audit via bounded channel — same pattern as event audit.
-    if let Some(audit_tx) = &state.audit_tx {
-        let desc = descriptor.clone();
-        if let Err(e) = audit_tx
-            .send(NewAuditEntry {
-                community_id: auth.tenant.community(),
-                action: AuditAction::MediaUploaded,
-                actor_pubkey: Some(auth.auth_event.pubkey.to_bytes().to_vec()),
-                object_id: Some(desc.sha256.clone()),
-                detail: serde_json::json!({
-                    "sha256": desc.sha256,
-                    "size": desc.size,
-                    "mime": desc.mime_type,
-                }),
-            })
-            .await
-        {
-            tracing::error!("Media audit channel closed — entry lost: {e}");
-            metrics::counter!("buzz_audit_send_errors_total").increment(1);
-        }
+    // This is cleanup ownership evidence when media-read/upload records are
+    // disabled. Await durability before releasing the upload, rather than
+    // enqueueing an audit entry that can arrive after a successful drain check.
+    if let Some(audit) = &state.audit {
+        audit.log_with_serving_lease(NewAuditEntry {
+            community_id: auth.tenant.community(),
+            action: AuditAction::MediaUploaded,
+            actor_pubkey: Some(auth.auth_event.pubkey.to_bytes().to_vec()),
+            object_id: Some(descriptor.sha256.clone()),
+            detail: serde_json::json!({
+                "sha256": descriptor.sha256, "size": descriptor.size, "mime": descriptor.mime_type,
+            }),
+        }, serving_write.lease()).await.map_err(|_| media_denial(MediaError::AuthorizationUnavailable, strictness))?;
     }
 
-    serving_write.finish().await.map_err(serving_lease_lost)?;
     Ok(Json(descriptor))
 }
 
@@ -4831,6 +4888,8 @@ mod tests {
             drop(permit_b);
             drop(permit_a);
         }
+
+        mod drain;
 
         /// Thumbnail regeneration needs real object storage, so these also
         /// need MinIO. They share one image and the process-wide regeneration

@@ -68,6 +68,16 @@ pub struct ObjectVersionsPage {
 /// S3-compatible object storage client.
 pub struct MediaStorage {
     bucket: Box<Bucket>,
+    upload_write_guard: Option<std::sync::Arc<dyn UploadWriteGuard>>,
+}
+
+/// Durable admission immediately before an upload mutates remote storage.
+/// Implementations must reject stale operations before allowing network writes.
+pub trait UploadWriteGuard: Send + Sync {
+    /// Establish that an upload remains authorized and retain its in-flight evidence.
+    fn before_write(
+        &self,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), MediaError>> + Send + '_>>;
 }
 
 impl MediaStorage {
@@ -116,7 +126,25 @@ impl MediaStorage {
             S3AddressingStyle::Path => bucket.with_path_style(),
             S3AddressingStyle::Virtual => bucket,
         };
-        Ok(Self { bucket })
+        Ok(Self {
+            bucket,
+            upload_write_guard: None,
+        })
+    }
+
+    /// Clone the client for one upload, guarding every blob, thumbnail and sidecar PUT.
+    pub fn with_upload_write_guard(&self, guard: std::sync::Arc<dyn UploadWriteGuard>) -> Self {
+        Self {
+            bucket: self.bucket.clone(),
+            upload_write_guard: Some(guard),
+        }
+    }
+
+    async fn admit_upload_write(&self) -> Result<(), MediaError> {
+        if let Some(guard) = &self.upload_write_guard {
+            guard.before_write().await?;
+        }
+        Ok(())
     }
 
     /// Store an object from a byte slice.
@@ -124,6 +152,7 @@ impl MediaStorage {
     /// Used for images, sidecars, and thumbnails. For large video files use
     /// [`put_file`] to avoid loading the entire blob into RAM.
     pub async fn put(&self, key: &str, bytes: &[u8], content_type: &str) -> Result<(), MediaError> {
+        self.admit_upload_write().await?;
         self.bucket
             .put_object_with_content_type(key, bytes, content_type)
             .await?;
@@ -148,6 +177,7 @@ impl MediaStorage {
             .map_err(|e| MediaError::Io(e.to_string()))?;
         let mut reader = tokio::io::BufReader::with_capacity(BUF, file);
 
+        self.admit_upload_write().await?;
         self.bucket
             .put_object_stream_with_content_type(&mut reader, key, content_type)
             .await?;
