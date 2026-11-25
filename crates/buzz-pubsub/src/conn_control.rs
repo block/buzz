@@ -18,7 +18,9 @@ use buzz_core::{CommunityId, TenantContext};
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
+use tokio::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::topic::BUZZ_PREFIX;
@@ -66,6 +68,29 @@ pub struct NipFiDisconnect {
     /// the signed command JWT is preserved across pod boundaries.
     #[serde(default)]
     pub until_unix_nanos: u32,
+    /// The command's `revoke_through` cutoff in whole seconds since the Unix
+    /// epoch.  Absent means the deny covers the whole key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoke_through: Option<i64>,
+}
+
+/// State of this pod's NIP-FI disconnect subscription.  Every confirmed
+/// subscribe and every loss increments `epoch`; `live` tells which it was.
+/// A consumer that restores state on each live epoch misses no message
+/// published after Redis confirmed the subscription.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NipFiSubscription {
+    /// Increments on every change.
+    pub epoch: u64,
+    /// Redis has confirmed the subscription and it has not ended since.
+    pub live: bool,
+}
+
+fn set_subscription(tx: &tokio::sync::watch::Sender<NipFiSubscription>, live: bool) {
+    tx.send_modify(|s| {
+        s.epoch += 1;
+        s.live = live;
+    });
 }
 
 /// Encode a [`NipFiDisconnect`] message to a JSON string for publication on
@@ -233,45 +258,96 @@ async fn connect_and_subscribe(
 
 // ── NIP-FI disconnect subscriber ──────────────────────────────────────────────
 
+/// First NIP-FI reconnect delay.  Admission is closed while the subscription
+/// is down, so this subscriber retries much sooner than the shared backoff.
+const NIP_FI_BACKOFF_INITIAL: Duration = Duration::from_millis(250);
+/// NIP-FI reconnect delay cap.
+const NIP_FI_BACKOFF_MAX: Duration = Duration::from_secs(4);
+/// A confirmed subscription that lasted this long counts as healthy: its end
+/// reconnects at once and resets the backoff.  A shorter one is a failure,
+/// so confirm-then-drop cycles keep backing off instead of spinning.
+const NIP_FI_HEALTHY_LIVE: Duration = Duration::from_secs(1);
+
 /// Subscribes to `channels` and forwards commands to the
-/// broadcast.  Mirrors [`run_conn_control_subscriber`]: reconnect loop with
-/// exponential backoff.  Never returns.
+/// broadcast, reporting each confirmed subscription and loss on
+/// `subscription`.  Reconnects with a short capped backoff (see
+/// [`NIP_FI_BACKOFF_MAX`]).  Never returns.
 pub async fn run_nip_fi_disconnect_subscriber(
     redis_url: String,
     broadcast_tx: broadcast::Sender<NipFiDisconnect>,
+    subscription: tokio::sync::watch::Sender<NipFiSubscription>,
     channels: &'static [&'static str],
 ) {
-    let mut backoff_secs = BACKOFF_INITIAL_SECS;
+    nip_fi_retry_loop(subscription, |confirmed| {
+        connect_and_subscribe_nip_fi(redis_url.clone(), broadcast_tx.clone(), confirmed, channels)
+    })
+    .await
+}
 
+/// Reports a confirmed NIP-FI subscription: records when Redis confirmed it
+/// and publishes the live epoch.
+struct NipFiConfirm {
+    at: Arc<Mutex<Option<Instant>>>,
+    subscription: Arc<tokio::sync::watch::Sender<NipFiSubscription>>,
+}
+
+impl NipFiConfirm {
+    fn confirmed(&self) {
+        *self.at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+        set_subscription(&self.subscription, true);
+    }
+}
+
+/// The NIP-FI reconnect loop.  `attempt` runs one connection; it calls
+/// [`NipFiConfirm::confirmed`] once Redis has confirmed the subscription,
+/// then returns when the subscription ends.
+async fn nip_fi_retry_loop<F, Fut>(
+    subscription: tokio::sync::watch::Sender<NipFiSubscription>,
+    mut attempt: F,
+) -> !
+where
+    F: FnMut(NipFiConfirm) -> Fut,
+    Fut: std::future::Future<Output = Result<(), redis::RedisError>>,
+{
+    let subscription = Arc::new(subscription);
+    let mut backoff = NIP_FI_BACKOFF_INITIAL;
     loop {
-        match connect_and_subscribe_nip_fi(&redis_url, &broadcast_tx, channels).await {
-            Ok(()) => {
-                backoff_secs = BACKOFF_INITIAL_SECS;
-                tracing::warn!(
-                    "Redis NIP-FI disconnect stream ended (clean disconnect) — reconnecting in {backoff_secs}s"
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Redis NIP-FI disconnect error: {e} — reconnecting in {backoff_secs}s"
-                );
-            }
+        let at = Arc::new(Mutex::new(None));
+        let result = attempt(NipFiConfirm {
+            at: Arc::clone(&at),
+            subscription: Arc::clone(&subscription),
+        })
+        .await;
+        set_subscription(&subscription, false);
+        match &result {
+            Ok(()) => tracing::warn!("Redis NIP-FI disconnect stream ended (clean disconnect)"),
+            Err(e) => tracing::error!("Redis NIP-FI disconnect error: {e}"),
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
-        backoff_secs = (backoff_secs * 2).min(BACKOFF_MAX_SECS);
+        let confirmed_at = *at.lock().unwrap_or_else(|e| e.into_inner());
+        if confirmed_at.is_some_and(|at| at.elapsed() >= NIP_FI_HEALTHY_LIVE) {
+            backoff = NIP_FI_BACKOFF_INITIAL;
+            tracing::info!("Redis NIP-FI disconnect subscriber reconnecting now");
+            continue;
+        }
+        tracing::info!("Redis NIP-FI disconnect subscriber reconnecting in {backoff:?}");
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(NIP_FI_BACKOFF_MAX);
     }
 }
 
 async fn connect_and_subscribe_nip_fi(
-    redis_url: &str,
-    broadcast_tx: &broadcast::Sender<NipFiDisconnect>,
+    redis_url: String,
+    broadcast_tx: broadcast::Sender<NipFiDisconnect>,
+    confirm: NipFiConfirm,
     channels: &[&str],
 ) -> Result<(), redis::RedisError> {
     let client = redis::Client::open(redis_url)?;
     let mut conn = client.get_async_pubsub().await?;
 
+    // Returns once Redis has confirmed the subscription.
     conn.subscribe(channels).await?;
+    confirm.confirmed();
 
     tracing::info!("Redis NIP-FI disconnect subscriber connected — listening on {channels:?}");
 
@@ -304,6 +380,106 @@ async fn connect_and_subscribe_nip_fi(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One scripted NIP-FI connection attempt: `None` fails before Redis
+    /// confirms; `Some(d)` confirms, stays live for `d`, then drops.
+    async fn run_script(script: Vec<Option<Duration>>) -> (Vec<Duration>, Vec<NipFiSubscription>) {
+        let (tx, mut rx) = tokio::sync::watch::channel(NipFiSubscription::default());
+        let starts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let origin = Instant::now();
+        let steps = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+            script,
+        )));
+        let recorded = std::sync::Arc::clone(&starts);
+        let task = tokio::spawn(async move {
+            nip_fi_retry_loop(tx, |confirm| {
+                recorded.lock().unwrap().push(origin.elapsed());
+                let step = steps.lock().unwrap().pop_front();
+                async move {
+                    match step {
+                        None => std::future::pending().await,
+                        Some(None) => {
+                            Err(redis::RedisError::from(std::io::Error::other("refused")))
+                        }
+                        Some(Some(live)) => {
+                            confirm.confirmed();
+                            tokio::time::sleep(live).await;
+                            Err(redis::RedisError::from(std::io::Error::other("dropped")))
+                        }
+                    }
+                }
+            })
+            .await
+        });
+        let mut states = Vec::new();
+        while let Ok(Ok(())) = tokio::time::timeout(Duration::from_secs(60), rx.changed()).await {
+            states.push(*rx.borrow_and_update());
+        }
+        task.abort();
+        let starts = starts.lock().unwrap().clone();
+        (starts, states)
+    }
+
+    fn gaps(starts: &[Duration]) -> Vec<Duration> {
+        starts.windows(2).map(|w| w[1] - w[0]).collect()
+    }
+
+    const MS: fn(u64) -> Duration = Duration::from_millis;
+
+    #[tokio::test(start_paused = true)]
+    async fn nip_fi_failed_connects_back_off_to_a_four_second_cap() {
+        let (starts, states) = run_script(vec![None; 7]).await;
+        assert_eq!(
+            gaps(&starts),
+            [250, 500, 1000, 2000, 4000, 4000, 4000].map(MS),
+        );
+        assert!(
+            states.iter().all(|s| !s.live),
+            "never confirmed: {states:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nip_fi_healthy_subscription_end_reconnects_at_once_and_resets() {
+        // Climb the backoff, then a healthy 5 s subscription, then failures.
+        let (starts, states) = run_script(vec![
+            None,
+            None,
+            None,
+            Some(Duration::from_secs(5)),
+            None,
+            None,
+        ])
+        .await;
+        assert_eq!(
+            gaps(&starts),
+            [250, 500, 1000, 5000, 250, 500].map(MS),
+            "healthy end retries immediately, then the backoff restarts at 250 ms"
+        );
+        // One live epoch, then its loss; every attempt bumps the epoch
+        // (6 losses + 1 confirmation), and the watch ends not live.
+        let live: Vec<_> = states.iter().filter(|s| s.live).collect();
+        assert_eq!(live.len(), 1);
+        let last = states.last().expect("states");
+        assert_eq!((last.epoch, last.live), (7, false));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nip_fi_confirm_then_drop_keeps_backing_off() {
+        let flap = Some(MS(100));
+        let (starts, states) = run_script(vec![flap; 7]).await;
+        // Each gap is 100 ms live plus the backoff step: no reset, no spin.
+        assert_eq!(
+            gaps(&starts),
+            [350, 600, 1100, 2100, 4100, 4100, 4100].map(MS),
+        );
+        // Every flap reports confirmation then loss, in order.
+        assert_eq!(states.len(), 14);
+        for (i, s) in states.iter().enumerate() {
+            assert_eq!(s.epoch, i as u64 + 1);
+            assert_eq!(s.live, i % 2 == 0);
+        }
+    }
 
     fn ctx(id: u128, host: &str) -> TenantContext {
         TenantContext::resolved(CommunityId::from_uuid(Uuid::from_u128(id)), host)
@@ -414,6 +590,7 @@ mod tests {
             pubkey_bytes: vec![0xabu8; 32],
             until_unix: 9_999_999_999,
             until_unix_nanos: 500_000_000,
+            revoke_through: None,
         };
         let json = serde_json::to_string(&cmd).unwrap();
         let decoded: NipFiDisconnect = serde_json::from_str(&json).unwrap();
@@ -451,6 +628,7 @@ mod tests {
             pubkey_bytes: vec![1u8; 32],
             until_unix: 1_000_000,
             until_unix_nanos: 0,
+            revoke_through: None,
         })
         .unwrap();
         assert!(serde_json::from_str::<NipFiDisconnect>(&good).is_ok());

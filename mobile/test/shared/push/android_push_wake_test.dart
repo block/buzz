@@ -76,6 +76,17 @@ void main() {
 
       expect(payload['notifications'], isEmpty);
       expect(payload['incomplete'], isTrue);
+      expect(payload['unreported'], isFalse);
+
+      // A message the wake lost track of is reported too, so the handler
+      // shows its generic notification beside any named ones.
+      final lost = await PushWakeChannelHandler(
+        PushWakeRunner(
+          (_) async =>
+              const PushWakeResult(notifications: [], unreported: true),
+        ),
+      ).wake();
+      expect(lost['unreported'], isTrue);
     });
 
     test(

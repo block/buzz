@@ -875,6 +875,25 @@ fn the_trait_rejects_without_saying_why() {
 }
 
 #[test]
+fn the_trait_defers_rather_than_rejects_without_a_fresh_list() {
+    let generated = generate(&Spec::default(), &Pki::default(), TRANSCRIPT);
+    let stale = Arc::new(RevocationList::new(3600));
+    stale.replace(HashSet::new(), NOW - 3601);
+    for list in [Arc::new(RevocationList::new(86_400)), stale] {
+        assert!(matches!(
+            verifier(&generated, policy(), list).verify(&generated.chain, TRANSCRIPT),
+            Err(AndroidAttestationError::Unavailable)
+        ));
+    }
+    // A listed certificate is the chain's fault, so it is still a rejection.
+    assert!(matches!(
+        verifier(&generated, policy(), fresh_list(&[LEAF_SERIAL]))
+            .verify(&generated.chain, TRANSCRIPT),
+        Err(AndroidAttestationError::Invalid)
+    ));
+}
+
+#[test]
 fn google_roots_load_and_pin_both_keys() {
     let verifier = KeyAttestationVerifier::new(
         GOOGLE_ROOTS_PEM,

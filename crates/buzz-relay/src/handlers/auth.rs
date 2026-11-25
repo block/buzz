@@ -962,17 +962,27 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             // [FI-TRACE-DENY-SET]
             if let Some(assertion) = &conn.nip_fi_assertion {
                 if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
-                    if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now())
-                    {
-                        attempt.log(AuthResult::Denied(crate::access::AuthReason::DenySet));
-                        metrics::counter!(
-                            "buzz_nip_fi_admission_denied_total",
-                            "reason" => "deny_set_post_registration"
-                        )
-                        .increment(1);
+                    if let Some(refusal) = crate::nip_fi_core::assertion_denied(
+                        deny_map,
+                        assertion,
+                        chrono::Utc::now(),
+                    ) {
+                        let (auth_reason, reason) = match refusal.class {
+                            buzz_auth::DenialClass::AuthorizationDenied => (
+                                crate::access::AuthReason::DenySet,
+                                "deny_set_post_registration",
+                            ),
+                            _ => (
+                                crate::access::AuthReason::AuthorizationUnavailable,
+                                "deny_set_restoring",
+                            ),
+                        };
+                        attempt.log(AuthResult::Denied(auth_reason));
+                        metrics::counter!("buzz_nip_fi_admission_denied_total", "reason" => reason)
+                            .increment(1);
                         conn.community_control
-                            .deny_nip_fi_enforce(crate::nip_fi_shadow::DENY_SET.by(Some(pubkey)));
-                        deny_nip_fi_auth(&conn, buzz_auth::DenialClass::AuthorizationDenied);
+                            .deny_nip_fi_enforce(refusal.by(Some(pubkey)));
+                        deny_nip_fi_auth(&conn, refusal.class);
                         return;
                     }
                 }
@@ -1823,7 +1833,11 @@ mod tests {
             Some(crate::nip_fi_core::NipFiSession::new("test-issuer", None)),
         );
         assert_eq!(
-            state.conn_manager.disconnect_nip_fi("test-issuer", &pubkey),
+            state.conn_manager.disconnect_nip_fi(
+                "test-issuer",
+                &pubkey,
+                buzz_auth::DenyScope::WholeKey
+            ),
             1
         );
         let admin_disconnect = harness.wire_frames().await;
@@ -3804,7 +3818,7 @@ mod tests {
             // the deny check. Insert the deny entry into the live map.
             let until = Utc::now() + Duration::seconds(3600);
             let merge =
-                deny_map_for_insert.merge_cross_pod_deny("test-issuer", &target, until, Utc::now());
+                deny_map_for_insert.merge_cross_pod_deny("test-issuer", &target, until, Utc::now);
             assert!(
                 matches!(merge, buzz_auth::CrossPodMergeResult::Merged),
                 "W_deny_straddle: deny entry must be inserted during the hook window"
@@ -3816,9 +3830,11 @@ mod tests {
             // With the deny entry live, the scan finds exactly one session matching this
             // pubkey and closes it.
             let pubkey_bytes = target.to_bytes().to_vec();
-            let closed = state
-                .conn_manager
-                .disconnect_nip_fi("test-issuer", &pubkey_bytes);
+            let closed = state.conn_manager.disconnect_nip_fi(
+                "test-issuer",
+                &pubkey_bytes,
+                buzz_auth::DenyScope::WholeKey,
+            );
             assert_eq!(
                 closed, 1,
                 "W_deny_straddle: close scan must find exactly 1 registered session \
@@ -3998,17 +4014,20 @@ mod tests {
                     ISSUER_A,
                     &key.public_key(),
                     Utc::now() + Duration::seconds(3600),
-                    Utc::now(),
+                    Utc::now,
                 ),
                 buzz_auth::CrossPodMergeResult::Merged
             ));
             let pubkey_bytes = key.public_key().to_bytes().to_vec();
-            let closed = state
-                .conn_manager
-                .disconnect_nip_fi(ISSUER_A, &pubkey_bytes)
-                + state
-                    .community_connections
-                    .disconnect_nip_fi(ISSUER_A, &pubkey_bytes);
+            let closed = state.conn_manager.disconnect_nip_fi(
+                ISSUER_A,
+                &pubkey_bytes,
+                buzz_auth::DenyScope::WholeKey,
+            ) + state.community_connections.disconnect_nip_fi(
+                ISSUER_A,
+                &pubkey_bytes,
+                buzz_auth::DenyScope::WholeKey,
+            );
             assert_eq!(
                 closed, 0,
                 "issuer A's close scan must not match a session admitted under B"
@@ -4040,6 +4059,170 @@ mod tests {
                 ok_true |= is_ok_true(t.as_str());
             }
             assert!(ok_true, "B session must receive OK(true)");
+        }
+
+        // ── W_cutoff_straddle: a cutoff disconnect lands between registration
+        // and the deny check.  The session registers through production
+        // `from_assertion`, with a signed `iat` far from registration time.
+        // `iat == C`: the scan sees and cancels it, and it is never admitted.
+        // `iat == C + 0.5`: the scan skips it, it is admitted, and redelivery
+        // leaves it open.  Mutation: recording registration time, or flooring
+        // the signed `iat`, flips one case.  [FI-TRACE-DENY-SET]
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn w_cutoff_straddle_old_token_is_cancelled_and_never_admitted() {
+            w_cutoff_straddle_body(false).await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn w_cutoff_straddle_fresh_token_is_admitted_and_survives_redelivery() {
+            w_cutoff_straddle_body(true).await;
+        }
+
+        async fn w_cutoff_straddle_body(fresh: bool) {
+            use buzz_auth::{
+                DenyEntry, DenyScope, IssuerCapacity, NipFiDenyMap, VerifiedAssertion,
+            };
+            use chrono::{Duration, Utc};
+            use std::collections::HashMap;
+            use std::sync::Arc;
+            use tokio::sync::mpsc;
+            use tokio_util::sync::CancellationToken;
+            use uuid::Uuid;
+
+            let key = Keys::generate();
+            let deadline = Utc::now() + Duration::hours(1);
+            let c = Utc::now().timestamp() - 120;
+            let iat =
+                chrono::DateTime::from_timestamp(c, if fresh { 500_000_000 } else { 0 }).unwrap();
+            let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline])
+                .with_issued_at_for_test(iat);
+
+            let challenge = "w-cutoff-straddle-challenge".to_string();
+            let (send_tx, mut send_rx) = mpsc::channel::<WsMessage>(8);
+            let (ctrl_tx, _ctrl_rx) = mpsc::channel::<WsMessage>(8);
+            let (terminal_ctrl_tx, mut terminal_ctrl_rx) = mpsc::channel::<WsMessage>(1);
+            let cancel = CancellationToken::new();
+            let gate = crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone());
+            let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
+            let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
+                conn_id: Uuid::new_v4(),
+                tenant: buzz_core::tenant::TenantContext::resolved(
+                    community,
+                    "test.local".to_string(),
+                ),
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+                auth_state: std::sync::Mutex::new(AuthState::Pending {
+                    challenge: challenge.clone(),
+                    started_at: std::time::Instant::now(),
+                }),
+                subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                send_tx,
+                ctrl_tx,
+                terminal_ctrl_tx,
+                cancel: cancel.clone(),
+                backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                grace_limit: 3,
+                nip_fi_assertion: Some(assertion),
+                session_deadline: Some(deadline),
+                nip_fi_gate: gate,
+                community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
+            });
+
+            let mut state = Arc::try_unwrap(auth_test_state_real_db_expect().await)
+                .unwrap_or_else(|arc| (*arc).clone());
+            let deny_map = Arc::new(NipFiDenyMap::new(
+                16,
+                vec![IssuerCapacity {
+                    issuer: "test-issuer".to_owned(),
+                    capacity: 16,
+                }],
+            ));
+            state.nip_fi_deny_map = Some(Arc::clone(&deny_map));
+            let state = Arc::new(state);
+            state.conn_manager.register(
+                conn.conn_id,
+                conn.send_tx.clone(),
+                conn.ctrl_tx.clone(),
+                conn.terminal_ctrl_tx.clone(),
+                None,
+                cancel.clone(),
+                community,
+                Arc::clone(&conn.backpressure_count),
+                Arc::clone(&conn.subscriptions),
+                conn.grace_limit,
+                conn.community_control.clone(),
+            );
+
+            let auth_event = nostr::EventBuilder::new(nostr::Kind::Authentication, "")
+                .tag(nostr::Tag::parse(["relay", "ws://test.local"]).unwrap())
+                .tag(nostr::Tag::parse(["challenge", &challenge]).unwrap())
+                .sign_with_keys(&key)
+                .unwrap();
+            let (arrived_rx, release) =
+                crate::nip_fi_test_hooks::deny_set_check_hook::arm(community);
+            let handle = tokio::spawn(handle_auth(
+                auth_event,
+                Arc::clone(&conn),
+                Arc::clone(&state),
+            ));
+            tokio::time::timeout(std::time::Duration::from_secs(5), arrived_rx)
+                .await
+                .expect("handler must reach before_deny_set_check within 5s")
+                .expect("arrived channel closed");
+
+            let scope = DenyScope::IssuedThrough(c);
+            let entry = DenyEntry {
+                until: Utc::now() + Duration::seconds(3600),
+                scope,
+            };
+            assert!(matches!(
+                deny_map.merge_cross_pod_deny("test-issuer", &key.public_key(), entry, Utc::now),
+                buzz_auth::CrossPodMergeResult::Merged
+            ));
+            let pubkey_bytes = key.public_key().to_bytes().to_vec();
+            let closed = state
+                .conn_manager
+                .disconnect_nip_fi("test-issuer", &pubkey_bytes, scope);
+            assert_eq!(closed, usize::from(!fresh), "the scan sees only iat <= C");
+
+            release.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                .await
+                .expect("handle_auth must return within 5s after hook release")
+                .expect("handle_auth task must not panic");
+
+            // `AuthState` turns Authenticated before the barrier; admission
+            // is `mark_admitted`, i.e. the admitted index entry.
+            let admitted = state
+                .conn_manager
+                .has_admitted_connection(community, &pubkey_bytes);
+            let mut ok_true = false;
+            while let Ok(WsMessage::Text(t)) = send_rx.try_recv() {
+                ok_true |= is_ok_true(t.as_str());
+            }
+            if fresh {
+                assert!(admitted && ok_true, "iat > C must be admitted");
+                for _ in 0..3 {
+                    assert_eq!(
+                        state
+                            .conn_manager
+                            .disconnect_nip_fi("test-issuer", &pubkey_bytes, scope),
+                        0
+                    );
+                }
+                assert!(!cancel.is_cancelled(), "iat > C survives redelivery");
+            } else {
+                assert!(cancel.is_cancelled(), "iat == C must be cancelled");
+                assert!(!admitted, "iat == C must never reach mark_admitted");
+                assert!(!ok_true, "iat == C must never get OK(true)");
+                assert!(
+                    terminal_ctrl_rx.try_recv().is_ok(),
+                    "iat == C must get a terminal denial"
+                );
+            }
         }
 
         /// True iff `frame` is a NIP-01 `["OK", <id>, true, ...]` acceptance.
@@ -4153,7 +4336,7 @@ mod tests {
                 "test-issuer",
                 &denied_key,
                 Utc::now() + Duration::hours(1),
-                Utc::now(),
+                Utc::now,
             );
             assert!(matches!(merge, buzz_auth::CrossPodMergeResult::Merged));
             state.nip_fi_deny_map = Some(deny_map);
@@ -4178,9 +4361,11 @@ mod tests {
 
             // The close scan runs while the connection is still unproven: it
             // must miss it, leaving the handler's check as the only defence.
-            let closed = state
-                .conn_manager
-                .disconnect_nip_fi("test-issuer", &key.public_key().to_bytes());
+            let closed = state.conn_manager.disconnect_nip_fi(
+                "test-issuer",
+                &key.public_key().to_bytes(),
+                buzz_auth::DenyScope::WholeKey,
+            );
             assert_eq!(closed, 0, "close scan must miss the unproven connection");
             assert!(!cancel.is_cancelled());
 
@@ -4822,6 +5007,53 @@ mod tests {
                     harness.assert_fi_terminal(buzz_auth::DenialClass::AuthorizationDenied);
                 }
             }
+        }
+
+        /// While the deny map restores, root AUTH refuses with the
+        /// `authorization unavailable` terminal frame and a bare close, never
+        /// `authorization denied`.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn fi_restoring_deny_map_emits_terminal_authorization_unavailable() {
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("PostgreSQL must be available");
+            let mut state = (*state_with_pool(pool, |_| {}).await).clone();
+            let deny_map = std::sync::Arc::new(buzz_auth::NipFiDenyMap::new(
+                16,
+                vec![buzz_auth::IssuerCapacity {
+                    issuer: "test-issuer".to_owned(),
+                    capacity: 16,
+                }],
+            ));
+            deny_map.begin_restore();
+            state.nip_fi_deny_map = Some(deny_map);
+            let state = std::sync::Arc::new(state);
+            let mut harness = AuthHarness::new(true);
+            let community = *harness.conn.tenant.community().as_uuid();
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community)
+                .bind(format!("fi-restoring-{}.example", community.simple()))
+                .execute(state.db.pool())
+                .await
+                .expect("insert community");
+            harness.run(harness.auth_event(), state).await;
+            assert_eq!(
+                harness
+                    .terminal_rx
+                    .try_recv()
+                    .expect("terminal denial frame"),
+                crate::nip_fi_session::denial_frame(
+                    crate::nip_fi_session::NipFiWsRoute::Root,
+                    buzz_auth::DenialClass::AuthorizationUnavailable,
+                ),
+            );
+            assert!(harness.conn.cancel.is_cancelled());
+            assert_eq!(
+                *harness.conn.community_control.disconnect_reason().borrow(),
+                None,
+                "a bare close, never the 1008 of a revocation"
+            );
         }
 
         /// Carl's coverage gap: a matching-key FI connection whose pubkey is

@@ -9,6 +9,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../diagnostics/diagnostic_reporter.dart';
 import 'nostr_models.dart';
+import 'relay_call_error.dart';
 import 'relay_websocket.dart';
 import 'package:buzz/shared/crypto/event_signing.dart';
 
@@ -30,10 +31,16 @@ class RelayAuthRejectedException implements Exception {
 }
 
 /// The relay answered an EVENT with OK false, so it wasn't stored.
-class RelayEventRejectedException implements Exception {
+class RelayEventRejectedException implements RelayCallError {
   final String message;
 
   const RelayEventRejectedException(this.message);
+
+  @override
+  RelayCall get call => RelayCall.publish;
+
+  @override
+  RelayReason get reason => RelayReason.fromMessage(message);
 
   @override
   String toString() => 'Exception: $message';

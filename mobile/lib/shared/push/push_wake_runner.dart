@@ -56,6 +56,7 @@ class PushWakeRunner {
     var first = true;
     var interrupted = false;
     var lastInterrupted = false;
+    var unreported = false;
     do {
       _rerun = false;
       final PushWakeResult result;
@@ -73,6 +74,9 @@ class PushWakeRunner {
       }
       first = false;
       notifications.addAll(result.notifications);
+      // A message claimed but not returned stays lost whatever later passes
+      // find, so any pass reports it.
+      unreported = unreported || result.unreported;
       // Only the last pass says what is still unread, because a community
       // that failed once may have been read by the next, and a pass that ran
       // out of time may have been followed by one that finished.
@@ -87,6 +91,7 @@ class PushWakeRunner {
       // A wake that arrived during the last pass and got no rerun for lack of
       // budget was never looked up, so the caller must fall back for it.
       interrupted: interrupted || lastInterrupted || _rerun,
+      unreported: unreported,
     );
   }
 }

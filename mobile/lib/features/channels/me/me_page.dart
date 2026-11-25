@@ -365,7 +365,6 @@ class MePage extends HookConsumerWidget {
           edgeOffset: topSectionHeight,
           onRefresh: () async {
             ref.invalidate(meGroupsProvider);
-            ref.invalidate(channelFilterActivityProvider);
             await Future.wait([
               ref.read(channelsProvider.notifier).refresh(),
               if (ref.read(soloFilterProvider) case final manager?)
