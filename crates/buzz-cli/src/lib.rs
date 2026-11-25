@@ -1101,6 +1101,23 @@ pub enum ChannelsCmd {
         #[arg(long)]
         policy: String,
     },
+    /// Publish respond_to policy on your kind:10100 agent profile
+    #[command(name = "set-respond-policy")]
+    SetRespondPolicy {
+        /// Policy: anyone | owner-only | allowlist | nobody
+        #[arg(long)]
+        policy: String,
+        /// Agent display name (defaults to BUZZ_ACP_SESSION_TITLE)
+        #[arg(long)]
+        name: Option<String>,
+        /// Set channel_add_policy on the same kind:10100 event (required when the
+        /// current profile has none)
+        #[arg(long)]
+        channel_add_policy: Option<String>,
+        /// Pubkey (hex) allowed to instruct the agent; repeatable, with --policy allowlist
+        #[arg(long)]
+        allow: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3150,6 +3167,7 @@ mod tests {
                 "remove-member",
                 "search",
                 "set-add-policy",
+                "set-respond-policy",
                 "topic",
                 "unarchive",
                 "unread",
@@ -3266,7 +3284,7 @@ mod tests {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
             ("canvas", 4),
-            ("channels", 17),
+            ("channels", 18),
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
