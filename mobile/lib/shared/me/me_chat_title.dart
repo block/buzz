@@ -12,10 +12,10 @@ import '../../features/channels/message_media.dart';
 ///    settle it, as the timeline draws it.
 /// 3. Only web addresses left, plain or `<…>`: `Link to example.com` for one,
 ///    `2 links` for several, and `Link` when the site cannot be read.
-/// 4. Otherwise the text as written, whitespace flattened, cut to 80
-///    characters. Markdown is not read. A leading `buzz://` source link or
-///    block quote, which Start Solo chat seeds, is skipped when a prompt
-///    follows it.
+/// 4. Otherwise the text as written, cut to 80 characters, each run of
+///    whitespace and control characters flattened to one space. Markdown is
+///    not read. A leading `buzz://` source link or block quote, which Start
+///    Solo chat seeds, is skipped when a prompt follows it.
 /// 5. Nothing to name: `Chat`.
 ///
 /// Desktop renames a chat with its agent harness's title while the stored
@@ -34,7 +34,7 @@ String startingMeChatTitle(
     while (lines.isNotEmpty && sent.containsKey(_attachedAddress(lines.last))) {
       lines.removeLast();
     }
-    final text = _prompt(lines.join('\n')).replaceAll(RegExp(r'\s+'), ' ');
+    final text = _prompt(lines.join('\n')).replaceAll(_blank, ' ').trim();
     final words = text.split(' ');
     final title = _cut(
       words.every(_webAddress.hasMatch) ? _linkTitle(words) : text,
@@ -70,6 +70,10 @@ String _prompt(String text) {
             .trim();
 }
 
+/// A run of whitespace and C0 and C1 control characters. The relay trims
+/// U+0085 from a name as whitespace, which `\s` does not match, so a name
+/// that kept one could be empty to the relay and refused on every retry.
+final _blank = RegExp(r'[\s\x00-\x1f\x7f-\x9f]+');
 final _sourceLinks = RegExp(r'^(?:buzz://\S*\s*)+', caseSensitive: false);
 final _quoteMark = RegExp(r'^>\s?');
 

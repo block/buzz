@@ -46,6 +46,13 @@ void main() {
       (published('@Alice help me'), '@Alice help me'),
       (published('### Heading'), 'Heading'),
       (published('🐝' * 90), '🐝' * 80),
+      // A control character is flattened as whitespace is, so none is stored.
+      (published('Fix \x1b[31mred\x1b[0m output'), 'Fix [31mred [0m output'),
+      (published('a\x00b'), 'a b'),
+      (published('Hello\u0085world'), 'Hello world'),
+      (published('\x00https://example.com/a'), 'Link to example.com'),
+      // The relay trims U+0085 as whitespace, and refuses the empty name left.
+      (published('# \u0085 #'), 'Chat'),
       // Markdown is not read: links, labels, emphasis and code stay.
       for (final text in [
         '[Release notes](https://example.com/notes)',
@@ -144,6 +151,12 @@ void main() {
       ),
       (
         (photo.toMarkdownImage(), const <List<String>>[]),
+        photo.toMarkdownImage().substring(0, 80),
+      ),
+      // The composer ends a message with its attachment lines, so a line
+      // with a space after it was typed, and is text.
+      (
+        ('${photo.toMarkdownImage()} ', [photo.toImetaTag()]),
         photo.toMarkdownImage().substring(0, 80),
       ),
 
