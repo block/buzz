@@ -221,9 +221,11 @@ rollout; a malformed or out-of-range value refuses startup.
 - A required admission, stored Required or inside the cohort, is refused when
   the receiving pod holds an active deny that covers the assertion: one for
   the key without `revoke_through`, or one whose `revoke_through` is at or
-  after the assertion's verified `iat`. A newer assertion is admitted. A revocation closes open
-  connections only in `enforce`; in `shadow` an open connection stays until its
-  deadline. Stored-Required communities already behave this way.
+  after the assertion's verified `iat`. This deny does not cover an assertion
+  issued after the cutoff; other admission checks still apply. A revocation
+  closes open connections only in `enforce`; in `shadow` an open connection
+  stays until its deadline. Stored-Required communities already behave this
+  way.
 - Denies are stored in Redis and restored on restart, but a healthy pod
   learns of new ones through best-effort pub/sub and can miss one. See
   [Revocation during a deploy](#revocation-during-a-deploy).
