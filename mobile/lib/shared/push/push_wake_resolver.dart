@@ -8,6 +8,7 @@ import '../community/community.dart';
 import '../community/community_storage.dart';
 import '../crypto/event_signing.dart' show verifySchnorrHex;
 import '../relay/nostr_models.dart';
+import '../relay/relay_call_error.dart' show RelayCall;
 import '../relay/relay_client.dart' show RelayException;
 import '../relay/relay_http_query_client.dart';
 import '../relay/relay_provider.dart';
@@ -363,6 +364,7 @@ Future<void> _resolveCommunity(
       request,
       maxBytes: pushWakeMaxResponseBytes,
       timeout: timeout < left ? timeout : left,
+      call: RelayCall.query,
     );
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw RelayException(response.statusCode, '');

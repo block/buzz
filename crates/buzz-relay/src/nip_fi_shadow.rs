@@ -127,6 +127,13 @@ pub(crate) const UNRESOLVED: &str = "community_unresolved";
 /// The deny-set step's would-deny, before attribution.
 pub(crate) const DENY_SET: WouldDeny =
     WouldDeny::new(Stage::DenySet, DenialClass::AuthorizationDenied, "deny_set");
+/// The deny-set step while the deny map is still restoring: the deny set is
+/// unknown, so authorization is unavailable rather than revoked.
+pub(crate) const DENY_SET_RESTORING: WouldDeny = WouldDeny::new(
+    Stage::DenySet,
+    DenialClass::AuthorizationUnavailable,
+    "deny_set_restoring",
+);
 /// The reason for a community binding that went stale before admission.
 pub(crate) const STALE: &str = "community_stale";
 

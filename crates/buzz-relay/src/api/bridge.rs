@@ -8903,7 +8903,7 @@ pub(crate) mod postgres_tests {
                             HANDLER_TEST_ISSUER,
                             &actor.public_key(),
                             now + chrono::Duration::minutes(5),
-                            now
+                            || now
                         ),
                         CrossPodMergeResult::Merged
                     );

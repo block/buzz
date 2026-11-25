@@ -912,6 +912,29 @@ fn fractional_iat_and_exp_within_bounds_verify() {
 }
 
 #[test]
+fn signed_fractional_iat_reaches_the_cutoff_predicate_exactly() {
+    let verifier = verifier_with(dedicated_policy(ISSUER));
+    let c = now() - 10;
+    let mint_at = |iat: f64| {
+        let token = mint(
+            Some("nip-fi+jwt"),
+            TEST_KID,
+            json!({ "sub": "u", "iat": iat, "exp": now() as f64 + 600.0 }),
+        );
+        verifier.verify_for_aud(&token, AUDIENCE).expect("verifies")
+    };
+    let scope = crate::nip_fi::DenyScope::IssuedThrough(c);
+    let at_c = mint_at(c as f64);
+    let after_c = mint_at(c as f64 + 0.5);
+    assert_eq!(after_c.issued_at().timestamp_subsec_millis(), 500);
+    assert!(scope.covers(at_c.issued_at()), "iat == C is revoked");
+    assert!(
+        !scope.covers(after_c.issued_at()),
+        "iat == C + 0.5 is fresh"
+    );
+}
+
+#[test]
 fn fractional_nbf_within_bounds_verifies() {
     let verifier = verifier_with(dedicated_policy(ISSUER));
     let token = mint(

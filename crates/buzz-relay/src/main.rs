@@ -627,10 +627,13 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // command; every pod merges the deny entry and closes matching sessions.
     // Subscribe before the Redis subscriber starts so messages buffer (up to the
     // channel capacity) instead of being dropped until the consumer below runs.
-    let mut nip_fi_disconnect_rx = pubsub.subscribe_nip_fi_disconnect();
+    let nip_fi_disconnect_rx = pubsub.subscribe_nip_fi_disconnect();
+    let nip_fi_subscription = pubsub.watch_nip_fi_subscription();
     let pubsub_for_nip_fi = Arc::clone(&pubsub);
-    let nip_fi_channels =
-        buzz_relay::api::nip_fi::disconnect_subscribe_channels(config.nip_fi.mode);
+    let nip_fi_channels = buzz_relay::api::nip_fi::disconnect_subscribe_channels(
+        config.nip_fi.mode,
+        config.nip_fi.accept_shadow_disconnects,
+    );
     tokio::spawn(async move {
         pubsub_for_nip_fi
             .run_nip_fi_disconnect_subscriber(nip_fi_channels)
@@ -709,6 +712,10 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                 &nip_fi.command_configs,
             )
             .map_err(|e| anyhow::anyhow!("NIP-FI startup failed: {e}"))?;
+            // Closed until the consumer below restores it from Redis.
+            if let Some(deny_map) = app_state.nip_fi_deny_map.as_deref() {
+                deny_map.begin_restore();
+            }
         } else if nip_fi.mode.evaluates() {
             return Err(anyhow::anyhow!(
                 "NIP-FI: failed to construct JWKS key source \
@@ -1387,46 +1394,23 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         tokio::spawn(Arc::clone(&state).run_conn_control_consumer(rx));
     }
 
-    // Cross-pod NIP-FI disconnect consumer: receive deny entries from remote
-    // pods, merge them into the local deny map (same max(until) rule), and
-    // close any matching sessions.  Every pod subscribes; the publishing pod
-    // also receives its own message and applies it — this is idempotent because
-    // the deny entry was already inserted locally before the publish.
-    //
-    // The consumer delegates to `apply_nip_fi_disconnect` which owns all
-    // validation, merge, and session-close logic.  This keeps the loop body
-    // minimal and makes the exact production path testable end-to-end.
+    // NIP-FI deny restoration + cross-pod consumer.  One task owns both: it
+    // keeps admission closed until the deny map is restored from Redis for
+    // the current subscription, applies remote deny entries (same max(until)
+    // rule, closing matching sessions), and restores again after any lost
+    // subscription or lag.  See `run_nip_fi_disconnect_consumer`.
     {
-        let state_for_nip_fi = Arc::clone(&state);
-        let nip_fi_mode = state.config.nip_fi.mode;
-        tokio::spawn(async move {
-            loop {
-                match nip_fi_disconnect_rx.recv().await {
-                    Ok(msg) => {
-                        let now = chrono::Utc::now();
-                        buzz_relay::api::nip_fi::apply_nip_fi_disconnect(
-                            &state_for_nip_fi,
-                            &msg,
-                            now,
-                        );
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        buzz_relay::api::nip_fi::count_disconnect_event(
-                            nip_fi_mode,
-                            "buzz_nip_fi_disconnect_lag_total",
-                            "cross_pod",
-                            "lag",
-                            n,
-                        );
-                        tracing::warn!("NIP-FI disconnect consumer lagged by {n} messages");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        tracing::error!("NIP-FI disconnect broadcast channel closed");
-                        break;
-                    }
-                }
-            }
-        });
+        let sources = buzz_relay::api::nip_fi::restore_sources(
+            state.redis_pool.clone(),
+            state.config.nip_fi.mode,
+            state.config.nip_fi.accept_shadow_disconnects,
+        );
+        tokio::spawn(buzz_relay::api::nip_fi::run_nip_fi_disconnect_consumer(
+            Arc::clone(&state),
+            nip_fi_disconnect_rx,
+            nip_fi_subscription,
+            sources,
+        ));
     }
 
     let router = build_router(Arc::clone(&state));
