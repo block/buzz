@@ -6,9 +6,12 @@ struct CreateChannelAccessibilityTests {
   // The insets stand in for the navigation bar and the home indicator.
   private static let landscape = (CGSize(width: 852, height: 393), UIEdgeInsets(top: 56, left: 0, bottom: 21, right: 0))
   private static let shortPortrait = (CGSize(width: 375, height: 667), UIEdgeInsets(top: 64, left: 0, bottom: 34, right: 0))
+  private static let smallPortrait = (CGSize(width: 320, height: 568), UIEdgeInsets(top: 56, left: 0, bottom: 0, right: 0))
 
   @MainActor static func main() {
-    if CommandLine.arguments.contains("-UIPreferredContentSizeCategoryName") { return largeTextMain() }
+    // The script pins the text size of both runs, so neither takes it from
+    // the simulator's setting.
+    if CommandLine.arguments.contains("UICTContentSizeCategoryAccessibilityXXXL") { return largeTextMain() }
     let controller = NativeCreateChannelViewController(configuration: [:])
     controller.loadViewIfNeeded()
     controller.tableView.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
@@ -91,19 +94,35 @@ struct CreateChannelAccessibilityTests {
   // The script's second run, at the largest text size. Rows are then taller
   // than their estimated height, and a first failed create leaves the ones
   // below the fold on the estimate: every row in landscape, only the last on
-  // a short portrait screen. One layout and scroll pass stops short by the
-  // difference.
+  // a short portrait screen. A layout and scroll pass stops short by the
+  // rows it has not yet brought on screen, so the Temporary type's third row
+  // needs a third pass. That case uses the smallest screen: on the 375-point
+  // one the type row measures at one of two heights from run to run, and
+  // two passes are enough at one of them.
   @MainActor private static func largeTextMain() {
     let taken = "An open channel named \"general\" already exists"
-    for screen in [landscape, shortPortrait] {
+    for (screen, temporary, error) in [(landscape, false, taken), (shortPortrait, false, taken), (smallPortrait, true, "Try again")] {
       let controller = NativeCreateChannelViewController(configuration: [:])
       controller.loadViewIfNeeded()
-      controller.tableView.reloadData()
-      expectFailureScrolledIntoView(controller, screen: screen, error: taken)
-      let lastRow = controller.tableView.rectForRow(at: IndexPath(row: 1, section: 2)).height
-      precondition(lastRow > controller.tableView.estimatedRowHeight, "Rows must outgrow their estimate for this run to mean anything")
+      let table = controller.tableView!
+      table.reloadData()
+      if temporary {
+        // Pick Temporary through the type row's own menu.
+        table.frame.size = screen.0
+        table.contentInset = screen.1
+        table.scrollToRow(at: IndexPath(row: 0, section: 2), at: .top, animated: false)
+        table.layoutIfNeeded()
+        let row = table.cellForRow(at: IndexPath(row: 0, section: 2))!.contentView.subviews.first as! UIStackView
+        let type = row.arrangedSubviews.last as! UIButton
+        (type.menu!.children[1] as! UIAction).performWithSender(nil, target: nil)
+      }
+      let rows = table.numberOfRows(inSection: 2)
+      precondition(rows == (temporary ? 3 : 2))
+      expectFailureScrolledIntoView(controller, screen: screen, error: error)
+      let lastRow = table.rectForRow(at: IndexPath(row: rows - 1, section: 2)).height
+      precondition(lastRow > table.estimatedRowHeight, "Rows must outgrow their estimate for this run to mean anything")
     }
-    print("Create-channel accessibility passed at the largest text size: a failed create scrolls its whole error into view")
+    print("Create-channel accessibility passed at the largest text size: a failed create scrolls its whole error into view with two rows and with three")
   }
 
   @MainActor private static func expectFailureScrolledIntoView(_ controller: NativeCreateChannelViewController, screen: (CGSize, UIEdgeInsets), error: String) {
