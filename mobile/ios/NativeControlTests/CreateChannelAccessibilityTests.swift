@@ -33,9 +33,10 @@ struct CreateChannelAccessibilityTests {
     for section in 0..<2 {
       precondition(controller.tableView.headerView(forSection: section)!.accessibilityElementsHidden)
     }
-    // The error wraps inside the field headings' margins at every width. The
-    // last step narrows the table under an unchanged error, as rotation does:
-    // nothing reloads the section, so UIKit alone must rewrap the footer.
+    // The error wraps inside the field headings' margins at every width,
+    // centred in them, a group's spacing below the rows. The last step narrows
+    // the table under an unchanged error, as rotation does: nothing reloads
+    // the section, so UIKit alone must rewrap the footer.
     let taken = "An open channel named \"release-notes-for-every-team\" already exists"
     let table = controller.tableView!
     for (width, error) in [(390.0, "Try again"), (820.0, taken), (320.0, taken)] {
@@ -56,12 +57,20 @@ struct CreateChannelAccessibilityTests {
         ancestor = view.superview
       }
       precondition(ancestor === table)
-      precondition(abs(frame.minX - inset) < 0.5, "Error must start where the field headings start")
-      precondition(frame.maxX <= width - inset + 0.5, "Error must keep the same margin on its far side")
-      precondition(label.textAlignment == .natural && label.numberOfLines == 0)
+      // The label fills the headings' margins and centres each line in it,
+      // so the text's centre is the table's.
+      precondition(abs(frame.minX - inset) < 0.5 && abs(width - frame.maxX - inset) < 0.5, "Error must keep the field headings' margin on both sides")
+      precondition(abs(frame.midX - width / 2) < 0.5, "Error must be centred in the table")
+      precondition(label.textAlignment == .center && label.numberOfLines == 0, "Each line of the error must be centred")
+      // UIKit leaves 17.5 points, rounded down to a pixel, under a group with
+      // no footer.
+      let rows = table.rectForRow(at: IndexPath(row: 1, section: 2))
+      precondition(abs(frame.minY - rows.maxY - 17.5) < 0.5, "Error must start a group's spacing below the rows")
       let needed = label.sizeThatFits(CGSize(width: frame.width, height: .greatestFiniteMagnitude)).height
       precondition(frame.height >= needed - 0.5, "The error must not be clipped")
-      precondition(table.rectForFooter(inSection: 2).insetBy(dx: 0, dy: -0.5).contains(frame), "The footer must hold the whole error")
+      let footerRect = table.rectForFooter(inSection: 2)
+      precondition(footerRect.insetBy(dx: 0, dy: -0.5).contains(frame), "The footer must hold the whole error")
+      precondition(footerRect.maxY - frame.maxY > 4, "A scrolled-into-view error must not touch the bottom edge")
       if width == 320 { precondition(frame.height > label.font.lineHeight * 1.5, "A long error must wrap") }
     }
     precondition(table.tableFooterView == nil, "UIKit does not lay out a table footer's x or width")
@@ -88,7 +97,7 @@ struct CreateChannelAccessibilityTests {
     // the error into view.
     expectFailureScrolledIntoView(controller, screen: landscape, error: taken)
     precondition(button.title == "Create" && button.isEnabled)
-    print("Create-channel accessibility passed: fields own labels before and after retry; the error aligns with them, clears on retry and scrolls into view")
+    print("Create-channel accessibility passed: fields own labels before and after retry; the error is centred in their margins, clears on retry and scrolls into view")
   }
 
   // The script's second run, at the largest text size. Rows are then taller

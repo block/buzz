@@ -198,14 +198,19 @@ final class NativeCreateChannelViewController: UITableViewController, UITextView
   override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? { section == 0 ? "Name" : section == 1 ? "Description · Optional" : nil }
 
   // The error is the last section's footer, so UIKit gives it the headings'
-  // margins and rewraps it. A table footer keeps its own x while UIKit stretches
-  // it to the table's width, which pushed the text off-centre and off-screen.
+  // margins and rewraps it, and centring it in them centres it in the sheet.
+  // A table footer keeps its own x while UIKit stretches it to the table's
+  // width, which pushed the text off-centre and off-screen.
   override func tableView(_ tableView: UITableView, viewForFooterInSection section: Int) -> UIView? {
     guard section == 2, let error else { return nil }
     let footer = UITableViewHeaderFooterView(reuseIdentifier: nil)
     var content = UIListContentConfiguration.groupedFooter()
     content.text = error
     content.textProperties.color = .systemRed
+    content.textProperties.alignment = .center
+    // UIKit leaves 17.5 points, rounded down to a pixel, under a group with no
+    // footer. This puts the text that far below the rows at 2x and at 3x.
+    content.directionalLayoutMargins.top = 17.33
     footer.contentConfiguration = content
     return footer
   }
