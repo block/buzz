@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/relay/relay_author_provider.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -58,14 +59,15 @@ void main() {
     }
   });
 
-  test('keeps a loaded document, and reads again after a failure', () async {
+  test('a failed read is not retried until the relay reconnects', () async {
     var reads = 0;
     final container = ProviderContainer(
       overrides: [
+        relaySessionProvider.overrideWith(_Session.new),
         relayInformationClientProvider.overrideWithValue(
           MockClient((request) async {
             reads += 1;
-            if (reads == 1) return http.Response('', 503);
+            if (reads == 1) throw http.ClientException('unreachable');
             return http.Response(
               jsonEncode({
                 'supported_extensions': ['buzz-dm-agents'],
@@ -77,16 +79,24 @@ void main() {
       ],
     );
     addTearDown(container.dispose);
+    final session = container.read(relaySessionProvider.notifier) as _Session;
+    final info = relayInformationProvider(relayUrl);
 
-    expect(await read(container), isNull);
-    await Future<void>.delayed(Duration.zero);
+    await expectLater(read(container), throwsA(isA<http.ClientException>()));
+    await Future<void>.delayed(const Duration(seconds: 1));
+    expect(container.read(info).hasError, isTrue);
+    expect(reads, 1);
+
+    session.status = SessionStatus.reconnecting;
+    session.status = SessionStatus.connected;
     expect((await read(container))?.addsAgentsToDm, isTrue);
-    await Future<void>.delayed(Duration.zero);
-    // Nobody watches it now, and the loaded document is still there.
-    expect(
-      container.read(relayInformationProvider(relayUrl)).asData?.value,
-      isNotNull,
-    );
     expect(reads, 2);
   });
+}
+
+class _Session extends RelaySessionNotifier {
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  set status(SessionStatus status) => state = SessionState(status: status);
 }

@@ -612,9 +612,12 @@ class _SwitchableRelayConfigNotifier extends RelayConfigNotifier {
 
 /// Records DM adds; each lands in this DM unless [refusal] is thrown.
 class _DmAgentAdds extends Fake implements ChannelActions {
-  _DmAgentAdds({this.refusal});
+  _DmAgentAdds({this.refusal, this.gate});
 
   final Object? refusal;
+
+  /// When set, the add answers only once this completes.
+  final Future<void>? gate;
   final calls = <({String channelId, List<String> pubkeys})>[];
 
   @override
@@ -623,6 +626,7 @@ class _DmAgentAdds extends Fake implements ChannelActions {
     required List<String> pubkeys,
   }) async {
     calls.add((channelId: channelId, pubkeys: pubkeys));
+    await gate;
     if (refusal case final refusal?) throw refusal;
   }
 }
@@ -7372,7 +7376,8 @@ void main() {
     group('an agent mentioned in a DM', () {
       final agentPubkey = 'd' * 64;
       final signer = nostr.Keys.generate();
-      const relayUrl = 'wss://relay.example';
+      // The relay the composer's test configuration points at.
+      const relayUrl = 'http://localhost:3000';
       const addsAgents = RelayInformation(
         author: null,
         extensions: {'buzz-dm-agents'},
@@ -7407,14 +7412,6 @@ void main() {
             ],
             overrides: [
               channelActionsProvider.overrideWithValue(actions),
-              activeCommunityProvider.overrideWith(
-                (ref) async => Community(
-                  id: 'c',
-                  name: 'C',
-                  relayUrl: relayUrl,
-                  addedAt: DateTime(2024),
-                ),
-              ),
               relayInformationProvider(
                 relayUrl,
               ).overrideWith((ref) => relay ?? Future.value(addsAgents)),
@@ -7426,7 +7423,6 @@ void main() {
             },
           ),
         );
-        // The composer loads relay information while it is open.
         await tester.pumpAndSettle();
         if (uploadService != null) {
           await _openSystemPhotoPicker(tester);
@@ -7445,6 +7441,120 @@ void main() {
         await tester.pumpAndSettle();
         return (recipients: recipients, tags: tags);
       }
+
+      testWidgets('reads relay information only once an outside agent is '
+          'picked', (tester) async {
+        var reads = 0;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            members: [me()],
+            relayAgents: [_testAgent(agentPubkey)],
+            channels: [
+              _makeCurrentChannel(channelType: 'dm'),
+              _makeSharedMemberChannel(),
+            ],
+            overrides: [
+              relayInformationProvider(relayUrl).overrideWith((ref) async {
+                reads++;
+                return addsAgents;
+              }),
+            ],
+            onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), 'hello @hel');
+        await tester.pumpAndSettle();
+        expect(reads, 0);
+
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        expect(reads, 1);
+      });
+
+      testWidgets('leaving during Invite keeps a queued voice note', (
+        tester,
+      ) async {
+        final recording = File(
+          '${Directory.systemTemp.createTempSync('invite').path}/note.m4a',
+        )..writeAsBytesSync(const [1, 2, 3]);
+        addTearDown(() => recording.parent.deleteSync(recursive: true));
+        // Real file work below also wakes the connectivity stream.
+        const connectivity = MethodChannel(
+          'dev.fluttercommunity.plus/connectivity_status',
+        );
+        final messenger = tester.binding.defaultBinaryMessenger;
+        messenger.setMockMethodCallHandler(connectivity, (_) async => null);
+        addTearDown(
+          () => messenger.setMockMethodCallHandler(connectivity, null),
+        );
+        final relayAnswer = Completer<void>();
+        final actions = _DmAgentAdds(gate: relayAnswer.future);
+        final navigator = GlobalKey<NavigatorState>();
+        var sends = 0;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            voiceNoteRecorderFactory: () =>
+                _FakeVoiceNoteRecorder(path: recording.path),
+            currentPubkey: signer.public,
+            members: [me()],
+            relayAgents: [_testAgent(agentPubkey)],
+            channels: [
+              _makeCurrentChannel(channelType: 'dm'),
+              _makeSharedMemberChannel(),
+            ],
+            overrides: [
+              channelActionsProvider.overrideWithValue(actions),
+              relayInformationProvider(
+                relayUrl,
+              ).overrideWith((ref) async => addsAgents),
+            ],
+            wrapPage: (page) => Navigator(
+              key: navigator,
+              onGenerateInitialRoutes: (_, _) => [
+                MaterialPageRoute<void>(builder: (_) => const Scaffold()),
+                MaterialPageRoute<void>(builder: (_) => page),
+              ],
+            ),
+            onSend: (_, _, {mediaTags = const <List<String>>[]}) async =>
+                sends++,
+          ),
+        );
+        await _expandComposer(tester);
+        await _openAttachmentMenu(tester);
+        await tester.tap(find.text('Voice note'));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey('voice-note-recorder-stop')),
+        );
+        await tester.pumpAndSettle();
+        await _selectAndSendAgentMention(tester);
+        await tester.tap(find.widgetWithText(TextButton, 'Invite'));
+        await tester.pump();
+        expect(actions.calls, hasLength(1));
+
+        // Leave the conversation before the relay answers.
+        navigator.currentState!.pop();
+        await tester.pumpAndSettle();
+        expect(find.byType(ComposeBar), findsNothing);
+        relayAnswer.complete();
+        await tester.pumpAndSettle();
+        // Let any file deletion the composer started finish.
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+
+        expect(recording.existsSync(), isTrue);
+        expect(sends, 0);
+        expect(
+          find.text('Added to the DM. Not sent. You left the conversation.'),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull);
+      });
 
       testWidgets('joins this DM in place when invited', (tester) async {
         final actions = _DmAgentAdds();
@@ -7556,7 +7666,7 @@ void main() {
             members: [me()],
             answer: 'Send anyway',
             relay: relay,
-            prompt: ['You cannot add people to this DM.'],
+            prompt: ['You can’t add agents to this DM.'],
           );
 
           expect(find.widgetWithText(TextButton, 'Invite'), findsNothing);
@@ -7602,7 +7712,7 @@ void main() {
           actions: actions,
           members: const [],
           answer: 'Send anyway',
-          prompt: ['You cannot add people to this DM.'],
+          prompt: ['You can’t add agents to this DM.'],
         );
 
         expect(find.widgetWithText(TextButton, 'Invite'), findsNothing);

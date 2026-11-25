@@ -596,7 +596,7 @@ Future<_NonMemberMentionChoice?> _promptNonMemberMention(
     (true, false) =>
       'Invite them to the channel, or send without inviting them.',
     (false, true) =>
-      'You cannot add people to this DM. You can still send without inviting '
+      'You can’t add agents to this DM. You can still send without inviting '
           'them.',
     (false, false) =>
       '$privateChannelAddDeniedMessage You can still send without inviting '
@@ -910,21 +910,28 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
   );
 }
 
-/// Loads the community relay's information while a DM composer is open, so
-/// its send can read it without waiting: see [relayInformationProvider].
-void _preloadDmRelayInformation(WidgetRef ref, Channel? channel) {
-  final relayUrl = ref.watch(activeCommunityProvider).asData?.value?.relayUrl;
-  if (channel?.isDm == true && relayUrl != null) {
-    ref.watch(relayInformationProvider(relayUrl));
-  }
+/// Starts reading the relay's information once [candidate], an agent
+/// outside the DM [channel], is picked, so the send can read it without
+/// waiting: see [relayInformationProvider].
+void _loadDmRelayInformation(
+  WidgetRef ref,
+  Channel? channel,
+  MentionCandidate candidate,
+  AsyncValue<List<ChannelMember>> members,
+) {
+  if (channel?.isDm != true || !candidate.isAgent) return;
+  final pubkey = candidate.pubkey.toLowerCase();
+  final known = members.asData?.value ?? const <ChannelMember>[];
+  if (known.any((member) => member.pubkey.toLowerCase() == pubkey)) return;
+  final relayUrl = ref.read(relayConfigProvider).baseUrl;
+  ref.read(relayInformationProvider(relayUrl).future).ignore();
 }
 
 /// Whether this community's relay adds agents to a DM of [memberPubkeys] in
 /// place, from relay information already loaded; nothing loaded means no.
 /// The relay's moderation DM only carries its notices, so nobody joins it.
 bool _dmAddsAgentsInPlace(WidgetRef ref, Set<String> memberPubkeys) {
-  final relayUrl = ref.read(activeCommunityProvider).asData?.value?.relayUrl;
-  if (relayUrl == null) return false;
+  final relayUrl = ref.read(relayConfigProvider).baseUrl;
   final info = ref.read(relayInformationProvider(relayUrl)).asData?.value;
   final author = info?.author;
   return info != null &&
@@ -944,6 +951,18 @@ class _OutgoingMentions {
 
   /// Agents the relay confirmed joined this DM before the send.
   List<String> joined = const [];
+
+  /// Sends [payload] to these recipients and references through [onSend],
+  /// counting the agents just added as members of this send's DM.
+  Future<void> send(ComposeBarOnSend onSend, _ComposeDraftPayload payload) =>
+      withConfirmedDmMembers(
+        joined,
+        () => onSend(
+          payload.content,
+          pubkeys,
+          mediaTags: [...payload.mediaTags, ...referenceTags],
+        ),
+      );
 
   /// [failure], saying first that the invite went through when it did.
   String afterJoin(String failure) =>

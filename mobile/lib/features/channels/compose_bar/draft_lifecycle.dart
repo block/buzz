@@ -50,11 +50,7 @@ Future<void> _sendTextOnlyDraft({
 
     await ComposerSendOrigin.uponLocalInsertion(
       clearSubmittedDraft,
-      () => onSend(
-        payload.content,
-        outgoing.pubkeys,
-        mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
-      ),
+      () => outgoing.send(onSend, payload),
     );
     // A send destination without an optimistic timeline clears on success.
     if (clearedDraftRevision == null) {
@@ -78,30 +74,50 @@ Future<void> _sendTextOnlyDraft({
 /// Runs a send's mention adds ([add]) before its draft clears or anything
 /// uploads, and returns whether the send goes on. When an add fails, or the
 /// draft changed meanwhile, it says why and the draft stays as it is.
+///
+/// While the add runs the send holds the queued [attachments], so leaving the
+/// conversation cannot delete them. They go back to the composer if the send
+/// stops while it is still open; once it has closed, the composer is left
+/// alone and they are not sent.
 Future<bool> _addBeforeSend({
   required BuildContext context,
   required ObjectRef<int> draftRevision,
   required int submittedDraftRevision,
   required Future<void> Function() add,
+  required _OutgoingMentions outgoing,
+  required ValueNotifier<List<_PendingAttachment>> attachments,
   required ScaffoldMessengerState? messenger,
 }) async {
-  void report(String message) => messenger?.showFeedbackSnackBar(
-    SnackBar(content: Text(message)),
-    kind: ToastKind.error,
-  );
+  final held = attachments.value;
+  if (held.isNotEmpty) attachments.value = const [];
+  bool stop(String? message) {
+    if (message != null) {
+      messenger?.showFeedbackSnackBar(
+        SnackBar(content: Text(message)),
+        kind: ToastKind.error,
+      );
+    }
+    if (held.isNotEmpty && context.mounted) {
+      attachments.value = [...held, ...attachments.value];
+    }
+    return false;
+  }
+
   try {
     await add();
   } on ActiveCommunityChangedError {
     _reportSendCancelledByCommunitySwitch(messenger);
-    return false;
+    return stop(null);
   } catch (error) {
-    report(_sendFailureMessage(error));
-    return false;
+    return stop(_sendFailureMessage(error));
+  }
+  if (!context.mounted) {
+    return held.isEmpty ||
+        stop(outgoing.afterJoin('Not sent. You left the conversation.'));
   }
   // A draft that changed while adding ran is not the draft the user sent.
-  if (context.mounted && draftRevision.value != submittedDraftRevision) {
-    report('Not sent. Message changed.');
-    return false;
+  if (draftRevision.value != submittedDraftRevision) {
+    return stop(outgoing.afterJoin('Not sent. Message changed.'));
   }
   return true;
 }

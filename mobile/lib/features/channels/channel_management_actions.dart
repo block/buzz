@@ -318,10 +318,10 @@ class ChannelActions {
   }
 
   /// Adds the agents [pubkeys] to the DM [channelId] in place, or throws and
-  /// changes nothing: [DmHistory.agents]. Once this returns they are members,
-  /// and the DM's next send counts them as members ([DmConfirmedJoins]). Only
-  /// this DM's details are reloaded; the channel list catches up in the
-  /// background, so the send can follow at once.
+  /// changes nothing: [DmHistory.agents]. Once this returns they are members;
+  /// a send can count them with `withConfirmedDmMembers`. Only this DM's
+  /// details are reloaded; the channel list catches up in the background, so
+  /// the send can follow at once.
   Future<void> addAgentsToDm({
     required String channelId,
     required List<String> pubkeys,
@@ -333,7 +333,6 @@ class ChannelActions {
     );
     // The relay never moves this add; anything else is not this DM.
     if (id != channelId) throw Exception(dmAgentsOnlyMessage);
-    _ref.read(dmConfirmedJoinsProvider).record(channelId, pubkeys);
     _invalidateChannelDetails(channelId);
     unawaited(_ref.read(channelsProvider.notifier).refresh());
   }

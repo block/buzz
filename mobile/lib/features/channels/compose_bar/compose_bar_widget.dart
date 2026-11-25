@@ -232,7 +232,6 @@ class ComposeBar extends HookConsumerWidget {
     final userCache = ref.watch(userCacheProvider);
     final composeChannel = ref.watch(channelByIdProvider(channelId));
     final isDmChannel = composeChannel?.isDm ?? false;
-    _preloadDmRelayInformation(ref, composeChannel);
 
     // Preload profiles for channel members, mentionable agents, and their
     // owners so @mention suggestions show names ("managed by …" included).
@@ -483,6 +482,7 @@ class ComposeBar extends HookConsumerWidget {
 
     // A picked row returns the composer to the keyboard, as a channel does.
     void insertMention(MentionCandidate candidate) {
+      _loadDmRelayInformation(ref, composeChannel, candidate, membersAsync);
       mentionChooser.insert(candidate);
       inputTool.value = null;
       unawaited(SystemChannels.textInput.invokeMethod<void>('TextInput.show'));
@@ -650,7 +650,6 @@ class ComposeBar extends HookConsumerWidget {
       try {
         Future<void> add() =>
             outgoing.addNonMembers(channelActions, scan, messenger);
-        // A DM add runs before the draft clears or uploads; a channel's after.
         final addsFirst = scan.isDm || queuedAttachments.isEmpty;
         if (addsFirst &&
             !await _addBeforeSend(
@@ -658,6 +657,8 @@ class ComposeBar extends HookConsumerWidget {
               draftRevision: draftRevision,
               submittedDraftRevision: submittedDraftRevision,
               add: add,
+              outgoing: outgoing,
+              attachments: attachments,
               messenger: messenger,
             )) {
           return;
@@ -685,7 +686,6 @@ class ComposeBar extends HookConsumerWidget {
         }
 
         final draftText = controller.value;
-        final draftAttachments = List<_PendingAttachment>.of(attachments.value);
         final draftMentions = controller.bindings;
         final draftMentionsInvalid = controller.mentionsInvalid;
         clearComposer();
@@ -729,11 +729,7 @@ class ComposeBar extends HookConsumerWidget {
             if (queueGeneration != uploadGeneration.value) return;
             if (!addsFirst) await add();
             if (queueGeneration != uploadGeneration.value) return;
-            await delivery(
-              payload.content,
-              outgoing.pubkeys,
-              mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
-            );
+            await outgoing.send(delivery, payload);
           } catch (error) {
             if (cancellation.isCancelled) return;
             if (context.mounted) {
@@ -742,7 +738,7 @@ class ComposeBar extends HookConsumerWidget {
             if (context.mounted &&
                 queueGeneration == uploadGeneration.value &&
                 draftRevision.value == clearedDraftRevision) {
-              attachments.value = draftAttachments;
+              attachments.value = queuedAttachments;
               retainedForRetry = true;
               controller.replaceDraft(
                 draftText,

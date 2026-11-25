@@ -472,25 +472,6 @@ final channelDetailsProvider = FutureProvider.family<ChannelDetails, String>((
   return channelDetailsFromEvent(events.first);
 });
 
-/// Agents the relay confirmed joined a DM, kept for that DM's next send: a
-/// membership read can lag the add for a moment, and the send must still
-/// count them as members.
-class DmConfirmedJoins {
-  final _joins = <String, Set<String>>{};
-
-  void record(String channelId, Iterable<String> pubkeys) => _joins
-      .putIfAbsent(channelId, () => {})
-      .addAll(pubkeys.map((pubkey) => pubkey.toLowerCase()));
-
-  Set<String> take(String channelId) => _joins.remove(channelId) ?? const {};
-}
-
-/// The [DmConfirmedJoins] of this relay session's identity.
-final dmConfirmedJoinsProvider = Provider<DmConfirmedJoins>((ref) {
-  ref.watch(relayConfigProvider);
-  return DmConfirmedJoins();
-});
-
 /// Channel members from kind:39002 NIP-29 members event.
 final channelMembersProvider = FutureProvider.autoDispose
     .family<List<ChannelMember>, String>((ref, channelId) async {

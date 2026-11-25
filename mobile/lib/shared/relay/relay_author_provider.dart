@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:buzz/shared/http/app_http_client.dart';
+import 'package:buzz/shared/relay/relay.dart';
 
 final relayInformationClientProvider = Provider<http.Client>((ref) {
   final client = newAppHttpClient();
@@ -36,18 +37,23 @@ class RelayInformation {
   bool get addsAgentsToDm => extensions.contains('buzz-dm-agents');
 }
 
-/// [relayUrl]'s NIP-11 document, read once and kept for the session so a send
-/// can consult it without waiting. Watch it ahead of the send; a send reads
-/// only what has loaded, and treats nothing loaded as nothing advertised. Only
-/// a document is kept: after a failed read the next watcher retries.
-final relayInformationProvider = FutureProvider.autoDispose
-    .family<RelayInformation?, String>((ref, relayUrl) async {
+/// [relayUrl]'s NIP-11 document, read once per connection so a send can
+/// consult it without waiting. Start the read ahead of the send; a send reads
+/// only what has loaded, and treats nothing loaded, or a failed read, as
+/// nothing advertised. A failed read is not retried until the next reconnect.
+final relayInformationProvider =
+    FutureProvider.family<RelayInformation?, String>((ref, relayUrl) async {
+      ref.listen(relaySessionProvider, (previous, next) {
+        if (next.status == SessionStatus.connected &&
+            previous?.status != SessionStatus.connected) {
+          ref.invalidateSelf();
+        }
+      });
       final info = await _fetchRelayInformation(
         ref.watch(relayInformationClientProvider),
         relayUrl,
       );
       if (info is! Map) return null;
-      ref.keepAlive();
       final advertised = info['supported_extensions'];
       return RelayInformation(
         author: _relayAuthor(info),
@@ -57,7 +63,7 @@ final relayInformationProvider = FutureProvider.autoDispose
               if (extension is String) extension,
         },
       );
-    });
+    }, retry: (_, _) => null);
 
 String? _relayAuthor(Object? info) {
   final author = info is Map ? info['self'] : null;

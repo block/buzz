@@ -129,19 +129,20 @@ void main() {
         signedEventRelay: SignedEventRelay(session: session, nsec: signingKey),
         // The membership read lags the add.
         fetchMembers: (_) async => [_member(sender), _member(human)],
-        takeConfirmedJoins: (channelId) =>
-            channelId == _channelId ? {joined} : const {},
         readUserCache: () => const {},
         addLocalMessage: (_, _) {},
         completeLocalMessage: (_, _) {},
         removeLocalMessage: (_, _) {},
       );
 
-      final result = send(
-        channelId: _channelId,
-        content: 'hello agent',
-        channel: _dmChannel([sender, human]),
-        mentionPubkeys: [joined],
+      final result = withConfirmedDmMembers(
+        [joined],
+        () => send(
+          channelId: _channelId,
+          content: 'hello agent',
+          channel: _dmChannel([sender, human]),
+          mentionPubkeys: [joined],
+        ),
       );
       await session.published;
 
