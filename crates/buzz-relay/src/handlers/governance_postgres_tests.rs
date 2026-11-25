@@ -1381,3 +1381,103 @@ async fn evidence_records_verified_owner_and_refuses_owner_switch() {
         "refused owner switch must not leave accepted evidence"
     );
 }
+
+/// On a members-only relay, an agent whose only admission is its Git grant's
+/// owner submits a governance command over HTTP as it reads one: the door
+/// admits it through that owner, and the handler judges the grant.
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn http_governance_commands_are_admitted_like_their_reads() {
+    use axum::{
+        body::{to_bytes, Body},
+        http::Request,
+    };
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    use tower::ServiceExt;
+    let (state, tenant, owner, subject) = fixture_on(
+        crate::api::bridge::postgres_tests::bridge_handler_test_state()
+            .await
+            .unwrap(),
+    )
+    .await;
+    community_role(&state, &tenant, &owner, "member").await;
+    let mut configured = (*state).clone();
+    let config = std::sync::Arc::make_mut(&mut configured.config);
+    config.require_relay_membership = true;
+    config.allow_nip_oa_auth = true;
+    let state = std::sync::Arc::new(configured);
+    let agent = Keys::generate();
+    let now = chrono::Utc::now().timestamp();
+    let grant = buzz_sdk::nip_oa::compute_git_grant(
+        &owner,
+        &agent.public_key(),
+        &format!(
+            "repo={}&git=manage&created_at>{}&created_at<{}",
+            subject.repo.trim_start_matches("30617:"),
+            now - 60,
+            now + 600
+        ),
+    )
+    .unwrap();
+    let post = |path: &'static str, body: Vec<u8>, tag: Option<String>| {
+        let state = state.clone();
+        let tenant = tenant.clone();
+        let agent = agent.clone();
+        async move {
+            let url =
+                crate::api::bridge::nip98_expected_url(&state.config.relay_url, &tenant, path);
+            let proof = EventBuilder::new(Kind::Custom(27235), "")
+                .tags([
+                    Tag::parse(["u", &url]).unwrap(),
+                    Tag::parse(["method", "POST"]).unwrap(),
+                    Tag::parse(["payload", &hex::encode(Sha256::digest(&body))]).unwrap(),
+                    Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()]).unwrap(),
+                ])
+                .sign_with_keys(&agent)
+                .unwrap();
+            let authorization = format!(
+                "Nostr {}",
+                base64::engine::general_purpose::STANDARD
+                    .encode(serde_json::to_vec(&proof).unwrap())
+            );
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("host", tenant.host())
+                .header("authorization", authorization);
+            if let Some(tag) = tag {
+                request = request.header("x-auth-tag", tag);
+            }
+            let response = crate::router::build_router(state)
+                .oneshot(request.body(Body::from(body)).unwrap())
+                .await
+                .unwrap();
+            let status = response.status().as_u16();
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+    let document = format!("rules:{}", subject.repo);
+    let read = serde_json::to_vec(&serde_json::json!([{"governance_head":1,"document":document}]))
+        .unwrap();
+    let (status, body) = post("/query", read, Some(grant.clone())).await;
+    assert_eq!(status, 200, "the read is admitted: {body}");
+    for (tag, status) in [(None, 403), (Some(grant.clone()), 200)] {
+        let mut builder = buzz_core::governance::command_builder(
+            *tenant.community().as_uuid(),
+            &document.parse().unwrap(),
+            &buzz_core::governance::ExpectedHead::Absent,
+            RULES,
+        )
+        .unwrap();
+        if let Some(tag) = &tag {
+            let parts: Vec<String> = serde_json::from_str(tag).unwrap();
+            builder = builder.tags([Tag::parse(parts).unwrap()]);
+        }
+        let event = builder.sign_with_keys(&agent).unwrap();
+        let tagged = tag.is_some();
+        let (actual, body) = post("/events", serde_json::to_vec(&event).unwrap(), tag).await;
+        assert_eq!(actual, status, "tagged={tagged}: {body}");
+    }
+}

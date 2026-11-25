@@ -1492,16 +1492,35 @@ async fn submit_event_authed(
     let is_typing = kind_u32 == buzz_core::kind::KIND_TYPING_INDICATOR;
 
     // Enforce relay membership (with NIP-OA fallback via x-auth-tag header).
+    // A governance command or evidence is admitted as its `/query` read is,
+    // through a Git grant's owner too; the handler then judges the grant.
     let auth_tag = super::relay_members::extract_auth_tag_header(headers);
-    let membership = super::relay_members::enforce_relay_membership(
-        state,
-        tenant,
-        &pubkey_bytes,
-        auth_tag,
-        signed_auth_created_at,
-        token_owner,
-    )
-    .await;
+    let membership = if matches!(
+        kind_u32,
+        buzz_core::kind::KIND_GOVERNANCE_COMMAND | buzz_core::kind::KIND_GIT_EVIDENCE
+    ) {
+        super::relay_members::enforce_git_membership(
+            state,
+            tenant,
+            &pubkey,
+            auth_tag,
+            signed_auth_created_at,
+            token_owner,
+        )
+        .await
+        .map(|_| ())
+    } else {
+        super::relay_members::enforce_relay_membership(
+            state,
+            tenant,
+            &pubkey_bytes,
+            auth_tag,
+            signed_auth_created_at,
+            token_owner,
+        )
+        .await
+        .map(|_| ())
+    };
     if let Err(e) = caller.admit_member(membership) {
         return SubmitOutcome::Err {
             response: e.into_response(),
