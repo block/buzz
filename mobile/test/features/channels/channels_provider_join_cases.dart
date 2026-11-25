@@ -409,6 +409,67 @@ void _confirmedJoinCases() {
     );
 
     test(
+      'an agents-only DM add is never resent, and its refusals become words',
+      () async {
+        final keys = nostr.Keys.generate();
+        final session = _WriterReplicaRelaySession(memberships: const [])
+          ..dmAddRefusals.addAll([
+            'invalid: only agents join this DM in place',
+            'invalid: history must be "include", got "agents"',
+            "forbidden: only people can share a DM's history",
+          ]);
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        final actions = container.read(
+          Provider<ChannelActions>(
+            (ref) => ChannelActions(
+              ref: ref,
+              session: session,
+              signedEventRelay: SignedEventRelay(
+                session: session,
+                nsec: keys.nsec,
+              ),
+              currentPubkey: 'me',
+            ),
+          ),
+        );
+        Future<void> add() => actions.addToDm(
+          channelId: _otherJoinedChannel,
+          pubkeys: const ['robin'],
+          history: DmHistory.agents,
+        );
+        Matcher refused(String message) => throwsA(
+          isA<Exception>().having(
+            (error) => error.toString(),
+            'message',
+            'Exception: $message',
+          ),
+        );
+
+        await expectLater(add(), refused(dmAgentsOnlyMessage));
+        // A relay from before the agents-only add refuses it by name.
+        await expectLater(
+          add(),
+          refused(
+            'Couldn’t add them. This community can’t add agents to a DM '
+            'from a mention yet.',
+          ),
+        );
+        // Resending without the tag could start another DM, so it is not.
+        await expectLater(add(), refused('Couldn’t add them. Try again.'));
+        expect(
+          session.published.map(
+            (event) =>
+                event.tags.where((tag) => tag.first == 'history').toList(),
+          ),
+          List.filled(3, [
+            ['history', 'agents'],
+          ]),
+        );
+      },
+    );
+
+    test(
       'an agent whose history tag is refused adds again without it',
       () async {
         final keys = nostr.Keys.generate();

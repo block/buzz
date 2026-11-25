@@ -18,6 +18,12 @@ List<List<String>> buildDeleteChannelTags(String channelId) => [
 const _onlyPeopleShareHistory =
     "forbidden: only people can share a DM's history";
 
+/// Why the relay refuses [DmHistory.agents] when anyone named is a person.
+const _onlyAgentsJoin = 'invalid: only agents join this DM in place';
+
+/// How a relay from before [DmHistory.agents] refuses it.
+const _agentsUnsupported = 'invalid: history must be "include", got "agents"';
+
 /// Re-read schedule while confirming a join, matching desktop's.
 const _joinConfirmationDelays = [
   Duration.zero,
@@ -292,7 +298,8 @@ class ChannelActions {
   /// more people. When that other DM cannot be confirmed yet, throws
   /// [DmAddUnconfirmed] with its id. The relay lets only people share a DM's
   /// history, so when it refuses the history tag to a signed-in agent, the add
-  /// is resent as [DmHistory.startNew].
+  /// is resent as [DmHistory.startNew]. [DmHistory.agents] is never resent:
+  /// it adds agents to this DM or changes nothing.
   Future<Channel> addToDm({
     required String channelId,
     required List<String> pubkeys,
@@ -306,7 +313,14 @@ class ChannelActions {
         ['h', channelId],
         for (final pubkey in pubkeys) ['p', pubkey],
         if (history != DmHistory.startNew)
-          ['history', history == DmHistory.ask ? 'ask' : 'include'],
+          [
+            'history',
+            switch (history) {
+              DmHistory.ask => 'ask',
+              DmHistory.agents => 'agents',
+              _ => 'include',
+            },
+          ],
       ],
     );
     NostrEvent result;
@@ -315,6 +329,7 @@ class ChannelActions {
         result = await submit(history);
       } catch (error) {
         if (history == DmHistory.startNew ||
+            history == DmHistory.agents ||
             relayErrorText(error) != _onlyPeopleShareHistory) {
           rethrow;
         }
@@ -330,6 +345,17 @@ class ChannelActions {
           (reason == 'needs-choice: history' ||
               reason == 'invalid: history must be "include", got "ask"')) {
         throw const DmNeedsHistoryChoice();
+      }
+      if (history == DmHistory.agents) {
+        if (reason == _onlyAgentsJoin) {
+          throw Exception(dmAgentsOnlyMessage);
+        }
+        if (reason == _agentsUnsupported) {
+          throw Exception(
+            'Couldn’t add them. This community can’t add agents to a DM from '
+            'a mention yet.',
+          );
+        }
       }
       await _throwIfAgentRefused(
         reason,

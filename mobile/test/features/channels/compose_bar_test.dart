@@ -609,6 +609,26 @@ class _SwitchableRelayConfigNotifier extends RelayConfigNotifier {
   RelayConfig build() => initial;
 }
 
+/// Records DM adds; each lands in this DM unless [refusal] is thrown.
+class _DmAgentAdds extends Fake implements ChannelActions {
+  _DmAgentAdds({this.refusal});
+
+  final Object? refusal;
+  final calls = <({String channelId, List<String> pubkeys})>[];
+
+  @override
+  Future<Channel> addToDm({
+    required String channelId,
+    required List<String> pubkeys,
+    required DmHistory history,
+  }) async {
+    expect(history, DmHistory.agents);
+    calls.add((channelId: channelId, pubkeys: pubkeys));
+    if (refusal case final refusal?) throw refusal;
+    return _makeCurrentChannel(channelType: 'dm');
+  }
+}
+
 class _RecordingRelaySocket extends RelaySocket {
   final List<Map<String, dynamic>> events;
   final void Function(List<dynamic> message) handleMessage;
@@ -7351,58 +7371,98 @@ void main() {
       });
     });
 
-    testWidgets('sends a non-member in a DM as a reference without asking', (
-      tester,
-    ) async {
+    group('an agent mentioned in a DM', () {
       final agentPubkey = 'd' * 64;
       final signer = nostr.Keys.generate();
-      final publishedEvents = <Map<String, dynamic>>[];
-      String? sentContent;
-      List<String>? sentMentionPubkeys;
-      List<List<String>>? sentMediaTags;
-
-      await tester.pumpWidget(
-        _buildComposeBar(
-          uploadService: _testUploadService(signer.nsec),
-          currentPubkey: signer.public,
-          relayAgents: [_testAgent(agentPubkey)],
-          channels: [
-            _makeCurrentChannel(channelType: 'dm'),
-            _makeSharedMemberChannel(),
-          ],
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {
-                sentContent = content;
-                sentMentionPubkeys = mentionPubkeys;
-                sentMediaTags = mediaTags;
-              },
-        ),
+      ChannelMember me() => ChannelMember(
+        pubkey: signer.public,
+        role: 'member',
+        joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
       );
 
-      final container = ProviderScope.containerOf(
-        tester.element(find.byType(ComposeBar)),
-      );
-      final session = container.read(relaySessionProvider.notifier);
-      final socket = _RecordingRelaySocket(
-        publishedEvents,
-        session.debugHandleSocketMessageForTest,
-      );
-      session.debugAttachSocketForTest(socket);
+      Future<({List<String>? recipients, List<List<String>>? tags})> send(
+        WidgetTester tester, {
+        required _DmAgentAdds actions,
+        required List<ChannelMember> members,
+        required String answer,
+        Iterable<String> prompt = const [],
+      }) async {
+        List<String>? recipients;
+        List<List<String>>? tags;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            members: members,
+            relayAgents: [_testAgent(agentPubkey)],
+            channels: [
+              _makeCurrentChannel(channelType: 'dm'),
+              _makeSharedMemberChannel(),
+            ],
+            overrides: [channelActionsProvider.overrideWithValue(actions)],
+            onSend: (_, mentions, {mediaTags = const <List<String>>[]}) async {
+              recipients = mentions;
+              tags = mediaTags;
+            },
+          ),
+        );
+        await _selectAndSendAgentMention(tester);
+        expect(find.text('Mention agents outside this DM?'), findsOneWidget);
+        for (final text in prompt) {
+          expect(find.textContaining(text), findsOneWidget);
+        }
+        await tester.tap(find.widgetWithText(TextButton, answer));
+        await tester.pumpAndSettle();
+        return (recipients: recipients, tags: tags);
+      }
 
-      await _selectAndSendAgentMention(tester);
+      testWidgets('joins this DM in place when invited', (tester) async {
+        final actions = _DmAgentAdds();
+        final sent = await send(
+          tester,
+          actions: actions,
+          members: [me()],
+          answer: 'Invite',
+          prompt: ['where it can read earlier messages'],
+        );
 
-      // Nobody can be added to a DM, so there is no choice to ask about:
-      // the message sends at once and the agent becomes a reference.
-      await tester.pumpAndSettle();
-      expect(find.byType(AlertDialog), findsNothing);
-      expect(sentContent, 'hello @Helper Bot');
-      expect(sentMentionPubkeys, isNot(contains(agentPubkey)));
-      expect(sentMediaTags, contains(orderedEquals(['mention', agentPubkey])));
-      expect(publishedEvents.where((event) => event['kind'] == 9000), isEmpty);
+        expect(actions.calls.single.channelId, 'channel-1');
+        expect(actions.calls.single.pubkeys, [agentPubkey]);
+        expect(sent.recipients, contains(agentPubkey));
+      });
+
+      testWidgets('is a reference when the add is refused', (tester) async {
+        final actions = _DmAgentAdds(refusal: Exception(dmAgentsOnlyMessage));
+        final sent = await send(
+          tester,
+          actions: actions,
+          members: [me()],
+          answer: 'Invite',
+        );
+
+        expect(actions.calls, hasLength(1));
+        expect(find.text(dmAgentsOnlyMessage), findsOneWidget);
+        expect(sent.recipients, isNot(contains(agentPubkey)));
+        expect(sent.tags, contains(orderedEquals(['mention', agentPubkey])));
+      });
+
+      testWidgets('is a reference in a DM the sender cannot add to', (
+        tester,
+      ) async {
+        final actions = _DmAgentAdds();
+        final sent = await send(
+          tester,
+          actions: actions,
+          members: const [],
+          answer: 'Send anyway',
+          prompt: ['You cannot add people to this DM.'],
+        );
+
+        expect(find.widgetWithText(TextButton, 'Invite'), findsNothing);
+        expect(actions.calls, isEmpty);
+        expect(sent.recipients, isNot(contains(agentPubkey)));
+        expect(sent.tags, contains(orderedEquals(['mention', agentPubkey])));
+      });
     });
 
     testWidgets('waits for current member data before adding an agent', (
