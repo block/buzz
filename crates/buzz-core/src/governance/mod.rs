@@ -201,6 +201,7 @@ impl Command {
             }
         }
         let body = Document::parse(&event.content, &document)?;
+        authorable(&body)?;
         Ok(Self {
             community,
             document,
@@ -210,6 +211,28 @@ impl Command {
     }
 }
 
+/// Refuse requirements the land cannot yet satisfy. A stored document that
+/// names one still parses and denies the refs it covers; a new command may
+/// not author one.
+fn authorable(doc: &Document) -> Result<(), String> {
+    let rules = match &doc.body {
+        Body::Floor { rules, .. } | Body::Rules { rules } => rules,
+        _ => return Ok(()),
+    };
+    for req in rules.iter().flat_map(|r| &r.require) {
+        match req {
+            Requirement::Codeowners => {
+                return Err("codeowners requirements are not supported yet".into())
+            }
+            Requirement::Review { group: Some(_), .. } => {
+                return Err("group review requirements are not supported yet".into())
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Build a command that the caller subsequently signs with its own identity.
 pub fn command_builder(
     community: Uuid,
@@ -217,7 +240,7 @@ pub fn command_builder(
     expected: &ExpectedHead,
     content: &str,
 ) -> Result<EventBuilder, String> {
-    Document::parse(content, document)?;
+    authorable(&Document::parse(content, document)?)?;
     let tags = [
         ("community", community.to_string()),
         ("d", document.to_string()),

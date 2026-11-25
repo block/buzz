@@ -115,3 +115,38 @@ fn repository_coordinates_match_safe_repository_names() {
             .is_err());
     }
 }
+
+#[test]
+fn commands_cannot_author_unsupported_requirements() {
+    let id = format!("rules:30617:{}:repo", "a".repeat(64));
+    let rules = |req: serde_json::Value| {
+        serde_json::json!({"version":1,"body":{"type":"rules","rules":[{"id":"r","refs":["refs/heads/**"],"labels":{},"require":[req]}]}}).to_string()
+    };
+    let with = |content: &str| {
+        let mut t = tags();
+        t[1] = Tag::parse(["d", &id]).unwrap();
+        signed(t, content)
+    };
+    for (req, reason) in [
+        (serde_json::json!({"type":"codeowners"}), "codeowners"),
+        (
+            serde_json::json!({"type":"review","count":1,"group":"00000000-0000-0000-0000-000000000002"}),
+            "group review",
+        ),
+    ] {
+        let content = rules(req);
+        // A stored head that names one still reads, and denies at the land.
+        assert!(Document::parse(&content, &id.parse().unwrap()).is_ok());
+        let refused = Command::parse(&with(&content)).unwrap_err();
+        assert!(refused.contains(reason), "{refused}");
+        assert!(command_builder(
+            Uuid::nil(),
+            &id.parse().unwrap(),
+            &ExpectedHead::Absent,
+            &content
+        )
+        .is_err());
+    }
+    let plain = rules(serde_json::json!({"type":"review","count":1,"group":null}));
+    assert!(Command::parse(&with(&plain)).is_ok());
+}
