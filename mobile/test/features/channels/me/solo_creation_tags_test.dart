@@ -314,7 +314,7 @@ void main() {
           await tester.pumpAndSettle();
           final composer = tester.widget<ComposeBar>(find.byType(ComposeBar));
           // Only attachments, as the composer sends them. The name comes from
-          // the `imeta` tags: without them the file's link would name it.
+          // the `imeta` tags: without them it would be the message's source.
           unawaited(
             composer
                 .onSend(firstMessage, const [], mediaTags: firstMessageTags)
