@@ -247,6 +247,81 @@ void main() {
     ),
   ];
 
+  testWidgets('See all uses the portrait row throughout the route push', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.view.physicalSize = const Size(669, 951);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    late BuildContext metrics;
+    await tester.pumpWidget(
+      ProviderScope(
+        child: IosNavigationMetricsHost(
+          child: MaterialApp(
+            home: Builder(
+              builder: (context) {
+                metrics = context;
+                return Scaffold(
+                  body: SectionShowMore(
+                    title: 'Team',
+                    channels: testChannels,
+                    buildRow: (channel, [onTap]) => Text(channel.name),
+                    buildDetail: (_) => const SizedBox(),
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+    IosNavigationMetrics.updatePortraitHeader(metrics, [
+      669,
+      951,
+      0,
+      20,
+      535,
+      56,
+    ]);
+    await tester.pump();
+    await tester.tap(find.text('See all'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 80));
+    final header = find.byWidgetPredicate(
+      (widget) => widget is IosNavigationBar && widget.title == 'Team',
+    );
+    final bar = tester.widget<IosNavigationBar>(header);
+    expect(bar.centerTitleInPane, isTrue);
+    expect(bar.leadingTitleRowTop, 26);
+    expect(bar.leading, isNull);
+    final field = find.byType(TextField);
+    final searchY = tester.getTopLeft(field).dy;
+    expect(searchY, greaterThanOrEqualTo(76 + Grid.gutter));
+    await tester.pumpAndSettle();
+    expect(tester.getTopLeft(field).dy, searchY);
+    await tester.tap(field);
+    await tester.pumpAndSettle();
+    expect(tester.getCenter(field).dy, closeTo(48, 1));
+    expect(
+      tester
+          .getRect(
+            find.byWidgetPredicate(
+              (w) =>
+                  w is IosGlassNavigationButton &&
+                  w.semanticLabel == 'Cancel search',
+            ),
+          )
+          .right,
+      lessThanOrEqualTo(535),
+    );
+    expect(header, findsNothing);
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('See all opens a searchable section page and selects a chat', (
     tester,
   ) async {

@@ -3,6 +3,7 @@ import 'package:duo_kit/duo_kit.dart';
 import '../../../shared/widgets/duo_toolbar.dart';
 import '../../../shared/widgets/adaptive_conversation_pane.dart';
 import '../../../shared/widgets/frosted_app_bar.dart';
+import '../../../shared/widgets/ios_navigation_metrics.dart';
 import 'package:flutter/foundation.dart';
 import '../../../shared/widgets/concentric_sheet_surface.dart';
 import '../../../shared/widgets/ios_glass_navigation_button.dart';
@@ -205,11 +206,30 @@ class _SectionChatsPage extends HookConsumerWidget {
               View.of(context).physicalSize / View.of(context).devicePixelRatio,
         );
     final regularPhone = ios && strip == null && isCompactDuoWindow(context);
-    final idleInset = regularPhone ? Grid.xs : Grid.xxs;
-    final activeInset = splitDuo ? Grid.xxs + Grid.xs : Grid.xxs;
+    final view = View.of(context);
+    final windowSize = view.physicalSize / view.devicePixelRatio;
+    final row = ios
+        ? IosNavigationMetrics.of(context).portraitHeaderFor(windowSize)
+        : null;
+    final portrait = row != null;
+    final idleInset = portrait
+        ? Grid.gutter
+        : regularPhone
+        ? Grid.xs
+        : Grid.xxs;
+    final activeInset = portrait
+        ? 0.0
+        : splitDuo
+        ? Grid.xxs + Grid.xs
+        : Grid.xxs;
     final searchTopInset = idleInset + (activeInset - idleInset) * progress;
-    final safeTop = MediaQuery.paddingOf(context).top;
-    final fullHeight = frostedAppBarHeight(context);
+    final safeTop = row == null
+        ? MediaQuery.paddingOf(context).top
+        : row.center.dy - kMinInteractiveDimension / 2;
+    final fullHeight = frostedAppBarHeight(
+      context,
+      alignWithStatusRegion: portrait,
+    );
     final detailOpen =
         ConversationPaneScope.maybeOf(context)?.selectedId != null;
     return PopScope<void>(
@@ -276,9 +296,13 @@ class _SectionChatsPage extends HookConsumerWidget {
                           ),
                         Padding(
                           padding: EdgeInsets.fromLTRB(
-                            Grid.xs,
+                            Grid.xs + (row?.left ?? 0) * progress,
                             searchTopInset,
-                            Grid.xs,
+                            Grid.xs +
+                                (row == null
+                                        ? 0
+                                        : windowSize.width - row.right) *
+                                    progress,
                             Grid.xxs,
                           ),
                           child: Row(
@@ -426,12 +450,24 @@ class _SectionChatsPage extends HookConsumerWidget {
                           children: [
                             FrostedAppBar(
                               nativeTitle: title,
+                              nativeLargeTitleWithActions: portrait,
+                              alignWithStatusRegion: portrait,
+                              leading: portrait
+                                  ? IosGlassNavigationButton(
+                                      icon: IosGlassNavigationIcon.back,
+                                      semanticLabel: 'Back',
+                                      onPressed: () => Navigator.of(
+                                        context,
+                                        rootNavigator: true,
+                                      ).pop(),
+                                    )
+                                  : null,
                               leadingInlineTitleOnDuo: true,
                               nativePaneSoftEdge: true,
                               automaticallyImplyLeading: false,
                               alwaysFrosted: true,
                               nativeActions: const [],
-                              nativeLeading: strip != null
+                              nativeLeading: portrait || strip != null
                                   ? null
                                   : IosNavigationAction(
                                       label: 'Back',

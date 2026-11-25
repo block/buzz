@@ -230,9 +230,13 @@ func duoPortraitHeader(in window: UIWindow?) -> CGRect? {
     }
     guard let region = regions.min(by: { $0.frame.minY < $1.frame.minY }) else { return nil }
     let status = window.windowScene?.statusBarManager?.statusBarFrame ?? .zero
-    let centerY = !status.isEmpty && region.frame.contains(CGPoint(x: status.midX, y: status.midY))
-      ? status.midY : region.frame.inset(by: region.margins).midY
-    let row = CGRect(x: 0, y: max(0, centerY - 28), width: region.frame.minX, height: 56)
+    // The inner display can report a status frame at the very top edge.
+    // A usable center must leave room for the entire navigation row.
+    // The reserved area includes asymmetric clearance around the indicators.
+    // On the unfolded display their visible center is 48 points from the top.
+    let centerY: CGFloat = !status.isEmpty && status.midY >= 28 && status.midY <= region.frame.maxY
+      ? status.midY : 48
+    let row = CGRect(x: 0, y: centerY - 28, width: region.frame.minX, height: 56)
     return row
   }
   #endif

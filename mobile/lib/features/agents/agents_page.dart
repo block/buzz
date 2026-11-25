@@ -1,3 +1,4 @@
+import '../../shared/widgets/ios_glass_navigation_button.dart';
 import 'dart:async';
 import 'package:duo_kit/duo_kit.dart';
 
@@ -649,16 +650,21 @@ class AgentsPage extends HookConsumerWidget {
       ],
     );
 
-    final headerStyle = context.textTheme.titleMedium?.copyWith(
-      fontSize: 22,
-      fontWeight: FontWeight.w600,
-      color: navigationPrimaryForeground(context),
-    );
+    final portrait = hasIosPortraitHeader(context);
+    final headerStyle = portrait
+        ? null
+        : context.textTheme.titleMedium?.copyWith(
+            fontSize: 22,
+            fontWeight: FontWeight.w600,
+            color: navigationPrimaryForeground(context),
+          );
     final topHeight = frostedAppBarHeight(
       context,
-      nativeLargeTitle: true,
+      nativeLargeTitle: !portrait,
+      useNativeNavigation: !portrait,
+      alignWithStatusRegion: portrait,
       titleStyle: headerStyle,
-      bottomHeight: Grid.xxs,
+      bottomHeight: portrait ? 0 : Grid.xxs,
     );
     return FrostedScaffold(
       backgroundColor: context.colors.surface,
@@ -671,32 +677,47 @@ class AgentsPage extends HookConsumerWidget {
               onPressed: addAgent,
             ),
         ],
+        centerTitle: portrait,
         nativeTitle: 'Agents',
-        nativeLargeTitle: true,
+        nativeLargeTitle: !portrait,
+        useNativeNavigation: !portrait,
+        alignWithStatusRegion: portrait,
         automaticallyImplyLeading: false,
         nativeLeading: IosNavigationAction(
           label: 'Close agents',
           symbol: 'xmark',
           onPressed: onClose,
         ),
-        leading: IconButton(
-          tooltip: 'Close agents',
-          icon: const Icon(BuzzIcons.x),
-          onPressed: onClose,
-        ),
-        horizontalInset: Grid.gutter,
+        leading: portrait
+            ? IosGlassNavigationButton(
+                icon: IosGlassNavigationIcon.close,
+                semanticLabel: 'Close agents',
+                onPressed: onClose,
+              )
+            : IconButton(
+                tooltip: 'Close agents',
+                icon: const Icon(BuzzIcons.x),
+                onPressed: onClose,
+              ),
+        horizontalInset: portrait ? Grid.xxs : Grid.gutter,
 
         title: Text('Agents', style: headerStyle),
         titleStyle: headerStyle,
-        bottomHeight: Grid.xxs,
-        bottom: const SizedBox.expand(),
+        bottomHeight: portrait ? 0 : Grid.xxs,
+        bottom: portrait ? null : const SizedBox.expand(),
         actions: [
           if (supportsRemoteAgents(community))
-            IconButton(
-              tooltip: 'Add agent',
-              onPressed: addAgent,
-              icon: const Icon(Icons.add),
-            ),
+            portrait
+                ? IosGlassNavigationButton(
+                    icon: IosGlassNavigationIcon.plus,
+                    semanticLabel: 'Add agent',
+                    onPressed: addAgent,
+                  )
+                : IconButton(
+                    tooltip: 'Add agent',
+                    onPressed: addAgent,
+                    icon: const Icon(Icons.add),
+                  ),
         ],
       ),
       body: SafeArea(

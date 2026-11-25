@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/ios_navigation_metrics.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import '../../shared/me/me_sync_test.dart' show FakeRelay;
 import 'dart:async';
@@ -239,7 +240,7 @@ class AgentsHarness {
           theme: AppTheme.light(),
           builder: (context, child) => MediaQuery(
             data: MediaQuery.of(context).copyWith(disableAnimations: true),
-            child: child!,
+            child: IosNavigationMetricsHost(child: child!),
           ),
           home:
               home ??
