@@ -199,6 +199,9 @@ final class NativeStatusEditorViewController: UITableViewController, UITextField
   }
 
   @objc private func changed() {
+    // The color emoji font draws below the center of UIKit’s title line.
+    emojiButton.titleLabel?.transform = CGAffineTransform(
+      translationX: 0, y: emoji.count == 1 ? -3 : 0)
     emojiButton.setTitle(emoji.isEmpty ? nil : emoji, for: .normal)
     emojiButton.setImage(emoji.isEmpty ? UIImage(systemName: "face.smiling") : nil, for: .normal)
     emojiButton.accessibilityValue = emoji.isEmpty ? nil : emoji
