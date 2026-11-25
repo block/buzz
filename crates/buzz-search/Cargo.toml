@@ -28,3 +28,6 @@ rand        = { workspace = true }
 [dev-dependencies]
 tokio       = { workspace = true, features = ["test-util"] }
 nostr       = { workspace = true }
+axum        = { workspace = true }
+reqwest     = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }

@@ -235,12 +235,38 @@ async fn disabled_outbox_queues_nothing() {
     assert_eq!(queued(pool, community).await, 0);
 }
 
-/// Enabling fails, and leaves admission unchanged, while the table is missing.
+/// Account deletion queues index changes once an indexing relay has started,
+/// even while the outbox and the backfill are both empty.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn the_index_counts_as_maintained_once_a_relay_enabled_it() {
+    let db = connect().await;
+    let pool = db.pool();
+    let mut conn = pool.acquire().await.expect("connect");
+    assert!(!search_outbox::index_maintained(&mut conn)
+        .await
+        .expect("read before enabling"));
+    // Mutation: drop the sequence check from index_maintained → RED.
+    search_outbox::enable(pool).await.expect("enable outbox");
+    assert!(search_outbox::index_maintained(&mut conn)
+        .await
+        .expect("read after enabling"));
+}
+
+/// Enabling fails, and leaves admission unchanged, while the version
+/// sequence or the table is missing.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn enable_requires_the_table() {
     let db = connect().await;
     let pool = db.pool();
+    sqlx::query("DROP SEQUENCE search_index_version")
+        .execute(pool)
+        .await
+        .expect("drop sequence");
+    search_outbox::enable(pool)
+        .await
+        .expect_err("enable refuses a database without the version sequence");
     sqlx::query("DROP TABLE search_outbox")
         .execute(pool)
         .await
@@ -298,4 +324,139 @@ async fn claim_passes_over_skipped_and_held_communities() {
         .await
         .expect("claim")
         .is_none());
+}
+
+/// Two workers can claim one community at once, but never rows of the same
+/// event. A message changed or deleted while a batch holds its earlier row
+/// gets a new row that no concurrent batch can claim; it is claimed, with the
+/// newer state, only once the holding batch completes. So a stale state
+/// never overwrites a newer one, and a delete is never followed by a stale
+/// write.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn concurrent_claims_of_one_community_never_share_an_event() {
+    let db = connect().await;
+    let pool = db.pool();
+    search_outbox::enable(pool).await.expect("enable outbox");
+    let community = create_community(pool).await;
+    let keys = Keys::generate();
+    for n in 0..200 {
+        db.insert_event(
+            community,
+            &signed(&keys, 9, &format!("message {n}"), vec![]),
+            None,
+        )
+        .await
+        .expect("insert");
+    }
+
+    let first = search_outbox::claim_batch_share(pool, 1000, &[], 2)
+        .await
+        .expect("claim")
+        .expect("a batch");
+    let changed = first.documents[0].event_id;
+    let deleted = first.documents[1].event_id;
+    // What an edit and a deletion queue while the first batch is in flight.
+    for event in [changed, deleted] {
+        sqlx::query(
+            "INSERT INTO search_outbox (community_id, event_id, event_created_at) \
+             SELECT community_id, id, created_at FROM events \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(event.as_slice())
+        .execute(pool)
+        .await
+        .expect("queue a change");
+    }
+    sqlx::query("UPDATE events SET deleted_at = now() WHERE community_id = $1 AND id = $2")
+        .bind(community.as_uuid())
+        .bind(deleted.as_slice())
+        .execute(pool)
+        .await
+        .expect("delete");
+
+    let second = search_outbox::claim_batch_share(pool, 1000, &[], 2)
+        .await
+        .expect("claim")
+        .expect("a concurrent batch of the same community");
+    assert_eq!(second.community(), community);
+    let events =
+        |batch: &search_outbox::SearchOutboxBatch| -> std::collections::BTreeSet<[u8; 32]> {
+            batch
+                .documents
+                .iter()
+                .map(|document| document.event_id)
+                .chain(batch.removed.iter().copied())
+                .collect()
+        };
+    let (held, concurrent) = (events(&first), events(&second));
+    assert!(!concurrent.is_empty());
+    assert!(
+        held.is_disjoint(&concurrent),
+        "two batches in flight hold the same event"
+    );
+    drop(second);
+    first.complete().await.expect("complete");
+
+    // Only now are the changes claimed, with their current state.
+    let after = search_outbox::claim_batch(pool, 1000, &[])
+        .await
+        .expect("claim")
+        .expect("a batch");
+    assert!(after
+        .documents
+        .iter()
+        .any(|document| document.event_id == changed));
+    assert!(after.removed.contains(&deleted));
+    assert!(after
+        .documents
+        .iter()
+        .all(|document| document.event_id != deleted));
+    after.complete().await.expect("complete");
+    assert_eq!(queued(pool, community).await, 0);
+}
+
+/// A worker whose share of the queue head is held by another batch still
+/// claims rows from the other partitions, instead of coming back empty and
+/// leaving the drain while rows remain.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_claim_looks_past_a_held_queue_head() {
+    let db = connect().await;
+    let pool = db.pool();
+    search_outbox::enable(pool).await.expect("enable outbox");
+    let community = create_community(pool).await;
+    let keys = Keys::generate();
+    let partition =
+        |event: &Event| i32::from(event.id.as_bytes()[0]) % search_outbox::CLAIM_PARTITIONS;
+    // With batches of 1 among 2 workers, the head is the oldest 4 rows.
+    let mut head = std::collections::BTreeSet::new();
+    for n in 0..4 {
+        let event = signed(&keys, 9, &format!("head {n}"), vec![]);
+        head.insert(partition(&event));
+        db.insert_event(community, &event, None)
+            .await
+            .expect("insert");
+    }
+    let behind = (0..)
+        .map(|n| signed(&keys, 9, &format!("behind {n}"), vec![]))
+        .find(|event| !head.contains(&partition(event)))
+        .expect("an event outside the head's partitions");
+    db.insert_event(community, &behind, None)
+        .await
+        .expect("insert");
+
+    let first = search_outbox::claim_batch_share(pool, 1, &[], 2)
+        .await
+        .expect("claim")
+        .expect("a batch");
+    let second = search_outbox::claim_batch_share(pool, 1, &[], 2)
+        .await
+        .expect("claim")
+        .expect("a batch from past the held head");
+    assert_eq!(second.documents.len(), 1);
+    assert_eq!(second.documents[0].event_id, *behind.id.as_bytes());
+    drop(second);
+    drop(first);
 }

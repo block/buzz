@@ -312,6 +312,12 @@ pub struct Config {
     /// indexer keeps the index up to date; searches still use Postgres.
     pub opensearch: Option<buzz_search::opensearch::OpenSearchConfig>,
 
+    /// Search indexer workers on the lease-holding instance
+    /// (`BUZZ_SEARCH_INDEXER_WORKERS`, default 1): how many bulk requests,
+    /// each holding a database connection, it keeps in flight. Workers can
+    /// share one community's queue.
+    pub search_indexer_workers: usize,
+
     /// Allow NIP-OA owner attestation for relay membership.
     ///
     /// When `true` and `require_relay_membership` is also `true`, agents
@@ -1048,6 +1054,9 @@ impl Config {
             aws_region,
         )
         .map_err(ConfigError::InvalidValue)?;
+        let search_indexer_workers =
+            parse_search_indexer_workers(optional_utf8_env("BUZZ_SEARCH_INDEXER_WORKERS")?)
+                .map_err(ConfigError::InvalidValue)?;
         if !operator_listener_delivery_urls.is_empty() && relay_operator_api_origin.is_none() {
             error!(
                 "BUZZ_OPERATOR_LISTENERS is set but RELAY_OPERATOR_API_ORIGIN is not — operator-listener registration requests will reject every request until RELAY_OPERATOR_API_ORIGIN is set"
@@ -1598,6 +1607,7 @@ impl Config {
             operator_listener_delivery_urls,
             storage_usage_delivery_url,
             opensearch,
+            search_indexer_workers,
             allow_nip_oa_auth,
             klipy,
             media,
@@ -1673,12 +1683,26 @@ fn optional_utf8_env(name: &str) -> Result<Option<String>, ConfigError> {
     }
 }
 
+/// Parse the search indexer worker count: a whole number from 1 to 32,
+/// default 1.
+fn parse_search_indexer_workers(value: Option<String>) -> Result<usize, String> {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return Ok(1);
+    };
+    value
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|workers| (1..=32).contains(workers))
+        .ok_or_else(|| "BUZZ_SEARCH_INDEXER_WORKERS must be a whole number from 1 to 32".into())
+}
+
 /// Parse the OpenSearch settings: an HTTP(S) URL without credentials, query,
 /// or fragment, and basic credentials given both or neither. Empty values
 /// count as unset.
 ///
-/// Deletes and edits don't reach the index yet, so a URL also needs the
-/// `BUZZ_OPENSEARCH_PREVIEW` opt-in.
+/// Deleting a community doesn't remove its documents from the index yet, so
+/// a URL also needs the `BUZZ_OPENSEARCH_PREVIEW` opt-in.
 fn parse_opensearch_config(
     url: Option<String>,
     username: Option<String>,
@@ -1697,7 +1721,7 @@ fn parse_opensearch_config(
         return Ok(None);
     };
     if !preview {
-        return Err("BUZZ_OPENSEARCH_URL needs BUZZ_OPENSEARCH_PREVIEW=true: deleted messages stay in the index, so use it only on a relay without real data".into());
+        return Err("BUZZ_OPENSEARCH_URL needs BUZZ_OPENSEARCH_PREVIEW=true: a deleted community's messages stay in the index, so use it only on a relay without real data".into());
     }
     let parsed = url::Url::parse(raw.trim())
         .map_err(|e| format!("BUZZ_OPENSEARCH_URL is not a valid URL: {e}"))?;
@@ -1774,6 +1798,20 @@ fn with_opensearch_aws_sigv4(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_indexer_workers_default_to_one_and_are_bounded() {
+        let some = |value: &str| Some(value.to_string());
+        assert_eq!(parse_search_indexer_workers(None), Ok(1));
+        assert_eq!(parse_search_indexer_workers(some(" ")), Ok(1));
+        assert_eq!(parse_search_indexer_workers(some("4")), Ok(4));
+        for invalid in ["0", "33", "-1", "two"] {
+            assert!(
+                parse_search_indexer_workers(some(invalid)).is_err(),
+                "{invalid}"
+            );
+        }
+    }
 
     #[test]
     fn opensearch_config_is_optional_and_validated() {
