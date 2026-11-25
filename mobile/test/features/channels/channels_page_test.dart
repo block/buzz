@@ -472,6 +472,14 @@ void main() {
         buildTestable(
           realHome: true,
           overrides: [
+            channelFilterProvider.overrideWithValue(
+              _filterTestManager(
+                cached: ChannelFilterStore.empty().edit(
+                  'channels',
+                  ChannelFilterMode.all,
+                ),
+              ),
+            ),
             channelsProvider.overrideWith(() => _FakeNotifier(channels)),
           ],
         ),
@@ -1615,8 +1623,7 @@ void main() {
         expect(
           homeCalls.where((call) => call.method == 'prepareForReveal').length,
           greaterThan(earlyRestores),
-          reason:
-              'Replay again after the outgoing route and Home transform settle.',
+          reason: 'Replay again after the outgoing route and Home transform settle.',
         );
         expect(position.pixels, 200);
         expect(
@@ -2136,9 +2143,8 @@ void main() {
           final image = await boundary.toImage(pixelRatio: 2);
           final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
           await Directory(directory).create(recursive: true);
-          await File(
-            '$directory/community-${brightness.name}.png',
-          ).writeAsBytes(bytes!.buffer.asUint8List());
+          await File('$directory/community-${brightness.name}.png')
+              .writeAsBytes(bytes!.buffer.asUint8List());
           image.dispose();
         });
       }
@@ -3862,9 +3868,8 @@ void main() {
           final image = await boundary.toImage(pixelRatio: 2);
           final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
           await Directory(directory).create(recursive: true);
-          await File(
-            '$directory/new-channel.png',
-          ).writeAsBytes(bytes!.buffer.asUint8List());
+          await File('$directory/new-channel.png')
+              .writeAsBytes(bytes!.buffer.asUint8List());
           image.dispose();
         });
       }

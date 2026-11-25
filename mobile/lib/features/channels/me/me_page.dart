@@ -1,8 +1,10 @@
 import '../channel_sections/section_show_more.dart';
 import '../channel_stars/channel_stars_provider.dart';
 import '../../../shared/widgets/native_conversation_menu.dart';
+
 import 'dart:async';
 import 'dart:convert';
+
 import '../channel_filter/channel_filter_activity.dart';
 import '../channel_sort/channel_sort_provider.dart';
 import '../channel_sort/channel_sort_storage.dart';
@@ -465,7 +467,7 @@ class _SoloFilterSection extends HookConsumerWidget {
     useListenable(manager);
     final display = MessagesSectionOptions.active(context)
         ? ref.watch(messagesDisplayProvider)
-        : const MessagesDisplay();
+        : const MessagesDisplay(messages: false);
     final mode = display.modeFor(manager?.store, group);
     final window = display.windowFor(manager?.store, group);
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
