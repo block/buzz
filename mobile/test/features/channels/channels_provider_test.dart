@@ -3135,6 +3135,27 @@ void main() {
     await reconnect();
     expect(notifier.activityFor(_channelA), (known: true, at: after.createdAt));
 
+    // So does a deletion in the same second as the latest post the read
+    // marker sits on.
+    final boundary = message('boundary', now - 1);
+    session.emit(boundary);
+    await _waitUntil(
+      () => notifier.activityFor(_channelA).at == boundary.createdAt,
+    );
+    session.recentMessages = [
+      old,
+      unchecked,
+      after,
+      deletionOf(boundary, at: now - 1),
+    ];
+    (container.read(readStateProvider.notifier) as _ActivityReadState)
+        .markReadThrough(_channelA, now - 1);
+    await reconnect();
+    expect(notifier.activityFor(_channelA).known, isFalse);
+    session.recentMessages = [old, unchecked, after];
+    await reconnect();
+    expect(notifier.activityFor(_channelA), (known: true, at: after.createdAt));
+
     // A channel no Active section shows skips its gap read, and reads as
     // unknown until a catch-up while it is shown.
     shown.close();

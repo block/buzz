@@ -63,16 +63,19 @@ extension _UnreadCatchUp on ChannelsNotifier {
       };
       final filters = [
         for (final channel in activeChannels)
-          for (final kinds in [
-            EventKind.channelMessageEventKinds,
-            [EventKind.deletion, EventKind.nip29DeleteEvent],
+          for (final (kinds, since) in [
+            (EventKind.channelMessageEventKinds, sinceByChannel[channel.id]!),
+            (
+              [EventKind.deletion, EventKind.nip29DeleteEvent],
+              _deletionsSince(channel.id, sinceByChannel[channel.id]!),
+            ),
           ])
             NostrFilter(
               kinds: kinds,
               tags: {
                 '#h': [channel.id],
               },
-              since: sinceByChannel[channel.id],
+              since: since,
               limit: _unreadCatchUpLimit,
             ),
       ];
@@ -561,6 +564,16 @@ extension _UnreadCatchUp on ChannelsNotifier {
     }
     return max(afterRead, caughtUp.sentAt - relayCrossDeviceSkewSeconds);
   }
+
+  /// Where [channelId]'s catch-up asks for deletions. When an Active section
+  /// shows it and its latest post is from the second before [since], as when
+  /// the read marker sits on that post, the gap read is moot, so a deletion
+  /// of that post made in the same second is asked for here.
+  int _deletionsSince(String channelId, int since) =>
+      _activity.isWatched(channelId) &&
+          _activity.latestAt(channelId) == since - 1
+      ? since - 1
+      : since;
 
   /// The stretch a catch-up starting at [since] skips since the last read
   /// that covered the channel, for the Active filter: a post that arrived
