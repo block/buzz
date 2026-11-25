@@ -4,6 +4,8 @@
 <dict>
 	<key>BuzzAppGroupIdentifier</key>
 	<string>$(BUZZ_APP_GROUP_IDENTIFIER)</string>
+	<key>BuzzKeychainAccessGroup</key>
+	<string>$(AppIdentifierPrefix)$(BUZZ_KEYCHAIN_ACCESS_GROUP)</string>
 	<key>BuzzShareURLScheme</key>
 	<string>$(BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleDevelopmentRegion</key>
@@ -34,6 +36,8 @@
 			</array>
 			<key>NSExtensionActivationRule</key>
 			<dict>
+				<key>NSExtensionActivationSupportsFileWithMaxCount</key>
+				<integer>10</integer>
 				<key>NSExtensionActivationSupportsImageWithMaxCount</key>
 				<integer>10</integer>
 				<key>NSExtensionActivationSupportsMovieWithMaxCount</key>

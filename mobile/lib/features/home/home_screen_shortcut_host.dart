@@ -5,8 +5,11 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/community/community_provider.dart';
 import '../../shared/me/default_agent.dart';
 import '../../shared/profile/user_cache_provider.dart';
+import '../../shared/relay/relay_provider.dart';
+import '../../shared/share/share_bestie.dart';
 import '../../shared/shortcuts/home_screen_shortcuts.dart';
 import '../../shared/widgets/adaptive_conversation_pane.dart';
 
@@ -45,6 +48,37 @@ class HomeScreenShortcutHost extends HookConsumerWidget {
         : bestie.value;
     final bestieName = ref.watch(
       userCacheProvider.select((profiles) => profiles[bestiePubkey]?.label),
+    );
+    final me = ref.watch(myPubkeyProvider);
+    final community = ref.watch(
+      activeCommunityProvider.select((value) => value.value?.id),
+    );
+    useEffect(
+      () {
+        if (bestie.isLoading ||
+            bestie.hasError ||
+            me == null ||
+            community == null) {
+          return null;
+        }
+        unawaited(
+          publishShareBestie(
+            pubkey: me,
+            community: community,
+            bestie: bestiePubkey,
+            name: bestieName,
+          ),
+        );
+        return null;
+      },
+      [
+        bestie.isLoading,
+        bestie.hasError,
+        me,
+        community,
+        bestiePubkey,
+        bestieName,
+      ],
     );
     final published = useRef<List<String>?>(null);
     useEffect(() {

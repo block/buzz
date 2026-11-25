@@ -125,6 +125,48 @@ enum BuzzPushKeychain {
   }
 }
 
+/// Gives the share extension every signed-in community and its signing key,
+/// whether or not its notifications are on. Communities go in the app group;
+/// keys go in the shared keychain under their own service, apart from the
+/// notification extension's.
+enum BuzzShareAccounts {
+  static let service = "buzz.share.signing"
+  static let fileName = "ShareAccounts.json"
+
+  static func replace(
+    communities: [[String: Any]], signingKeys: [String: String], appGroupIdentifier: String?,
+    accessGroup: String?
+  ) throws {
+    guard
+      let container = appGroupIdentifier.flatMap({
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0)
+      })
+    else { return }
+    var base: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: service,
+    ]
+    if let accessGroup, !accessGroup.isEmpty { base[kSecAttrAccessGroup as String] = accessGroup }
+    let deletion = SecItemDelete(base as CFDictionary)
+    guard deletion == errSecSuccess || deletion == errSecItemNotFound else {
+      throw NSError(domain: NSOSStatusErrorDomain, code: Int(deletion))
+    }
+    for (communityID, privateKeyHex) in signingKeys {
+      var item = base
+      item[kSecAttrAccount as String] = communityID
+      item[kSecValueData as String] = Data(privateKeyHex.utf8)
+      item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+      let status = SecItemAdd(item as CFDictionary, nil)
+      guard status == errSecSuccess else {
+        SecItemDelete(base as CFDictionary)
+        throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+      }
+    }
+    let data = try JSONSerialization.data(withJSONObject: communities, options: [.sortedKeys])
+    try data.write(to: container.appendingPathComponent(fileName), options: [.atomic])
+  }
+}
+
 /// Carries replies typed into notifications to Flutter, which sends them, and
 /// reports each outcome on the notification side. See
 /// docs/adr/0004-notification-reply.md.

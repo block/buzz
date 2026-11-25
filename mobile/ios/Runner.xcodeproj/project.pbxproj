@@ -27,6 +27,11 @@
 		C0AF00000000000000000071 /* NativeCreateChannelSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AF00000000000000000072 /* NativeCreateChannelSheet.swift */; };
 		BZZ00000000000000000001 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000006 /* NotificationService.swift */; };
 		BZZ00000000000000000031 /* ShareExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000036 /* ShareExtension.swift */; };
+		BZZ00000000000000000050 /* ShareRelayClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000051 /* ShareRelayClient.swift */; };
+		BZZ00000000000000000099 /* MediaSanitizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 331C809A294A618700263BE5 /* MediaSanitizer.swift */; };
+		BZZ00000000000000000098 /* ShareImageEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000097 /* ShareImageEncoder.swift */; };
+		BZZ00000000000000000052 /* ShareImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000053 /* ShareImage.swift */; };
+		BZZ00000000000000000054 /* BuzzPushKit in Frameworks */ = {isa = PBXBuildFile; productRef = BZZ00000000000000000022 /* BuzzPushKit */; };
 		BZZ00000000000000000002 /* NotificationService.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000009 /* NotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		BZZ00000000000000000032 /* ShareExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000039 /* ShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		BZZ00000000000000000020 /* BuzzPushKit in Frameworks */ = {isa = PBXBuildFile; productRef = BZZ00000000000000000022 /* BuzzPushKit */; };
@@ -58,6 +63,9 @@
 		CA8300012F50000100A17E01 /* IosMediaCarousel.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA8300022F50000100A17E01 /* IosMediaCarousel.swift */; };
 		AC7400012F50000100A17E01 /* ThemePaginationGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC7400022F50000100A17E01 /* ThemePaginationGeometry.swift */; };
 		4A71C01F2F4100100A17E01 /* VoiceNotePackager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C0202F4100100A17E01 /* VoiceNotePackager.swift */; };
+		BAEE00000000000000000001 /* VideoTranscoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAEE00000000000000000002 /* VideoTranscoder.swift */; };
+		BAEE00000000000000000003 /* VideoTranscoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAEE00000000000000000002 /* VideoTranscoder.swift */; };
+		BAEE00000000000000000004 /* MP4Canonicalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C0222F4110100A17E01 /* MP4Canonicalizer.swift */; };
 		4A71C0212F4110100A17E01 /* MP4Canonicalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C0222F4110100A17E01 /* MP4Canonicalizer.swift */; };
 		4A71C0232F4120100A17E01 /* NativeAttachmentPopoverMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C0242F4120100A17E01 /* NativeAttachmentPopoverMenu.swift */; };
 		331C809D294A63AB00263BE5 /* UIKitEncoded.png in Resources */ = {isa = PBXBuildFile; fileRef = 331C809C294A618700263BE5 /* UIKitEncoded.png */; };
@@ -138,6 +146,9 @@
 		C0AF00000000000000000072 /* NativeCreateChannelSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCreateChannelSheet.swift; sourceTree = "<group>"; };
 		BZZ00000000000000000006 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
 		BZZ00000000000000000036 /* ShareExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareExtension.swift; sourceTree = "<group>"; };
+		BZZ00000000000000000051 /* ShareRelayClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareRelayClient.swift; sourceTree = "<group>"; };
+		BZZ00000000000000000097 /* ShareImageEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareImageEncoder.swift; sourceTree = "<group>"; };
+		BZZ00000000000000000053 /* ShareImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareImage.swift; sourceTree = "<group>"; };
 		BZZ00000000000000000007 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		BZZ00000000000000000037 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		BZZ00000000000000000008 /* NotificationService.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = NotificationService.entitlements; sourceTree = "<group>"; };
@@ -174,6 +185,7 @@
 		CA8300022F50000100A17E01 /* IosMediaCarousel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IosMediaCarousel.swift; sourceTree = "<group>"; };
 		AC7400022F50000100A17E01 /* ThemePaginationGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemePaginationGeometry.swift; sourceTree = "<group>"; };
 		4A71C0202F4100100A17E01 /* VoiceNotePackager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceNotePackager.swift; sourceTree = "<group>"; };
+		BAEE00000000000000000002 /* VideoTranscoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoTranscoder.swift; sourceTree = "<group>"; };
 		4A71C0222F4110100A17E01 /* MP4Canonicalizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MP4Canonicalizer.swift; sourceTree = "<group>"; };
 		4A71C0242F4120100A17E01 /* NativeAttachmentPopoverMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeAttachmentPopoverMenu.swift; sourceTree = "<group>"; };
 		331C809C294A618700263BE5 /* UIKitEncoded.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = UIKitEncoded.png; sourceTree = "<group>"; };
@@ -223,6 +235,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				BZZ00000000000000000054 /* BuzzPushKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -380,6 +393,7 @@
 				4A71C0202F4100100A17E01 /* VoiceNotePackager.swift */,
 				A17100022F4100100A17E001 /* DeviceTranscriptionPlugin.swift */,
 				4A71C0222F4110100A17E01 /* MP4Canonicalizer.swift */,
+				BAEE00000000000000000002 /* VideoTranscoder.swift */,
 				4A71C0242F4120100A17E01 /* NativeAttachmentPopoverMenu.swift */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
@@ -410,6 +424,9 @@
 			isa = PBXGroup;
 			children = (
 				BZZ00000000000000000036 /* ShareExtension.swift */,
+				BZZ00000000000000000051 /* ShareRelayClient.swift */,
+				BZZ00000000000000000053 /* ShareImage.swift */,
+				BZZ00000000000000000097 /* ShareImageEncoder.swift */,
 				BZZ00000000000000000037 /* Info.plist */,
 				BZZ00000000000000000038 /* ShareExtension.entitlements */,
 			);
@@ -500,6 +517,7 @@
 			);
 			name = ShareExtension;
 			packageProductDependencies = (
+				BZZ00000000000000000022 /* BuzzPushKit */,
 			);
 			productName = ShareExtension;
 			productReference = BZZ00000000000000000039 /* ShareExtension.appex */;
@@ -719,6 +737,12 @@
 			buildActionMask = 2147483647;
 			files = (
 				BZZ00000000000000000031 /* ShareExtension.swift in Sources */,
+				BZZ00000000000000000050 /* ShareRelayClient.swift in Sources */,
+				BZZ00000000000000000052 /* ShareImage.swift in Sources */,
+				BZZ00000000000000000098 /* ShareImageEncoder.swift in Sources */,
+				BZZ00000000000000000099 /* MediaSanitizer.swift in Sources */,
+				BAEE00000000000000000003 /* VideoTranscoder.swift in Sources */,
+				BAEE00000000000000000004 /* MP4Canonicalizer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -788,6 +812,7 @@
 				4A71C01F2F4100100A17E01 /* VoiceNotePackager.swift in Sources */,
 				A17100012F4100100A17E001 /* DeviceTranscriptionPlugin.swift in Sources */,
 				4A71C0212F4110100A17E01 /* MP4Canonicalizer.swift in Sources */,
+				BAEE00000000000000000001 /* VideoTranscoder.swift in Sources */,
 				4A71C0232F4120100A17E01 /* NativeAttachmentPopoverMenu.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
@@ -1184,7 +1209,10 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
-				OTHER_LDFLAGS = "";
+				OTHER_LDFLAGS = ("-framework", Flutter);
+				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = ("$(inherited)", "$(FLUTTER_ROOT)/bin/cache/artifacts/engine/ios-release/extension_safe/Flutter.xcframework/ios-arm64");
+				"FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*]" = ("$(inherited)", "$(FLUTTER_ROOT)/bin/cache/artifacts/engine/ios/extension_safe/Flutter.xcframework/ios-arm64_x86_64-simulator");
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).ShareExtension";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -1235,7 +1263,10 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
-				OTHER_LDFLAGS = "";
+				OTHER_LDFLAGS = ("-framework", Flutter);
+				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = ("$(inherited)", "$(FLUTTER_ROOT)/bin/cache/artifacts/engine/ios-release/extension_safe/Flutter.xcframework/ios-arm64");
+				"FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*]" = ("$(inherited)", "$(FLUTTER_ROOT)/bin/cache/artifacts/engine/ios/extension_safe/Flutter.xcframework/ios-arm64_x86_64-simulator");
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).ShareExtension";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -1286,7 +1317,10 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
-				OTHER_LDFLAGS = "";
+				OTHER_LDFLAGS = ("-framework", Flutter);
+				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = ("$(inherited)", "$(FLUTTER_ROOT)/bin/cache/artifacts/engine/ios-release/extension_safe/Flutter.xcframework/ios-arm64");
+				"FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*]" = ("$(inherited)", "$(FLUTTER_ROOT)/bin/cache/artifacts/engine/ios/extension_safe/Flutter.xcframework/ios-arm64_x86_64-simulator");
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/BuzzPushKit/Sources/CSecp256k1/include");
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).ShareExtension";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;

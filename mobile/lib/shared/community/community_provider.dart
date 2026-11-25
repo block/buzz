@@ -22,6 +22,7 @@ import '../push/push_lease_revocation_outbox.dart';
 import '../push/push_subscription.dart';
 import '../relay/media_disk_cache.dart';
 import '../relay/signed_event_relay.dart';
+import '../share/share_bestie.dart';
 import '../relay/relay_provider.dart' show RelayConfig, pubkeyFromNsec;
 import 'community.dart';
 import 'community_storage.dart';
@@ -96,7 +97,10 @@ typedef CommunitySnapshotWriter =
 final communitySnapshotWriterProvider = Provider<CommunitySnapshotWriter>((
   ref,
 ) {
-  return registerBuzzPushCommunitySnapshot;
+  return (communities) async {
+    await publishShareAccounts(communities);
+    await registerBuzzPushCommunitySnapshot(communities);
+  };
 });
 
 final _communitySnapshotSyncProvider = Provider<_CommunitySnapshotSync>((ref) {

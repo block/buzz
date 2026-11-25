@@ -522,7 +522,7 @@ class MediaUploadService {
       onProgress: onProgress,
       cancellationToken: cancellationToken,
     );
-    return descriptor.withFilename(_safeAttachmentFilename(pickedFile.name));
+    return descriptor.withFilename(safeAttachmentFilename(pickedFile.name));
   }
 
   Future<BlobDescriptor> uploadBytes(
@@ -747,7 +747,7 @@ class MediaUploadService {
   }
 }
 
-String _safeAttachmentFilename(String filename) {
+String safeAttachmentFilename(String filename) {
   final segments = filename.split(RegExp(r'[/\\]'));
   final basename = segments.isEmpty ? '' : segments.last;
   final sanitized = StringBuffer();
@@ -771,7 +771,7 @@ String _safeAttachmentFilename(String filename) {
 }
 
 String _voiceNoteMp4Filename(String filename) {
-  final safe = _safeAttachmentFilename(filename);
+  final safe = safeAttachmentFilename(filename);
   final withoutExtension = safe.replaceFirst(RegExp(r'\.[^.]*$'), '');
   final stem = withoutExtension.toLowerCase().startsWith('voice-note-')
       ? withoutExtension

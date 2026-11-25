@@ -175,6 +175,18 @@ import os.log
       case "cachesDirectory":
         // Caches the app's extensions can read too. The OS may purge it.
         result(container?.appendingPathComponent("Library/Caches", isDirectory: true).path)
+      case "syncShareAccounts":
+        let args = call.arguments as? [String: Any] ?? [:]
+        do {
+          try BuzzShareAccounts.replace(
+            communities: args["communities"] as? [[String: Any]] ?? [],
+            signingKeys: args["signingKeys"] as? [String: String] ?? [:],
+            appGroupIdentifier: self?.appGroupIdentifier,
+            accessGroup: self?.pushKeychainAccessGroup)
+          result(nil)
+        } catch {
+          result(FlutterError(code: "share_accounts_failed", message: error.localizedDescription, details: nil))
+        }
       case "pendingSharesDirectory":
         // Where the share extension leaves items for the app to pick up.
         result(container?.appendingPathComponent("PendingShares", isDirectory: true).path)
@@ -1060,132 +1072,12 @@ import os.log
     sourcePath: String,
     result: @escaping FlutterResult
   ) {
-    let sourceURL = URL(fileURLWithPath: sourcePath)
-    let asset = AVURLAsset(url: sourceURL)
-
-    // Do not export the source asset directly. An iPhone video can carry GPS,
-    // spatial-video, and other data tracks even when its user-visible metadata
-    // is cleared. A fresh composition copies only one video and one audio
-    // track, so those private channels cannot reach the relay.
-    let composition = AVMutableComposition()
-    guard
-      let sourceVideo = asset.tracks(withMediaType: .video).first,
-      let destinationVideo = composition.addMutableTrack(
-        withMediaType: .video,
-        preferredTrackID: kCMPersistentTrackID_Invalid
-      )
-    else {
-      result(
-        FlutterError(
-          code: "transcode_failed",
-          message: "The selected file does not contain a video track.",
-          details: nil
-        )
-      )
-      return
-    }
-
-    do {
-      let sourceAudio = asset.tracks(withMediaType: .audio).first
-      let insertionTimes = Self.relativeTrackInsertionTimes(
-        videoStart: sourceVideo.timeRange.start,
-        audioStart: sourceAudio?.timeRange.start
-      )
-      try destinationVideo.insertTimeRange(
-        sourceVideo.timeRange,
-        of: sourceVideo,
-        at: insertionTimes.video
-      )
-      destinationVideo.preferredTransform = sourceVideo.preferredTransform
-
-      if let sourceAudio,
-        let destinationAudio = composition.addMutableTrack(
-          withMediaType: .audio,
-          preferredTrackID: kCMPersistentTrackID_Invalid
-        )
-      {
-        try destinationAudio.insertTimeRange(
-          sourceAudio.timeRange,
-          of: sourceAudio,
-          at: insertionTimes.audio ?? .zero
-        )
-      }
-    } catch {
-      result(
-        FlutterError(
-          code: "transcode_failed",
-          message: error.localizedDescription,
-          details: nil
-        )
-      )
-      return
-    }
-
-    guard
-      let exportSession = AVAssetExportSession(
-        asset: composition,
-        // Passthrough preserves the source's HEVC codec and container
-        // metadata. Buzz accepts only canonical H.264/AAC MP4s with no
-        // metadata channels, so re-encode instead of copying the movie.
-        presetName: AVAssetExportPresetMediumQuality
-      )
-    else {
-      result(
-        FlutterError(
-          code: "transcode_failed",
-          message: "Unable to create export session.",
-          details: nil
-        )
-      )
-      return
-    }
-
-    let outputURL = FileManager.default.temporaryDirectory
-      .appendingPathComponent(UUID().uuidString)
-      .appendingPathExtension("mp4")
-
-    exportSession.outputURL = outputURL
-    exportSession.outputFileType = .mp4
-    exportSession.shouldOptimizeForNetworkUse = true
-    // `forSharing()` intentionally retains playback metadata. The relay
-    // rejects every descriptive metadata channel to avoid leaking location or
-    // other private information, so write no source metadata at all.
-    exportSession.metadata = []
-    exportSession.metadataItemFilter = nil
-
-    exportSession.exportAsynchronously {
-      switch exportSession.status {
-      case .completed:
-        do {
-          // AVFoundation writes a standard sample-dependency table (`sdtp`).
-          // Older Buzz relays mistook that playback-only box for metadata. Keep
-          // its size and payload in a `free` box so chunk offsets stay valid and
-          // uploads work before those relays receive the validator fix.
-          try MP4Canonicalizer.neutralizeSampleDependencyBoxes(at: outputURL)
-          result(outputURL.path)
-        } catch {
-          try? FileManager.default.removeItem(at: outputURL)
-          result(
-            FlutterError(
-              code: "transcode_failed",
-              message: "Unable to canonicalize transcoded video.",
-              details: error.localizedDescription
-            )
-          )
-        }
-      default:
-        let errorMessage =
-          exportSession.error?.localizedDescription
-          ?? "Video transcoding failed with status \(exportSession.status.rawValue)."
-        result(
-          FlutterError(
-            code: "transcode_failed",
-            message: errorMessage,
-            details: nil
-          )
-        )
-        // Clean up partial output on failure.
-        try? FileManager.default.removeItem(at: outputURL)
+    VideoTranscoder.transcode(source: URL(fileURLWithPath: sourcePath)) { outcome in
+      switch outcome {
+      case .success(let url):
+        result(url.path)
+      case .failure(let error):
+        result(FlutterError(code: "transcode_failed", message: error.localizedDescription, details: nil))
       }
     }
   }
@@ -1194,16 +1086,7 @@ import os.log
     videoStart: CMTime,
     audioStart: CMTime?
   ) -> (video: CMTime, audio: CMTime?) {
-    guard let audioStart else {
-      return (video: .zero, audio: nil)
-    }
-
-    let timelineStart =
-      CMTimeCompare(audioStart, videoStart) < 0 ? audioStart : videoStart
-    return (
-      video: CMTimeSubtract(videoStart, timelineStart),
-      audio: CMTimeSubtract(audioStart, timelineStart)
-    )
+    VideoTranscoder.relativeTrackInsertionTimes(videoStart: videoStart, audioStart: audioStart)
   }
 
   private func generateVideoPoster(
@@ -1211,50 +1094,8 @@ import os.log
     result: @escaping FlutterResult
   ) {
     DispatchQueue.global(qos: .userInitiated).async {
-      let asset = AVURLAsset(url: URL(fileURLWithPath: sourcePath))
-      let generator = AVAssetImageGenerator(asset: asset)
-      generator.appliesPreferredTrackTransform = true
-      generator.maximumSize = CGSize(width: 720, height: 720)
-      generator.requestedTimeToleranceBefore = .positiveInfinity
-      generator.requestedTimeToleranceAfter = .positiveInfinity
-
       do {
-        let durationSeconds = CMTimeGetSeconds(asset.duration)
-        let middleTime =
-          durationSeconds.isFinite && durationSeconds > 0
-          ? min(durationSeconds / 2, 1)
-          : 0
-        let candidateTimes = [0, 0.1, middleTime]
-        var posterImage: CGImage?
-        var lastError: Error?
-
-        for seconds in candidateTimes {
-          do {
-            posterImage = try generator.copyCGImage(
-              at: CMTime(seconds: seconds, preferredTimescale: 600),
-              actualTime: nil
-            )
-            if posterImage != nil { break }
-          } catch {
-            lastError = error
-          }
-        }
-
-        guard let posterImage else {
-          throw lastError
-            ?? NSError(
-              domain: "BuzzVideoPoster",
-              code: 1,
-              userInfo: [NSLocalizedDescriptionKey: "Unable to decode a video frame."]
-            )
-        }
-        guard let jpegData = try MediaSanitizer.encodeJpeg(UIImage(cgImage: posterImage)) else {
-          throw NSError(
-            domain: "BuzzVideoPoster",
-            code: 2,
-            userInfo: [NSLocalizedDescriptionKey: "Unable to encode video poster."]
-          )
-        }
+        let jpegData = try VideoTranscoder.poster(source: URL(fileURLWithPath: sourcePath))
         DispatchQueue.main.async {
           result(FlutterStandardTypedData(bytes: jpegData))
         }
