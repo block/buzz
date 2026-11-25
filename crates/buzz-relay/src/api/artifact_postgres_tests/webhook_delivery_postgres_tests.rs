@@ -7,7 +7,7 @@ const INTEGRATION: &str = "0f4c1a52-7d3e-4b8a-9c61-2e5f8d7a1b30";
 const NOT_INGRESS: &str = "restricted: not an authorized webhook ingress";
 
 /// A fixture whose relay trusts a gateway key that is no community member.
-async fn with_gateway() -> (Fixture, Keys) {
+pub(super) async fn with_gateway() -> (Fixture, Keys) {
     let mut f = Fixture::new().await;
     let gateway = Keys::generate();
     let mut state = (*f.state).clone();
@@ -16,7 +16,7 @@ async fn with_gateway() -> (Fixture, Keys) {
     (f, gateway)
 }
 
-fn delivery(key: &Keys, delivery_id: &str, created_at: u64) -> Event {
+pub(super) fn delivery(key: &Keys, delivery_id: &str, created_at: u64) -> Event {
     let content = json!({
         "version": 1, "type": "pull_request", "delivery_id": delivery_id,
         "payload": {"action": "opened"},

@@ -13,6 +13,13 @@
 //! dynamically typed, so the check cannot prove the result type: it refuses a
 //! program whose result is a literal of the wrong type, and evaluation refuses
 //! any other wrong result.
+//!
+//! The worker then evaluates each program against a [`Delivery`] within a
+//! [`Budget`].
+
+mod eval;
+
+pub use eval::{Budget, Delivery, EvalError};
 
 use cel::common::ast::{EntryExpr, Expr, LiteralValue, MapExpr, StructExpr};
 use cel::{Env, IdedExpr};

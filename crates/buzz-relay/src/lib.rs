@@ -100,6 +100,7 @@ pub mod tunnel;
 pub mod webhook_config;
 /// Webhook secret generation and constant-time comparison.
 pub mod webhook_secret;
+pub mod webhook_worker;
 /// Workflow action sink — relay-side implementation of [`buzz_workflow::ActionSink`].
 pub mod workflow_sink;
 

@@ -16,6 +16,26 @@ impl Fixture {
         prev: Option<&Event>,
         filter: &str,
     ) -> Event {
+        self.subscription_with(
+            key,
+            home,
+            id,
+            op,
+            prev,
+            json!({"version": 1, "filter": filter}),
+        )
+    }
+
+    /// A subscription revision with `content`, signed by `key`.
+    pub(super) fn subscription_with(
+        &self,
+        key: &Keys,
+        home: Uuid,
+        id: Uuid,
+        op: &str,
+        prev: Option<&Event>,
+        content: Value,
+    ) -> Event {
         let mut tags = vec![
             vec!["ar".to_owned(), "1".into()],
             vec!["d".into(), id.to_string()],
@@ -28,7 +48,7 @@ impl Fixture {
         } else {
             tags.push(vec!["title".into(), "Opened pull requests".into()]);
             tags.push(vec!["integration".into(), INTEGRATION.into()]);
-            json!({"version": 1, "filter": filter}).to_string()
+            content.to_string()
         };
         if let Some(prev) = prev {
             tags.push(vec!["prev".into(), prev.id.to_hex()]);
@@ -39,7 +59,7 @@ impl Fixture {
             .unwrap()
     }
 
-    async fn set_role(&self, channel: Uuid, key: &Keys, role: &str) {
+    pub(super) async fn set_role(&self, channel: Uuid, key: &Keys, role: &str) {
         sqlx::query(
             "INSERT INTO channel_members(community_id,channel_id,pubkey,role) \
              VALUES($1,$2,$3,$4::member_role) \
@@ -64,13 +84,13 @@ impl Fixture {
         body.to_string()
     }
 
-    async fn accepted(&self, key: &Keys, event: &Event) {
+    pub(super) async fn accepted(&self, key: &Keys, event: &Event) {
         let (status, body) = self.request_as(key, "/events", json!(event)).await;
         assert!(status.is_success(), "{status}: {body}");
         assert_eq!(body["accepted"], true, "{body}");
     }
 
-    async fn head(&self, id: Uuid) -> Option<(Vec<u8>, Uuid)> {
+    pub(super) async fn head(&self, id: Uuid) -> Option<(Vec<u8>, Uuid)> {
         sqlx::query_as(
             "SELECT event_id, channel_id FROM artifact_heads WHERE community_id=$1 AND artifact_id=$2",
         )

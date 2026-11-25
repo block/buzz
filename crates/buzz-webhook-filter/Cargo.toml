@@ -8,6 +8,7 @@ repository.workspace = true
 description = "CEL programs for Buzz webhook subscriptions"
 
 [dependencies]
-cel = { version = "0.16", default-features = false, features = ["regex"] }
+cel = { version = "0.16", default-features = false, features = ["json", "regex"] }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 

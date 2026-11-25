@@ -493,3 +493,5 @@ mod sync_postgres_tests;
 mod webhook_delivery_postgres_tests;
 #[path = "artifact_postgres_tests/webhook_subscription_postgres_tests.rs"]
 mod webhook_subscription_postgres_tests;
+#[path = "artifact_postgres_tests/webhook_worker_postgres_tests.rs"]
+mod webhook_worker_postgres_tests;
