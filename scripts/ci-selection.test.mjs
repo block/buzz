@@ -181,7 +181,7 @@ async function select(paths, pullRequest = false, apiStatus = 200) {
   const rawOutputs = Object.fromEntries(
     [
       ...readFileSync(output, "utf8").matchAll(
-        /^(rust|desktop|desktop-rust|web|mobile)<<([^\n]+)\n(true|false)\n\2/gm,
+        /^(rust|desktop|desktop-rust|web|mobile|mobile-native)<<([^\n]+)\n(true|false)\n\2/gm,
       ),
     ].map(([, key, , value]) => [key, value]),
   );
@@ -216,7 +216,47 @@ const scenarios = [
     ],
     ["mobile"],
   ],
-  ["mobile lockfile", ["mobile/pubspec.lock"], ["mobile"]],
+  ["mobile lockfile", ["mobile/pubspec.lock"], ["mobile", "mobile-native"]],
+  [
+    "Flutter SDK pin",
+    ["bin/.flutter-3.47.9.pkg"],
+    ["mobile", "mobile-native"],
+  ],
+  [
+    "mobile bundled font",
+    ["mobile/assets/fonts/InterVariable.ttf"],
+    ["mobile", "mobile-native"],
+  ],
+  [
+    "mobile build script",
+    ["mobile/scripts/require-push-gateway-origin.sh"],
+    ["mobile", "mobile-native"],
+  ],
+  [
+    "mobile iOS source",
+    ["mobile/ios/Runner/IosMediaCarousel.swift"],
+    ["mobile", "mobile-native"],
+  ],
+  [
+    "mobile native package",
+    ["mobile/packages/buzz_secp256k1/src/buzz_secp256k1_ecdh.c"],
+    ["mobile", "mobile-native"],
+  ],
+  [
+    "mobile Android source",
+    ["mobile/android/app/build.gradle.kts"],
+    ["mobile"],
+  ],
+  [
+    "mobile native control script",
+    ["scripts/test-mobile-carousel.sh"],
+    ["mobile", "mobile-native"],
+  ],
+  [
+    "clients workflow",
+    [".github/workflows/_ci-clients.yml"],
+    ["mobile", "mobile-native", "rust"],
+  ],
   [
     "mobile release source helper",
     ["scripts/mobile-release-source.sh"],
@@ -235,7 +275,7 @@ const scenarios = [
   [
     "shared workflow",
     [".github/workflows/ci.yml"],
-    ["desktop", "mobile", "rust"],
+    ["desktop", "mobile", "mobile-native", "rust"],
   ],
   [
     "desktop workflow",
@@ -300,7 +340,7 @@ const scenarios = [
 for (const [name, paths, expected] of scenarios) {
   test(`real paths-filter: ${name}`, async () => {
     const outputs = await select(paths);
-    assert.equal(Object.keys(outputs).length, 5);
+    assert.equal(Object.keys(outputs).length, 6);
     assert.deepEqual(
       Object.keys(outputs)
         .filter((key) => outputs[key] === "true")
@@ -329,7 +369,7 @@ for (const [name, paths, expected] of [
 ]) {
   test(`PR file list ignores newer base changes: ${name}`, async () => {
     const outputs = await select(paths, true);
-    assert.equal(Object.keys(outputs).length, 5);
+    assert.equal(Object.keys(outputs).length, 6);
     assert.deepEqual(
       Object.keys(outputs)
         .filter((key) => outputs[key] === "true")
@@ -341,7 +381,14 @@ for (const [name, paths, expected] of [
 
 test("workflow consumes guarded selection outputs", () => {
   const outputs = workflow.match(/ {4}outputs:\n([\s\S]*?) {4}steps:/)[1];
-  for (const key of ["rust", "desktop", "desktop-rust", "web", "mobile"]) {
+  for (const key of [
+    "rust",
+    "desktop",
+    "desktop-rust",
+    "web",
+    "mobile",
+    "mobile-native",
+  ]) {
     assert.ok(outputs.includes(`steps.selection.outputs.${key}`));
   }
   assert.match(

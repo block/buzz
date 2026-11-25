@@ -123,7 +123,7 @@ class _UploadProgressPill extends HookConsumerWidget {
                           'Uploading',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: context.textTheme.labelMedium?.copyWith(
+                          style: messageCaptionTextStyle.copyWith(
                             color: context.colors.onSurface,
                             fontWeight: FontWeight.w600,
                           ),
@@ -136,7 +136,7 @@ class _UploadProgressPill extends HookConsumerWidget {
                           fit: BoxFit.scaleDown,
                           child: Text(
                             '$percentage%',
-                            style: context.textTheme.labelMedium?.copyWith(
+                            style: messageCaptionTextStyle.copyWith(
                               color: context.colors.onSurfaceVariant,
                               fontWeight: FontWeight.w600,
                             ),
@@ -173,11 +173,10 @@ class _UploadProgressPill extends HookConsumerWidget {
                                 ),
                                 child: Text(
                                   'Cancel',
-                                  style: context.textTheme.labelMedium
-                                      ?.copyWith(
-                                        color: context.colors.onSurface,
-                                        fontWeight: FontWeight.w600,
-                                      ),
+                                  style: messageCaptionTextStyle.copyWith(
+                                    color: context.colors.onSurface,
+                                    fontWeight: FontWeight.w600,
+                                  ),
                                 ),
                               ),
                             ),

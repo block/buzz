@@ -58,6 +58,31 @@ void main() {
     expect(_plainText(tester), isNot(contains('**')));
   });
 
+  testWidgets('signed names that fold alike leave a plain mention as text', (
+    tester,
+  ) async {
+    const sam =
+        'd000000000000000000000000000000000000000000000000000000000000000';
+    for (final names in [
+      {sam: 'Sam', _alice: 'ſam'},
+      {_alice: 'ſam', sam: 'Sam'},
+    ]) {
+      await tester.pumpWidget(
+        _testable(
+          MessagePreview(
+            content: 'hi @Sam',
+            mentionNames: names,
+            tags: [
+              for (final key in names.keys) ['p', key],
+            ],
+          ),
+        ),
+      );
+      expect(find.byType(MessageMentionPill), findsNothing, reason: '$names');
+      expect(_plainText(tester), 'hi @Sam');
+    }
+  });
+
   testWidgets('labels media by kind', (tester) async {
     await tester.pumpWidget(
       _testable(

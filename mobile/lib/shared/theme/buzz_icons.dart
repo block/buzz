@@ -8,6 +8,13 @@ abstract final class BuzzIcons {
   /// Tabler `filter-2`. Referenced from Dart so release icon pruning retains it.
   static const filter2 = IconData(0x1014b, fontFamily: 'BuzzTabler');
 
+  static const adjustmentsHorizontal = IconData(
+    0xec38,
+    fontFamily: 'BuzzTabler',
+  );
+
+  static const menu2 = IconData(0xec42, fontFamily: 'BuzzTabler');
+
   static const cornerUpLeft = IconData(0xeb77, fontFamily: 'BuzzTabler');
   static const droplet = IconData(0xea97, fontFamily: 'BuzzTabler');
 
@@ -36,6 +43,9 @@ abstract final class BuzzIcons {
 
   /// Tabler `arrows-exchange`.
   static const arrowLeftRight = IconData(0xf1f4, fontFamily: 'BuzzTabler');
+
+  /// Tabler `arrow-right`.
+  static const arrowRight = IconData(0xea1f, fontFamily: 'BuzzTabler');
 
   /// Tabler `arrow-up`.
   static const arrowUp = IconData(0xea25, fontFamily: 'BuzzTabler');
@@ -302,6 +312,9 @@ abstract final class BuzzIcons {
   static const play = IconData(0xed46, fontFamily: 'BuzzTabler');
 
   /// Tabler `plus`.
+  static const pinned = IconData(0xed60, fontFamily: 'BuzzTabler');
+  static const pinnedOff = IconData(0xed5f, fontFamily: 'BuzzTabler');
+
   static const plus = IconData(0xeb0b, fontFamily: 'BuzzTabler');
 
   /// Tabler `radio`.
@@ -390,6 +403,9 @@ abstract final class BuzzIcons {
 
   /// Tabler `user`.
   static const user = IconData(0xeb4d, fontFamily: 'BuzzTabler');
+
+  /// Tabler `user-circle`.
+  static const userCircle = IconData(0xef68, fontFamily: 'BuzzTabler');
 
   /// Tabler `user-minus`.
   static const userMinus = IconData(0xeb4a, fontFamily: 'BuzzTabler');

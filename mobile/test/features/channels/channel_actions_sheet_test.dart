@@ -1,4 +1,9 @@
+import 'package:buzz/shared/widgets/bottom_up_page_route.dart';
+import 'package:buzz/shared/huddle/huddle_session.dart';
+import 'package:buzz/features/channels/huddle_lifecycle_provider.dart';
+import 'package:buzz/features/channels/me/me_chat_settings.dart';
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_actions_sheet.dart';
@@ -10,6 +15,7 @@ import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/manage_channel_sheet.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/buzz_action_tile.dart';
@@ -19,6 +25,10 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart';
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 
 const _currentPubkey = 'me';
 
@@ -72,13 +82,18 @@ Widget _modalApp({
   bool details = false,
   String? canvasContent,
   Future<ChannelCanvas>? pendingCanvas,
+  List<Override>? sectionOverrides,
+  String? sectionId,
 }) => ProviderScope(
   overrides: [
     currentPubkeyProvider.overrideWith((ref) => _currentPubkey),
     channelMembersProvider(channel.id).overrideWith((ref) => loadMembers()),
-    channelSectionsProvider.overrideWith(
-      () => _FakeChannelSectionsNotifier(const ChannelSectionStore()),
-    ),
+    ...sectionOverrides ??
+        [
+          channelSectionsProvider.overrideWith(
+            () => _FakeChannelSectionsNotifier(const ChannelSectionStore()),
+          ),
+        ],
     agentOwnersProvider.overrideWithValue(
       const AsyncValue.data(<String, String>{}),
     ),
@@ -105,11 +120,22 @@ Widget _modalApp({
                   currentPubkey: _currentPubkey,
                   onMemberTap: (_, _) {},
                   personalChat: soloDetails,
+                  soloSettings: soloDetails
+                      ? (rename, render) => render(
+                          MeChatSettings(
+                            renameRow: rename,
+                            agentName: 'Terp',
+                            workspaceName: 'No workspace',
+                            onAgentTap: () {},
+                          ),
+                        )
+                      : null,
                 )
               : showChannelActionsSheet(
                   context: context,
                   channel: channel,
                   isUnread: false,
+                  sectionId: sectionId,
                 ),
           child: const Text('Open actions'),
         ),
@@ -117,6 +143,27 @@ Widget _modalApp({
     ),
   ),
 );
+
+Future<void> selectNativeManageChannel(WidgetTester tester) async {
+  const bridge = MethodChannel('buzz/channel_actions_sheet');
+  final result = Completer<String?>();
+  final messenger = tester.binding.defaultBinaryMessenger;
+  var hasManage = false;
+  messenger.setMockMethodCallHandler(bridge, (call) async {
+    final payload = call.arguments as Map;
+    final rows = (payload['sections'] as List).expand((group) => group as List);
+    hasManage = rows.any(
+      (row) => row['id'] == 'Manage channel' && row['enabled'] == true,
+    );
+    return call.method == 'present' ? result.future : null;
+  });
+  addTearDown(() => messenger.setMockMethodCallHandler(bridge, null));
+  await tester.tap(find.text('Open actions'));
+  await tester.pumpAndSettle();
+  expect(hasManage, isTrue);
+  result.complete('Manage channel');
+  await tester.pumpAndSettle();
+}
 
 void main() {
   for (final size in [const Size(800, 390), const Size(669, 951)]) {
@@ -163,7 +210,10 @@ void main() {
           SystemChannels.platform_views,
           (call) async {
             if (call.method == 'create') {
-              expect((call.arguments as Map)['viewType'], 'buzz/toast_layer');
+              expect(
+                (call.arguments as Map)['viewType'],
+                isIn(['buzz/toast_layer', 'buzz/navigation_glass']),
+              );
             }
             return null;
           },
@@ -189,7 +239,9 @@ void main() {
             null,
           ),
         );
-        final result = Completer<String?>();
+        var result = Completer<String?>();
+        var session = HuddleSessionState.idle;
+        final discovery = _MenuHuddleDiscovery();
         final members = Completer<List<ChannelMember>>();
         final calls = <MethodCall>[];
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
@@ -208,12 +260,25 @@ void main() {
           _modalApp(
             channel: _channel(),
             soloDetails: soloDetails,
+            sectionOverrides: [
+              relaySessionProvider.overrideWith(() => discovery),
+              huddleLifecycleProvider(
+                'channel-id',
+              ).overrideWith((ref) => Stream.value([])),
+              huddleSessionProvider.overrideWithBuild(
+                (ref, notifier) => session,
+              ),
+            ],
             loadMembers: () => members.future,
             createChannelActions: (ref) => _FakeChannelActions(ref),
           ),
         );
+        final homeRoute = ModalRoute.of(
+          tester.element(find.text('Open actions')),
+        );
         await tester.tap(find.text('Open actions'));
         await tester.pumpAndSettle();
+        expect(BottomUpPageRoute.hasRetainedControls(homeRoute), isTrue);
         if (soloDetails) {
           expect(calls.last.arguments.toString(), contains('general'));
           expect(
@@ -226,7 +291,7 @@ void main() {
         expect(find.byType(BottomSheet), findsNothing);
         expect(
           calls.last.arguments.toString(),
-          isNot(contains('Delete channel')),
+          isNot(contains(soloDetails ? 'Delete chat' : 'Delete channel')),
         );
         members.complete([
           ChannelMember(
@@ -236,7 +301,10 @@ void main() {
           ),
         ]);
         await tester.pumpAndSettle();
-        expect(calls.last.arguments.toString(), contains('Delete channel'));
+        expect(
+          calls.last.arguments.toString(),
+          contains(soloDetails ? 'Delete chat' : 'Delete channel'),
+        );
         final displayModel = Map<String, dynamic>.from(
           calls
                   .lastWhere(
@@ -246,9 +314,63 @@ void main() {
                   .arguments
               as Map,
         );
+        if (soloDetails) {
+          final container = ProviderScope.containerOf(
+            tester.element(find.text('Open actions', skipOffstage: false)),
+            listen: false,
+          );
+          session = const HuddleSessionState(
+            phase: HuddleSessionPhase.connected,
+            parentChannelId: 'channel-id',
+            ephemeralChannelId: 'call',
+          );
+          container.invalidate(huddleSessionProvider);
+          await tester.pumpAndSettle();
+          expect(calls.last.arguments.toString(), contains('Open Huddle'));
+          result.complete('huddle');
+          await tester.pumpAndSettle();
+          expect(find.byTooltip('Minimize'), findsWidgets);
+          Navigator.of(tester.element(find.byTooltip('Minimize').first)).pop();
+          await tester.pumpAndSettle();
+          result = Completer<String?>();
+          await tester.tap(find.text('Open actions'));
+          await tester.pumpAndSettle();
+          expect(calls.where((call) => call.method == 'present'), hasLength(2));
+          session = HuddleSessionState.idle;
+          container.invalidate(huddleSessionProvider);
+          await tester.pumpAndSettle();
+          result.complete('huddle');
+          await tester.pump();
+          await tester.pump();
+          expect(discovery.requests, 1);
+          expect(find.text('Start a Huddle?'), findsNothing);
+          discovery.history.complete([
+            NostrEvent(
+              id: 'peer-start',
+              pubkey: 'peer',
+              kind: EventKind.huddleStarted,
+              createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+              tags: const [
+                ['h', 'channel-id'],
+              ],
+              content: jsonEncode({
+                'ephemeral_channel_id': '8d764100-fd8f-44cf-9c98-6d8fbd739b8c',
+              }),
+              sig: '',
+            ),
+          ]);
+          await tester.pumpAndSettle();
+          // Joining the discovered call requires a paired account in this fixture.
+          expect(find.text('Start a Huddle?'), findsNothing);
+          result = Completer<String?>();
+          await tester.tap(find.text('Open actions'));
+          await tester.pumpAndSettle();
+          expect(calls.where((call) => call.method == 'present'), hasLength(3));
+        }
         result.complete('Copy channel ID');
         await tester.pumpAndSettle();
         expect(clipboard, ['channel-id']);
+        expect(BottomUpPageRoute.hasRetainedControls(homeRoute), isFalse);
         expect(find.byType(ChannelActionsSheet), findsNothing);
         expect(find.byType(ChannelDetailsPage), findsNothing);
         expect(find.text('Open actions'), findsOneWidget);
@@ -269,7 +391,7 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        expect(find.byType(BuzzActionTile), findsNWidgets(soloDetails ? 3 : 2));
+        expect(find.byType(BuzzActionTile), findsNWidgets(soloDetails ? 2 : 1));
         expect(find.byType(AppListCard), findsWidgets);
         if (soloDetails) {
           expect(
@@ -277,9 +399,15 @@ void main() {
             findsOneWidget,
           );
           expect(find.text('general'), findsOneWidget);
+          expect(find.text('Mark unread'), findsOneWidget);
+          expect(find.text('Terp'), findsOneWidget);
+          expect(find.text('No workspace'), findsOneWidget);
+          await tester.tap(find.text('Agent'));
+          expect(selected.removeLast(), 'Agent');
         }
-        await tester.tap(find.text('Star'));
-        expect(selected, ['Star']);
+        await tester.ensureVisible(find.text('Pin'));
+        await tester.tap(find.text('Pin'));
+        expect(selected, ['Pin']);
         await tester.pumpWidget(const SizedBox());
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
@@ -306,7 +434,7 @@ void main() {
     await tester.pumpAndSettle();
 
     for (final label in [
-      'Star',
+      'Pin',
       'Mark Unread',
       'Move to section…',
       'Mute channel',
@@ -602,6 +730,206 @@ void main() {
     });
   }
 
+  for (final (pick, laterExists) in [
+    ('Work', false),
+    ('Remove from section', false),
+    ('New section…', false),
+    ('New section…', true),
+  ]) {
+    testWidgets('Move to section: $pick files the channel after the actions '
+        'sheet closes (a "Later" section already exists: $laterExists)', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(1200, 3000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final keys = nostr.Keys.generate();
+      const relayUrl = 'https://relay.example';
+      final storeKey = channelSectionsKey(keys.public, relayUrl);
+      // Records every snapshot saved for this layout, so one pick must be
+      // exactly one write.
+      final saves = _LayoutSaves('flutter.$storeKey', {
+        'flutter.$storeKey': jsonEncode(
+          ChannelSectionStore(
+            sections: [
+              const ChannelSection(id: 'work', name: 'Work', order: 0),
+              if (laterExists)
+                const ChannelSection(id: 'old-later', name: 'Later', order: 1),
+            ],
+            assignments: {
+              if (pick == 'Remove from section') 'channel-id': 'work',
+            },
+          ).toJson(),
+        ),
+      });
+      final previousStore = SharedPreferencesStorePlatform.instance;
+      SharedPreferencesStorePlatform.instance = saves;
+      SharedPreferences.resetStatic();
+      addTearDown(() {
+        SharedPreferencesStorePlatform.instance = previousStore;
+        SharedPreferences.resetStatic();
+      });
+      final prefs = await SharedPreferences.getInstance();
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          loadMembers: () async => const [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+          sectionId: pick == 'Remove from section' ? 'work' : null,
+          sectionOverrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            relayConfigProvider.overrideWith(
+              () => _SignedInConfig(relayUrl, keys.nsec),
+            ),
+            activeCommunityProvider.overrideWith((ref) async => null),
+          ],
+        ),
+      );
+      final container = ProviderScope.containerOf(
+        tester.element(find.text('Open actions')),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Move to section…'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ChannelActionsSheet), findsNothing);
+
+      await tester.tap(find.text(pick));
+      await tester.pumpAndSettle();
+      if (pick == 'New section…') {
+        await tester.enterText(find.byType(TextField), 'Later');
+        await tester.tap(find.text('Create'));
+        await tester.pumpAndSettle();
+      }
+
+      expect(tester.takeException(), isNull);
+      // The provider shows the move at once, and it is saved in one write.
+      final shown = container.read(channelSectionsProvider).store;
+      final saved = ChannelSectionStore.fromJson(
+        jsonDecode(saves.snapshots.single) as Map<String, dynamic>,
+      );
+      expect(prefs.getString(storeKey), saves.snapshots.single);
+      for (final store in [shown, saved]) {
+        final filed = store.assignments['channel-id'];
+        switch (pick) {
+          case 'Work':
+            expect(filed, 'work');
+          case 'Remove from section':
+            expect(store.assignments, isNot(contains('channel-id')));
+          default:
+            final created = store.sections.singleWhere(
+              (s) => s.name == 'Later' && s.id != 'old-later',
+            );
+            expect(filed, created.id);
+        }
+      }
+    });
+  }
+
+  for (final (pick, newKey, beforeDialog) in [
+    ('Work', true, false),
+    ('Work', false, false),
+    ('New section…', true, false),
+    ('New section…', false, false),
+    // The switch lands after the tap but before the name dialog's first frame.
+    ('New section…', true, true),
+    ('New section…', false, true),
+  ]) {
+    testWidgets('Move to section: $pick closes and files nothing once the '
+        'community changes behind it (new signing key: $newKey, before the '
+        'dialog builds: $beforeDialog)', (tester) async {
+      tester.view.physicalSize = const Size(1200, 3000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final keys = nostr.Keys.generate();
+      final other = nostr.Keys.generate();
+      const relayUrl = 'https://relay.example';
+      const otherRelayUrl = 'https://other.example';
+      final mine = channelSectionsKey(keys.public, relayUrl);
+      // A portable identity keeps its key in another community's relay.
+      final theirs = newKey
+          ? channelSectionsKey(other.public, relayUrl)
+          : channelSectionsKey(keys.public, otherRelayUrl);
+      final workOnly = jsonEncode(
+        const ChannelSectionStore(
+          sections: [ChannelSection(id: 'work', name: 'Work', order: 0)],
+          assignments: {},
+        ).toJson(),
+      );
+      SharedPreferences.setMockInitialValues({
+        mine: workOnly,
+        theirs: workOnly,
+      });
+      final prefs = await SharedPreferences.getInstance();
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          loadMembers: () async => const [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+          sectionOverrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            relayConfigProvider.overrideWith(
+              () => _SignedInConfig(relayUrl, keys.nsec),
+            ),
+            activeCommunityProvider.overrideWith((ref) async => null),
+          ],
+        ),
+      );
+      final container = ProviderScope.containerOf(
+        tester.element(find.text('Open actions')),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Move to section…'));
+      await tester.pumpAndSettle();
+      final config =
+          container.read(relayConfigProvider.notifier) as _SignedInConfig;
+      void switchToThird() => config.signInAs(
+        nostr.Keys.generate().nsec,
+        baseUrl: 'https://third.example',
+      );
+      // A second switch follows, so a stale route is asked to close more
+      // than once. Before the dialog builds, it lands just after the first
+      // frame builds the dialog.
+      void switchCommunity() {
+        config.signInAs(
+          newKey ? other.nsec : keys.nsec,
+          baseUrl: newKey ? relayUrl : otherRelayUrl,
+        );
+        if (beforeDialog) {
+          tester.binding.addPostFrameCallback((_) => switchToThird());
+        } else {
+          switchToThird();
+        }
+      }
+
+      if (beforeDialog) {
+        await tester.tap(find.text(pick));
+      } else if (pick == 'New section…') {
+        await tester.tap(find.text(pick));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byType(TextField), 'Later');
+      }
+      switchCommunity();
+      await tester.pumpAndSettle();
+
+      // The stale picker or name dialog closes rather than offering a pick
+      // that would be dropped.
+      expect(find.text(pick), findsNothing);
+      expect(find.text('Create'), findsNothing);
+      // Only the stale route closes; the page under it stays.
+      expect(find.text('Open actions'), findsOneWidget);
+
+      expect(tester.takeException(), isNull);
+      expect(
+        container.read(channelSectionsProvider).store.assignments,
+        isEmpty,
+      );
+      expect(prefs.getString(mine), workOnly);
+      expect(prefs.getString(theirs), workOnly);
+    });
+  }
+
   testWidgets('member sees neither owner action', (tester) async {
     await tester.pumpWidget(
       _app(
@@ -685,6 +1013,45 @@ void main() {
       findsNothing,
     );
   });
+
+  testWidgets(
+    'iPhone long press sends full channel details to the native sheet',
+    (tester) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(420, 912);
+      tester.view.padding = const FakeViewPadding(top: 62);
+      tester.view.viewPadding = const FakeViewPadding(top: 62);
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          details: true,
+          loadMembers: () async => [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+        ),
+      );
+      const bridge = MethodChannel('buzz/channel_actions_sheet');
+      final calls = <MethodCall>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
+        call,
+      ) async {
+        calls.add(call);
+        return null;
+      });
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          bridge,
+          null,
+        ),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      final payload =
+          calls.firstWhere((call) => call.method == 'present').arguments as Map;
+      expect(payload['details'], _channel().toJson());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
 
   testWidgets('Manage refreshes metadata after saving from actions', (
     tester,
@@ -778,10 +1145,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Open actions'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Manage channel'));
-      await tester.pumpAndSettle();
+      await selectNativeManageChannel(tester);
       expect(updates, [
         ('renamed', 'Updated description'),
         ('renamed', 'Updated description'),
@@ -843,11 +1207,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Open actions'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Manage channel'));
-    await tester.pump();
-    // Presented once, before the canvas resolved, and marked not loaded.
+    await selectNativeManageChannel(tester);
     expect(opened, [(false, false)]);
     expect(saved, isTrue);
     canvas.complete(
@@ -907,10 +1267,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Open actions'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Manage channel'));
-    await tester.pumpAndSettle();
+    await selectNativeManageChannel(tester);
     expect(canvasPresentations, [containsPair('title', 'Canvas')]);
     expect(canvasPresentations.single['multiline'], true);
     expect(channelPresentations, hasLength(2));
@@ -1047,10 +1404,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Open actions'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Manage channel'));
-      await tester.pumpAndSettle();
+      await selectNativeManageChannel(tester);
       expect(presentations.map((p) => p.$1), List.filled(3, 'presentChannel'));
       expect(presentations.map((p) => p.$2['canvasLoaded']), [
         true,
@@ -1146,13 +1500,13 @@ void main() {
     for (final label in [
       'Mute channel',
       'Copy channel name',
+      'Pin',
       'Copy channel ID',
     ]) {
       expect(find.text(label), findsOneWidget, reason: label);
     }
     for (final label in [
-      'Star',
-      'Unstar',
+      'Unpin',
       'Mark Unread',
       'Mark Read',
       'Move to section…',
@@ -1170,6 +1524,31 @@ void main() {
     expect(muteTop, lessThan(copyNameTop));
     expect(copyNameTop, lessThan(copyIdTop));
   });
+}
+
+class _LayoutSaves extends InMemorySharedPreferencesStore {
+  _LayoutSaves(this.key, Map<String, Object> data) : super.withData(data);
+
+  final String key;
+  final snapshots = <String>[];
+
+  @override
+  Future<bool> setValue(String valueType, String key, Object value) {
+    if (key == this.key) snapshots.add(value as String);
+    return super.setValue(valueType, key, value);
+  }
+}
+
+class _SignedInConfig extends RelayConfigNotifier {
+  _SignedInConfig(this.baseUrl, this.nsec);
+  final String baseUrl;
+  final String nsec;
+
+  @override
+  RelayConfig build() => RelayConfig(baseUrl: baseUrl, nsec: nsec);
+
+  void signInAs(String other, {required String baseUrl}) =>
+      state = RelayConfig(baseUrl: baseUrl, nsec: other);
 }
 
 class _FakeChannelSectionsNotifier extends ChannelSectionsNotifier {
@@ -1289,4 +1668,19 @@ class _RecordingReadState extends ReadStateNotifier {
     bool clearForcedMessages = false,
     bool explicit = false,
   }) => marks.add((contextId, unixTimestamp, clearForcedMessages));
+}
+
+class _MenuHuddleDiscovery extends RelaySessionNotifier {
+  final history = Completer<List<NostrEvent>>();
+  int requests = 0;
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (!filter.kinds.contains(EventKind.huddleStarted)) return [];
+    requests++;
+    return history.future;
+  }
 }

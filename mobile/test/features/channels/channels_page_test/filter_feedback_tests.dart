@@ -1,7 +1,11 @@
 part of '../channels_page_test.dart';
 
 void _filterFeedbackTests(
-  Widget Function({required List<Override> overrides, bool realHome})
+  Widget Function({
+    required List<Override> overrides,
+    bool realHome,
+    SharedPreferences? prefs,
+  })
   buildTestable,
 ) {
   for (final coverMessages in [true, false]) {
@@ -41,9 +45,9 @@ void _filterFeedbackTests(
         const ids = ['failed', 'loaded'];
         await tester.pumpWidget(
           buildTestable(
+            prefs: prefs,
             realHome: coverMessages,
             overrides: [
-              savedPrefsProvider.overrideWithValue(prefs),
               channelsProvider.overrideWith(
                 () => _FakeNotifier([
                   for (final id in ids)
@@ -84,6 +88,19 @@ void _filterFeedbackTests(
           ),
         );
         await tester.pumpAndSettle();
+        if (coverMessages) {
+          ProviderScope.containerOf(tester.element(find.byType(HomePage)))
+              .read(messagesDisplayProvider.notifier)
+              .update(
+                const MessagesDisplay(
+                  sort: ChannelSortMode.recent,
+                  mode: ChannelFilterMode.active,
+                  count: 5,
+                  days: 30,
+                ),
+              );
+          await tester.pumpAndSettle();
+        }
         final notice = find.text('Some activity couldn’t load');
         if (coverMessages) {
           await tester.tap(find.byTooltip('Search'));
@@ -160,6 +177,7 @@ void _filterFeedbackTests(
       final manager = _filterTestManager(onPublish: () => publications++);
       await tester.pumpWidget(
         buildTestable(
+          prefs: prefs,
           overrides: [
             channelsProvider.overrideWith(
               () => _FakeNotifier([
@@ -186,7 +204,6 @@ void _filterFeedbackTests(
                 initialStatus: SessionStatus.disconnected,
               ),
             ),
-            savedPrefsProvider.overrideWithValue(prefs),
             channelFilterProvider.overrideWithValue(manager),
           ],
         ),
@@ -273,47 +290,8 @@ void _filterFeedbackTests(
     );
     await tester.pumpAndSettle();
     expect(find.text('history'), findsNothing);
-    await tester.tap(find.text('Show more'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 70));
-    expect(
-      tester
-          .widget<SizeTransition>(
-            find
-                .ancestor(
-                  of: find.byKey(const ValueKey('history')),
-                  matching: find.byType(SizeTransition),
-                )
-                .first,
-          )
-          .sizeFactor
-          .value,
-      allOf(greaterThan(0), lessThan(1)),
-    );
-    await tester.pumpAndSettle();
-    expect(
-      tester.widget<Text>(find.text('history')).style?.fontWeight,
-      FontWeight.w400,
-    );
-    await tester.tap(find.text('Show fewer'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 70));
-    expect(
-      tester
-          .widget<SizeTransition>(
-            find
-                .ancestor(
-                  of: find.byKey(const ValueKey('history')),
-                  matching: find.byType(SizeTransition),
-                )
-                .first,
-          )
-          .sizeFactor
-          .value,
-      allOf(greaterThan(0), lessThan(1)),
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('history'), findsNothing);
+    expect(find.text('See all'), findsOneWidget);
+    expect(find.text('forced'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
     manager.dispose();
   });
@@ -330,11 +308,19 @@ void _filterFeedbackTests(
         nsec: keys.nsec,
         pubkey: keys.public,
       );
+      final other = Community.create(
+        name: 'Other community',
+        relayUrl: 'https://other.example',
+        nsec: keys.nsec,
+        pubkey: keys.public,
+      );
       await storage.save(community);
+      await storage.save(other);
       await storage.saveActiveId(community.id);
       final relay = _FilterJourneyRelay();
       await tester.pumpWidget(
         buildTestable(
+          prefs: prefs,
           overrides: [
             channelsProvider.overrideWith(
               () => _FakeNotifier([
@@ -363,7 +349,6 @@ void _filterFeedbackTests(
             ),
             communityStorageProvider.overrideWithValue(storage),
             communitySnapshotWriterProvider.overrideWithValue((_) async {}),
-            savedPrefsProvider.overrideWithValue(prefs),
             relaySessionProvider.overrideWith(() => relay),
           ],
         ),
@@ -387,7 +372,7 @@ void _filterFeedbackTests(
       await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
       await _chooseSectionOption(tester, 'Sort', 'Recent');
-      await _chooseSectionOption(tester, 'Show', 'Unreads');
+      await _chooseSectionOption(tester, 'View', 'Unreads');
       await tester.tap(find.byTooltip('Apply changes'));
       await tester.pumpAndSettle();
       expect(relay.filterPublishes, 1);
@@ -411,8 +396,8 @@ void _filterFeedbackTests(
       // and the replacement's queued refresh restores write access.
       await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
-      await _chooseSectionOption(tester, 'Show', 'All');
-      await _chooseSectionOption(tester, 'Show', 'Unreads');
+      await _chooseSectionOption(tester, 'View', 'All chats');
+      await _chooseSectionOption(tester, 'View', 'Unreads');
       await _chooseSectionOption(tester, 'Sort', 'A–Z');
       relay.holdNextFilterRead = true;
       unawaited(manager.refresh());
@@ -440,7 +425,7 @@ void _filterFeedbackTests(
       // A failed load leaves a staged filter edit recoverable from the sheet.
       await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
-      await _chooseSectionOption(tester, 'Show', 'All');
+      await _chooseSectionOption(tester, 'View', 'All chats');
       relay.setReconnecting();
       await tester.pumpAndSettle();
       relay.holdNextFilterRead = true;
@@ -465,13 +450,6 @@ void _filterFeedbackTests(
       // Switching community still abandons the sheet.
       await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
-      final other = Community.create(
-        name: 'Other community',
-        relayUrl: 'https://other.example',
-        nsec: keys.nsec,
-        pubkey: keys.public,
-      );
-      await communities.addCommunity(other);
       await communities.switchCommunity(other.id);
       await tester.pumpAndSettle();
       expect(find.text(reopen), findsOneWidget);

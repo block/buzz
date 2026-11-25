@@ -104,23 +104,19 @@ void _applyComposerFormat(
 
   isModifyingText.value = true;
   try {
-    if (sel.isCollapsed) {
-      final offset = sel.baseOffset;
-      final updated =
-          '${text.substring(0, offset)}$prefix$suffix${text.substring(offset)}';
-      controller.text = updated;
-      controller.selection = TextSelection.collapsed(
-        offset: offset + prefix.length,
-      );
-    } else {
-      final selected = text.substring(sel.start, sel.end);
-      final updated =
-          '${text.substring(0, sel.start)}$prefix$selected$suffix${text.substring(sel.end)}';
-      controller.text = updated;
-      controller.selection = TextSelection.collapsed(
-        offset: sel.start + prefix.length + selected.length + suffix.length,
-      );
-    }
+    // The selected text is kept between the delimiters, so a chip in it
+    // keeps its recipient; an empty selection gets the caret between them.
+    final selected = text.substring(sel.start, sel.end);
+    _replaceComposerRange(
+      controller,
+      start: sel.start,
+      end: sel.end,
+      replacement: '$prefix$selected$suffix',
+      caret: sel.isCollapsed
+          ? sel.start + prefix.length
+          : sel.start + prefix.length + selected.length + suffix.length,
+      keptShift: prefix.length,
+    );
   } finally {
     isModifyingText.value = false;
   }

@@ -30,20 +30,33 @@ class _MessageTile extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final mentionedPubkeys = hit.content.length > _richSearchPreviewLimit
-        ? <String>{}
-        : mentionedPubkeysFromTags(hit.tags);
+    final rich = hit.content.length <= _richSearchPreviewLimit;
+    // Identity links name their own keys: resolve those for display only.
+    final taggedPubkeys = rich
+        ? mentionedPubkeysFromTags(hit.tags)
+        : <String>{};
+    final linkedPubkeys = rich
+        // Only links in the two-line preview render, so only those resolve.
+        ? messagePreviewIdentityKeys(hit.content, maxLines: 2)
+        : const <String>{};
     // A hit is labelled within its channel, as it would be there.
     final hitChannelId = channel?.id ?? hit.channelId;
-    final labelPubkeys = {hit.pubkey.toLowerCase(), ...mentionedPubkeys};
+    final labelPubkeys = {hit.pubkey.toLowerCase(), ...taggedPubkeys};
     final Map<String, String> labels;
     if (hitChannelId == null) {
-      final names = watchIdentityNames(ref, labelPubkeys);
-      labels = {
-        for (final pubkey in labelPubkeys) pubkey: names.labelFor(pubkey),
-      };
+      final names = watchIdentityNames(ref, {
+        ...labelPubkeys,
+        ...linkedPubkeys,
+      });
+      requestLinkedProfiles(ref, linkedPubkeys);
+      labels = identityLabels(names, labelPubkeys, linkedPubkeys);
     } else {
-      labels = watchChannelIdentityLabels(ref, hitChannelId, labelPubkeys);
+      labels = watchChannelIdentityLabels(
+        ref,
+        hitChannelId,
+        labelPubkeys,
+        linkedPubkeys: linkedPubkeys,
+      );
     }
     final authorName =
         labels[hit.pubkey.toLowerCase()] ??

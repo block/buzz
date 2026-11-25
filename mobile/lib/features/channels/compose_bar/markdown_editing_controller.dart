@@ -15,7 +15,47 @@ class _MarkdownRule {
 }
 
 class _MarkdownEditingController extends TextEditingController {
-  final Set<String> _agentMentionNames = <String>{};
+  _MarkdownEditingController({this.portableProse = false});
+
+  /// Set by the message edit sheet, whose chips are rewritten as identity
+  /// links in a body other Markdown readers also draw. A name is then prose
+  /// only where those readers agree with this bubble: not in a reference
+  /// whose definition differs only in case, and not in an indented code
+  /// block. The composer leaves it unset, so a send notifies wherever this
+  /// bubble draws a pill.
+  final bool portableProse;
+
+  /// Picked mentions bound to their recipients, in text order. The editor
+  /// stores the literal `@Label` the relay receives; each binding is carried
+  /// across edits by position, so two namesakes can both read `@Sam` and
+  /// still notify two people, and no key ever enters the text. Holds the
+  /// dormant bindings too; see [bindings].
+  List<_ComposerMention> _mentions = const [];
+
+  /// The bindings of [_mentions] that sit in prose; see [mentions].
+  List<_ComposerMention> _live = const [];
+
+  /// Set when a saved draft's bindings could not be read. The send refuses
+  /// until no `@` is left in the text, since nothing says who it was for.
+  bool _mentionsInvalid = false;
+
+  /// Display labels for chips whose name another candidate shares, by
+  /// lowercase key, such as `Sam · a1b2`. Display only.
+  Map<String, String> _mentionQualifiers = const {};
+
+  /// Set while Undo (-1) or Redo (1) restores an earlier value, which must
+  /// stay exact rather than be widened to a chip or given a space after a
+  /// link. Zero for every other edit.
+  int _historyDirection = 0;
+
+  /// The bindings held with each text of the current draft, oldest first,
+  /// and where the current text sits among them; a different draft starts
+  /// it again ([replaceDraft]). Undo and Redo restore text
+  /// alone, and identical neighbouring text (`@Sam @Sam`) cannot say whose
+  /// chip came back, so the restored text takes its bindings from here.
+  final List<({String text, List<_ComposerMention> mentions})> _history = [];
+  int _historyAt = -1;
+  static const _maxHistory = 200;
   TextSpan? _cachedTextSpan;
   String? _cachedText;
   TextRange? _cachedComposingRange;
@@ -29,6 +69,14 @@ class _MarkdownEditingController extends TextEditingController {
   String? _chipRangesText;
   List<TextRange> _chipRanges = const [];
   final List<TextRange> _pendingChipRanges = [];
+
+  /// The last selection the platform set that reached into a chip, and the
+  /// chip-wide selection it was snapped to in [_snappedText]. iOS selects
+  /// the character before the caret right before Backspace removes it; the
+  /// removal then matches this range rather than the snapped selection.
+  TextSelection? _platformSelection;
+  TextSelection? _snappedSelection;
+  String? _snappedText;
 
   /// Where [buildTextSpan] last ran, so the chip ranges can be brought up
   /// to date when edits arrive faster than frames.
@@ -63,26 +111,200 @@ class _MarkdownEditingController extends TextEditingController {
   /// then shows as raw text.
   @override
   set value(TextEditingValue newValue) {
-    final previousText = super.value.text;
+    final text = newValue.text;
+    if (text != value.text) {
+      if (_mentionsInvalid && !text.contains('@')) _mentionsInvalid = false;
+      if (_history.isEmpty) _recordHistory(value.text);
+      if (_historyDirection == 0) {
+        _carryMentions(value, newValue);
+        _recordHistory(text);
+      } else if (!_restoreHistory(text)) {
+        _carryMentions(value, newValue);
+      }
+      _live = _inProse(text, _mentions);
+    }
     super.value = _snapSelectionToChips(newValue);
-    // Like Flutter's undo history, keep only values that changed the text.
-    if (super.value.text == previousText && _recentValues.isNotEmpty) return;
-    _recentValues.add(_historyKey(super.value));
   }
 
-  /// Text edits this controller has made. Undo and redo restore one of these
-  /// exactly, which tells them apart from a key press or a paste of a link.
-  /// Like Flutter's undo stack this is unbounded, so it keeps a small key per
-  /// edit rather than each edit's full text.
-  final _recentValues = <(int, int, int)>{};
+  /// The picked mentions that are live in [text], in text order: the chips
+  /// drawn, the recipients of a send and the identity links of a saved
+  /// edit. A binding inside code or a web link is dormant and not here.
+  List<_ComposerMention> get mentions => _live;
 
-  /// Android's undo history drops the composing range, so the key leaves it
-  /// out.
-  static (int, int, int) _historyKey(TextEditingValue value) =>
-      (value.text.length, value.text.hashCode, value.selection.hashCode);
+  /// Every picked mention bound in [text], in text order: [mentions] and
+  /// the dormant ones inside code or a web link. A dormant binding keeps
+  /// its recipient and moves with the text like any other, so a pick
+  /// wrapped in code and then unwrapped by hand is the same person again
+  /// and not a typed name. Saved drafts and restored text carry these.
+  List<_ComposerMention> get bindings => _mentions;
+
+  /// Whether a restored draft's bindings were unreadable; see [replaceDraft].
+  bool get mentionsInvalid => _mentionsInvalid;
+
+  /// Moves every binding across the edit from [old] to [next]: a mention
+  /// the edit reached into is gone, as is one a name character now
+  /// continues (`@Bobby`); punctuation, quotes, hyphens and slashes typed
+  /// against a chip keep it and its recipient (`@Bob's`).
+  void _carryMentions(TextEditingValue old, TextEditingValue next) {
+    if (_mentions.isEmpty) return;
+    final replaced = editReplacedRange(
+      old.text,
+      next.text,
+      oldSelection: old.selection,
+      newSelection: next.selection,
+    );
+    final ranges = remapMentionRanges(
+      [for (final mention in _mentions) mention.range],
+      replaced: replaced,
+      oldLength: old.text.length,
+      newText: next.text,
+    );
+    _mentions = List.unmodifiable([
+      for (var i = 0; i < ranges.length; i++)
+        if (ranges[i] case final range?) _mentions[i].at(range),
+    ]);
+  }
+
+  /// The [mentions] that sit in the prose of [text]: outside the code spans
+  /// and blocks drawn in it, and outside every Markdown link, image and URL
+  /// ([mentionsInsideMarkdownLinks]). Code and link text are literal: a name
+  /// there draws no pill in the bubble and notifies nobody, so a binding
+  /// that lands there is dormant, whether a command wrapped a chip, the
+  /// syntax was typed around it, a pick was made inside it or a saved draft
+  /// held it. Text without a backtick, a `]` or a `://` costs three
+  /// searches.
+  List<_ComposerMention> _inProse(
+    String text,
+    List<_ComposerMention> mentions,
+  ) {
+    if (mentions.isEmpty) return mentions;
+    var kept = mentions;
+    if (text.contains('`')) {
+      final code = _styledCodeRanges(text);
+      kept = [
+        for (final mention in mentions)
+          if (!code.any((c) => c.start < mention.start && mention.end < c.end))
+            mention,
+      ];
+    }
+    final linked = mentionsInsideMarkdownLinks(text, [
+      for (final mention in kept) mention.range,
+    ], portable: portableProse);
+    if (linked.isEmpty && identical(kept, mentions)) return mentions;
+    return List.unmodifiable([
+      for (var i = 0; i < kept.length; i++)
+        if (!linked.contains(i)) kept[i],
+    ]);
+  }
+
+  /// Sets [newValue] and the mentions bound in it in one notification, so
+  /// no listener sees the text without its bindings: a restored or
+  /// recovered draft, a prefill, or a cleared composer. [mentionsInvalid]
+  /// marks a draft whose saved bindings could not be read.
+  ///
+  /// The value starts a different draft unless [sameDraft] is set, as a
+  /// command editing the current one sets it: the binding history is
+  /// dropped, so an Undo that brings back the text of a sent, cleared or
+  /// other draft brings back no pick made there.
+  void replaceDraft(
+    TextEditingValue newValue, {
+    required List<_ComposerMention> mentions,
+    bool mentionsInvalid = false,
+    bool sameDraft = false,
+  }) {
+    if (!sameDraft) {
+      _history.clear();
+      _historyAt = -1;
+    } else if (_history.isEmpty) {
+      _recordHistory(value.text);
+    }
+    _mentions = List.unmodifiable(
+      mentions.toList()..sort((a, b) => a.start.compareTo(b.start)),
+    );
+    _live = _inProse(newValue.text, _mentions);
+    _mentionsInvalid = mentionsInvalid;
+    _cachedTextSpan = null;
+    _recordHistory(newValue.text);
+    final snapped = _snapSelectionToChips(newValue);
+    final unchanged = value == snapped;
+    super.value = snapped;
+    if (unchanged) notifyListeners();
+  }
+
+  /// Replaces the `@query` at `[start, end)` with `@Label` and [separator]
+  /// (a space, or the closing punctuation that selected the name) bound to
+  /// [candidate], caret after the separator. Mentions after it move with
+  /// the text in the same notification.
+  void insertMention({
+    required int start,
+    required int end,
+    required MentionCandidate candidate,
+    String separator = ' ',
+  }) {
+    final label = candidate.label;
+    final replacement = '@$label$separator';
+    replaceRange(
+      start: start,
+      end: end,
+      replacement: replacement,
+      caret: start + replacement.length,
+      added: _ComposerMention(
+        start: start,
+        end: start + 1 + label.length,
+        candidate: candidate,
+      ),
+    );
+  }
+
+  /// Replaces `[start, end)` with [replacement] for a composer command, the
+  /// caret at [caret], and moves the bound mentions in the same
+  /// notification. A command knows exactly what it replaced, where a typed
+  /// edit is inferred from the selection: formatting wrapped around a
+  /// selected chip keeps the chip (see [remapMentionRanges] for
+  /// [keptShift]), and text a share appends never takes a chip's key.
+  void replaceRange({
+    required int start,
+    required int end,
+    required String replacement,
+    required int caret,
+    int? keptShift,
+    _ComposerMention? added,
+  }) {
+    final next = TextEditingValue(
+      text: text.replaceRange(start, end, replacement),
+      selection: TextSelection.collapsed(offset: caret),
+    );
+    final carried = remapMentionRanges(
+      [for (final mention in _mentions) mention.range],
+      replaced: TextRange(start: start, end: end),
+      oldLength: text.length,
+      newText: next.text,
+      keptShift: keptShift,
+    );
+    replaceDraft(
+      next,
+      mentions: [
+        for (var i = 0; i < carried.length; i++)
+          if (carried[i] case final range?) _mentions[i].at(range),
+        ?added,
+      ],
+      mentionsInvalid: _mentionsInvalid && next.text.contains('@'),
+      sameDraft: true,
+    );
+  }
+
+  /// Updates the display labels of namesake chips (lowercase key to label
+  /// such as `Sam · a1b2`). The text keeps `@Sam`.
+  void setMentionQualifiers(Map<String, String> qualifiers) {
+    if (mapEquals(_mentionQualifiers, qualifiers)) return;
+    _mentionQualifiers = Map.unmodifiable(qualifiers);
+    _cachedTextSpan = null;
+    notifyListeners();
+  }
 
   TextEditingValue _snapSelectionToChips(TextEditingValue next) {
     _refreshChipRanges(next.text);
+    _platformSelection = _snappedSelection = _snappedText = null;
     final selection = next.selection;
     if ((_chipRanges.isEmpty && _revealedChip == null) ||
         next.text != _chipRangesText ||
@@ -131,6 +353,9 @@ class _MarkdownEditingController extends TextEditingController {
         : selection.baseOffset <= selection.extentOffset
         ? TextSelection(baseOffset: start, extentOffset: end)
         : TextSelection(baseOffset: end, extentOffset: start);
+    _platformSelection = selection;
+    _snappedSelection = snapped;
+    _snappedText = next.text;
     return next.copyWith(selection: snapped);
   }
 
@@ -231,22 +456,6 @@ class _MarkdownEditingController extends TextEditingController {
     _MarkdownRule(r'_([^_\n]*?)_', _MarkdownStyle.italic),
   ];
 
-  /// Updates the known agent labels which should render as agent mention
-  /// chips. The editor still stores the literal `@Name` text, matching the
-  /// markdown sent to the relay.
-  void setAgentMentionNames(Iterable<String> names) {
-    final next = {
-      for (final name in names)
-        if (name.trim().isNotEmpty) name.trim().toLowerCase(),
-    };
-    if (setEquals(_agentMentionNames, next)) return;
-    _agentMentionNames
-      ..clear()
-      ..addAll(next);
-    _cachedTextSpan = null;
-    notifyListeners();
-  }
-
   @override
   TextSpan buildTextSpan({
     required BuildContext context,
@@ -310,7 +519,7 @@ class _MarkdownEditingController extends TextEditingController {
     TextEditingValue newValue,
   ) {
     // Undo and Redo restore an earlier value exactly, and must stay exact.
-    if (_recentValues.contains(_historyKey(newValue))) return newValue;
+    if (_historyDirection != 0) return newValue;
     return _spaceAfterPastedLink(
       oldValue,
       expandChipDeletion(oldValue, newValue),
@@ -412,8 +621,15 @@ class _MarkdownEditingController extends TextEditingController {
   /// hidden source so it removes the whole chip. Each chip draws its whole
   /// URL or `@label` as one glyph, so backspace right after it would
   /// otherwise remove one invisible character of the source and leave a
-  /// broken token behind. Edits over a selection replace exactly that
-  /// selection, so Cut never removes more than it copies.
+  /// broken token behind. The deletion arrives either against a collapsed
+  /// caret (Android, hardware keys in tests) or, as iOS reports it from the
+  /// hardware key and the on-screen delete key alike, as two updates: the
+  /// character before the caret is selected first, then that selection is
+  /// removed. The selection step snaps to the whole chip, so the removal is
+  /// recognised by matching the platform's own selection rather than the
+  /// snapped one. Any other edit over a selection replaces exactly that
+  /// selection, so typed text is kept and Cut never removes more than it
+  /// copies.
   TextEditingValue expandChipDeletion(
     TextEditingValue oldValue,
     TextEditingValue newValue,
@@ -423,19 +639,20 @@ class _MarkdownEditingController extends TextEditingController {
     if (_chipRanges.isEmpty ||
         _chipRangesText != oldValue.text ||
         !oldSelection.isValid ||
-        !oldSelection.isCollapsed ||
         !_withinChip(oldValue.composing, _chipRanges) ||
         !_withinChip(newValue.composing, _chipRanges)) {
       return newValue;
     }
     final newSelection = newValue.selection;
     if (!newSelection.isValid || !newSelection.isCollapsed) return newValue;
-    final deleted = _caretDeletion(
-      oldValue.text,
-      newValue.text,
-      oldSelection.baseOffset,
-      newSelection.baseOffset,
-    );
+    final deleted = oldSelection.isCollapsed
+        ? _caretDeletion(
+            oldValue.text,
+            newValue.text,
+            oldSelection.baseOffset,
+            newSelection.baseOffset,
+          )
+        : _platformSelectionDeletion(oldValue, newValue);
     if (deleted == null) return newValue;
     // A link the caret has revealed edits as raw text, even before the next
     // frame drops its chip.
@@ -512,6 +729,30 @@ class _MarkdownEditingController extends TextEditingController {
       return TextRange(start: caret, end: caret + removed);
     }
     return null;
+  }
+
+  /// The range the platform removed when [oldValue] carries the snapped
+  /// form of a selection the platform set inside a chip and [newValue] is
+  /// [oldValue] with exactly that platform selection gone, caret at its
+  /// start. Null for any other edit, including text typed over a selection.
+  TextRange? _platformSelectionDeletion(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final platform = _platformSelection;
+    if (platform == null ||
+        _snappedText != oldValue.text ||
+        _snappedSelection != oldValue.selection) {
+      return null;
+    }
+    final oldText = oldValue.text;
+    final start = platform.start;
+    final end = platform.end;
+    if (newValue.selection.baseOffset != start ||
+        newValue.text != oldText.replaceRange(start, end, '')) {
+      return null;
+    }
+    return TextRange(start: start, end: end);
   }
 
   List<InlineSpan> _buildMarkdownSpans(
@@ -596,7 +837,7 @@ class _MarkdownEditingController extends TextEditingController {
             contentStyle,
             matchOffset + contentStart,
             composingRange,
-            renderAgentMentions: false,
+            renderMentions: false,
           ),
         );
       }
@@ -619,14 +860,14 @@ class _MarkdownEditingController extends TextEditingController {
     TextStyle style,
     int sourceOffset,
     TextRange composingRange, {
-    bool renderAgentMentions = true,
+    bool renderMentions = true,
   }) {
     List<InlineSpan> buildTextSegment(
       String text,
       TextStyle segmentStyle,
       int segmentOffset,
-    ) => renderAgentMentions
-        ? _buildAgentMentionSpans(
+    ) => renderMentions
+        ? _buildMentionSpans(
             context,
             text,
             segmentStyle,
@@ -675,7 +916,11 @@ class _MarkdownEditingController extends TextEditingController {
     ];
   }
 
-  List<InlineSpan> _buildAgentMentionSpans(
+  /// Draws each bound mention inside [source] as one chip over its hidden
+  /// `@Label` source, so the span keeps one character per source character
+  /// for native caret movement and deletion. A namesake's chip reads its
+  /// qualified display label while the source stays the plain name.
+  List<InlineSpan> _buildMentionSpans(
     BuildContext context,
     String source,
     TextStyle style, {
@@ -686,65 +931,48 @@ class _MarkdownEditingController extends TextEditingController {
         ? _buildComposerTokenSpans(context, source, style, sourceOffset)
         : null;
     if (tokenSpans != null) return tokenSpans;
-    if (_agentMentionNames.isEmpty) {
-      return [TextSpan(text: source, style: style)];
-    }
+    final segmentEnd = sourceOffset + source.length;
+    final inSegment = [
+      for (final mention in _live)
+        if (mention.start >= sourceOffset && mention.end <= segmentEnd) mention,
+    ];
+    if (inSegment.isEmpty) return [TextSpan(text: source, style: style)];
 
-    final escapedNames = _agentMentionNames.toList()
-      ..sort((a, b) => b.length.compareTo(a.length));
-    final expression = RegExp(
-      r'(^|\s)@(' +
-          escapedNames.map(RegExp.escape).join('|') +
-          r')(?=\s|[,.!?:;)\]}*_]|$)',
-      caseSensitive: false,
-      multiLine: true,
-    );
     final spans = <InlineSpan>[];
     var offset = 0;
-    for (final match in expression.allMatches(source)) {
-      final prefix = match.group(1)!;
-      if (match.start > offset) {
+    for (final mention in inSegment) {
+      final start = mention.start - sourceOffset;
+      final end = mention.end - sourceOffset;
+      if (start > offset) {
         spans.add(
-          TextSpan(text: source.substring(offset, match.start), style: style),
+          TextSpan(text: source.substring(offset, start), style: style),
         );
       }
-      if (prefix.isNotEmpty) spans.add(TextSpan(text: prefix, style: style));
-
-      final label = match.group(2)!;
-      if (RegExp(r'\([0-9a-f]{64}\)').hasMatch(label)) {
-        spans.add(
-          TextSpan(
-            text: '@$label',
-            style: style.copyWith(color: context.colors.primary),
-          ),
-        );
-        offset = match.end;
-        continue;
-      }
+      final hidden = source.substring(start + 1, end);
       spans.add(
         WidgetSpan(
           alignment: PlaceholderAlignment.baseline,
           baseline: TextBaseline.alphabetic,
-          child: _ComposerAgentMentionChip(label: label, textStyle: style),
+          child: _ComposerMentionChip(
+            label:
+                _mentionQualifiers[mention.pubkey] ?? mention.candidate.label,
+            isAgent: mention.candidate.isAgent,
+            textStyle: style,
+          ),
         ),
       );
-      _pendingChipRanges.add(
-        TextRange(
-          start: sourceOffset + match.start + prefix.length,
-          end: sourceOffset + match.end,
-        ),
-      );
+      _pendingChipRanges.add(TextRange(start: mention.start, end: mention.end));
       // The visual chip replaces the `@` placeholder. Keep the label as
       // invisible source text so the text span still has one character per
       // source character, preserving native cursor and deletion behavior.
       spans.add(
         TextSpan(
-          text: label,
+          text: hidden,
           semanticsLabel: '',
           style: _hiddenMentionTextStyle(style),
         ),
       );
-      offset = match.end;
+      offset = end;
     }
     if (offset < source.length) {
       spans.add(TextSpan(text: source.substring(offset), style: style));
@@ -766,7 +994,7 @@ class _MarkdownEditingController extends TextEditingController {
     for (final match in matches) {
       if (match.start > offset) {
         spans.addAll(
-          _buildAgentMentionSpans(
+          _buildMentionSpans(
             context,
             source.substring(offset, match.start),
             style,
@@ -829,7 +1057,7 @@ class _MarkdownEditingController extends TextEditingController {
     }
     if (offset < source.length) {
       spans.addAll(
-        _buildAgentMentionSpans(
+        _buildMentionSpans(
           context,
           source.substring(offset),
           style,
@@ -950,122 +1178,4 @@ class _MarkdownEditingController extends TextEditingController {
       decoration: TextDecoration.none,
     );
   }
-}
-
-class _ComposerBuzzLinkChip extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String semanticLabel;
-  final TextStyle textStyle;
-
-  const _ComposerBuzzLinkChip({
-    required this.icon,
-    required this.label,
-    required this.semanticLabel,
-    required this.textStyle,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final style = textStyle.copyWith(
-      color: context.colors.primary,
-      fontWeight: FontWeight.w600,
-      height: 1,
-    );
-    final fontSize = style.fontSize ?? 16;
-    return Semantics(
-      label: semanticLabel,
-      excludeSemantics: true,
-      child: Container(
-        key: ValueKey('composer-buzz-link-chip:$label'),
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-        decoration: BoxDecoration(
-          color: context.colors.primary.withValues(alpha: 0.16),
-          borderRadius: BorderRadius.circular(Radii.sm),
-          border: Border.all(
-            color: context.colors.primary.withValues(alpha: 0.12),
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: fontSize * 0.95, color: context.colors.primary),
-            const SizedBox(width: Grid.quarter + 1),
-            Text(label, style: style),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ComposerAgentMentionChip extends StatelessWidget {
-  final String label;
-  final TextStyle textStyle;
-
-  const _ComposerAgentMentionChip({
-    required this.label,
-    required this.textStyle,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final style = textStyle.copyWith(
-      color: context.colors.primary,
-      fontWeight: FontWeight.w500,
-      height: 1,
-    );
-    final fontSize = style.fontSize ?? 16;
-
-    return Semantics(
-      label: 'Agent mention: $label',
-      excludeSemantics: true,
-      child: Container(
-        key: const ValueKey('composer-agent-mention-chip'),
-        padding: const EdgeInsets.fromLTRB(
-          Grid.half,
-          Grid.quarter + 1,
-          Grid.half,
-          Grid.quarter,
-        ),
-        decoration: BoxDecoration(
-          // The composer surface is already tinted, so the body chip's
-          // low-opacity fill disappears here. Keep the same chip geometry
-          // while giving this editable token enough contrast to read as one.
-          color: context.colors.primary.withValues(alpha: 0.16),
-          borderRadius: BorderRadius.circular(Radii.sm),
-          border: Border.all(
-            color: context.colors.primary.withValues(alpha: 0.12),
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            Icon(
-              BuzzIcons.bot,
-              size: fontSize * 0.95,
-              color: context.colors.primary,
-            ),
-            const SizedBox(width: Grid.quarter),
-            Text(label, style: style),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Routes user edits through [_MarkdownEditingController.formatUserEdit] so
-/// composer chips follow their editing rules.
-class _ComposerChipEditingFormatter extends TextInputFormatter {
-  final _MarkdownEditingController controller;
-
-  _ComposerChipEditingFormatter(this.controller);
-
-  @override
-  TextEditingValue formatEditUpdate(
-    TextEditingValue oldValue,
-    TextEditingValue newValue,
-  ) => controller.formatUserEdit(oldValue, newValue);
 }

@@ -1,10 +1,14 @@
 import 'package:buzz/features/settings/settings_page.dart';
+import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
+import 'package:buzz/shared/community/community_storage.dart';
 import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/push/push_bootstrap.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/push_relay_capability_provider.dart';
+import 'package:buzz/shared/push/push_subscription.dart';
+import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:buzz/shared/relay/relay_session.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -13,7 +17,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../community/community_storage_test.dart';
+
+const _turningOff =
+    'Turning off. Notifications may continue until this finishes.';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -135,5 +145,119 @@ void main() {
         },
       );
     }
+
+    testWidgets(
+      'Android without a gateway shows a saved opt-in only until it is off',
+      (tester) async {
+        tester.view.physicalSize = const Size(430, 1800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        PackageInfo.setMockInitialValues(
+          appName: 'Buzz',
+          packageName: 'buzz',
+          version: '1.0.0',
+          buildNumber: '1',
+          buildSignature: '',
+        );
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final storage = CommunityStorage(secure: FakeSecureStorage());
+        final subscriptions = [
+          BuzzPushSubscription(
+            filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+            notificationClass: 'default',
+          ),
+        ];
+        final community =
+            Community.create(
+              name: 'Team',
+              relayUrl: 'wss://relay.example',
+            ).copyWith(
+              pushNotificationsEnabled: true,
+              pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+                desired: subscriptions,
+              ).withAccepted(subscriptions: subscriptions, generation: 7),
+            );
+        await storage.save(community);
+        await storage.saveActiveId(community.id);
+        var relayAccepts = false;
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
+              authProvider.overrideWith(_Auth.new),
+              communityStorageProvider.overrideWithValue(storage),
+              communitySnapshotWriterProvider.overrideWithValue(
+                (communities) async {},
+              ),
+              communityPushLeaseDeactivatorProvider.overrideWithValue((
+                community, {
+                generation,
+              }) async {
+                if (!relayAccepts) throw StateError('relay rejected');
+              }),
+              appLifecycleProvider.overrideWith(_Lifecycle.new),
+            ],
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: SettingsPage(
+                profileHeader: const SizedBox.shrink(),
+                identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // The saved opt-in stays visible so it can be turned off.
+        expect(find.text('Notifications'), findsOneWidget);
+        expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+
+        await tester.tap(find.byType(Switch));
+        await tester.pumpAndSettle();
+
+        // The relay rejected the tombstone: the row stays, inert, and says so
+        // until a retry gets through.
+        expect(find.text('Notifications'), findsOneWidget);
+        expect(find.text(_turningOff), findsOneWidget);
+        final offSwitch = tester.widget<Switch>(find.byType(Switch));
+        expect(offSwitch.value, isFalse);
+        expect(offSwitch.onChanged, isNull);
+
+        relayAccepts = true;
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(SettingsPage)),
+        );
+        await container
+            .read(communityListProvider.notifier)
+            .retryPendingPushLeaseTombstone(community.id);
+        await tester.pumpAndSettle();
+
+        expect(
+          (await storage.loadAll())
+              .single
+              .pushSubscriptionState
+              .pendingTombstoneGeneration,
+          isNull,
+        );
+        expect(find.text(_turningOff), findsNothing);
+        expect(find.text('Notifications'), findsNothing);
+        expect(tester.takeException(), isNull);
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
   });
+}
+
+class _Lifecycle extends AppLifecycleNotifier {
+  @override
+  AppLifecycleState build() => AppLifecycleState.resumed;
+}
+
+class _Auth extends AuthNotifier {
+  @override
+  Future<AuthState> build() async =>
+      const AuthState(status: AuthStatus.unauthenticated);
 }

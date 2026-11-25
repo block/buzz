@@ -1,7 +1,8 @@
 part of '../channels_page_test.dart';
 
 void _readSeedJourney(
-  Widget Function({required List<Override> overrides}) buildTestable,
+  Widget Function({required List<Override> overrides, SharedPreferences? prefs})
+  buildTestable,
 ) {
   testWidgets('late unseen channels stay unread after journal reload', (
     tester,
@@ -14,8 +15,8 @@ void _readSeedJourney(
     Future<ProviderContainer> mount(_ReadSeedSession session) async {
       await tester.pumpWidget(
         buildTestable(
+          prefs: prefs,
           overrides: [
-            savedPrefsProvider.overrideWithValue(prefs),
             relayConfigProvider.overrideWith(() => _ReadSeedConfig(keys.nsec)),
             relaySessionProvider.overrideWith(() => session),
             activeCommunityProvider.overrideWith((ref) async => null),
@@ -89,8 +90,8 @@ void _readSeedJourney(
     store.nonemptySnapshots.clear();
     await tester.pumpWidget(
       buildTestable(
+        prefs: prefs,
         overrides: [
-          savedPrefsProvider.overrideWithValue(prefs),
           relayConfigProvider.overrideWith(() => _ReadSeedConfig(keys.nsec)),
           relaySessionProvider.overrideWith(() => session),
           activeCommunityProvider.overrideWith((ref) async => null),
@@ -114,7 +115,7 @@ void _readSeedJourney(
     );
     expect(
       tester.widget<Text>(find.text('channel-1')).style?.fontWeight,
-      FontWeight.w400,
+      FontWeight.w500,
     );
     final saved = ReadStateStorage(prefs).readJournal(
       '${keys.public}:${Uri.encodeComponent('https://seed.example')}',

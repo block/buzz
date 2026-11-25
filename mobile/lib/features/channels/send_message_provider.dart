@@ -8,6 +8,7 @@ import '../channels/channel_management_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'channel.dart';
+import 'composer_send_origin.dart';
 import 'me/me_messages_provider.dart';
 import 'channel_messages_provider.dart';
 import 'message_mention_pubkeys.dart';
@@ -55,8 +56,9 @@ class SendMessage {
   /// thread head). Tags are built to match the desktop's `buildReplyTags`
   /// convention with `root` / `reply` markers. Pass [mediaTags] to append
   /// relay-validated `imeta` tags and NIP-30 `emoji` tags. [mayPublish] is
-  /// asked after every wait, right before the event is signed and published;
-  /// when it says no, nothing is published and this throws.
+  /// asked after every wait, once the event is signed and shown locally and
+  /// right before it is published; when it says no, nothing is published,
+  /// the local message is removed and this throws.
   Future<void> call({
     required String channelId,
     required String content,
@@ -134,6 +136,7 @@ class SendMessage {
           localMessage = event;
           _markLocalMessageForAnimation(channelId, event.id);
           _addLocalMessage(channelId, event);
+          ComposerSendOrigin.didInsertLocalMessage();
         },
         mayPublish: mayPublish,
       );

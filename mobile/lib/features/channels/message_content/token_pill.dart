@@ -118,6 +118,11 @@ RegExp _buildPrefixPattern({
 
   final escapedPrefix = RegExp.escape(prefix);
   const leadingBoundary = r'(?<![\w./:-])';
+  // A known name ends where `mentionOccurrences` ends it: a letter, mark or
+  // digit continues it, anything else follows it as text, so `@Bob's`,
+  // `@Bob-bot`, `@Bob/Alice` and an italic `_@Bob_` draw Bob's pill. An
+  // unknown token still ends only at whitespace or sentence punctuation.
+  const knownTrailingBoundary = '(?!$mentionNameContinuation)';
   const trailingBoundary = r'(?=$|[\s,;.!?:)\]}])';
 
   if (names.isEmpty) {
@@ -125,13 +130,15 @@ RegExp _buildPrefixPattern({
       '$leadingBoundary$escapedPrefix(?:$genericTokenPattern)$trailingBoundary',
       caseSensitive: false,
       multiLine: true,
+      unicode: true,
     );
   }
 
   final knownAlternatives = names.map(RegExp.escape).join('|');
   return RegExp(
-    '$leadingBoundary$escapedPrefix(?:(?:$knownAlternatives)$trailingBoundary|(?:$genericTokenPattern)$trailingBoundary)',
+    '$leadingBoundary$escapedPrefix(?:(?:$knownAlternatives)$knownTrailingBoundary|(?:$genericTokenPattern)$trailingBoundary)',
     caseSensitive: false,
     multiLine: true,
+    unicode: true,
   );
 }

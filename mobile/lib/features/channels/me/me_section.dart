@@ -1,12 +1,13 @@
+import '../../../shared/widgets/section_state_chevron.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../../../shared/theme/theme.dart';
-import '../../../shared/theme/buzz_icons.dart';
 import '../../../shared/widgets/collapsible_section_body.dart';
 import '../../../shared/widgets/collapsible_sliver_body.dart';
 
 import '../channel_sections/section_options_button.dart';
+import '../channels_page/filters.dart';
 
 /// A project or unassigned-chat section matching the Channels list headings.
 class MeSection extends HookWidget {
@@ -15,6 +16,7 @@ class MeSection extends HookWidget {
     required this.label,
     required this.children,
     this.sliver = false,
+    this.compactHeaderGap = false,
     this.onFilter,
   }) : buildBody = null;
 
@@ -23,20 +25,21 @@ class MeSection extends HookWidget {
     required this.label,
     required this.buildBody,
     this.onFilter,
+    this.compactHeaderGap = false,
   }) : sliver = true,
        children = const [];
 
   final String label;
   final VoidCallback? onFilter;
   final bool sliver;
+  final bool compactHeaderGap;
   final List<Widget> children;
   final Widget Function(bool expanded)? buildBody;
 
   @override
   Widget build(BuildContext context) {
     final expanded = useState(true);
-    final color = navigationHeadingForeground(context);
-    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final inset = compactHeaderGap ? Grid.inventoryRowInset : Grid.xxs;
     final toggle = Semantics(
       label: label,
       excludeSemantics: true,
@@ -47,39 +50,15 @@ class MeSection extends HookWidget {
         borderRadius: BorderRadius.circular(Radii.md),
         onTap: () => expanded.value = !expanded.value,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(
+          padding: EdgeInsets.fromLTRB(
             Grid.xxs,
-            Grid.twelve,
+            compactHeaderGap ? Grid.inventorySectionTopInset : inset,
             Grid.xxs,
-            Grid.half,
+            inset,
           ),
           child: ConstrainedBox(
-            constraints: const BoxConstraints(minHeight: 28),
-            child: Row(
-              children: [
-                Flexible(
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: navigationSectionTextStyle.copyWith(color: color),
-                  ),
-                ),
-                const SizedBox(width: Grid.quarter),
-                AnimatedRotation(
-                  turns: expanded.value ? 0 : -0.25,
-                  duration: reducedMotion
-                      ? Duration.zero
-                      : sectionExpandDuration,
-                  curve: sectionExpandCurve,
-                  child: Icon(
-                    BuzzIcons.chevronDown,
-                    size: 14,
-                    color: navigationAccessoryForeground(context),
-                  ),
-                ),
-              ],
-            ),
+            constraints: BoxConstraints(minHeight: compactHeaderGap ? 0 : 28),
+            child: SectionHeadingLabel(label: label, expanded: expanded.value),
           ),
         ),
       ),
@@ -101,12 +80,19 @@ class MeSection extends HookWidget {
     if (sliver) {
       return SliverMainAxisGroup(
         slivers: [
-          SliverToBoxAdapter(child: header),
-          buildBody?.call(expanded.value) ??
-              CollapsibleSliverBody(
-                expanded: expanded.value,
-                sliver: SliverList.list(children: children),
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: EdgeInsets.only(
+                left: MessagesSectionOptions.leadingInset(context) - Grid.xxs,
+                right: Grid.gutter - Grid.xxs,
               ),
+              child: header,
+            ),
+          ),
+          CollapsibleSliverBody(
+            expanded: expanded.value,
+            sliver: SliverList.list(children: children),
+          ),
         ],
       );
     }

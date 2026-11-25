@@ -47,6 +47,26 @@ pub(crate) async fn run_migrations_through(pool: &PgPool, target: i64) -> Result
     .await
 }
 
+/// Migrations that only add a tenant table, applied after the fence
+/// retirement (0090). Append each new one here.
+#[cfg(test)]
+const TENANT_TABLE_MIGRATIONS_AFTER_FENCE_RETIREMENT: [i64; 1] = [106];
+
+/// Create the tenant tables added since the fence retirement, without
+/// recording their migrations. For tests that stop before the retirement but
+/// exercise the whole deletion catalog, and never migrate further.
+#[cfg(test)]
+pub(crate) async fn create_tenant_tables_added_after_fence_retirement(pool: &PgPool) -> Result<()> {
+    for version in TENANT_TABLE_MIGRATIONS_AFTER_FENCE_RETIREMENT {
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == version)
+            .ok_or_else(|| crate::DbError::InvalidData(format!("no migration {version}")))?;
+        sqlx::raw_sql(migration.sql.as_str()).execute(pool).await?;
+    }
+    Ok(())
+}
+
 async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
     reject_legacy_nip_rs_cardinality_ambiguity(conn).await?;
     for (version, doc, indexes) in INLINE_INDEX_BUILDS {
@@ -1036,7 +1056,11 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 105);
+        assert_eq!(migrations.len(), 106);
+        assert_eq!(migrations[105].version, 106);
+        assert!(
+            strip_sql_comments(migrations[105].sql.as_str()).contains("CREATE TABLE search_outbox")
+        );
         assert_eq!(migrations[104].version, 105);
         assert!(strip_sql_comments(migrations[104].sql.as_str())
             .contains("ADD COLUMN finished BOOLEAN NOT NULL DEFAULT true;"));
@@ -1709,6 +1733,7 @@ mod postgres_tests {
             "nip_fi_profile_heads",
             "media_uploaders",
             "media_publications",
+            "search_outbox",
         ];
         for table in crate::deletion::EXPECTED_SCOPED_TABLES
             .iter()
@@ -3501,6 +3526,7 @@ mod postgres_tests {
             "user_deletion_fences",
             "workflow_runs",
             "push_gateway_installations",
+            "search_outbox",
         ] {
             assert_eq!(
                 columns(&desired, table).await,
@@ -4469,11 +4495,22 @@ mod postgres_tests {
             .validate_serving_catalog()
             .await
             .expect("new runtime must accept pre-retirement catalog");
+        // Deletion needs every tenant table this binary purges, and tables
+        // added after the retirement are not there yet.
+        let drift = store
+            .validate_catalog()
+            .await
+            .expect_err("deletion refuses a catalog missing later tenant tables")
+            .to_string();
+        assert!(
+            drift.contains("(missing=search_outbox, unknown=)"),
+            "deletion must accept the pre-retirement fences: {drift}"
+        );
+        run_migrations(&pool).await.expect("apply all migrations");
         store
             .validate_catalog()
             .await
-            .expect("deletion must accept pre-retirement catalog");
-        run_migrations(&pool).await.expect("apply all migrations");
+            .expect("deletion accepts the migrated catalog");
         let fence_triggers: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgname LIKE 'community_write_fence_%'",
         )
@@ -4545,10 +4582,17 @@ mod postgres_tests {
             .validate_serving_catalog()
             .await
             .expect("new code must boot before the drop");
-        store
+        // Deletion needs every tenant table this binary purges, and tables
+        // added after the retirement are not there yet.
+        let drift = store
             .validate_catalog()
             .await
-            .expect("deletion must accept the catalog before the drop");
+            .expect_err("deletion refuses a catalog missing later tenant tables")
+            .to_string();
+        assert!(
+            drift.contains("(missing=search_outbox, unknown=)"),
+            "deletion must accept the catalog before the drop: {drift}"
+        );
         run_migrations(&pool).await.expect("apply all migrations");
         assert_eq!(present(&pool).await, (false, false));
         store

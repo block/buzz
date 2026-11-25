@@ -696,17 +696,100 @@ void swipeReplyTests() {
                 .id,
             threadIdRoot,
           );
-          // A thread message must push a reply route too, rather than doing nothing.
+          final navigator = Navigator.of(
+            tester.element(find.byType(ThreadDetailPage)),
+          );
+          if (!thread) {
+            expect(navigator.canPop(), isTrue);
+            return;
+          }
+          // A thread head's reply destination is the page already showing:
+          // its composer takes the reply and no copy of the thread stacks.
+          expect(navigator.canPop(), isFalse);
           expect(
-            Navigator.of(
-              tester.element(find.byType(ThreadDetailPage)),
-            ).canPop(),
+            tester
+                .widget<TextField>(find.byType(TextField))
+                .focusNode
+                ?.hasFocus,
+            isTrue,
+          );
+          FocusManager.instance.primaryFocus?.unfocus();
+          await tester.pumpAndSettle();
+          await tester.longPress(
+            find
+                .descendant(
+                  of: row,
+                  matching: find.byType(LocalSendBubbleSurface),
+                )
+                .first,
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Reply'));
+          await tester.pumpAndSettle();
+          expect(navigator.canPop(), isFalse);
+          expect(
+            tester
+                .widget<TextField>(find.byType(TextField))
+                .focusNode
+                ?.hasFocus,
             isTrue,
           );
         },
       );
     }
   }
+
+  testWidgets('replying to the thread head from its photo focuses the page', (
+    tester,
+  ) async {
+    const url = 'https://example.com/media/head.png';
+    final events = [
+      _textMsg(
+        id: threadIdRoot,
+        pubkey: 'alice',
+        content: 'Look\n![Head]($url)',
+        extraTags: [
+          ['imeta', 'url $url', 'm image/png'],
+        ],
+      ),
+    ];
+    final messages = formatTimeline(events);
+    await tester.pumpWidget(
+      _buildTestable(
+        signingPubkey: 'self',
+        messages: events,
+        home: ThreadDetailPage(
+          threadHead: messages.first,
+          allMessages: messages,
+          channelId: _channelId,
+          currentPubkey: 'self',
+          isMember: true,
+          isArchived: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final navigator = Navigator.of(
+      tester.element(find.byType(ThreadDetailPage)),
+    );
+    await tester.tap(
+      find.byKey(const ValueKey('message-media-image-preview:$url')),
+    );
+    await tester.pumpAndSettle();
+    expect(navigator.canPop(), isTrue);
+    await tester.tap(
+      find.byKey(const ValueKey('message-media-image-viewer-reply-thread')),
+    );
+    await tester.pumpAndSettle();
+    // The viewer closes onto the same thread page, whose composer takes the
+    // reply; no copy of the thread stacks.
+    expect(navigator.canPop(), isFalse);
+    expect(find.byType(ThreadDetailPage), findsOneWidget);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).focusNode?.hasFocus,
+      isTrue,
+    );
+  });
 
   for (final movement in [
     const Offset(-45, 0),

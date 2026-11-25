@@ -18,8 +18,6 @@ import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/shared/theme/theme.dart';
-import 'package:buzz/shared/widgets/app_list.dart';
-import 'package:buzz/shared/widgets/tabler_star_icon.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -99,6 +97,7 @@ void main() {
           defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
           meAssistantsProvider.overrideWith((ref) async => []),
           channelStarsProvider.overrideWith(_Stars.new),
+          channelPinsProvider.overrideWith(() => _Stars(id: 'pinned')),
           meUnreadChannelIdsProvider.overrideWith(_SoloUnread.new),
         ],
         child: MaterialApp(
@@ -125,30 +124,129 @@ void main() {
     );
     double top(String text) => tester.getTopLeft(inList(text)).dy;
 
+    for (final label in ['Old', 'Solo']) {
+      final header = find
+          .ancestor(
+            of: inList(label),
+            matching: find.byType(label == 'Solo' ? InkWell : GestureDetector),
+          )
+          .first;
+      final expandedTop = top(label);
+      await tester.tap(inList(label));
+      await tester.pumpAndSettle();
+      expect(top(label), expandedTop);
+      expect(
+        tester.getBottomLeft(header).dy -
+            tester.getBottomLeft(inList(label)).dy,
+        closeTo(Grid.inventoryRowInset, 0.01),
+      );
+      expect(
+        top(label) - tester.getTopLeft(header).dy,
+        Grid.inventorySectionTopInset,
+      );
+      double chevronCenter(IconData icon) => tester
+          .getCenter(find.descendant(of: header, matching: find.byIcon(icon)))
+          .dy;
+      expect(
+        chevronCenter(BuzzIcons.chevronRight),
+        tester.getCenter(inList(label)).dy,
+      );
+      await tester.tap(inList(label));
+      await tester.pumpAndSettle();
+      expect(
+        chevronCenter(BuzzIcons.chevronDown),
+        tester.getCenter(inList(label)).dy,
+      );
+      expect(top(label), expandedTop);
+    }
+
+    Future<void> openEdit() async {
+      await tester.tap(find.byTooltip('Messages options'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Edit Sections'));
+      await tester.tap(find.text('Edit Sections'));
+      await tester.pump();
+      expect(find.byType(ReorderableListView), findsNothing);
+      await tester.pumpAndSettle();
+    }
+
+    await tester.tap(find.byTooltip('Messages options'));
+    await tester.pumpAndSettle();
+    expect(find.byType(BottomSheet), findsOneWidget);
+    expect(find.byType(ReorderableListView), findsNothing);
+    final view = find.byKey(const ValueKey('messages-display-View'));
+    await tester.tap(view);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(MenuItemButton, 'Unreads'));
+    await tester.pumpAndSettle();
+    expect(find.text('Unreads'), findsOneWidget);
+    await tester.tap(find.byTooltip('Discard changes'));
+    await tester.pumpAndSettle();
+    Future<void> openDisplay() async {
+      await tester.tap(find.byTooltip('Messages options'));
+      await tester.pumpAndSettle();
+    }
+
+    await openDisplay();
+    expect(find.text('Unreads'), findsNothing);
+    expect(find.text('Sort'), findsOneWidget);
+    Future<void> choose(Finder control, String label) async {
+      await tester.tap(control);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(MenuItemButton, label));
+      await tester.pumpAndSettle();
+    }
+
+    final sort = find.byKey(const ValueKey('messages-display-Sort'));
+    await choose(sort, 'Recent');
+    await choose(view, 'Unreads');
+    expect(find.text('Section containers'), findsNothing);
+    await tester.tap(find.byTooltip('Apply changes'));
+    await tester.pumpAndSettle();
+    expect(inList('general'), findsNothing);
+    expect(inList('design-crit'), findsNothing);
+    expect(inList('solo-scratch'), findsNothing);
+    await openDisplay();
+    expect(find.text('Recent'), findsOneWidget);
+    expect(find.text('Unreads'), findsOneWidget);
+    await choose(sort, 'Recent');
+    await choose(view, 'All chats');
+    await tester.tap(find.byTooltip('Apply changes'));
+    await tester.pumpAndSettle();
+
     // Legacy sections stay editable, and their moves follow display order.
     expect(top('design-crit'), greaterThan(top('Old')));
     expect(top('Old'), greaterThan(top('Newer')));
-    await tester.tap(find.byTooltip('Old options'));
+    await openEdit();
+
+    await tester.tap(find.byTooltip('Old actions'));
     await tester.pumpAndSettle();
-    expect(find.text('Rename section'), findsOneWidget);
-    await tester.tap(find.text('Reorder sections'));
+    await tester.tap(find.text('Rename'));
     await tester.pumpAndSettle();
-    final list = tester.widget<ReorderableListView>(
-      find.byType(ReorderableListView),
-    );
-    list.onReorderItem!(0, 1);
+    expect(find.text('Rename Section'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Old actions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remove'));
+    await tester.pumpAndSettle();
+    expect(find.text('Delete "Old"?'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Discard order'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Discard changes'));
-    await tester.pumpAndSettle();
+    expect(find.byTooltip('Discard changes'), findsNothing);
     // Team actions follow the Team section, not the Solo project sharing its
     // ID.
     for (final (header, team) in [('Newer', true), ('Focus', false)]) {
-      await tester.tap(find.byTooltip('$header options'));
-      await tester.pumpAndSettle();
-      expect(find.text('Rename section'), team ? findsOneWidget : findsNothing);
-      await tester.tap(find.byTooltip('Discard changes'));
+      await openEdit();
+      final menu = find.byTooltip('$header actions');
+      expect(menu, team ? findsOneWidget : findsNothing);
+      expect(
+        find.byTooltip('Move $header with the up and down arrow keys'),
+        findsOneWidget,
+      );
+      await tester.tap(find.byTooltip('Discard order'));
       await tester.pumpAndSettle();
     }
 
@@ -194,9 +292,13 @@ void main() {
     expect(inList('Old'), findsNothing);
     expect(inList('Focus'), findsNothing);
 
+    expect(find.byTooltip('pinned'), findsOneWidget);
+    expect(inList('Pins'), findsNothing);
+    expect(
+      tester.getCenter(find.byTooltip('pinned')).dy,
+      lessThan(top('Launch')),
+    );
     final order = [
-      'Starred',
-      'pinned',
       'Launch',
       'Later',
       'Team',
@@ -212,19 +314,9 @@ void main() {
         reason: '$label follows ${order[index - 1]}',
       );
     }
-    Finder menuIcon(String label) => find.descendant(
-      of: find.byTooltip('$label options'),
-      matching: find.byIcon(BuzzIcons.ellipsis),
-    );
-    final teamIcon = menuIcon('Team');
-    for (final label in ['Solo', 'Direct messages', 'Launch']) {
-      final icon = menuIcon(label);
-      expect(tester.getCenter(icon).dx, tester.getCenter(teamIcon).dx);
-      expect(tester.getSize(icon), tester.getSize(teamIcon));
-      expect(
-        tester.widget<Icon>(icon).color,
-        tester.widget<Icon>(teamIcon).color,
-      );
+    expect(find.byTooltip('Messages options'), findsOneWidget);
+    for (final label in ['Solo', 'Direct messages', 'Team', 'Launch']) {
+      expect(find.byTooltip('$label options'), findsNothing);
     }
     expect(
       tester.getTopLeft(find.byIcon(BuzzIcons.messageCircle).first).dx,
@@ -236,21 +328,18 @@ void main() {
     final channelIcon = tester.getRect(
       find.byKey(const ValueKey('channel-icon-general')),
     );
-    final star = find.byType(TablerStarIcon);
-    expect(tester.widget<TablerStarIcon>(star).filled, isTrue);
-    expect(tester.getCenter(star).dx, channelIcon.center.dx);
-    expect(tester.getCenter(star).dy, tester.getCenter(inList('Starred')).dy);
+    expect(inList('Starred'), findsOneWidget);
+    expect(inList('solo-star'), findsOneWidget);
+    expect(find.byTooltip('solo-star'), findsNothing);
     expect(
-      tester.getTopLeft(inList('Starred')).dx,
-      tester.getTopLeft(inList('Launch')).dx,
+      tester.getTopLeft(inList('Later')).dx,
+      tester.getTopLeft(inList('Team')).dx,
     );
     expect(emoji.center.dx, channelIcon.center.dx);
     expect(emoji.center.dy, tester.getCenter(inList('Launch')).dy);
-    expect(
-      emoji.center.dy,
-      tester.getCenter(find.byTooltip('Launch options')).dy,
-    );
+    expect(emoji.size, channelIcon.size);
     expect(tester.getTopLeft(inList('Launch')).dx - emoji.right, 8);
+    expect(tester.getTopLeft(inList('general')).dx - channelIcon.right, 8);
     // A workspace holds team and Solo rows alike, in desktop's sort.
     for (final filed in ['design-crit', 'solo-plan']) {
       expect(top(filed), greaterThan(top('Launch')));
@@ -259,84 +348,44 @@ void main() {
     expect(top('solo-plan'), lessThan(top('design-crit')));
     expect(inList('No chats yet'), findsNothing);
 
-    // Desktop owns these workspaces and their sort: only filters remain.
-    final launchOptions = tester.getRect(find.byTooltip('Launch options'));
-    expect(launchOptions.size, const Size(64, 48));
-    await tester.tapAt(launchOptions.bottomRight - const Offset(2, 2));
+    await tester.tap(inList('Launch'));
     await tester.pumpAndSettle();
-    expect(find.text('Show'), findsOneWidget);
-    expect(find.text('Rename section'), findsNothing);
-    expect(find.text('Delete section'), findsNothing);
-    final sortChoice = find.byKey(const ValueKey('section-menu-Sort'));
-    expect(tester.widget<AppListRow>(sortChoice).onTap, isNull);
-    // Unreads keeps the unread Solo chat its row shows as unread.
-    await tester.tap(find.byKey(const ValueKey('section-menu-Show')));
+    expect(inList('design-crit'), findsNothing);
+    await tester.tap(inList('Launch'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Unreads'));
-    await tester.pumpAndSettle();
+    expect(inList('design-crit'), findsOneWidget);
+
+    // Apply the Home filter across desktop-owned sections and Solo.
+    await openDisplay();
+    await choose(view, 'Unreads');
     await tester.tap(find.byTooltip('Apply changes'));
     await tester.pumpAndSettle();
     expect(inList('solo-plan'), findsOneWidget);
     expect(inList('design-crit'), findsNothing);
-
-    // Only the filter choice was saved; no layout or sort record desktop
-    // would have to reconcile.
-    expect(relay.published.map((e) => e.getTagValue('d')), ['channel-filter']);
-    final soloSection = find.byKey(const ValueKey('me-ungrouped-chats'));
-    Finder soloDisclosure(String label) =>
-        find.descendant(of: soloSection, matching: find.text(label));
-    await tester.tap(find.byTooltip('Solo options'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('section-menu-Show')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Unreads').last);
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Apply changes'));
-    await tester.pumpAndSettle();
     expect(inList('solo-scratch'), findsNothing);
-    relay.session.setStatus(SessionStatus.disconnected);
-    await tester.pumpAndSettle();
-    await tester.tap(soloDisclosure('Show more'));
-    await tester.pumpAndSettle();
-    expect(inList('solo-scratch'), findsOneWidget);
-    await tester.tap(soloDisclosure('Show fewer'));
-    await tester.pumpAndSettle();
-    expect(inList('solo-scratch'), findsNothing);
-    expect(relay.published.map((e) => e.getTagValue('d')), [
-      'channel-filter',
-      'channel-filter',
-    ]);
-    relay.session.setStatus(SessionStatus.connected);
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byTooltip('Solo options'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('section-menu-Show')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Active'));
-    await tester.pumpAndSettle();
-    await tester.tap(
-      find.byKey(const ValueKey('section-menu-Active in the past')),
+    expect(relay.published, isEmpty);
+    await openDisplay();
+    await choose(view, 'Active');
+    await choose(
+      find.byKey(const ValueKey('messages-display-Active in the past')),
+      '7 days',
     );
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('7 days'));
-    await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Apply changes'));
     await tester.pumpAndSettle();
     expect(inList('solo-scratch'), findsOneWidget);
-    expect(find.text('Some activity couldn’t load'), findsOneWidget);
-    await tester.tap(find.text('Retry'));
+    await tester.tap(find.text('Retry').last);
     await tester.pumpAndSettle();
-    expect(find.text('Some activity couldn’t load'), findsNothing);
     expect(inList('solo-scratch'), findsNothing);
-    expect(inList('solo-plan'), findsOneWidget);
-    await tester.tap(find.byTooltip('Solo options'));
+
+    await openDisplay();
+    await choose(view, 'All chats');
+    await tester.tap(find.byTooltip('Apply changes'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Reorder sections'));
+    await openEdit();
     await tester.pumpAndSettle();
     Finder handle(String id) => find.descendant(
       of: find.byKey(ValueKey(id)).last,
-      matching: find.byIcon(Icons.drag_handle),
+      matching: find.byIcon(BuzzIcons.menu2),
     );
     final haptics = <Object?>[];
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -411,8 +460,8 @@ void main() {
     expect(prefs.getStringList(key), firstOrder);
     expect(await orders.save(const [], firstOrder.reversed.toList()), isFalse);
 
-    // Reopening from the same options sheet uses the order just saved.
-    await tester.tap(find.text('Reorder sections'));
+    // Reopen options from Messages after saving the order.
+    await openEdit();
     await tester.pumpAndSettle();
     expect(sheetOrder(sectionIds), firstOrder);
     await tester.tap(find.byTooltip('Discard order'));
@@ -421,17 +470,21 @@ void main() {
     final stars = container.read(channelStarsProvider.notifier) as _Stars;
     stars.setStarred(false);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Reorder sections'));
+    await openEdit();
     await tester.pumpAndSettle();
-    expect(find.text('Starred'), findsNothing);
+    expect(find.text('Starred'), findsOneWidget);
 
     final dmFocus = Focus.of(tester.element(handle('dms')));
-    for (var n = 0; n < 10 && !dmFocus.hasPrimaryFocus; n++) {
+    for (
+      var n = 0;
+      n < 2 * sectionIds.length + 4 && !dmFocus.hasPrimaryFocus;
+      n++
+    ) {
       await tester.sendKeyEvent(LogicalKeyboardKey.tab);
       await tester.pump();
     }
     expect(dmFocus.hasPrimaryFocus, isTrue);
-    final visibleOrder = firstOrder.where((id) => id != 'starred').toList();
+    final visibleOrder = firstOrder.toList();
     final from = visibleOrder.indexOf('dms');
     visibleOrder.insert(from - 1, visibleOrder.removeAt(from));
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
@@ -439,10 +492,7 @@ void main() {
     expect(sheetOrder(visibleOrder), visibleOrder);
     await tester.tap(find.byTooltip('Save order'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Discard changes'));
-    await tester.pumpAndSettle();
-    final starredIndex = firstOrder.indexOf('starred');
-    visibleOrder.insert(starredIndex, 'starred');
+    expect(find.byTooltip('Discard changes'), findsNothing);
     expect(prefs.getStringList(key), visibleOrder);
     expect(
       prefs.getStringList('section-order:https://relay.example:null'),
@@ -486,6 +536,7 @@ class _Channels extends ChannelsNotifier {
   Future<List<Channel>> build() async => [
     _channel('general'),
     _channel('pinned'),
+    _channel('solo-star', solo: true),
     _channel('design-crit'),
     // Newest in Launch, so Recent puts it above design-crit.
     _channel('solo-plan', solo: true, day: 9),
@@ -494,11 +545,14 @@ class _Channels extends ChannelsNotifier {
 }
 
 class _Stars extends ChannelStarsNotifier {
+  _Stars({this.id = 'solo-star'});
+  final String id;
+
   @override
-  ChannelStarsState build() => const ChannelStarsState(
+  ChannelStarsState build() => ChannelStarsState(
     isReady: true,
     store: ChannelStarStore(
-      channels: {'pinned': ChannelStarEntry(starred: true, updatedAt: 1)},
+      channels: {id: const ChannelStarEntry(starred: true, updatedAt: 1)},
     ),
   );
 

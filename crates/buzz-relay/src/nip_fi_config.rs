@@ -14,6 +14,7 @@
 //! | `BUZZ_NIP_FI_COMMUNITIES` | If enforce | JSON array mapping each community's canonical URI to its authorized issuers (see [`CommunityEnvConfig`]). |
 //! | `BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS` | If enforce | Per-partition limit on session lifetime. |
 //! | `BUZZ_NIP_FI_ENFORCE_PERCENT` | No | Integer 0-100 (default 0), validated in every mode. In `shadow`, communities whose stable [`rollout_bucket`] is below it are required as if stored Required. |
+//! | `BUZZ_NIP_FI_ACCEPT_SHADOW_DISCONNECTS` | No | `true` lets an enforce pod honor disconnects accepted by shadow pods, for the deploy that switches shadow → enforce. Default `false`; rejected unless the mode is `enforce`. |
 //! | `BUZZ_NIP_FI_PROVISION_BINDING` | No | JSON `{"host_suffix", "authorized_issuers"}` binding communities created one label under the suffix; read in every mode (see [`buzz_auth::ProvisionBindingPolicy`]). |
 //!
 //! Each `BUZZ_NIP_FI_ISSUERS` entry also carries the S4 command-API fields.
@@ -298,6 +299,9 @@ pub struct NipFiRelayConfig {
     pub profile_policies: Vec<buzz_db::verified_profiles::ProfilePolicy>,
     /// `BUZZ_NIP_FI_ENFORCE_PERCENT`: share of communities required in shadow.
     pub enforce_percent: u8,
+    /// `BUZZ_NIP_FI_ACCEPT_SHADOW_DISCONNECTS`: an enforce pod also receives
+    /// and restores disconnects accepted by shadow pods.  Enforce mode only.
+    pub accept_shadow_disconnects: bool,
 }
 
 impl NipFiRelayConfig {
@@ -308,6 +312,14 @@ impl NipFiRelayConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         let mode = parse_mode()?;
         let enforce_percent = parse_enforce_percent()?;
+        let accept_shadow_disconnects =
+            crate::config::parse_bool("BUZZ_NIP_FI_ACCEPT_SHADOW_DISCONNECTS", false)?;
+        if accept_shadow_disconnects && mode != NipFiMode::Enforce {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_NIP_FI_ACCEPT_SHADOW_DISCONNECTS requires BUZZ_NIP_FI_MODE=enforce"
+                    .to_string(),
+            ));
+        }
         let source = parse_community_source()?;
         if source == CommunitySource::Database
             && !std::env::var("BUZZ_NIP_FI_COMMUNITIES")
@@ -336,6 +348,7 @@ impl NipFiRelayConfig {
                 command_configs: Vec::new(),
                 profile_policies: Vec::new(),
                 enforce_percent,
+                accept_shadow_disconnects,
             });
         }
 
@@ -554,6 +567,7 @@ impl NipFiRelayConfig {
             command_configs,
             profile_policies,
             enforce_percent,
+            accept_shadow_disconnects,
         })
     }
 }
@@ -931,6 +945,7 @@ mod tests {
         "BUZZ_NIP_FI_COMMUNITIES",
         "BUZZ_NIP_FI_MAXIMUM_ASSERTION_AGE_SECS",
         "BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS",
+        "BUZZ_NIP_FI_ACCEPT_SHADOW_DISCONNECTS",
     ];
 
     /// Same-process witness (plain libtest, not nextest): a fixture's
@@ -987,6 +1002,7 @@ mod tests {
             command_configs: Vec::new(),
             profile_policies: Vec::new(),
             enforce_percent,
+            accept_shadow_disconnects: false,
         }
     }
 
@@ -1086,6 +1102,32 @@ mod tests {
                 percent
             );
         }
+    }
+
+    #[test]
+    fn accept_shadow_disconnects_requires_enforce() {
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = EnvGuard::new(NIP_FI_VARS);
+
+        std::env::set_var("BUZZ_NIP_FI_ACCEPT_SHADOW_DISCONNECTS", "true");
+        for mode in ["off", "shadow", "deny_protected"] {
+            std::env::set_var("BUZZ_NIP_FI_MODE", mode);
+            let err = NipFiRelayConfig::from_env().expect_err(mode);
+            assert!(
+                err.to_string()
+                    .contains("BUZZ_NIP_FI_ACCEPT_SHADOW_DISCONNECTS"),
+                "{mode}: {err}"
+            );
+        }
+        std::env::set_var("BUZZ_NIP_FI_ACCEPT_SHADOW_DISCONNECTS", "false");
+        std::env::set_var("BUZZ_NIP_FI_MODE", "off");
+        assert!(
+            !NipFiRelayConfig::from_env()
+                .unwrap()
+                .accept_shadow_disconnects
+        );
     }
 
     #[test]
