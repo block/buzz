@@ -158,7 +158,11 @@ async fn admitted_messages_become_searchable() {
     let (index, prefix) = sync_index().await;
     let community = search_suite::mk_community(db.pool(), "sync.example").await;
     let keys = Keys::generate();
-    let indexer = tokio::spawn(Indexer::new(db.clone(), index.clone()).run());
+    let indexer = tokio::spawn(
+        Indexer::new(db.clone(), index.clone())
+            .with_new_index_settle(Duration::ZERO)
+            .run(),
+    );
 
     let kept = message(&keys, "syncword kept");
     db.insert_event(community, &kept, None)
@@ -223,14 +227,22 @@ async fn the_indexer_lease_hands_over() {
     let before = message_at(&keys, "leaseword before", -1);
     let after = message_at(&keys, "leaseword after", 0);
 
-    let first = tokio::spawn(Indexer::new(db.clone(), index.clone()).run());
+    let first = tokio::spawn(
+        Indexer::new(db.clone(), index.clone())
+            .with_new_index_settle(Duration::ZERO)
+            .run(),
+    );
     db.insert_event(community, &before, None)
         .await
         .expect("insert");
     wait_until_indexed(&db, &index).await;
 
     // The first instance holds the lease, so the second only waits.
-    let second = tokio::spawn(Indexer::new(db.clone(), index.clone()).run());
+    let second = tokio::spawn(
+        Indexer::new(db.clone(), index.clone())
+            .with_new_index_settle(Duration::ZERO)
+            .run(),
+    );
     first.abort();
     let _ = first.await;
     db.insert_event(community, &after, None)
@@ -468,7 +480,11 @@ async fn a_deleted_message_no_longer_matches() {
     let keys = Keys::generate();
     let channel = channel(&db, community, &keys).await;
     let service = SearchService::with_opensearch(db.pool().clone(), index.clone());
-    let indexer = tokio::spawn(Indexer::new(db.clone(), index.clone()).run());
+    let indexer = tokio::spawn(
+        Indexer::new(db.clone(), index.clone())
+            .with_new_index_settle(Duration::ZERO)
+            .run(),
+    );
 
     let doomed = channel_message(&keys, channel, 9, "deleteword doomed", &[], 0);
     let kept = channel_message(&keys, channel, 9, "deleteword kept", &[], 0);
@@ -502,7 +518,11 @@ async fn an_edited_message_matches_its_current_text() {
     let keys = Keys::generate();
     let channel = channel(&db, community, &keys).await;
     let service = SearchService::with_opensearch(db.pool().clone(), index.clone());
-    let indexer = tokio::spawn(Indexer::new(db.clone(), index.clone()).run());
+    let indexer = tokio::spawn(
+        Indexer::new(db.clone(), index.clone())
+            .with_new_index_settle(Duration::ZERO)
+            .run(),
+    );
 
     let original = channel_message(&keys, channel, 9, "oldword typo", &[], 0);
     db.insert_event(community, &original, Some(channel))
@@ -819,6 +839,7 @@ async fn the_indexer_backfills_on_its_own() {
         Indexer::new(db.clone(), index.clone())
             .with_batch_size(2)
             .with_backfill_bound(2)
+            .with_new_index_settle(Duration::ZERO)
             .run(),
     );
     let service = SearchService::with_opensearch(db.pool().clone(), index.clone());
@@ -1429,7 +1450,13 @@ async fn instances_started_together_elect_one_leader() {
         .await
         .expect("insert");
     let instances: Vec<_> = (0..4)
-        .map(|_| tokio::spawn(Indexer::new(db.clone(), index.clone()).run()))
+        .map(|_| {
+            tokio::spawn(
+                Indexer::new(db.clone(), index.clone())
+                    .with_new_index_settle(Duration::ZERO)
+                    .run(),
+            )
+        })
         .collect();
     let service = SearchService::with_opensearch(db.pool().clone(), index.clone());
     tokio::time::timeout(Duration::from_secs(30), async {

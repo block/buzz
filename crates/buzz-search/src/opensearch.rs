@@ -20,7 +20,9 @@ use opensearch::http::response::Response;
 use opensearch::http::transport::{SingleNodeConnectionPool, TransportBuilder};
 use opensearch::http::Url;
 use opensearch::indices::IndicesRefreshParts;
-use opensearch::indices::{IndicesCreateParts, IndicesDeleteParts, IndicesExistsParts};
+use opensearch::indices::{
+    IndicesCreateParts, IndicesDeleteParts, IndicesExistsParts, IndicesGetSettingsParts,
+};
 use opensearch::params::VersionType;
 use opensearch::{BulkOperation, BulkParts, OpenSearch, SearchParts};
 use serde_json::{json, Value};
@@ -182,6 +184,30 @@ impl SearchIndex {
             .await
             .map_err(transport_error)?;
         Ok(response.status_code().is_success())
+    }
+
+    /// How long ago the versioned index was created, by the cluster's
+    /// creation time and this host's clock; zero if that time is ahead.
+    pub(crate) async fn age(&self) -> Result<Duration, SearchError> {
+        let response = self
+            .client
+            .indices()
+            .get_settings(IndicesGetSettingsParts::IndexName(
+                &[&self.index],
+                &["index.creation_date"],
+            ))
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let body = checked(response).await?;
+        let created = body[self.index.as_str()]["settings"]["index"]["creation_date"]
+            .as_str()
+            .and_then(|millis| millis.parse().ok())
+            .ok_or_else(|| SearchError::Engine("index creation date missing".into()))?;
+        let created = std::time::UNIX_EPOCH + Duration::from_millis(created);
+        Ok(std::time::SystemTime::now()
+            .duration_since(created)
+            .unwrap_or_default())
     }
 
     /// Delete the versioned index. For tests and tools.

@@ -36,7 +36,8 @@ const BACKFILL_OUTBOX_BOUND: i64 = 4 * BATCH_SIZE;
 /// How often an idle leader checks the queue, and a follower the lease.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// How long a new index is left alone before the first write. On OpenSearch
+/// How long after its creation a new index is left alone before the first
+/// write, whichever relay holds the lease. On OpenSearch
 /// Serverless a write sent within two seconds of creating an index that
 /// replaces a deleted one can be acknowledged by the deleted index and lost,
 /// under the same name or another, and requests can fail for ten seconds.
@@ -89,6 +90,7 @@ pub struct Indexer {
     batch_size: i64,
     backfill_bound: i64,
     workers: usize,
+    new_index_settle: Duration,
 }
 
 impl Indexer {
@@ -100,7 +102,15 @@ impl Indexer {
             batch_size: BATCH_SIZE,
             backfill_bound: BACKFILL_OUTBOX_BOUND,
             workers: 1,
+            new_index_settle: NEW_INDEX_SETTLE,
         }
+    }
+
+    /// Leave a new index alone for `settle` after its creation instead of
+    /// [`NEW_INDEX_SETTLE`]. For tests on a cluster that needs no wait.
+    pub fn with_new_index_settle(mut self, settle: Duration) -> Self {
+        self.new_index_settle = settle;
+        self
     }
 
     /// Run `workers` (at least one) batches at once when draining, of one
@@ -353,10 +363,22 @@ impl Indexer {
     /// serving. Backfilling before draining keeps it going while a rejected
     /// batch's rows stay queued. Returns whether backfill queued anything, in
     /// which case the next pass should follow at once.
-    async fn pass(&self) -> Result<bool, IndexerError> {
+    ///
+    /// `settled` is false until this lease holder has made sure the index is
+    /// at least the settle time old.
+    async fn pass(&self, settled: &mut bool) -> Result<bool, IndexerError> {
         if self.index.ensure().await? {
-            tokio::time::sleep(NEW_INDEX_SETTLE).await;
+            tokio::time::sleep(self.new_index_settle).await;
+        } else if !*settled {
+            // The relay that created the index may have lost the lease before
+            // its wait ended. Without the creation time, wait the whole time.
+            let age = self.index.age().await.unwrap_or_else(|error| {
+                warn!(error = %error.kind(), "could not read when the search index was created");
+                Duration::ZERO
+            });
+            tokio::time::sleep(self.new_index_settle.saturating_sub(age)).await;
         }
+        *settled = true;
         let backfilled = self.backfill().await?;
         self.drain().await?;
         Ok(backfilled > 0)
@@ -373,6 +395,7 @@ impl Indexer {
     pub async fn run(self) {
         tokio::time::sleep(POLL_INTERVAL.mul_f64(rand::random::<f64>())).await;
         let mut leader: Option<buzz_db::SessionLeader> = None;
+        let mut settled = false;
         let mut failures = 0u32;
         let mut throttled = 0u32;
         loop {
@@ -387,6 +410,7 @@ impl Indexer {
                     Ok(Some(acquired)) => {
                         info!("acquired the search indexer lease");
                         leader = Some(acquired);
+                        settled = false;
                         failures = 0;
                         self.publish_backfill_progress().await;
                     }
@@ -399,7 +423,7 @@ impl Indexer {
             }
             let mut backfilling = false;
             if leader.is_some() {
-                match self.pass().await {
+                match self.pass(&mut settled).await {
                     Ok(more) => {
                         failures = 0;
                         throttled = 0;
