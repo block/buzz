@@ -236,7 +236,8 @@ void main() {
       expect(jsonEncode(sent), isNot(contains(marker)));
     });
 
-    test('unanswered is a publish timeout from the caller', () async {
+    test('unanswered after sending is an unacknowledged publish timeout '
+        'from the caller', () async {
       final server = await relayAnswering(null);
 
       final (error, stack) = await failure(
@@ -244,7 +245,11 @@ void main() {
       );
       final sent = await escaped(error, stack);
 
-      expect(error, isA<RelayTimeoutException>());
+      expect(error, isA<SignedEventUnacknowledged>());
+      expect(
+        (error as SignedEventUnacknowledged).cause,
+        isA<RelayTimeoutException>(),
+      );
       expect(stack.toString(), contains('_submitFromTheCaller'));
       expect(sent['tags']['relay.call'], 'publish');
       expect(sent['tags']['relay.reason'], 'timeout');

@@ -40,6 +40,7 @@ void main() {
         final keys = nostr.Keys.generate();
         final reporter = _RecordingDiagnostics()..setMember(keys.public);
 
+        // A refusal is definite: the relay saw the event and didn't store it.
         await expectLater(
           submitSignedEventOnce(
             wsUrl: 'ws://127.0.0.1:${server.port}',
@@ -49,7 +50,9 @@ void main() {
             tags: const [],
             diagnostics: reporter,
           ),
-          throwsA(isA<Exception>()),
+          throwsA(
+            allOf(isA<Exception>(), isNot(isA<SignedEventUnacknowledged>())),
+          ),
         );
 
         expect(reporter.errors, [
@@ -58,6 +61,64 @@ void main() {
         ]);
       },
     );
+  }
+
+  // Whether a failure might have reached the relay decides whether a caller
+  // can treat the event as never stored. Each relay stalls at one step, and
+  // the attempt ends at its deadline.
+  for (final (stall, maybeStored) in [
+    ('auth', false),
+    ('ok', true),
+    ('close after event', true),
+  ]) {
+    test('a relay that stalls at $stall ends at the deadline, '
+        '${maybeStored ? 'maybe stored' : 'never sent'}', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final events = <Object?>[];
+      server.listen((request) async {
+        final ws = await WebSocketTransformer.upgrade(request);
+        ws.add(jsonEncode(['AUTH', 'challenge']));
+        ws.listen((raw) {
+          final frame = jsonDecode(raw as String) as List<dynamic>;
+          final id = (frame[1] as Map<String, dynamic>)['id'];
+          if (frame[0] == 'AUTH' && stall != 'auth') {
+            ws.add(jsonEncode(['OK', id, true, '']));
+          }
+          if (frame[0] == 'EVENT') {
+            events.add(id);
+            if (stall == 'close after event') unawaited(ws.close());
+          }
+        });
+      });
+      final started = DateTime.now();
+
+      final failure = submitSignedEventOnce(
+        wsUrl: 'ws://127.0.0.1:${server.port}',
+        nsec: nostr.Keys.generate().nsec,
+        kind: 1,
+        content: '',
+        tags: const [],
+        deadline: started.add(const Duration(milliseconds: 500)),
+      );
+
+      await expectLater(
+        failure,
+        throwsA(
+          maybeStored
+              ? isA<SignedEventUnacknowledged>()
+              : allOf(
+                  isA<TimeoutException>(),
+                  isNot(isA<SignedEventUnacknowledged>()),
+                ),
+        ),
+      );
+      expect(
+        DateTime.now().difference(started),
+        lessThan(const Duration(seconds: 3)),
+      );
+      expect(events, hasLength(maybeStored ? 1 : 0));
+    });
   }
 
   // A removed community's tombstone, say, signs with a key other than the

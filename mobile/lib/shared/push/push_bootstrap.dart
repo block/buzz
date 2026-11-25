@@ -135,14 +135,6 @@ String buzzPushPublicationAttemptKey({
   buzzPushSubscriptionsFingerprint(subscriptions),
 ].join('|');
 
-/// Identifies a pass over pending opt-out tombstones by the communities it
-/// covers, so a community whose tombstone appears while another is backing
-/// off runs now instead of waiting out that delay. Not by generation: each
-/// pass advances it, and that must not restart the backoff.
-@visibleForTesting
-String buzzPushTombstoneAttemptKey(Iterable<Community> pending) =>
-    [for (final community in pending) community.id].join('|');
-
 @visibleForTesting
 bool buzzPushLifecycleEnabled({
   required Community? community,
@@ -330,10 +322,8 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     useListenable(apnsDeviceToken);
     useListenable(fcmDeviceToken);
     final publicationAttempt = useMemoized(BuzzPushAttemptGate.new);
-    final tombstoneAttempt = useMemoized(BuzzPushAttemptGate.new);
     final reconcileAttempt = useMemoized(BuzzPushAttemptGate.new);
     final publicationRetry = useState(0);
-    final tombstoneRetry = useState(0);
     final reconcileRetry = useState(0);
     final (
       :revocationOutbox,
@@ -404,69 +394,9 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     useEffect(
       () => () {
         publicationAttempt.dispose();
-        tombstoneAttempt.dispose();
         reconcileAttempt.dispose();
       },
       const [],
-    );
-
-    useEffect(
-      () {
-        final pendingCommunities = communities
-            .where(
-              (candidate) =>
-                  !candidate.pushNotificationsEnabled &&
-                  candidate.pushSubscriptionState.pendingTombstoneGeneration !=
-                      null,
-            )
-            .toList();
-        if (session.status != SessionStatus.connected ||
-            pendingCommunities.isEmpty) {
-          return null;
-        }
-        final attempt = buzzPushTombstoneAttemptKey(pendingCommunities);
-        if (!tombstoneAttempt.tryBegin(attempt)) return null;
-        unawaited(() async {
-          try {
-            Object? firstError;
-            StackTrace? firstStack;
-            for (final pendingCommunity in pendingCommunities) {
-              try {
-                await ref
-                    .read(communityListProvider.notifier)
-                    .retryPendingPushLeaseTombstone(
-                      pendingCommunity.id,
-                      advanceGeneration: true,
-                    );
-              } catch (error, stack) {
-                firstError ??= error;
-                firstStack ??= stack;
-              }
-            }
-            if (firstError != null) {
-              Error.throwWithStackTrace(firstError, firstStack!);
-            }
-            tombstoneAttempt.complete(attempt);
-          } catch (error, stack) {
-            tombstoneAttempt.failed(
-              attempt,
-              retry: () {
-                if (context.mounted) tombstoneRetry.value += 1;
-              },
-            );
-            debugPrint('Push lease tombstone retry failed: $error');
-            debugPrintStack(stackTrace: stack);
-          }
-        }());
-        return null;
-      },
-      [
-        session.status,
-        for (final candidate in communities)
-          '${candidate.id}|${candidate.pushNotificationsEnabled}|'
-              '${candidate.pushSubscriptionState.pendingTombstoneGeneration}',
-        tombstoneRetry.value,
-      ],
     );
 
     // Removing the last community with push already off leaves the relay set
@@ -516,6 +446,35 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
         reconcileRetry.value,
       ],
     );
+
+    // An unconfirmed opt-out (its acknowledgment was lost, or an earlier run
+    // left it) is settled by reading the relay's lease once the session is up,
+    // and again on each later connect until a read answers. Nothing publishes
+    // here: the read only shows the setting the relay actually holds.
+    final optOutStatus = ref.watch(pushOptOutStatusProvider)[community?.id];
+    final unconfirmedOptOutId =
+        community != null &&
+            !community.pushNotificationsEnabled &&
+            community.pushSubscriptionState.pendingTombstoneGeneration !=
+                null &&
+            optOutStatus != PushOptOutStatus.turningOff
+        ? community.id
+        : null;
+    useEffect(() {
+      final id = unconfirmedOptOutId;
+      if (session.status != SessionStatus.connected || id == null) {
+        return null;
+      }
+      unawaited(
+        ref
+            .read(communityListProvider.notifier)
+            .reconcilePushOptOut(id)
+            .catchError((Object error, StackTrace stack) {
+              debugPrint('Push opt-out lease read failed: $error');
+            }),
+      );
+      return null;
+    }, [session.status, unconfirmedOptOutId, optOutStatus]);
 
     final token = apnsDeviceToken.value ?? fcmDeviceToken.value;
     useEffect(
