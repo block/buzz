@@ -37,6 +37,40 @@ use nostr::{FromBech32, PublicKey};
 /// inline implementation.
 pub const MENTION_CAP: usize = 50;
 
+/// Whether an `@` opens a mention, given everything before it.
+///
+/// Mirrors the opening group of Desktop's mention regex (`hasMention.ts`):
+///
+/// ```text
+/// (^|\s|\(|[*_]{1,3}|\|\|)(@name)(?=\|\||[\s,;.!?:)\]}*_]|$)
+/// ```
+///
+/// so: start-of-string, whitespace, an opening parenthesis (team expansions),
+/// a bold or italic marker, or the **paired** spoiler delimiter. Desktop
+/// renders `**@fizz**`, `_@fizz_`, `(@fizz)` and `||@fizz||` as mentions, and
+/// agents are told to write GitHub-flavored Markdown, so a mention only the
+/// renderer recognises produces a message that *looks* addressed to an agent
+/// and carries no `p` tag to wake it.
+///
+/// The delimiter is `||`, never a lone `|`: `|@fizz` is not a spoiler to
+/// Desktop and must not tag Fizz here either — the inverse error, waking an
+/// agent nobody visibly addressed.
+///
+/// Whitespace is Unicode-aware, because JavaScript's `\s` is: Desktop renders
+/// a mention wrapped in non-breaking spaces, so `is_ascii_whitespace` would
+/// leave it out of the signed event.
+///
+/// Anything else — most importantly an alphanumeric, as in `user@host` — is
+/// not an opener.
+fn opens_mention(preceding: &str) -> bool {
+    let mut back = preceding.chars().rev();
+    match back.next() {
+        None => true,
+        Some('|') => back.next() == Some('|'),
+        Some(c) => c.is_whitespace() || matches!(c, '(' | '*' | '_'),
+    }
+}
+
 /// A channel-member profile, as needed for name matching.
 ///
 /// `pubkey` is the lowercase hex public key. `content_json` is the raw
@@ -56,8 +90,8 @@ pub struct MentionProfile<'a> {
 /// available — it correctly handles multi-word display names.
 ///
 /// Returns lowercased names found after `@` tokens. An `@name` only matches
-/// when the `@` is at start-of-string or preceded by an ASCII whitespace
-/// character — this excludes things like email addresses (`user@host`).
+/// when the `@` opens a mention (see [`opens_mention`]) — this excludes
+/// things like email addresses (`user@host`).
 ///
 /// Allowed name characters: ASCII alphanumerics, `.`, `-`, `_`.
 /// Duplicates are removed; first-seen order is preserved.
@@ -72,8 +106,8 @@ pub fn extract_at_names(content: &str) -> Vec<String> {
     let mut i = 0;
     while i < len {
         if chars[i] == '@' {
-            let preceded_by_ws = i == 0 || chars[i - 1].is_ascii_whitespace();
-            if preceded_by_ws && i + 1 < len {
+            let preceding: String = chars[..i].iter().rev().take(2).rev().collect();
+            if opens_mention(&preceding) && i + 1 < len {
                 let start = i + 1;
                 let mut end = start;
                 while end < len {
@@ -84,7 +118,9 @@ pub fn extract_at_names(content: &str) -> Vec<String> {
                         break;
                     }
                 }
-                if end > start {
+                let closed_by_lone_pipe =
+                    chars.get(end) == Some(&'|') && chars.get(end + 1) != Some(&'|');
+                if end > start && !closed_by_lone_pipe {
                     let name: String = chars[start..end].iter().collect();
                     let lower = name.to_ascii_lowercase();
                     if seen.insert(lower.clone()) {
@@ -100,7 +136,7 @@ pub fn extract_at_names(content: &str) -> Vec<String> {
 
 /// Extract `@mention` names from message content using known member names.
 ///
-/// At each `@` preceded by whitespace or start-of-string, tries known names
+/// At each `@` that opens a mention (see [`opens_mention`]), tries known names
 /// longest-first (case-insensitive, word-boundary-checked), then falls back
 /// to single-word tokenization. Returns lowercased names in first-seen order,
 /// deduplicated. Empty/whitespace-only entries in `known_names` are ignored.
@@ -120,8 +156,7 @@ pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Ve
     let mut seen = HashSet::new();
 
     for (i, _) in content.match_indices('@') {
-        let preceded = i == 0 || content.as_bytes()[i - 1].is_ascii_whitespace();
-        if !preceded {
+        if !opens_mention(&content[..i]) {
             continue;
         }
         let rest = &content[i + 1..];
@@ -138,7 +173,7 @@ pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Ve
             let end = rest
                 .find(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '.' | '-' | '_'))
                 .unwrap_or(rest.len());
-            if end == 0 {
+            if end == 0 || ends_on_unpaired_pipe(&rest[end..]) {
                 continue;
             }
             rest[..end].to_ascii_lowercase()
@@ -151,10 +186,41 @@ pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Ve
     names
 }
 
+/// Whether a known name ends here.
+///
+/// Mirrors the closing lookahead of Desktop's mention regex,
+/// `(?=\|\||[\s,;.!?:)\]}*_]|$)` — so `**@Will Pfleger**` and
+/// `_@Will Pfleger_` resolve to the member rather than to a name with a marker
+/// glued on. `_` is a legal name character, so it only ends a *known* name:
+/// the fallback tokenizer still reads `@fizz_` as `fizz_`, which is the name
+/// that was typed.
+///
+/// A closing `|` counts only as the pair `||`. Whitespace is Unicode-aware to
+/// match JavaScript's `\s`.
 fn is_word_boundary(s: &str) -> bool {
-    s.chars().next().is_none_or(|c| {
-        c.is_ascii_whitespace() || matches!(c, ',' | ';' | '.' | '!' | '?' | ':' | ')' | ']' | '}')
-    })
+    let mut chars = s.chars();
+    match chars.next() {
+        None => true,
+        Some('|') => chars.next() == Some('|'),
+        Some(c) => {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    ',' | ';' | '.' | '!' | '?' | ':' | ')' | ']' | '}' | '*' | '_'
+                )
+        }
+    }
+}
+
+/// Whether the text after a mention is a lone `|`.
+///
+/// The fallback tokenizer stops at any non-name character, so it would restore
+/// `fizz` from `||@fizz|` — a spoiler Desktop never closes and therefore never
+/// renders as a mention. Only the pipe is checked: every other terminator the
+/// tokenizer accepts is pre-existing behaviour this change does not touch.
+fn ends_on_unpaired_pipe(rest: &str) -> bool {
+    let mut chars = rest.chars();
+    chars.next() == Some('|') && chars.next() != Some('|')
 }
 
 /// Match extracted `@names` against channel-member profiles.
@@ -424,6 +490,80 @@ mod tests {
         assert!(extract_at_names("user@example.com").is_empty());
         assert!(extract_at_names("hello @ world").is_empty());
         assert!(extract_at_names("hello @").is_empty());
+    }
+
+    #[test]
+    fn markdown_wrapped_mentions_are_extracted() {
+        // Agents are instructed to write GitHub-flavored Markdown, and Buzz
+        // Desktop renders every one of these as a mention. Extracting nothing
+        // here publishes a message that reads as addressed to the agent and
+        // carries no `p` tag to wake it.
+        assert_eq!(extract_at_names("**@fizz** please look"), vec!["fizz"]);
+        assert_eq!(extract_at_names("(@fizz can you check?)"), vec!["fizz"]);
+        assert_eq!(extract_at_names("||@fizz||"), vec!["fizz"]);
+    }
+
+    #[test]
+    fn markdown_wrapped_known_names_are_extracted() {
+        let known = ["Will Pfleger"];
+        assert_eq!(
+            extract_at_mentions_with_known("**@Will Pfleger** ping", &known),
+            vec!["will pfleger"]
+        );
+        assert_eq!(
+            extract_at_mentions_with_known("(@Will Pfleger)", &known),
+            vec!["will pfleger"]
+        );
+        assert_eq!(
+            extract_at_mentions_with_known("_@Will Pfleger_ ping", &known),
+            vec!["will pfleger"]
+        );
+        // `_` is a legal name character, so an unknown name keeps it — the
+        // member list is what disambiguates.
+        assert_eq!(extract_at_names("_@fizz_"), vec!["fizz_"]);
+    }
+
+    #[test]
+    fn a_lone_pipe_is_not_a_spoiler_delimiter() {
+        // Desktop's regex takes `\|\|` on both boundaries. A single pipe is
+        // not a spoiler, so treating it as one tags an agent that nobody
+        // visibly addressed — the inverse of the bug this PR fixes.
+        assert!(extract_at_names("|@fizz").is_empty());
+        assert!(extract_at_names("||@fizz|").is_empty());
+        assert!(extract_at_mentions_with_known("|@fizz", &["fizz"]).is_empty());
+        assert!(extract_at_mentions_with_known("||@fizz|", &["fizz"]).is_empty());
+        // The fallback tokenizer must not restore it either.
+        assert!(extract_at_mentions_with_known("||@fizz|", &["nobody"]).is_empty());
+        // The paired form still works on both sides.
+        assert_eq!(extract_at_names("||@fizz||"), vec!["fizz"]);
+        assert_eq!(
+            extract_at_mentions_with_known("||@fizz||", &["fizz"]),
+            vec!["fizz"]
+        );
+    }
+
+    #[test]
+    fn unicode_whitespace_bounds_a_mention() {
+        // JavaScript's `\s` is Unicode-aware, so Desktop renders these as
+        // mentions; `is_ascii_whitespace` left them out of the signed event.
+        assert_eq!(extract_at_names("hi\u{a0}@fizz"), vec!["fizz"]);
+        assert_eq!(
+            extract_at_mentions_with_known("hi\u{a0}@Will Pfleger\u{a0}ok", &["Will Pfleger"]),
+            vec!["will pfleger"]
+        );
+        // Other Unicode spaces Desktop accepts: en space, ideographic space.
+        assert_eq!(extract_at_names("hi\u{2002}@fizz"), vec!["fizz"]);
+        assert_eq!(extract_at_names("hi\u{3000}@fizz"), vec!["fizz"]);
+    }
+
+    #[test]
+    fn an_at_inside_a_word_is_still_not_a_mention() {
+        // The opener set gains markdown punctuation only — an alphanumeric or
+        // any other character before the `@` still means "not a mention".
+        assert!(extract_at_names("user@example.com").is_empty());
+        assert!(extract_at_names("path/to@thing").is_empty());
+        assert!(extract_at_names("a-@fizz").is_empty());
+        assert!(extract_at_mentions_with_known("user@fizz", &["fizz"]).is_empty());
     }
 
     #[test]
