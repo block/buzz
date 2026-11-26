@@ -282,6 +282,13 @@ pub struct UpdateManagedAgentRequest {
     /// the record-scope alias sweep runs atomically with the column write.
     #[serde(default, deserialize_with = "crate::util::double_option")]
     pub effort_level: Option<Option<String>>,
+    /// Absent = don't touch. Present = move the agent to this backend; see
+    /// `apply_backend_update` for the rules.
+    #[serde(default)]
+    pub backend: Option<BackendKind>,
+    /// Confirms moving an agent whose provider deployment may still exist.
+    #[serde(default)]
+    pub force_backend_change: bool,
 }
 
 #[cfg(test)]
