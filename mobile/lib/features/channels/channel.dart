@@ -5,7 +5,7 @@ const Object _sentinel = Object();
 /// Shown when a private-channel add is refused, so a missing Invite action
 /// reads as a rule rather than a bug.
 const privateChannelAddDeniedMessage =
-    'Only channel members can add people to a private channel.';
+    'Only members can add people to a private conversation.';
 
 @immutable
 class Channel {

@@ -368,7 +368,7 @@ class _MemberTile extends ConsumerWidget {
                       color: context.colors.error,
                     ),
                     title: Text(
-                      'Remove from channel',
+                      'Remove from conversation',
                       style: TextStyle(color: context.colors.error),
                     ),
                     onTap: () async {

@@ -585,8 +585,8 @@ Future<_NonMemberMentionChoice?> _promptNonMemberMention(
       title: const Text('Mention people outside this conversation?'),
       content: Text(
         canInvite
-            ? '${names.join(', ')} $verb not in this conversation. Invite them to '
-                  'the conversation, or send without inviting them.'
+            ? '${names.join(', ')} $verb not in this conversation. Invite them, '
+                  'or send without inviting them.'
             : '${names.join(', ')} $verb not in this conversation. '
                   '$privateChannelAddDeniedMessage You can still send without '
                   'inviting them.',

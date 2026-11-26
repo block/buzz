@@ -419,7 +419,7 @@ class ChannelActionsSheet extends HookConsumerWidget {
             if (canLeave)
               _ActionTile(
                 icon: BuzzIcons.logOut,
-                label: channel.isSolo ? 'Leave Solo' : 'Leave conversation',
+                label: 'Leave conversation',
                 destructive: true,
                 onTap: () => _confirmAndRun(
                   context,
@@ -675,7 +675,7 @@ Future<void> _confirmAndRun(
     messenger.showFeedbackSnackBar(
       SnackBar(
         content: Text(
-          'Couldn’t ${confirmLabel.toLowerCase()} channel. Try again.',
+          'Couldn’t ${confirmLabel.toLowerCase()} conversation. Try again.',
         ),
       ),
       kind: ToastKind.error,
