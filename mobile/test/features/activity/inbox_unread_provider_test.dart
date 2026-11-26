@@ -55,7 +55,7 @@ void main() {
     read.load({'channel': 100});
     expect(container.read(inboxHasUnreadProvider), isFalse);
     final local = container.read(inboxLocalStateProvider.notifier);
-    local.markUnread(['mention']);
+    local.markUnread(['mention'], baseline: 100);
     expect(container.read(inboxHasUnreadProvider), isTrue);
     local.clearUnread(['mention']);
     expect(container.read(inboxHasUnreadProvider), isFalse);

@@ -37,7 +37,7 @@ class _Account extends BuilderlabAccountClient {
   }
 
   @override
-  Future<Map<String, dynamic>> currentIdentity() async {
+  Future<Map<String, dynamic>> currentIdentity({String? signer}) async {
     reads++;
     return {
       'identity': {'pubkey_hex': pubkey},

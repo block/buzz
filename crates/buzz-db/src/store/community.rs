@@ -823,7 +823,7 @@ impl Db {
     /// Locks the community row before reading ownership so a concurrent owner
     /// transfer, whose `FOR NO KEY UPDATE` conflicts with this one, has one
     /// serial order with the archive. The weaker lock lets the archive
-    /// proceed past foreign-key child inserts' `FOR KEY SHARE`. A single
+    /// proceed past reference checks' `FOR KEY SHARE`. A single
     /// `UPDATE ... FROM relay_members` would keep its pre-lock ownership
     /// snapshot after waiting and could archive the new owner's community on
     /// the old owner's assertion.
@@ -1601,8 +1601,8 @@ mod postgres_tests {
             .expect("restored community state"));
     }
 
-    /// Foreign-key child inserts hold `FOR KEY SHARE` on the community row for
-    /// their whole transaction. Archive and the lifecycle fences must not queue
+    /// Reference checks hold `FOR KEY SHARE` on the community row for their
+    /// whole transaction. Archive and the lifecycle fences must not queue
     /// behind them, or a busy community stalls the operator archive and
     /// revalidation and conn-control on every pod. `FOR UPDATE` would block
     /// here; `FOR NO KEY UPDATE` must not.

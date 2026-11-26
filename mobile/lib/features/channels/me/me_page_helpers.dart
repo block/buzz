@@ -15,6 +15,120 @@ class _MeRetry extends StatelessWidget {
   );
 }
 
+/// Opens the list-row action popover and clears the matching pane when requested.
+Future<bool?> openConversationListDetails(
+  BuildContext context,
+  Channel channel,
+  String? viewer, {
+  required bool personal,
+  bool isUnread = false,
+  String? sectionId,
+  ConversationMenuSession? nativeSession,
+}) async {
+  final pane = ConversationPaneScope.maybeOf(context);
+  final result = await showConversationPopover(
+    anchorContext: context,
+    channel: channel,
+    viewer: viewer,
+    personal: personal,
+    isUnread: isUnread,
+    sectionId: sectionId,
+    nativeSession: nativeSession,
+  );
+  if (result == true && context.mounted && pane?.selectedId == channel.id) {
+    pane!.clear();
+  }
+  return result;
+}
+
+/// A Solo chat row. It opens as a personal chat in whichever sidebar
+/// section the chat is filed.
+class SoloChatTile extends ConsumerWidget {
+  const SoloChatTile({super.key, required this.channel, this.onTap});
+  final VoidCallback? onTap;
+  final Channel channel;
+
+  static void showActions(
+    BuildContext context,
+    Channel channel,
+    String? viewer,
+  ) => showChannelDetailsSheet(
+    context: context,
+    channel: channel,
+    currentPubkey: viewer,
+    personalChat: true,
+  );
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final viewer = ref.watch(myPubkeyProvider);
+    final legacyChannels = ref.watch(
+      meGroupsProvider.select((g) => g.value?.channels ?? const <String>[]),
+    );
+    final isUnread = ref.watch(
+      meUnreadChannelIdsProvider.select((ids) => ids.contains(channel.id)),
+    );
+    final pane = ConversationPaneScope.maybeOf(context);
+    final selected = pane?.selectedId == channel.id;
+    return IosConversationMenuRow(
+      onMenu: (session) => openConversationListDetails(
+        context,
+        channel,
+        viewer,
+        personal: channel.isPersonalChat(viewer, legacyChannels),
+        isUnread: isUnread,
+        nativeSession: session,
+      ),
+      child: markMessagesRow(
+        context,
+        Stack(
+          children: [
+            if (selected)
+              Positioned.fill(
+                left: MessagesSectionOptions.leadingInset(context) - Grid.xxs,
+                right: Grid.gutter - Grid.xxs,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: context.colors.primaryContainer,
+                    borderRadius: BorderRadius.circular(Radii.container),
+                  ),
+                ),
+              ),
+            Semantics(
+              selected: selected,
+              child: _MeChatRow(
+                channelId: channel.id,
+                name: channel.name,
+                isUnread: isUnread,
+                onLongPress: () => openConversationListDetails(
+                  context,
+                  channel,
+                  viewer,
+                  personal: channel.isPersonalChat(viewer, legacyChannels),
+                  isUnread: isUnread,
+                ),
+                onTap:
+                    onTap ??
+                    () => openConversationPane(
+                      context,
+                      channel.id,
+                      (_) => ChannelDetailPage(
+                        channel: channel,
+                        personalChat: channel.isPersonalChat(
+                          viewer,
+                          legacyChannels,
+                        ),
+                      ),
+                    ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _MeChatRow extends ConsumerWidget {
   const _MeChatRow({
     required this.channelId,
@@ -41,21 +155,27 @@ class _MeChatRow extends ConsumerWidget {
       excludeSemantics: true,
       button: true,
       child: InkWell(
-        borderRadius: BorderRadius.circular(Radii.md),
+        borderRadius: BorderRadius.circular(Radii.container),
         onTap: onTap,
-        onLongPress: onLongPress,
+        onLongPress: usesIosConversationMenu ? null : onLongPress,
         child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: Grid.xxs,
-            vertical: Grid.inventoryRowInset,
+          padding: EdgeInsets.fromLTRB(
+            MessagesSectionOptions.leadingInset(context),
+            Grid.inventoryRowInset,
+            Grid.gutter + Grid.half,
+            Grid.inventoryRowInset,
           ),
           child: Row(
             children: [
               SizedBox(
-                width: 24,
+                width: Grid.inventoryIconSize,
                 child: Align(
                   alignment: Alignment.centerLeft,
-                  child: Icon(BuzzIcons.messageCircle, size: 20, color: color),
+                  child: Icon(
+                    BuzzIcons.messageCircle,
+                    size: Grid.inventoryIconSize,
+                    color: navigationRowIconForeground(context),
+                  ),
                 ),
               ),
               const SizedBox(width: Grid.inventoryLabelGap),
@@ -66,14 +186,24 @@ class _MeChatRow extends ConsumerWidget {
                   overflow: TextOverflow.ellipsis,
                   style: navigationChatTitleTextStyle.copyWith(
                     color: color,
-                    fontWeight: isUnread ? FontWeight.w600 : FontWeight.w400,
+                    fontWeight: isUnread ? FontWeight.w600 : FontWeight.w500,
                   ),
                 ),
               ),
-              if (working.isNotEmpty) ...[
-                const SizedBox(width: Grid.xs),
-                SoloWorkingDots(color: color),
-              ],
+              SizedBox(
+                width: Grid.inventoryAccessoryWidth,
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: SizedBox(
+                    width: 20,
+                    child: Center(
+                      child: working.isEmpty
+                          ? null
+                          : SoloWorkingDots(color: color),
+                    ),
+                  ),
+                ),
+              ),
             ],
           ),
         ),
@@ -100,7 +230,7 @@ class _MeSectionEmpty extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.symmetric(
-      horizontal: Grid.xxs,
+      horizontal: Grid.xxs * 2,
       vertical: Grid.half,
     ),
     child: Align(

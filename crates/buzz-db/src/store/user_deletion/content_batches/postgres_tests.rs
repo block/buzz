@@ -97,28 +97,6 @@ async fn preview_delete_and_retry_preserve_other_users_contributions() {
     .execute(&pool)
     .await
     .unwrap();
-    for (name, author) in [
-        ("alice-sub", &alice),
-        ("agent-sub", &agent),
-        ("bob-sub", &bob),
-    ] {
-        sqlx::query("INSERT INTO subscriptions (community_id,id,owner_pubkey) VALUES ($1,$2,$3)")
-            .bind(community.as_uuid())
-            .bind(name)
-            .bind(author.public_key().as_bytes().as_slice())
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO delivery_log (community_id,subscription_id,event_id) VALUES ($1,$2,$3)",
-        )
-        .bind(community.as_uuid())
-        .bind(name)
-        .bind(original.id.as_bytes().as_slice())
-        .execute(&pool)
-        .await
-        .unwrap();
-    }
     for event in std::iter::once(&original)
         .chain(authored.iter().skip(1))
         .chain(&preserved)
@@ -236,13 +214,6 @@ async fn preview_delete_and_retry_preserve_other_users_contributions() {
             .await
             .unwrap();
     assert_eq!(reaction_authors, vec![bob.public_key().as_bytes().to_vec()]);
-    let deliveries: Vec<String> =
-        sqlx::query_scalar("SELECT subscription_id FROM delivery_log WHERE community_id=$1")
-            .bind(community.as_uuid())
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-    assert_eq!(deliveries, vec!["bob-sub"]);
     let reply_count: i32 = sqlx::query_scalar(
         "SELECT reply_count FROM thread_metadata WHERE community_id=$1 AND event_id=$2",
     )

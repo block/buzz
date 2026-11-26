@@ -118,4 +118,32 @@ void main() {
       expect(ranked.first, 'park');
     });
   });
+
+  group('ShortcodeIndex', () {
+    test('ranks like rankByShortcode, capped at the limit', () {
+      final codes = [
+        'smile',
+        'smiley',
+        'sweat_smile',
+        'smirk',
+        'sm',
+        'some_mode',
+        'grinning-D',
+        '-D',
+        'blob-prayge',
+        'PartyParrot',
+        for (var i = 0; i < 60; i++) 'smile_$i',
+      ];
+      final index = ShortcodeIndex(codes, (code) => code);
+      // `sm` hits every tier: exact, prefix, substring and subsequence.
+      for (final query in ['sm', 'smile', '-D', 'D', 'party', 'bp', 'qx']) {
+        expect(
+          index.rank(query, limit: 50),
+          rankByShortcode(query, codes, (code) => code, limit: 50),
+          reason: query,
+        );
+      }
+      expect(index.rank('sm', limit: 50), hasLength(50));
+    });
+  });
 }

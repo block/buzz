@@ -70,18 +70,7 @@ Future<void> openBestieConversation(
     }
     // Only the lookup is guarded; an open conversation can be replaced.
     release();
-    final pane = ConversationPaneScope.maybeOf(context);
-    if (pane != null) {
-      pane.open(channel.id, (_) => ChannelDetailPage(channel: channel));
-    } else {
-      await Navigator.of(context).push<void>(
-        MaterialPageRoute(
-          // Native glass and video layers must track the live route.
-          allowSnapshotting: false,
-          builder: (_) => ChannelDetailPage(channel: channel),
-        ),
-      );
-    }
+    await openBestieDestination(context, channel);
   } catch (error) {
     if (context.mounted) {
       ScaffoldMessenger.of(context).showFeedbackSnackBar(
@@ -94,5 +83,25 @@ Future<void> openBestieConversation(
   } finally {
     release();
     if (context.mounted) onResolving?.call(false);
+  }
+}
+
+/// Both taps and delivered notes retain Home's split-pane destination and never
+/// navigate over a newer route.
+Future<void> openBestieDestination(
+  BuildContext context,
+  Channel channel,
+) async {
+  if (!context.mounted || ModalRoute.of(context)?.isCurrent == false) return;
+  final pane = ConversationPaneScope.maybeOf(context);
+  if (pane != null) {
+    pane.open(channel.id, (_) => ChannelDetailPage(channel: channel));
+  } else {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        allowSnapshotting: false,
+        builder: (_) => ChannelDetailPage(channel: channel),
+      ),
+    );
   }
 }

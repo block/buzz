@@ -30,3 +30,11 @@ final _threadReferences = Expando<({String? parentId, String? rootId})>();
 }
 
 final _threadEventId = RegExp(r'^[0-9a-fA-F]{64}$');
+
+/// Broadcast replies surface at the channel top level — desktop's
+/// `isBroadcastReply`.
+bool isBroadcastReply(List<List<String>> tags) {
+  return tags.any(
+    (tag) => tag.length >= 2 && tag[0] == 'broadcast' && tag[1] == '1',
+  );
+}

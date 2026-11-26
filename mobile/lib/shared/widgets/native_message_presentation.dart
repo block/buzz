@@ -13,6 +13,7 @@ class NativeMessagePresentation {
 
   static var _nextRequest = 0;
   static bool _active = false;
+  static String? _reactionRequest;
 
   /// Owns preflight through dismissal across reaction surfaces.
   /// An overlapping request is consumed instead of opening a fallback surface.
@@ -36,6 +37,7 @@ class NativeMessagePresentation {
     final requestId =
         arguments['requestId'] as String? ?? 'message-${_nextRequest++}';
     if (onReaction != null) {
+      _reactionRequest = requestId;
       channel.setMethodCallHandler((call) async {
         if (call.method == 'toggleReaction') {
           final data = call.arguments as Map;
@@ -56,8 +58,27 @@ class NativeMessagePresentation {
       return null;
     } finally {
       if (onReaction != null) {
+        if (_reactionRequest == requestId) _reactionRequest = null;
         channel.setMethodCallHandler(null);
       }
+    }
+  }
+
+  /// Shows [message] on the open reaction sheet, which covers Flutter's own
+  /// overlay. False when no reaction sheet is open to show it.
+  static Future<bool> showNotice(String message) async {
+    final requestId = _reactionRequest;
+    if (requestId == null) return false;
+    try {
+      await channel.invokeMethod<void>('notice', {
+        'requestId': requestId,
+        'message': message,
+      });
+      return true;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
     }
   }
 }

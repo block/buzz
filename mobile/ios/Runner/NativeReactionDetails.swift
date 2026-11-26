@@ -293,6 +293,18 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     table.reloadData()
   }
 
+  /// A failed toggle leaves the sheet as it was, so say why above it.
+  func showNotice(_ message: String) {
+    guard presentedViewController == nil else {
+      UIAccessibility.post(notification: .announcement, argument: message)
+      return
+    }
+    let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+    alert.view.tintColor = .label
+    alert.addAction(UIAlertAction(title: "OK", style: .default))
+    present(alert, animated: !UIAccessibility.isReduceMotionEnabled)
+  }
+
   func updateProfiles(_ profiles: [String: [String: Any]]) {
     self.profiles.merge(profiles) { _, new in new }
     guard isViewLoaded else { return }

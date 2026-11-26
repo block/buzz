@@ -1,7 +1,7 @@
 # Mobile Huddles MVP
 
-This foreground-only product slice preserves the existing Desktop/relay
-contract. Android and iOS clients can start a human Huddle, open a recent
+Mobile Huddles use the same Desktop and relay protocol. An admitted iOS
+Huddle can also continue while the phone is locked. Android and iOS clients can start a human Huddle, open a recent
 Desktop-started Huddle card, join with the microphone on, hear multiple remote
 participants, send microphone audio, mute, and leave.
 
@@ -68,16 +68,23 @@ flag bits are ignored. Frames are capped at 4096 bytes before the relay peer
 prefix.
 
 The dBov header also drives the participant speaking treatment. Values above
-the existing `-55 dBov` activity threshold are normalized for a 50 ms visual
-update cadence and continuously scale a 7%-opacity primary-color halo from
-just beyond the avatar to 2.55 times its base diameter. Level increases use a
-responsive eased attack while decreases and silence use a softer eased release;
-silence begins that release after the existing 600 ms hold.
+`-55 dBov` feed a 50 ms visual update cadence. Speaking fades in a close,
+four-point ring, tinted with blurred avatar artwork where available. The portrait
+has a stable slight tilt and responds subtly to volume, growing by at most 3.6%.
+Reduced motion keeps the speaking ring without animated scaling or rotation.
+Agent preparing-response indicators keep their existing meaning and behavior.
+
+On iOS, the full-screen call controls use the existing native Liquid Glass
+container with the same Flutter Tabler artwork, labels and actions. Android
+retains its existing button treatment. The minimized sheet keeps its original
+buttons on both platforms. The emoji action is hidden on both platforms; the
+reaction implementation remains available for future use. On iOS foldable displays, full-screen actions follow
+the workspace side rail: leave then minimize at the top, microphone and speaker at the bottom. Without a rail, controls retain their original positions and sizes, with
+speaker then microphone in the bottom row. Microphone-on and speaker-on use filled selected glass states.
 
 ## Native boundary
 
-`buzz/huddle_media` owns microphone permission and the foreground voice audio
-session. Each platform probes its native Opus encoder and decoder before
+`buzz/huddle_media` owns microphone permission and the voice audio session. Each platform probes its native Opus encoder and decoder before
 advertising support. On Android, `AudioRecord` captures 48 kHz mono PCM,
 `MediaCodec` encodes and decodes Opus, and one `AudioTrack` per remote
 participant lets the Android communication mixer combine decoded PCM. On iOS,
@@ -99,16 +106,24 @@ Flutter bridge; PCM remains inside the native realtime path. Capture starts
 unmuted. Debuggable builds also emit aggregate pre-encode RMS/peak dBov
 histograms plus the active recording route and exposed voice-processing state.
 They never retain or persist PCM, Opus packets, or speech content. Native
-capture and compressed ingress queues are bounded so a foreground session
-cannot accumulate unbounded latency.
+capture and compressed ingress queues are bounded so a session cannot accumulate unbounded latency.
 
-This is deliberately not Desktop parity. The app must remain in the foreground;
-pausing/detaching leaves the room. Mobile agent controls, mobile-originated
-STT/TTS, recordings, background ringing/calling, and advanced device controls
-remain outside this slice. Agent-authenticated Opus published by a Desktop
+On iOS, an admitted Huddle continues when the app is backgrounded or the device
+is locked. The Huddle audio socket stays independent of the main relay socket,
+which follows its usual background disconnect and resume policy. Detaching the
+app or switching communities tears down the Huddle. On Android, pausing or
+detaching leaves the room. Mobile agent controls, mobile-originated STT/TTS,
+recordings, background incoming calls, and advanced device controls remain
+outside this slice. Agent-authenticated Opus published by a Desktop
 Huddle uses the same remote playback path as any other participant.
 
 Physical iOS acceptance must separately verify permission, receiver/speaker and
 connected-headset routing, interruption recovery, and two-way audio with a
-Desktop participant. Static codec and Flutter tests do not prove those device
+Desktop participant while foregrounded, locked, and after unlocking. Static codec and Flutter tests do not prove those device
 behaviors.
+
+The rail uses 48-point controls with 12-point gaps and 28-point Tabler glyphs.
+The side rail keeps a 24-point bottom inset, increased for reported occlusions.
+The compact cover display adds 24 points above the top controls to clear its
+system status cluster; the inner display uses the reported rail clearance.
+Participant content spans the full display width beneath the overlaid rail.

@@ -2,9 +2,9 @@
 //!
 //! Relay membership enforcement uses the shared
 //! [`crate::api::relay_members::enforce_relay_membership`] helper, which supports
-//! NIP-OA owner-delegation fallback on closed relays. On open relays, the auth
+//! NIP-OA owner-delegation fallback on closed relays. On any admitted AUTH, the
 //! handler calls [`crate::api::relay_members::extract_nip_oa_owner`] directly to
-//! extract the owner pubkey for agent→owner backfill (observer frame auth).
+//! record the agent→owner link (owner removal, bans, observer frame auth).
 //!
 //! For WebSocket auth, the NIP-OA `auth` tag is extracted from the signed AUTH
 //! event itself (the tag is integrity-protected by the event signature).
@@ -809,20 +809,15 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 }
             };
 
-            // Open relay NIP-OA backfill: extract owner for agent→owner DB mapping
-            // (needed for observer frame auth). Only runs on open relays — on closed
-            // relays, enforce_relay_membership already handles NIP-OA delegation.
-            // No feature flag needed: NIP-OA is cryptographically self-proving.
+            // Record any verified NIP-OA owner, whatever the relay mode or how
+            // this AUTH was admitted: removing or banning the owner reaches the
+            // agent only through that record. Refused attempts returned above.
             let nip_oa_owner = nip_oa_owner.or(token_owner).or_else(|| {
-                if !state.config.require_relay_membership && auth_tag_json.is_some() {
-                    crate::api::relay_members::extract_nip_oa_owner(
-                        pubkey.as_bytes(),
-                        auth_tag_json.as_deref(),
-                        Some(signed_auth_created_at),
-                    )
-                } else {
-                    None
-                }
+                crate::api::relay_members::extract_nip_oa_owner(
+                    pubkey.as_bytes(),
+                    auth_tag_json.as_deref(),
+                    Some(signed_auth_created_at),
+                )
             });
 
             // B2: acquire a session effect permit after the last policy read
@@ -967,17 +962,27 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             // [FI-TRACE-DENY-SET]
             if let Some(assertion) = &conn.nip_fi_assertion {
                 if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
-                    if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now())
-                    {
-                        attempt.log(AuthResult::Denied(crate::access::AuthReason::DenySet));
-                        metrics::counter!(
-                            "buzz_nip_fi_admission_denied_total",
-                            "reason" => "deny_set_post_registration"
-                        )
-                        .increment(1);
+                    if let Some(refusal) = crate::nip_fi_core::assertion_denied(
+                        deny_map,
+                        assertion,
+                        chrono::Utc::now(),
+                    ) {
+                        let (auth_reason, reason) = match refusal.class {
+                            buzz_auth::DenialClass::AuthorizationDenied => (
+                                crate::access::AuthReason::DenySet,
+                                "deny_set_post_registration",
+                            ),
+                            _ => (
+                                crate::access::AuthReason::AuthorizationUnavailable,
+                                "deny_set_restoring",
+                            ),
+                        };
+                        attempt.log(AuthResult::Denied(auth_reason));
+                        metrics::counter!("buzz_nip_fi_admission_denied_total", "reason" => reason)
+                            .increment(1);
                         conn.community_control
-                            .deny_nip_fi_enforce(crate::nip_fi_shadow::DENY_SET.by(Some(pubkey)));
-                        deny_nip_fi_auth(&conn, buzz_auth::DenialClass::AuthorizationDenied);
+                            .deny_nip_fi_enforce(refusal.by(Some(pubkey)));
+                        deny_nip_fi_auth(&conn, refusal.class);
                         return;
                     }
                 }
@@ -1828,7 +1833,11 @@ mod tests {
             Some(crate::nip_fi_core::NipFiSession::new("test-issuer", None)),
         );
         assert_eq!(
-            state.conn_manager.disconnect_nip_fi("test-issuer", &pubkey),
+            state.conn_manager.disconnect_nip_fi(
+                "test-issuer",
+                &pubkey,
+                buzz_auth::DenyScope::WholeKey
+            ),
             1
         );
         let admin_disconnect = harness.wire_frames().await;
@@ -2587,6 +2596,74 @@ mod tests {
             builder.sign_with_keys(keys).unwrap()
         }
 
+        /// An owner ban landing after AUTH's first checks but before its final
+        /// check refuses the agent's sign-in, yet the verified owner stays
+        /// recorded: the accepted late-refusal rule. Paused at the AUTH commit
+        /// hook, so no timing sleeps.
+        /// Mutation: skip the owner write on this path → the owner is not
+        /// recorded → RED; drop `final_admission_denial` → admitted → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn late_refused_auth_keeps_the_recorded_owner() {
+            use std::sync::Arc;
+            let state = auth_test_state_real_db_expect().await;
+            let community = seeded_community(&state).await;
+            let (owner, agent) = (Keys::generate(), Keys::generate());
+            let tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+                .expect("sign NIP-OA credential");
+            let tag: Vec<String> = serde_json::from_str(&tag).expect("tag JSON");
+            let (conn, _ctrl) = registered_pending_conn(&state, community, "late-refusal");
+            let (arrived, release) =
+                crate::nip_fi_test_hooks::auth_commit_hook::arm(conn.tenant.community());
+            let handle = tokio::spawn(handle_auth(
+                signed_auth(&agent, "late-refusal", Some(tag)),
+                Arc::clone(&conn),
+                Arc::clone(&state),
+            ));
+            tokio::time::timeout(std::time::Duration::from_secs(5), arrived)
+                .await
+                .expect("AUTH must pause after its first checks")
+                .expect("hook channel closed");
+            state
+                .db
+                .ensure_user(community, owner.public_key().as_bytes())
+                .await
+                .expect("ensure owner");
+            state
+                .db
+                .ban_community_member(
+                    community,
+                    &owner.public_key().to_bytes(),
+                    &Keys::generate().public_key().to_bytes(),
+                    None,
+                    None,
+                )
+                .await
+                .expect("ban owner");
+            release.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                .await
+                .expect("AUTH must finish")
+                .expect("AUTH must not panic");
+
+            assert!(
+                !matches!(conn.auth_state_snapshot(), AuthState::Authenticated(_)),
+                "the sign-in is refused and the agent is not authenticated"
+            );
+            assert!(
+                state
+                    .db
+                    .is_agent_owner(
+                        community,
+                        agent.public_key().as_bytes(),
+                        owner.public_key().as_bytes(),
+                    )
+                    .await
+                    .expect("owner lookup"),
+                "the verified owner stays recorded"
+            );
+        }
+
         /// A ban whose disconnect lands after AUTH's policy reads but before it
         /// binds the socket must still refuse admission: the final check runs
         /// after the bind. A user in another community, paused at the same
@@ -2881,6 +2958,119 @@ mod tests {
             assert!(
                 matches!(&refusal, WsMessage::Text(t) if t.contains(crate::handlers::auth::OWNER_LINK_ERROR)),
                 "refusal names the owner-link failure, got {refusal:?}"
+            );
+        }
+
+        /// On a closed relay with NIP-OA admission off, a member agent's
+        /// verified NIP-OA tag records its owner; a tag for another agent or
+        /// one that has expired records nothing; a refused AUTH (agent not a
+        /// member) records nothing. Removing the recorded owner then refuses
+        /// the agent's next AUTH.
+        /// Mutation: restore the `!require_relay_membership` guard on the
+        /// recording step → the member agent's owner stays NULL → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn closed_relay_auth_records_only_verified_admitted_owner() {
+            use std::sync::Arc;
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("PostgreSQL must be available");
+            let state = state_with_pool(pool, |c| {
+                c.require_relay_membership = true;
+                c.allow_nip_oa_auth = false;
+            })
+            .await;
+            let community = seeded_community(&state).await;
+            let owner = Keys::generate();
+            let (valid, wrong_agent, stale, refused) = (
+                Keys::generate(),
+                Keys::generate(),
+                Keys::generate(),
+                Keys::generate(),
+            );
+            for keys in [&owner, &valid, &wrong_agent, &stale] {
+                state
+                    .db
+                    .add_relay_member(
+                        community,
+                        &keys.public_key().to_hex(),
+                        "member",
+                        None,
+                        &nostr::Keys::generate(),
+                    )
+                    .await
+                    .map(|write| write.outcome)
+                    .expect("add agent");
+            }
+            let tag = |agent: &nostr::PublicKey, conditions: &str| -> Vec<String> {
+                let json = buzz_sdk::nip_oa::compute_auth_tag(&owner, agent, conditions)
+                    .expect("sign NIP-OA credential");
+                serde_json::from_str(&json).expect("tag JSON")
+            };
+            let cases = [
+                (&valid, tag(&valid.public_key(), ""), true, true),
+                (&wrong_agent, tag(&stale.public_key(), ""), true, false),
+                (
+                    &stale,
+                    tag(&stale.public_key(), "created_at<1"),
+                    true,
+                    false,
+                ),
+                (&refused, tag(&refused.public_key(), ""), false, false),
+            ];
+            for (i, (keys, auth_tag, admitted, recorded)) in cases.into_iter().enumerate() {
+                let challenge = format!("record-owner-{i}");
+                let (conn, _ctrl) = registered_pending_conn(&state, community, &challenge);
+                handle_auth(
+                    signed_auth(keys, &challenge, Some(auth_tag)),
+                    Arc::clone(&conn),
+                    Arc::clone(&state),
+                )
+                .await;
+                assert_eq!(
+                    matches!(conn.auth_state_snapshot(), AuthState::Authenticated(_)),
+                    admitted,
+                    "case {i} admission"
+                );
+                let stored: Option<Option<Vec<u8>>> = sqlx::query_scalar(
+                    "SELECT agent_owner_pubkey FROM users WHERE community_id = $1 AND pubkey = $2",
+                )
+                .bind(community.as_uuid())
+                .bind(keys.public_key().as_bytes().as_slice())
+                .fetch_optional(state.db.pool())
+                .await
+                .expect("read owner");
+                assert_eq!(
+                    stored.flatten(),
+                    recorded.then(|| owner.public_key().to_bytes().to_vec()),
+                    "case {i} owner record"
+                );
+            }
+
+            // The recorded owner's removal takes the agent with it.
+            buzz_db::relay_members::remove_relay_member(
+                state.db.pool(),
+                community,
+                &owner.public_key().to_hex(),
+                &nostr::Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("remove owner");
+            let (conn, _ctrl) = registered_pending_conn(&state, community, "record-owner-after");
+            handle_auth(
+                signed_auth(
+                    &valid,
+                    "record-owner-after",
+                    Some(tag(&valid.public_key(), "")),
+                ),
+                Arc::clone(&conn),
+                Arc::clone(&state),
+            )
+            .await;
+            assert!(
+                !matches!(conn.auth_state_snapshot(), AuthState::Authenticated(_)),
+                "the agent is refused after its owner's removal"
             );
         }
 
@@ -3628,7 +3818,7 @@ mod tests {
             // the deny check. Insert the deny entry into the live map.
             let until = Utc::now() + Duration::seconds(3600);
             let merge =
-                deny_map_for_insert.merge_cross_pod_deny("test-issuer", &target, until, Utc::now());
+                deny_map_for_insert.merge_cross_pod_deny("test-issuer", &target, until, Utc::now);
             assert!(
                 matches!(merge, buzz_auth::CrossPodMergeResult::Merged),
                 "W_deny_straddle: deny entry must be inserted during the hook window"
@@ -3640,9 +3830,11 @@ mod tests {
             // With the deny entry live, the scan finds exactly one session matching this
             // pubkey and closes it.
             let pubkey_bytes = target.to_bytes().to_vec();
-            let closed = state
-                .conn_manager
-                .disconnect_nip_fi("test-issuer", &pubkey_bytes);
+            let closed = state.conn_manager.disconnect_nip_fi(
+                "test-issuer",
+                &pubkey_bytes,
+                buzz_auth::DenyScope::WholeKey,
+            );
             assert_eq!(
                 closed, 1,
                 "W_deny_straddle: close scan must find exactly 1 registered session \
@@ -3822,17 +4014,20 @@ mod tests {
                     ISSUER_A,
                     &key.public_key(),
                     Utc::now() + Duration::seconds(3600),
-                    Utc::now(),
+                    Utc::now,
                 ),
                 buzz_auth::CrossPodMergeResult::Merged
             ));
             let pubkey_bytes = key.public_key().to_bytes().to_vec();
-            let closed = state
-                .conn_manager
-                .disconnect_nip_fi(ISSUER_A, &pubkey_bytes)
-                + state
-                    .community_connections
-                    .disconnect_nip_fi(ISSUER_A, &pubkey_bytes);
+            let closed = state.conn_manager.disconnect_nip_fi(
+                ISSUER_A,
+                &pubkey_bytes,
+                buzz_auth::DenyScope::WholeKey,
+            ) + state.community_connections.disconnect_nip_fi(
+                ISSUER_A,
+                &pubkey_bytes,
+                buzz_auth::DenyScope::WholeKey,
+            );
             assert_eq!(
                 closed, 0,
                 "issuer A's close scan must not match a session admitted under B"
@@ -3864,6 +4059,170 @@ mod tests {
                 ok_true |= is_ok_true(t.as_str());
             }
             assert!(ok_true, "B session must receive OK(true)");
+        }
+
+        // ── W_cutoff_straddle: a cutoff disconnect lands between registration
+        // and the deny check.  The session registers through production
+        // `from_assertion`, with a signed `iat` far from registration time.
+        // `iat == C`: the scan sees and cancels it, and it is never admitted.
+        // `iat == C + 0.5`: the scan skips it, it is admitted, and redelivery
+        // leaves it open.  Mutation: recording registration time, or flooring
+        // the signed `iat`, flips one case.  [FI-TRACE-DENY-SET]
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn w_cutoff_straddle_old_token_is_cancelled_and_never_admitted() {
+            w_cutoff_straddle_body(false).await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn w_cutoff_straddle_fresh_token_is_admitted_and_survives_redelivery() {
+            w_cutoff_straddle_body(true).await;
+        }
+
+        async fn w_cutoff_straddle_body(fresh: bool) {
+            use buzz_auth::{
+                DenyEntry, DenyScope, IssuerCapacity, NipFiDenyMap, VerifiedAssertion,
+            };
+            use chrono::{Duration, Utc};
+            use std::collections::HashMap;
+            use std::sync::Arc;
+            use tokio::sync::mpsc;
+            use tokio_util::sync::CancellationToken;
+            use uuid::Uuid;
+
+            let key = Keys::generate();
+            let deadline = Utc::now() + Duration::hours(1);
+            let c = Utc::now().timestamp() - 120;
+            let iat =
+                chrono::DateTime::from_timestamp(c, if fresh { 500_000_000 } else { 0 }).unwrap();
+            let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline])
+                .with_issued_at_for_test(iat);
+
+            let challenge = "w-cutoff-straddle-challenge".to_string();
+            let (send_tx, mut send_rx) = mpsc::channel::<WsMessage>(8);
+            let (ctrl_tx, _ctrl_rx) = mpsc::channel::<WsMessage>(8);
+            let (terminal_ctrl_tx, mut terminal_ctrl_rx) = mpsc::channel::<WsMessage>(1);
+            let cancel = CancellationToken::new();
+            let gate = crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone());
+            let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
+            let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
+                conn_id: Uuid::new_v4(),
+                tenant: buzz_core::tenant::TenantContext::resolved(
+                    community,
+                    "test.local".to_string(),
+                ),
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+                auth_state: std::sync::Mutex::new(AuthState::Pending {
+                    challenge: challenge.clone(),
+                    started_at: std::time::Instant::now(),
+                }),
+                subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                send_tx,
+                ctrl_tx,
+                terminal_ctrl_tx,
+                cancel: cancel.clone(),
+                backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                grace_limit: 3,
+                nip_fi_assertion: Some(assertion),
+                session_deadline: Some(deadline),
+                nip_fi_gate: gate,
+                community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
+            });
+
+            let mut state = Arc::try_unwrap(auth_test_state_real_db_expect().await)
+                .unwrap_or_else(|arc| (*arc).clone());
+            let deny_map = Arc::new(NipFiDenyMap::new(
+                16,
+                vec![IssuerCapacity {
+                    issuer: "test-issuer".to_owned(),
+                    capacity: 16,
+                }],
+            ));
+            state.nip_fi_deny_map = Some(Arc::clone(&deny_map));
+            let state = Arc::new(state);
+            state.conn_manager.register(
+                conn.conn_id,
+                conn.send_tx.clone(),
+                conn.ctrl_tx.clone(),
+                conn.terminal_ctrl_tx.clone(),
+                None,
+                cancel.clone(),
+                community,
+                Arc::clone(&conn.backpressure_count),
+                Arc::clone(&conn.subscriptions),
+                conn.grace_limit,
+                conn.community_control.clone(),
+            );
+
+            let auth_event = nostr::EventBuilder::new(nostr::Kind::Authentication, "")
+                .tag(nostr::Tag::parse(["relay", "ws://test.local"]).unwrap())
+                .tag(nostr::Tag::parse(["challenge", &challenge]).unwrap())
+                .sign_with_keys(&key)
+                .unwrap();
+            let (arrived_rx, release) =
+                crate::nip_fi_test_hooks::deny_set_check_hook::arm(community);
+            let handle = tokio::spawn(handle_auth(
+                auth_event,
+                Arc::clone(&conn),
+                Arc::clone(&state),
+            ));
+            tokio::time::timeout(std::time::Duration::from_secs(5), arrived_rx)
+                .await
+                .expect("handler must reach before_deny_set_check within 5s")
+                .expect("arrived channel closed");
+
+            let scope = DenyScope::IssuedThrough(c);
+            let entry = DenyEntry {
+                until: Utc::now() + Duration::seconds(3600),
+                scope,
+            };
+            assert!(matches!(
+                deny_map.merge_cross_pod_deny("test-issuer", &key.public_key(), entry, Utc::now),
+                buzz_auth::CrossPodMergeResult::Merged
+            ));
+            let pubkey_bytes = key.public_key().to_bytes().to_vec();
+            let closed = state
+                .conn_manager
+                .disconnect_nip_fi("test-issuer", &pubkey_bytes, scope);
+            assert_eq!(closed, usize::from(!fresh), "the scan sees only iat <= C");
+
+            release.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                .await
+                .expect("handle_auth must return within 5s after hook release")
+                .expect("handle_auth task must not panic");
+
+            // `AuthState` turns Authenticated before the barrier; admission
+            // is `mark_admitted`, i.e. the admitted index entry.
+            let admitted = state
+                .conn_manager
+                .has_admitted_connection(community, &pubkey_bytes);
+            let mut ok_true = false;
+            while let Ok(WsMessage::Text(t)) = send_rx.try_recv() {
+                ok_true |= is_ok_true(t.as_str());
+            }
+            if fresh {
+                assert!(admitted && ok_true, "iat > C must be admitted");
+                for _ in 0..3 {
+                    assert_eq!(
+                        state
+                            .conn_manager
+                            .disconnect_nip_fi("test-issuer", &pubkey_bytes, scope),
+                        0
+                    );
+                }
+                assert!(!cancel.is_cancelled(), "iat > C survives redelivery");
+            } else {
+                assert!(cancel.is_cancelled(), "iat == C must be cancelled");
+                assert!(!admitted, "iat == C must never reach mark_admitted");
+                assert!(!ok_true, "iat == C must never get OK(true)");
+                assert!(
+                    terminal_ctrl_rx.try_recv().is_ok(),
+                    "iat == C must get a terminal denial"
+                );
+            }
         }
 
         /// True iff `frame` is a NIP-01 `["OK", <id>, true, ...]` acceptance.
@@ -3977,7 +4336,7 @@ mod tests {
                 "test-issuer",
                 &denied_key,
                 Utc::now() + Duration::hours(1),
-                Utc::now(),
+                Utc::now,
             );
             assert!(matches!(merge, buzz_auth::CrossPodMergeResult::Merged));
             state.nip_fi_deny_map = Some(deny_map);
@@ -4002,9 +4361,11 @@ mod tests {
 
             // The close scan runs while the connection is still unproven: it
             // must miss it, leaving the handler's check as the only defence.
-            let closed = state
-                .conn_manager
-                .disconnect_nip_fi("test-issuer", &key.public_key().to_bytes());
+            let closed = state.conn_manager.disconnect_nip_fi(
+                "test-issuer",
+                &key.public_key().to_bytes(),
+                buzz_auth::DenyScope::WholeKey,
+            );
             assert_eq!(closed, 0, "close scan must miss the unproven connection");
             assert!(!cancel.is_cancelled());
 
@@ -4646,6 +5007,53 @@ mod tests {
                     harness.assert_fi_terminal(buzz_auth::DenialClass::AuthorizationDenied);
                 }
             }
+        }
+
+        /// While the deny map restores, root AUTH refuses with the
+        /// `authorization unavailable` terminal frame and a bare close, never
+        /// `authorization denied`.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn fi_restoring_deny_map_emits_terminal_authorization_unavailable() {
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("PostgreSQL must be available");
+            let mut state = (*state_with_pool(pool, |_| {}).await).clone();
+            let deny_map = std::sync::Arc::new(buzz_auth::NipFiDenyMap::new(
+                16,
+                vec![buzz_auth::IssuerCapacity {
+                    issuer: "test-issuer".to_owned(),
+                    capacity: 16,
+                }],
+            ));
+            deny_map.begin_restore();
+            state.nip_fi_deny_map = Some(deny_map);
+            let state = std::sync::Arc::new(state);
+            let mut harness = AuthHarness::new(true);
+            let community = *harness.conn.tenant.community().as_uuid();
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community)
+                .bind(format!("fi-restoring-{}.example", community.simple()))
+                .execute(state.db.pool())
+                .await
+                .expect("insert community");
+            harness.run(harness.auth_event(), state).await;
+            assert_eq!(
+                harness
+                    .terminal_rx
+                    .try_recv()
+                    .expect("terminal denial frame"),
+                crate::nip_fi_session::denial_frame(
+                    crate::nip_fi_session::NipFiWsRoute::Root,
+                    buzz_auth::DenialClass::AuthorizationUnavailable,
+                ),
+            );
+            assert!(harness.conn.cancel.is_cancelled());
+            assert_eq!(
+                *harness.conn.community_control.disconnect_reason().borrow(),
+                None,
+                "a bare close, never the 1008 of a revocation"
+            );
         }
 
         /// Carl's coverage gap: a matching-key FI connection whose pubkey is

@@ -185,18 +185,6 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
         for (index, author) in authors.into_iter().enumerate() {
             let key = author.public_key().to_bytes();
             let id = &first_ids[index];
-            let sub = format!("sub-{index}");
-            sqlx::query(
-                "INSERT INTO subscriptions (community_id,id,owner_pubkey) VALUES ($1,$2,$3)",
-            )
-            .bind(community.as_uuid())
-            .bind(&sub)
-            .bind(key.as_slice())
-            .execute(&pool)
-            .await
-            .unwrap();
-            sqlx::query("INSERT INTO delivery_log (community_id,subscription_id,event_id) VALUES ($1,$2,$3)")
-                .bind(community.as_uuid()).bind(&sub).bind(&first_ids[3]).execute(&pool).await.unwrap();
             sqlx::query("INSERT INTO reactions (community_id,event_created_at,event_id,pubkey,emoji) VALUES ($1,to_timestamp($2),$3,$4,'+')")
                 .bind(community.as_uuid()).bind(timestamp.as_secs() as f64).bind(&first_ids[3])
                 .bind(key.as_slice()).execute(&pool).await.unwrap();
@@ -237,8 +225,6 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
         "events",
         "event_mentions",
         "reactions",
-        "subscriptions",
-        "delivery_log",
         "push_leases",
         "push_match_queue",
         "push_wake_outbox",
@@ -368,10 +354,6 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
                         !selected.contains(&hex_field("event_id"))
                     }
                     "reactions" => !owned("pubkey"),
-                    "subscriptions" => !owned("owner_pubkey"),
-                    "delivery_log" => {
-                        !["sub-0", "sub-1"].contains(&row["subscription_id"].as_str().unwrap())
-                    }
                     "push_leases" | "push_wake_outbox" => !owned("author"),
                     "operator_listener_outbox" => {
                         !owned("target_pubkey") && !owned("listener_pubkey")
@@ -441,7 +423,7 @@ async fn target_discovery_handles_no_agents_and_rejects_overflow_without_output(
             .run_message_batches(&options, mode, None, &mut output)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("target key limit"));
+        assert!(error.to_string().contains("ownership exceeds target limit"));
         assert!(output.is_empty());
     }
     assert_eq!(snapshot_rows(&pool, community, "users").await.len(), 10001);

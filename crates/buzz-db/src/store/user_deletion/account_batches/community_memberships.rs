@@ -64,6 +64,16 @@ impl UserDeletionStore {
             .ok_or_else(|| invalid("missing relay signing key"))?;
         check_signer(tx.conn(), community, signer).await?;
         batch(writer, options, op, &keys, summary)?;
+        // The member row is locked, so no new acceptance can be recorded
+        // (`record_join_policy_acceptance` locks it `FOR KEY SHARE`). Delete
+        // the ones recorded after the acceptance batch ran, in the same
+        // transaction as the member, as `delete_member_with_acceptances` does.
+        // A rollback below keeps them with the member.
+        sqlx::query("DELETE FROM join_policy_acceptances WHERE community_id=$1 AND pubkey=$2")
+            .bind(community)
+            .bind(&options.pubkey)
+            .execute(tx.conn())
+            .await?;
         // The selected row is locked: a concurrent ownership grant cannot turn
         // this target into an owner between this predicate and the delete.
         let removed = sqlx::query(

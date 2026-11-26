@@ -7,10 +7,16 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app.dart';
+import 'diagnostic_screens.dart';
 import 'features/age_gate/age_signal_push_bootstrap.dart';
 import 'features/agents/agents_page.dart';
 import 'features/invites/invite_join_provider.dart';
 import 'shared/agents/agents_surface.dart';
+import 'shared/diagnostics/diagnostic_member_binding.dart';
+import 'shared/diagnostics/diagnostic_navigation_observer.dart';
+import 'shared/diagnostics/diagnostic_reporter.dart';
+import 'shared/diagnostics/diagnostic_startup.dart';
+import 'shared/push/android_push_wake.dart';
 import 'shared/push/push_bridge.dart';
 import 'shared/relay/media_disk_cache.dart';
 import 'shared/relay/relay_closed_policy.dart';
@@ -19,8 +25,20 @@ import 'shared/theme/theme_provider.dart';
 
 void main() => runBuzzApp(const App());
 
+/// Started by the Android push handler in a background engine, without UI,
+/// to turn a push wake into notifications.
+@pragma('vm:entry-point')
+Future<void> androidPushWakeMain() => runAndroidPushWake();
+
 Future<void> runBuzzApp(Widget app) async {
   WidgetsFlutterBinding.ensureInitialized();
+  await runWithDiagnostics(
+    destination: reportingDestination,
+    app: (reporter) => _startApp(app, reporter),
+  );
+}
+
+Future<void> _startApp(Widget app, DiagnosticReporter reporter) async {
   installBuzzPushMethodHandler();
   // Relay upgrades name the app version, so learn it before any socket opens.
   final userAgent = loadRelayUserAgent(
@@ -35,6 +53,7 @@ Future<void> runBuzzApp(Widget app) async {
     buildRootProviderScope(
       prefs: prefs,
       mediaCacheRoot: _mediaCacheRoot,
+      reporter: reporter,
       child: app,
     ),
   );
@@ -56,6 +75,7 @@ ProviderScope buildRootProviderScope({
   required SharedPreferences prefs,
   required Widget child,
   Future<Directory?> Function()? mediaCacheRoot,
+  DiagnosticReporter reporter = const NoopDiagnosticReporter(),
 }) => ProviderScope(
   // A relay statement deadline cannot resolve on retry — the same expensive
   // query would re-run and hit the same limit. Return null (no retry) for
@@ -66,6 +86,8 @@ ProviderScope buildRootProviderScope({
     agentCreationSurfaceProvider.overrideWithValue(
       (context, link) async => unawaited(showAgents(context, draft: link)),
     ),
+    diagnosticReporterProvider.overrideWithValue(reporter),
+    diagnosticScreenClassifierProvider.overrideWithValue(diagnosticScreenOf),
     savedPrefsProvider.overrideWithValue(prefs),
     if (mediaCacheRoot != null)
       mediaCacheRootProvider.overrideWith((ref) => mediaCacheRoot()),
@@ -74,5 +96,5 @@ ProviderScope buildRootProviderScope({
           (scope) => buildMobileInviteJoinRecovery(ref, scope),
     ),
   ],
-  child: AgeSignalPushBootstrap(child: child),
+  child: DiagnosticMemberBinding(child: AgeSignalPushBootstrap(child: child)),
 );

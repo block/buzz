@@ -16,8 +16,6 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/profile/profile_setup_page.dart';
 import 'package:buzz/features/profile/profile_setup_avatar_editor.dart';
 import 'package:buzz/features/profile/profile_avatar_draft.dart';
-import 'package:buzz/shared/emoji/emoji_avatar.dart';
-import 'package:buzz/shared/widgets/playing_avatar_image.dart';
 import 'package:buzz/features/pairing/pairing_page.dart';
 import 'package:buzz/hosted_app_gate.dart';
 import 'package:buzz/onboarding_app_entry.dart';
@@ -349,44 +347,53 @@ void main() {
     });
   }
 
-  journey('linked account without backup imports its key without replacing it', (
-    tester,
-    f,
-  ) async {
-    await f.initialize(localIdentity: false);
-    f.offerProfile = false;
-    await f.mount(tester);
-    // Account restoration may resume independently of the Add choices.
-    await f.flow.signInAccount();
-    await f.settle(tester);
-    expect(f.flow.stage, HostedFlowStage.setupIdentity);
-    expect(f.probes, isEmpty);
-    expect(find.text('Create my Buzz identity'), findsNothing);
-    expect(find.text('Import existing identity'), findsOneWidget);
-    await f.tap(tester, 'Import existing identity');
-    await tester.enterText(
-      find.byType(TextField).hitTestable(),
-      f.secondKeys.nsec,
+  for (final hasUnrelatedBackup in [false, true]) {
+    journey(
+      'linked account imports its missing key (unrelated backup: $hasUnrelatedBackup)',
+      (tester, f) async {
+        await f.initialize(localIdentity: false);
+        f.offerProfile = false;
+        if (hasUnrelatedBackup) f.cloudKeys.add(f.secondKeys);
+        await f.mount(tester);
+        // Account restoration may resume independently of the Add choices.
+        await f.flow.signInAccount();
+        await f.settle(tester);
+        expect(f.flow.stage, HostedFlowStage.setupIdentity);
+        expect(f.probes, isEmpty);
+        expect(find.text('Create my Buzz identity'), findsNothing);
+        expect(find.text('Import existing identity'), findsOneWidget);
+        await f.tap(tester, 'Import existing identity');
+        await tester.enterText(
+          find.byType(TextField).hitTestable(),
+          f.secondKeys.nsec,
+        );
+        await f.tap(tester, 'Preview identity');
+        await f.tap(tester, 'Import this identity');
+        expect(
+          find.text(
+            'This key doesn’t match the identity linked to your Builderlab account.',
+          ),
+          findsOneWidget,
+        );
+        expect(await f.store.read(), isNull);
+        expect(f.bound, f.keys.public);
+        await tester.enterText(
+          find.byType(TextField).hitTestable(),
+          f.keys.nsec,
+        );
+        await f.tap(tester, 'Preview identity');
+        await f.tap(tester, 'Import this identity');
+        expect(await f.store.read(), isNull);
+        await f.tap(tester, 'Back up and continue');
+        expect((await f.store.read())!.pubkey, f.keys.public);
+        expect((await f.store.read())!.backup, isNotNull);
+        expect(
+          f.requests.where((r) => r.url.path.endsWith('/recovery')),
+          isEmpty,
+        );
+      },
     );
-    await f.tap(tester, 'Preview identity');
-    await f.tap(tester, 'Import this identity');
-    expect(
-      find.text(
-        'This key doesn’t match the identity linked to your Builderlab account.',
-      ),
-      findsOneWidget,
-    );
-    expect(await f.store.read(), isNull);
-    expect(f.bound, f.keys.public);
-    await tester.enterText(find.byType(TextField).hitTestable(), f.keys.nsec);
-    await f.tap(tester, 'Preview identity');
-    await f.tap(tester, 'Import this identity');
-    expect(await f.store.read(), isNull);
-    await f.tap(tester, 'Back up and continue');
-    expect((await f.store.read())!.pubkey, f.keys.public);
-    expect((await f.store.read())!.backup, isNotNull);
-    expect(f.requests.where((r) => r.url.path.endsWith('/recovery')), isEmpty);
-  });
+  }
 
   journey('system Back leaves community link entry', (tester, f) async {
     await f.initialize();
@@ -467,16 +474,20 @@ void main() {
         expect(f.profileWrites, isEmpty);
         await tester.tap(find.byTooltip('Add profile photo'));
         await f.settle(tester);
-        final url = emojiAvatarDataUrl('🐝', 0xFFFFE75C);
+        final bytes = base64Decode(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+        );
         Navigator.of(
           tester.element(find.byType(ProfileSetupAvatarEditor)),
-        ).pop(ProfileUrlAvatarDraft(url));
+        ).pop(ProfileImageAvatarDraft(bytes));
         await f.settle(tester);
         expect(
-          tester
-              .widget<PlayingAvatarImage>(find.byType(PlayingAvatarImage))
-              .imageUrl,
-          url,
+          (tester
+                      .widget<CircleAvatar>(find.byType(CircleAvatar))
+                      .backgroundImage!
+                  as MemoryImage)
+              .bytes,
+          bytes,
         );
         await tester.tap(find.byTooltip('Back'));
         await f.settle(tester);
@@ -497,7 +508,12 @@ void main() {
         expect(find.byTooltip('Edit profile photo'), findsOneWidget);
         await f.tap(tester, skipAvatar ? 'Skip' : 'Continue');
         expect(f.profileWrites, ['Draft Person']);
-        expect(f.profileAvatars, skipAvatar ? isEmpty : [url]);
+        expect(
+          f.profileAvatars,
+          skipAvatar ? isEmpty : ['https://media.example/avatar.png'],
+        );
+        // The failed save already uploaded the image; the retry reuses it.
+        expect(f.avatarUploads, 1);
       },
     );
   }

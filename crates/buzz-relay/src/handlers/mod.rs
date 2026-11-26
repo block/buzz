@@ -48,6 +48,9 @@ pub mod moderation_commands;
 pub mod moderation_notices;
 /// Multi-node fan-out: Redis events to local subscribers, with lossless lag handling.
 pub mod multinode_fanout;
+mod pins;
+#[cfg(test)]
+mod pins_postgres_tests;
 /// Product-feedback validation + deployment sidecar persistence.
 pub mod product_feedback;
 #[allow(dead_code, missing_docs)]
@@ -66,6 +69,9 @@ pub mod report_resolution;
 pub mod req;
 /// NIP-29 and NIP-25 side-effect handlers.
 pub mod side_effects;
+mod solo_member_role;
+#[cfg(test)]
+mod solo_member_role_postgres_tests;
 #[cfg(test)]
 mod system_channel_postgres_tests;
 /// Per-filter query scope for system channels.

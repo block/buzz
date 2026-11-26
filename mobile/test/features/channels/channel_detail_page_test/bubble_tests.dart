@@ -28,7 +28,9 @@ void bubbleLayoutTests() {
       find.byKey(const ValueKey('channel-header-settings-trigger')),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Member actions'));
+    final memberActions = find.text('Member actions');
+    await _scrollDetailsTo(tester, memberActions);
+    await tester.tap(memberActions);
     await tester.pumpAndSettle();
 
     final members = find.byKey(const ValueKey('members-sheet-list'));
@@ -451,6 +453,65 @@ void bubbleLayoutTests() {
       await tester.pumpAndSettle();
       expect(actions.removed, ['own-1', 'own-2']);
       expect(actions.added, isEmpty);
+    },
+  );
+
+  testWidgets(
+    'a failed grouped quick reaction still shows its notice after the row '
+    'is rebuilt away',
+    (tester) async {
+      final removals = [
+        for (var index = 0; index < 3; index++)
+          _systemMsg(
+            id: 'removal-$index',
+            payload: {
+              'type': 'member_removed',
+              'actor': 'alice',
+              'target': 'target-$index',
+            },
+            createdAt: 1000 + index,
+          ),
+      ];
+      final notifier = _FakeMessagesNotifier(removals);
+      final actions = _OfflineGroupedReactionActions();
+      await tester.pumpWidget(
+        _buildTestable(
+          toastHost: true,
+          signingPubkey: 'self',
+          messages: const [],
+          messagesNotifier: notifier,
+          createChannelActions: (_) => actions,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.longPress(
+        find.byKey(const ValueKey('system-message-row-removal-0')),
+      );
+      await tester.pumpAndSettle();
+
+      // A new message shifts the timeline while the sheet is open.
+      notifier.setMessages([
+        _textMsg(
+          id: 'newer',
+          pubkey: 'alice',
+          content: 'Newer',
+          createdAt: 2000,
+        ),
+      ]);
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('system-message-row-removal-0')),
+        findsNothing,
+      );
+      await tester.tap(find.byKey(const ValueKey('quick-reaction-👍')));
+      await tester.pumpAndSettle();
+
+      expect(actions.attempts, 1);
+      expect(
+        find.text('Couldn’t add reaction. No connection.'),
+        findsOneWidget,
+      );
+      await tester.pumpAndSettle(const Duration(seconds: 10));
     },
   );
 
@@ -1026,6 +1087,22 @@ class _GroupedReactionActions implements ChannelActions {
     String emoji, {
     required String targetAuthor,
   }) async => added.add(id);
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _OfflineGroupedReactionActions implements ChannelActions {
+  var attempts = 0;
+  @override
+  Future<void> addReaction(
+    String id,
+    String emoji, {
+    required String targetAuthor,
+  }) {
+    attempts += 1;
+    return Future.error(RelayNotConnectedError());
+  }
+
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

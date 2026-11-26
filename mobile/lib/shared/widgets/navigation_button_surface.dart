@@ -47,12 +47,25 @@ class NavigationButtonSurface extends StatelessWidget {
 
 /// Uses the shared native navigation glass instead of a separate surface.
 class NavigationGlassGroup extends InheritedWidget {
-  const NavigationGlassGroup({super.key, required super.child});
+  const NavigationGlassGroup({
+    super.key,
+    required super.child,
+    this.diameter = 56,
+  });
+
+  final double diameter;
+
+  static double diameterOf(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<NavigationGlassGroup>()
+          ?.diameter ??
+      56;
 
   static bool maybeOf(BuildContext context) =>
       context.dependOnInheritedWidgetOfExactType<NavigationGlassGroup>() !=
       null;
 
   @override
-  bool updateShouldNotify(NavigationGlassGroup oldWidget) => false;
+  bool updateShouldNotify(NavigationGlassGroup oldWidget) =>
+      diameter != oldWidget.diameter;
 }

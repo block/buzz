@@ -4,8 +4,8 @@
 //! Each helper locks the parent row `FOR KEY SHARE`: the lock a foreign key's
 //! check takes, so a concurrent delete of the parent (which locks it
 //! `FOR UPDATE` first) either waits for the writing transaction or runs first
-//! and makes the check fail. While the foreign keys still exist the two checks
-//! are idempotent; once they are dropped these checks are the only guard.
+//! and makes the check fail. The foreign keys are dropped (migrations
+//! 0102-0104), so these checks are the only guard.
 //!
 //! A missing parent is `DbError::NotFound`, never a silent success. Every
 //! lookup below the community is scoped by `community_id`, so a parent that

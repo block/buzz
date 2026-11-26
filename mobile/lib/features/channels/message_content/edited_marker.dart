@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 
 import '../../../shared/theme/theme.dart';
+import '../message_reply_drag_target.dart';
 
 /// Marks where an edited body draws its "(edited)" marker. A private-use
 /// character. A body that already has one is drawn as written, and its
@@ -116,11 +117,13 @@ class EditedMarkerBelow extends StatelessWidget {
   const EditedMarkerBelow({super.key});
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
-    child: Text(
-      editedMarkerText,
-      style: editedMarkerStyle(context, own: false),
+  Widget build(BuildContext context) => MessageLongPressTarget(
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+      child: Text(
+        editedMarkerText,
+        style: editedMarkerStyle(context, own: false),
+      ),
     ),
   );
 }

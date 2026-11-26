@@ -2,7 +2,7 @@
 
 > Someone pushes a fix. Buzz creates a channel for the branch. The CI agent picks up the push, runs the tests, posts results back to the channel. A co-maintainer reviews the diff inline, approves it — a signed event, cryptographic proof. Merge. The workflow runs the integration. The channel archives into a permanent record of why that code exists.
 >
-> Bug report to merged patch. One place. One search index. One identity system. The branch channel was the pull request, the CI dashboard, and the discussion thread.
+> Bug report to merged fix. One place. One search index. One identity system. The work channel held the pull request, the CI results, and the discussion.
 
 This document is the software-forge slice of the broader Buzz platform. [VISION.md](VISION.md) covers the platform. [VISION_SOVEREIGN.md](VISION_SOVEREIGN.md) covers the sovereign relay story — one domain, one relay, one project. This doc zooms in on what it looks like when that relay hosts code. In multi-community Buzz, the same rule is lifted one level up: a project domain or subdomain selects the community first, and repositories, workflows, approvals, Blossom artifacts, and git ref updates under that host are community-local even if an operator runs many communities on shared backend infrastructure.
 
@@ -27,16 +27,14 @@ The portable representation is a NIP-34 repo announcement (kind:30617) — stand
     ["maintainers", "<co-maintainer-npub>"],
     ["buzz-channel", "<channel-uuid>"],
     ["buzz-visibility", "listed"],
-    ["buzz-protect", "main", "push-allowed", "<alice-npub>", "<bob-npub>"],
-    ["buzz-protect", "main", "require-approval", "2"],
-    ["buzz-protect", "main", "no-force-push"]
+    ["buzz-protect", "refs/heads/main", "push:admin", "no-force-push", "no-delete"]
   ]
 }
 ```
 
-Branch protections live in the same event — `buzz-protect` tags. The relay enforces them at the git transport layer. Only npubs listed in `push-allowed` can push to protected branches. Force pushes are blocked. Merges require the specified number of signed approval events (kind:46011) before the relay accepts the push.
+Branch protections live in the same event as `buzz-protect` tags, and the relay enforces them at the git transport layer. The repo channel's roles decide who can push: members write, and `push:admin` narrows a protected branch to admins. `no-force-push` and `no-delete` apply to everyone, the owner included. Required approvals and checks are governance rules still to build; see [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md).
 
-Agents inherit access from their owner via [NIP-OA](docs/nips/NIP-OA.md). The relay checks: does the push carry a valid NIP-OA auth tag, and is the owner pubkey in that tag listed in `push-allowed`? If yes, the push is accepted — the agent's own pubkey doesn't need to be in the list. Add a maintainer, and all their authorized agents can push. Remove the maintainer, and all their agents lose access instantly. Agents without NIP-OA attestation are treated as their own identity and must be listed explicitly.
+Agents act under their own authority, never their owner's. An agent reaches a repo through its own membership in the repo channel, and where the community requires it, a grant from its owner that further limits its repos, actions, and lifetime. [NIP-OA](docs/nips/NIP-OA.md) identifies the human who delegated: every push is attributed to that owner, and a ban on the owner reaches the agent too. Owner attestation never replaces the agent's own channel access or a required grant. An agent never holds more than its owner currently does: when the owner loses access to a repo, the agent loses it too, grant or no grant. See [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md).
 
 Standard NIP-34 clients see a normal repo. gitworkshop.dev renders it. ngit-cli works with it. Buzz clients read the `buzz-` tags and wire up the channel and project UI. One event, two audiences, no custom kind for the repo itself.
 
@@ -78,23 +76,23 @@ The cost is stated plainly: a third-party NIP-34 client sees the member repos in
 
 A feature branch is a conversation.
 
-When you create a branch, Buzz creates a channel. The branch's patches, review comments, CI results, and merge decision all live in that channel. When the branch merges, the channel archives. The conversation becomes the permanent record of why that code exists.
+When you create a branch, Buzz creates a channel. The branch's pull request, review comments, CI results, and merge decision all live in that channel. When the branch merges, the channel archives. The conversation becomes the permanent record of why that code exists.
 
 ```
 #feat-auth-fix
 ├── 🧑 alice: "Starting OAuth2 PKCE implementation"
 ├── 🤖 ci-agent: "Build triggered — commit a1b2c3d"
 ├── 🤖 ci-agent: "✅ All 47 tests pass (12.3s)"
-├── 📎 kind:1617 patch — src/auth/pkce.rs (+120 lines)
+├── 📎 kind:1618 pull request — src/auth/pkce.rs (+120 lines)
 ├── 🧑 bob: "One nit on error handling line 45"
-├── 📎 kind:1617 patch v2 — addressed review
+├── ⬆️ alice pushed d4e5f6a — addressed review
 ├── 🤖 review-agent: "LGTM — error variants match trait spec"
 ├── ✅ bob: Approval event (kind:46011)
 ├── 🔀 Merged to main — kind:1631
 └── 📦 Channel archived
 ```
 
-No tab-switching between issue tracker, CI dashboard, chat, and code review. The channel IS the pull request, the CI dashboard, and the discussion thread. One stream. One search index.
+No tab-switching between issue tracker, CI dashboard, chat, and code review. The channel shows the pull request, the CI dashboard, and the discussion thread. One stream. One search index. It displays the proposal and grants nothing: who can read, push, and approve always comes from the repo channel and the community's rules. See [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md).
 
 ---
 
@@ -115,8 +113,8 @@ Push          CI              Review          Merge
   │            │ Test ✅        │               │
   │            │ Lint ✅        │               │
   │            │                │               │
-  │            │ kind:1630 ────►│               │
-  │            │ (CI passed)    │               │
+  │            │ check ────────►│               │
+  │            │ (signed result)│               │
   │            │                │ Review in     │
   │            │                │ branch channel│
   │            │                │               │
@@ -129,7 +127,7 @@ Push          CI              Review          Merge
   │            │                │               │ Channel archives
 ```
 
-The approval event is signed by the maintainer's npub. The merge status references the approval. The audit log chains them together. Cryptographic proof of who approved what.
+The approval event is signed by the maintainer's npub. The merge status references the approval. The audit log chains them together. Cryptographic proof of who approved what. In a governed community, landing goes through one gate that checks every applicable rule and leaves a receipt; see [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md).
 
 ---
 
@@ -137,11 +135,11 @@ The approval event is signed by the maintainer's npub. The merge status referenc
 
 Every contributor — human or agent — has a verifiable identity and a queryable contribution history across every project on the network. Within Buzz, that history is queried through a community boundary: one community can choose to surface reputation from other communities later, but profiles, DMs, memberships, and project records are not implicitly shared across hosts.
 
-A new contributor submits a patch. Before you read the code:
+A new contributor opens a pull request. Before you read the code:
 
-1. **Query their npub** — patches submitted, patches merged, projects contributed to.
+1. **Query their npub** — pull requests opened, pull requests merged, projects contributed to.
 2. **Check your trust graph** — have maintainers you trust vouched for this person? Signed approval events are public and queryable.
-3. **Assess risk** — fresh npub with no history gets scrutiny. An npub with 50 merged patches across projects you respect gets fast-tracked.
+3. **Assess risk** — fresh npub with no history gets scrutiny. An npub with 50 merged pull requests across projects you respect gets fast-tracked.
 
 This works because identity is cryptographic and portable. Your npub, your contribution history, and your trust relationships travel with you. No platform owns your reputation.
 
@@ -194,7 +192,7 @@ Living documents, collaboratively editable by humans and agents via MCP tools. N
 
 ### Releases → Agent + Workflow
 
-An agent in `#releases` watches `main`. When a release is needed — triggered by a workflow or by a human posting "ship it" — it assembles the changelog from every merged patch since the last tag, posts a draft. The maintainer approves. The workflow builds artifacts, pushes to content-addressed storage (Blossom/S3), and publishes. Logged, signed, traceable.
+An agent in `#releases` watches `main`. When a release is needed — triggered by a workflow or by a human posting "ship it" — it assembles the changelog from every merged pull request since the last tag, posts a draft. The maintainer approves. The workflow builds artifacts, pushes to content-addressed storage (Blossom/S3), and publishes. Logged, signed, traceable.
 
 ---
 
@@ -213,10 +211,10 @@ Agents are project members with npubs, contribution histories, and reputations. 
 | Role | Watches | Does |
 |------|---------|------|
 | **Triage** | Issues (kind:1621) | Labels, assigns, detects duplicates, pre-screens |
-| **Review** | Patches (kind:1617) | First-pass code review, style checks, dependency audit |
+| **Review** | Pull requests (kind:1618) | First-pass code review, style checks, dependency audit |
 | **Docs** | Ref updates (kind:30618) | Keeps docs in sync after merges |
 | **Merge coordinator** | CI results | Runs the merge train, requests human sign-off |
-| **Coding agent** | Jobs (kind:43001) | Implements tasks, submits patches for review |
+| **Coding agent** | Jobs (kind:43001) | Implements tasks, pushes branches for review |
 
 ---
 
@@ -238,7 +236,7 @@ Standard kinds as substrate. Custom kinds only where genuinely novel.
 | **Multi-repo projects** | — | 30621 ([NIP-MP](docs/nips/NIP-MP.md)) | Cross-owner grouping is unexpressible in per-repo tags |
 | **Audit** | — | 48001 | Hash-chain tamper-evident log |
 
-If Buzz disappears tomorrow, your repos still work on gitworkshop.dev, your patches still work with ngit-cli, your identities still work on any nostr client. Centralized deployment, decentralized protocol.
+If Buzz disappears tomorrow, your repos still work on gitworkshop.dev, your pull requests still work with ngit-cli, your identities still work on any nostr client. Centralized deployment, decentralized protocol.
 
 ---
 

@@ -576,7 +576,7 @@ async fn key_disconnected_before_its_community_exists_is_denied_there() {
     let (k_keys, control_keys) = (nostr::Keys::generate(), nostr::Keys::generate());
     let (k, control) = (k_keys.public_key(), control_keys.public_key());
     let now = chrono::Utc::now();
-    let merged = deny_map.merge_cross_pod_deny(ISS, &k, now + chrono::Duration::hours(1), now);
+    let merged = deny_map.merge_cross_pod_deny(ISS, &k, now + chrono::Duration::hours(1), || now);
     assert!(matches!(merged, buzz_auth::CrossPodMergeResult::Merged));
     let h = host("after");
     assert_eq!(

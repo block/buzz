@@ -12,7 +12,7 @@ This chart has two operating profiles selected by values:
 ## Quickstart (eval only)
 
 ```sh
-helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.10 \
+helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.12 \
   --create-namespace --namespace buzz \
   --set quickstart=true \
   --set postgresql.enabled=true \
@@ -514,6 +514,118 @@ from the deployed image identity (`image.digest` when set, otherwise
 `image.tag`, otherwise `Chart.AppVersion`). The value is never hashed or
 sanitized.
 
+## Acceptance probe
+
+`acceptance.enabled=true` adds a CronJob that runs `buzz-acceptance` from the
+relay image. Each run checks the relay's core jobs once (NIP-11, connect and
+NIP-42 auth, channel create, publish, fan-out, history, access control and
+cleanup), prints a JSON report and exits: 0 when every check passed, 1 when
+one failed, 2 when the probe could not run or report. The probe ships in the
+relay image, so it needs an explicit `image.tag` or `image.digest`: the chart
+fails to render when both are empty, because the default `Chart.AppVersion`
+image predates the probe.
+
+- The probe connects to `acceptance.relayUrl`, or to `relayUrl` when that is
+  empty. Each run creates one private channel with a 1 h TTL and deletes it.
+- `acceptance.connectAddr` is a plaintext `host:port` the probe dials instead
+  of the URL's host, for a probe that runs where the public host is not
+  reachable, such as inside the relay's cluster. The URL still sets the `Host`
+  header, the NIP-42 relay tag and the NIP-11 request's `Host`, so the relay
+  serves the same community. The chart passes it as `--connect-addr`, so the
+  relay image's probe must have that flag. An older probe exits with an error
+  instead of checking the public URL.
+- `acceptance.privateKeySecret.name` names a Secret with the probe's key
+  (hex or nsec), or `acceptance.privateKeyFile` names a file an init
+  container writes. Set exactly one: the chart fails to render with neither.
+  Without a key the probe would sign with a new key each run, which a
+  members-only relay refuses and an open relay joins to every auto-join
+  channel. On a members-only relay, make the key a relay member first. The
+  chart passes `privateKeyFile` as `--private-key-file`, so a probe without
+  that flag exits with an error instead of running with a new key.
+- `acceptance.statsdAddr` sends DogStatsD metrics under
+  `acceptance.metricPrefix` (`<prefix>.runs`, `<prefix>.run.seconds`,
+  `<prefix>.check.runs`, `<prefix>.check.seconds`, `<prefix>.stage.seconds`).
+  `$(HOST_IP)` expands to the node IP, for example `$(HOST_IP):8125` for a
+  node-local agent. Every series carries `probe_revision`, the relay's NIP-11
+  `relay_version`, and each `acceptance.tags` entry. `probe_revision` names the
+  probe's own image (`image.digest`, else `image.tag`), not the relay build the
+  run reached: during a rollout, or with `acceptance.relayUrl` set, the probe
+  can reach pods of another build. `acceptance.tags` keys must be lowercase
+  (`a-z`, `0-9`, `_`, `.`, `/`, `-`, starting with a letter, with no `__` and
+  no trailing `_`), because Datadog lowercases keys, collapses `__` and trims
+  `_`. They can't reuse the
+  probe-owned keys `probe_revision`, `relay_version`, `check`, `stage` or
+  `result`, and each key may appear once.
+- The Pod runs with `acceptance.serviceAccountName`, or the namespace default
+  service account when that is empty. It never inherits the relay's service
+  account and never mounts its token.
+- `concurrencyPolicy` is `Forbid` and `backoffLimit` is 0: a retry would
+  hide a failed run. `acceptance.activeDeadlineSeconds` bounds the whole run,
+  including image pull and init containers. The probe sends metrics only when
+  the run ends, so a run killed at the deadline sends none. A run has 13
+  serial stage timeouts, each `acceptance.stageTimeoutSeconds`, plus about
+  30 s to close and send metrics. Keep the deadline above 13 ×
+  `stageTimeoutSeconds` + 30 s plus pull and init time.
+
+On a relay that enforces NIP-FI, the probe needs a fresh assertion for its
+key. Minting one is deployment-specific, so the chart takes it as a file: an
+init container writes it to a shared volume and `acceptance.assertionFile`
+points the probe at it. The probe re-reads the file before every connection.
+The assertion must name the probe's key, so the init container needs the same
+key. Keep the Pod's `runAsUser` in the init container, so the probe can read
+files the minter writes with mode 0600. When the issuer binds each key to one
+identity, the init container can also write a new key for each run to
+`acceptance.privateKeyFile`. A new key per run needs an agent assertion
+(`nip-fi-agent+jwt` whose `nostr_owner_pubkey` is a relay member): a
+members-only relay refuses a new person key, and an open relay joins it to
+every auto-join channel.
+
+```yaml
+image:
+  tag: 1.2.3                     # a relay build that includes buzz-acceptance
+acceptance:
+  enabled: true
+  privateKeySecret:
+    name: buzz-acceptance-key
+  statsdAddr: "$(HOST_IP):8125"
+  tags: ["env:staging"]
+  assertionFile: /var/run/assertion/token
+  extraInitContainers:
+    - name: mint-assertion
+      image: example.com/assertion-minter:v1
+      args: [--out, /var/run/assertion/token]
+      env:
+        - name: BUZZ_PRIVATE_KEY   # the assertion must name the probe's key
+          valueFrom:
+            secretKeyRef:
+              name: buzz-acceptance-key
+              key: BUZZ_PRIVATE_KEY
+      securityContext:
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+      resources:
+        limits:
+          cpu: 100m
+          memory: 64Mi
+      volumeMounts:
+        - name: assertion
+          mountPath: /var/run/assertion
+  extraVolumes:
+    - name: assertion
+      emptyDir:
+        medium: Memory             # holds a credential
+  extraVolumeMounts:
+    - name: assertion
+      mountPath: /var/run/assertion
+      readOnly: true
+```
+
+The extension values follow the same rules as the relay Pod extensions above.
+Keep the assertion's lifetime longer than `acceptance.activeDeadlineSeconds`.
+
 ## Datadog version label
 
 Every Pod the chart renders — relay, pairing relay, storage accounting, and the
@@ -635,6 +747,8 @@ Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run 
 
 **Required stop before migrations 0089–0091, 0095 and 0096.** These migrations drop database triggers whose work the relay now does in application code. Before you upgrade to a build that contains any of them, every relay pod, job and rollback target must run a stop build. An older relay that keeps serving after they run can write data the dropped triggers used to refuse, and some older builds refuse to start without the 0032 roster trigger or the community tombstone trigger. [`docs/trigger-retirement-deployment.md`](../../../docs/trigger-retirement-deployment.md) names the stop build and gives the procedure and rollback.
 
+**Required stop before migration 0100.** Migrations 0098–0100 undo migration 0097, and 0100 drops the columns and indexes that 0097 added. No tagged relay release reads them. Only rolling images built from commit `eebf62b6` (#9650) up to, but not including, `a4061916` (#9689) do. Their channel artifact reads and writes fail once 0100 runs. If any relay pod, job or rollback target runs one of those images, move all of them to `sha-a406191` or later before you upgrade. To roll back after 0100 has run, set `migrate.autoMigrate=false` first, because an older binary with auto-migration on refuses a database that has migrations it does not know. Then roll back to `sha-a406191` or later, never to an image in that range. Migration 0098 refuses a database whose `artifact_heads` primary key is not `(community_id, artifact_id)`. Recover such a database as #9689 describes before upgrading.
+
 Apply migrations before rolling the relay; for large installations, prefer a controlled `buzz-admin migrate` job with PostgreSQL lock monitoring before the code rollout.
 
 If you prefer decoupling migrations from serving, set `migrate.autoMigrate=false`. **In that mode the chart does not run migrations for you** — you own running `buzz-admin migrate` (separate Pod / one-shot Job) against the database before every `helm install` / `helm upgrade`. Readiness probes only verify DB connectivity, not schema freshness, so a pod will appear healthy against an unmigrated schema and fail under load. A pre-upgrade Helm Job for this is on the chart roadmap; the values knob `migrate.preUpgradeJob.enabled` is reserved.
@@ -675,11 +789,11 @@ and the relay image via its own `chart-v*` tags. Every PR/`main` push still
 lints, unit-tests, and render-checks the chart; only a `chart-v*` tag publishes,
 so an in-progress `main` can never overwrite a released version.
 
-To cut a release, push a `chart-release/<version>` branch whose `<version>`
-matches `Chart.yaml`'s `version`; merging it auto-tags `chart-v<version>` and
-dispatches the publish job (same lane machinery as the desktop and relay
-releases — see `.github/workflows/auto-tag-on-release-pr-merge.yml`). The publish
-job fails loudly if the tag version and `Chart.yaml` version disagree.
+Merging a PR from a branch in `block/buzz` that bumps `version` in
+`Chart.yaml` creates a `chart-v<version>` tag and triggers the publish job.
+For a dedicated release PR, use a `chart-release/<version>` branch with a
+version matching `Chart.yaml`. The publish job checks that the tag and
+`Chart.yaml` version agree.
 
 ## Development
 

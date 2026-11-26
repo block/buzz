@@ -80,7 +80,10 @@ void main() {
 
   test('an edit made before the thread opens folds into its reply', () async {
     final session = _FakeRelaySession()
-      ..replies = [_reply('r1', 1000), _edit('e1', 'r1', 'typo fixed', 1100)];
+      ..replies = [
+        _reply(threadIdR1, 1000),
+        _edit('e1', threadIdR1, 'typo fixed', 1100),
+      ];
     final container = ProviderContainer(
       overrides: [relaySessionProvider.overrideWith(() => session)],
     );
@@ -89,7 +92,10 @@ void main() {
     final events = await container.read(threadRepliesProvider(args).future);
     expect(session.filtersSeen.single.extensions['include_aux'], isTrue);
     final reply = formatTimeline(events).single;
-    expect((reply.id, reply.content, reply.edited), ('r1', 'typo fixed', true));
+    expect(
+      (reply.id, reply.content, reply.edited),
+      (threadIdR1, 'typo fixed', true),
+    );
   });
 
   test('aux events neither end a scan page nor move its cursor', () async {

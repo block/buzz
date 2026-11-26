@@ -91,6 +91,8 @@ pub enum Admission {
     Rejected,
     /// The authority store was transiently unavailable.
     Unavailable,
+    /// An earlier attempt of the same request id is still being delivered.
+    InFlight,
 }
 
 /// Record the outcome of a delivery-admission attempt.
@@ -99,6 +101,7 @@ pub fn record_admission(result: Admission) {
         Admission::Admitted => "admitted",
         Admission::Rejected => "rejected",
         Admission::Unavailable => "unavailable",
+        Admission::InFlight => "in_flight",
     };
     metrics::counter!("push_gateway_admissions_total", "result" => label).increment(1);
 }

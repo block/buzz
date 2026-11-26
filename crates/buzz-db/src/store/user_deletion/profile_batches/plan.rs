@@ -103,7 +103,6 @@ pub(super) async fn dependencies(conn: &mut PgConnection, scope: &Scope) -> Resu
     for (table, selector) in [
         ("api_tokens","owner_pubkey=ANY($2::bytea[])"),
         ("workflows","owner_pubkey=ANY($2::bytea[])"),
-        ("subscriptions","owner_pubkey=ANY($2::bytea[])"),
         ("channel_members","pubkey=ANY($2::bytea[])"),
         ("relay_members","pubkey=ANY(SELECT encode(k,'hex') FROM unnest($2::bytea[]) k)"),
         ("events","pubkey=ANY($2::bytea[]) AND kind NOT IN (0,10100,30177,30179,9035,9036,30617,30618)"),

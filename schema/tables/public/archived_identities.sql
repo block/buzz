@@ -2,7 +2,7 @@
 -- Conformance: archive cannot hide a key in another community. PK scoped.
 
 CREATE TABLE archived_identities (
-    community_id      UUID NOT NULL REFERENCES communities(id),
+    community_id      UUID NOT NULL,
     pubkey            TEXT NOT NULL,
     consent_path      TEXT NOT NULL CHECK (consent_path IN ('self', 'owner', 'admin')),
     actor             TEXT NOT NULL,

@@ -81,7 +81,7 @@ class FakeRegistry extends BuilderlabAccountClient {
   }
 
   @override
-  Future<Map<String, dynamic>> currentIdentity() async => {
+  Future<Map<String, dynamic>> currentIdentity({String? signer}) async => {
     'identity': {'pubkey_hex': bound},
   };
   @override
@@ -89,6 +89,7 @@ class FakeRegistry extends BuilderlabAccountClient {
     String path,
     Map<String, dynamic> body, {
     String? expectedSubject,
+    String? signer,
   }) async {
     if (expectedSubject != null && account?.subject != expectedSubject) {
       throw AccountFailure.differentAccount;

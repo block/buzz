@@ -9,7 +9,7 @@
 
 CREATE TABLE channels (
     id              UUID NOT NULL DEFAULT gen_random_uuid(),
-    community_id    UUID NOT NULL REFERENCES communities(id),
+    community_id    UUID NOT NULL,
     name            VARCHAR(255) NOT NULL,
     channel_type    channel_type NOT NULL DEFAULT 'stream',
     visibility      channel_visibility NOT NULL DEFAULT 'open',

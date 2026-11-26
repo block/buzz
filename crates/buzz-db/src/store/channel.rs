@@ -857,6 +857,40 @@ pub fn group_members_tags(
     Ok(tags)
 }
 
+/// Sign and replace one group-state event while the caller holds its
+/// replacement lock. The caller commits or rolls back the replacement.
+pub(crate) async fn replace_signed_group_state_under_lock(
+    tx: &mut crate::AdmittedTx,
+    channel_id: Uuid,
+    kind: i32,
+    tags: Vec<nostr::Tag>,
+    signer: &nostr::Keys,
+) -> Result<(StoredEvent, bool)> {
+    let relay_pubkey = signer.public_key().to_bytes();
+    let latest: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT created_at FROM events WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+         AND channel_id = $4 AND deleted_at IS NULL ORDER BY created_at DESC, id ASC LIMIT 1",
+    )
+    .bind(tx.community().as_uuid())
+    .bind(kind)
+    .bind(relay_pubkey.as_slice())
+    .bind(channel_id)
+    .fetch_optional(tx.conn())
+    .await?;
+    let now = nostr::Timestamp::now().as_secs();
+    let timestamp = latest
+        .map(|timestamp| (timestamp.timestamp() as u64).saturating_add(1))
+        .unwrap_or(now)
+        .max(now);
+    let event = nostr::EventBuilder::new(nostr::Kind::Custom(kind as u16), "")
+        .tags(tags)
+        .allow_self_tagging()
+        .custom_created_at(nostr::Timestamp::from(timestamp))
+        .sign_with_keys(signer)
+        .map_err(|error| DbError::InvalidData(error.to_string()))?;
+    crate::replaceable::replace_addressable_event_under_lock(tx, &event, Some(channel_id)).await
+}
+
 fn group_list_identity_tags(
     group_id: &str,
     identity: Option<&ChannelIdentity>,
@@ -1341,8 +1375,8 @@ async fn lock_channel_row(
     lock_channel_ttl(tx, channel_id, ttl).await?;
     // `FOR NO KEY UPDATE`, like a huddle join: it orders this write against
     // every other settings write and a huddle join, but not against a
-    // `KEY SHARE` lock on the channel (a membership INSERT's foreign key while
-    // it exists, `insert_auto_membership`'s channel check).
+    // `KEY SHARE` lock on the channel (`insert_auto_membership`'s channel
+    // check).
     let (previous_visibility, archived, listed): (String, bool, bool) =
         sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT visibility::text, archived_at IS NOT NULL, {LISTED_CHANNEL_SQL} FROM channels \

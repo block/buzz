@@ -7,24 +7,16 @@
 -- the claim binds both community and id explicitly rather than resolving from id.
 -- workflow_run_id links the won claim to the run it created (audit; NULL until the
 -- post-insert attach, and stays NULL if run creation failed after a won claim).
--- The FK to workflow_runs uses NO ACTION (not SET NULL): community_id is shared
--- with the claim PK and is NOT NULL, so SET NULL is unimplementable here; a future
--- delete of a still-linked run is blocked rather than orphaning the at-most-once
--- claim row. Workflow delete removes the workflow's own fires before its runs, so
--- attach_scheduled_workflow_run only links a run of the same workflow; a
--- cross-workflow link would otherwise block that delete.
+-- Workflow delete removes the workflow's own fires before its runs, and
+-- attach_scheduled_workflow_run links only an existing run of the same workflow.
 
 CREATE TABLE scheduled_workflow_fires (
-    community_id    UUID NOT NULL REFERENCES communities(id),
+    community_id    UUID NOT NULL,
     workflow_id     UUID NOT NULL,
     scheduled_for   TIMESTAMPTZ NOT NULL,
     claimed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     workflow_run_id UUID,
-    PRIMARY KEY (community_id, workflow_id, scheduled_for),
-    FOREIGN KEY (community_id, workflow_id)
-        REFERENCES workflows (community_id, id) ON DELETE CASCADE,
-    FOREIGN KEY (community_id, workflow_run_id)
-        REFERENCES workflow_runs (community_id, id) ON DELETE NO ACTION
+    PRIMARY KEY (community_id, workflow_id, scheduled_for)
 );
 
 -- The interval anchor reads MAX(scheduled_for) per workflow; the janitor prunes

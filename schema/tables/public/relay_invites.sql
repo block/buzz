@@ -4,7 +4,7 @@
 -- PK and UNIQUE both lead with community_id. max_uses NULL = unlimited.
 
 CREATE TABLE relay_invites (
-    community_id  UUID        NOT NULL REFERENCES communities(id),
+    community_id  UUID        NOT NULL,
     id           UUID        NOT NULL DEFAULT gen_random_uuid(),
     token_hash   BYTEA       NOT NULL CHECK (length(token_hash) = 32),
     role         TEXT        NOT NULL DEFAULT 'member' CHECK (role = 'member'),
