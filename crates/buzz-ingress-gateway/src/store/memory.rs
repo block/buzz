@@ -799,7 +799,7 @@ mod tests {
                 change: SubscriptionChange::Put {
                     channel_id: channel,
                     filter: None,
-                    message: None,
+                    message_template: None,
                 },
             };
             assert!(matches!(
@@ -817,7 +817,7 @@ mod tests {
                         change: SubscriptionChange::Put {
                             channel_id: channel,
                             filter: None,
-                            message: None,
+                            message_template: None,
                         },
                     },
                     at(1),

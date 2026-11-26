@@ -2,7 +2,7 @@
 //!
 //! A subscription routes an integration's webhook deliveries into a channel.
 //! It holds a filter, a CEL expression that decides whether a delivery reaches
-//! the channel, and an optional message, a CEL expression that renders the
+//! the channel, and an optional message template, a CEL expression that renders the
 //! text the channel receives. Both read two variables:
 //!
 //! - `event`: `event.provider` and `event.type`;
@@ -24,7 +24,7 @@ pub use eval::{Budget, Delivery, EvalError};
 use cel::common::ast::{EntryExpr, Expr, LiteralValue, MapExpr, StructExpr};
 use cel::{Env, IdedExpr};
 
-/// The largest filter or message source accepted, in bytes.
+/// The largest filter or message template source accepted, in bytes.
 pub const MAX_EXPRESSION_BYTES: usize = 4 * 1024;
 
 /// The deepest bracket and call nesting the parser accepts. Its default is
@@ -99,9 +99,9 @@ pub struct Filter {
     expression: IdedExpr,
 }
 
-/// A checked message: a CEL expression that returns a string.
+/// A checked message template: a CEL expression that returns a string.
 #[derive(Debug, Clone)]
-pub struct Message {
+pub struct MessageTemplate {
     expression: IdedExpr,
 }
 
@@ -112,7 +112,7 @@ impl Filter {
     }
 }
 
-impl Message {
+impl MessageTemplate {
     /// The parsed expression.
     pub fn expression(&self) -> &IdedExpr {
         &self.expression
@@ -124,9 +124,9 @@ pub fn compile_filter(source: &str) -> Result<Filter, CompileError> {
     compile(source, Returns::Bool).map(|expression| Filter { expression })
 }
 
-/// Check `source` as a message.
-pub fn compile_message(source: &str) -> Result<Message, CompileError> {
-    compile(source, Returns::String).map(|expression| Message { expression })
+/// Check `source` as a message template.
+pub fn compile_message_template(source: &str) -> Result<MessageTemplate, CompileError> {
+    compile(source, Returns::String).map(|expression| MessageTemplate { expression })
 }
 
 fn compile(source: &str, returns: Returns) -> Result<IdedExpr, CompileError> {
@@ -285,7 +285,7 @@ mod tests {
             r#"has(payload.issue) ? payload.issue.title : "no issue""#,
             r#""fixed""#,
         ] {
-            compile_message(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            compile_message_template(source).unwrap_or_else(|error| panic!("{source}: {error}"));
         }
     }
 
@@ -335,7 +335,7 @@ mod tests {
         }
         for source in ["true", "[\"a\"]", "1", r#"{"a": "b"}"#] {
             assert_eq!(
-                compile_message(source).expect_err(source),
+                compile_message_template(source).expect_err(source),
                 CompileError::WrongResult("a string"),
                 "{source}"
             );

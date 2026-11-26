@@ -10,7 +10,7 @@
 //! Writes are idempotent by revision: each carries the revision it produces,
 //! a retry of the applied write returns 200 with the stored subscription, and
 //! an older revision gets 409 with the current one. Filter and message
-//! programs are checked here so a typo fails the request, not every delivery.
+//! template programs are checked here so a typo fails the request, not every delivery.
 //! Deletion is a POST because NIP-98 signs no DELETE method.
 use super::{authenticate, invalid, parse_body, store_error};
 use crate::http::{error, AppState};
@@ -23,7 +23,7 @@ use axum::{
     routing::{get, post, put},
     Router,
 };
-use buzz_webhook_filter::{compile_filter, compile_message, CompileError};
+use buzz_webhook_filter::{compile_filter, compile_message_template, CompileError};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -52,7 +52,7 @@ struct PutSubscriptionBody {
     #[serde(default)]
     filter: Option<String>,
     #[serde(default)]
-    message: Option<String>,
+    message_template: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -69,13 +69,16 @@ fn invalid_program(field: &'static str, e: CompileError) -> Response {
 
 /// Check both programs off the async runtime: the parser runs on a scoped
 /// thread with a large stack. `Some` is the response refusing the request.
-async fn refuse_programs(filter: Option<String>, message: Option<String>) -> Option<Response> {
+async fn refuse_programs(
+    filter: Option<String>,
+    message_template: Option<String>,
+) -> Option<Response> {
     let checked = tokio::task::spawn_blocking(move || {
         if let Some(source) = &filter {
             compile_filter(source).map_err(|e| ("filter", e))?;
         }
-        if let Some(source) = &message {
-            compile_message(source).map_err(|e| ("message", e))?;
+        if let Some(source) = &message_template {
+            compile_message_template(source).map_err(|e| ("message_template", e))?;
         }
         Ok(())
     })
@@ -131,7 +134,9 @@ async fn put_subscription(
         Ok(request) => request,
         Err(reject) => return reject.into_response(),
     };
-    if let Some(refusal) = refuse_programs(request.filter.clone(), request.message.clone()).await {
+    if let Some(refusal) =
+        refuse_programs(request.filter.clone(), request.message_template.clone()).await
+    {
         return refusal;
     }
     write(
@@ -143,7 +148,7 @@ async fn put_subscription(
             change: SubscriptionChange::Put {
                 channel_id: request.channel_id,
                 filter: request.filter,
-                message: request.message,
+                message_template: request.message_template,
             },
         },
     )
@@ -250,7 +255,7 @@ mod tests {
             "revision": 1,
             "channel_id": channel,
             "filter": "payload.action == \"opened\"",
-            "message": "\"PR: \" + payload.title",
+            "message_template": "\"PR: \" + payload.title",
         });
         let (status, created) = call(&fx, &fx.relay, "PUT", &path, &path, Some(body.clone())).await;
         assert_eq!(status, StatusCode::OK, "{created}");
@@ -277,8 +282,8 @@ mod tests {
                 json!({ "revision": 2, "channel_id": channel, "filter": "1" }),
             ),
             (
-                "message",
-                json!({ "revision": 2, "channel_id": channel, "message": "true" }),
+                "message_template",
+                json!({ "revision": 2, "channel_id": channel, "message_template": "true" }),
             ),
         ] {
             let (status, refused) = call(&fx, &fx.relay, "PUT", &path, &path, Some(bad)).await;

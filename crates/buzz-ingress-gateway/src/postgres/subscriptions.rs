@@ -11,7 +11,8 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::{postgres::PgRow, Row};
 use uuid::Uuid;
 
-const SUBSCRIPTION_COLUMNS: &str = "id, integration_id, channel_id, filter, message, revision, \
+const SUBSCRIPTION_COLUMNS: &str =
+    "id, integration_id, channel_id, filter, message_template, revision, \
                                     deleted_at, created_at, updated_at";
 
 fn subscription_from_row(row: PgRow) -> Result<Subscription, StoreError> {
@@ -20,7 +21,7 @@ fn subscription_from_row(row: PgRow) -> Result<Subscription, StoreError> {
         integration_id: row.try_get("integration_id")?,
         channel_id: row.try_get("channel_id")?,
         filter: row.try_get("filter")?,
-        message: row.try_get("message")?,
+        message_template: row.try_get("message_template")?,
         revision: row.try_get("revision")?,
         deleted_at: row.try_get("deleted_at")?,
         created_at: row.try_get("created_at")?,
@@ -77,13 +78,13 @@ impl SubscriptionStore for PostgresStore {
         // to move the row instead.
         let written = sqlx::query(
             "INSERT INTO ingress_gateway_subscriptions
-                 (id, integration_id, channel_id, filter, message, revision, deleted_at,
+                 (id, integration_id, channel_id, filter, message_template, revision, deleted_at,
                   created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              ON CONFLICT (id) DO UPDATE SET
                  channel_id = EXCLUDED.channel_id,
                  filter = EXCLUDED.filter,
-                 message = EXCLUDED.message,
+                 message_template = EXCLUDED.message_template,
                  revision = EXCLUDED.revision,
                  deleted_at = EXCLUDED.deleted_at,
                  created_at = EXCLUDED.created_at,
@@ -94,7 +95,7 @@ impl SubscriptionStore for PostgresStore {
         .bind(next.integration_id)
         .bind(next.channel_id)
         .bind(&next.filter)
-        .bind(&next.message)
+        .bind(&next.message_template)
         .bind(next.revision)
         .bind(next.deleted_at)
         .bind(next.created_at)
@@ -363,7 +364,7 @@ mod tests {
             change: SubscriptionChange::Put {
                 channel_id: channel,
                 filter: filter.map(str::to_owned),
-                message: None,
+                message_template: None,
             },
         }
     }

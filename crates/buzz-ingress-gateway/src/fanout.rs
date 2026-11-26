@@ -6,7 +6,7 @@
 //!        ▼
 //!   live subscriptions of the integration
 //!        │ per subscription: filter? ── false → nothing
-//!        │                           ── true  → render message
+//!        │                           ── true  → render message template
 //!        │                           ── error → failed message (visible)
 //!        ▼
 //!   complete_fanout: messages + delivery → accepted, in one transaction
@@ -16,7 +16,7 @@
 //! scoped thread with a large stack, and that must not stall the runtime.
 use crate::metrics::{record_fanout, record_forwarder_failure, FanoutResult};
 use crate::store::{ClaimedDelivery, FanoutOutcome, NewMessage, Store, StoreError, Subscription};
-use buzz_webhook_filter::{compile_filter, compile_message, Budget, Delivery, EvalError};
+use buzz_webhook_filter::{compile_filter, compile_message_template, Budget, Delivery, EvalError};
 use chrono::{DateTime, Duration, Utc};
 use std::sync::Arc;
 use tokio::task::JoinSet;
@@ -40,7 +40,7 @@ pub enum Evaluated {
     Retry(String),
 }
 
-/// The message a subscription without a message program sends.
+/// The message a subscription without a message template sends.
 pub fn default_message(delivery: &ClaimedDelivery) -> String {
     format!("{}: {}", delivery.provider.as_str(), delivery.event_type)
 }
@@ -87,8 +87,8 @@ fn render(
             return Ok(None);
         }
     }
-    match &subscription.message {
-        Some(source) => compile_message(source)
+    match &subscription.message_template {
+        Some(source) => compile_message_template(source)
             .map_err(compile)?
             .render(input, &BUDGET)
             .map(Some),
@@ -208,7 +208,7 @@ mod tests {
         store: &MemoryStore,
         integration_id: Uuid,
         filter: Option<&str>,
-        message: Option<&str>,
+        message_template: Option<&str>,
     ) -> Uuid {
         let id = Uuid::new_v4();
         store
@@ -220,7 +220,7 @@ mod tests {
                     change: SubscriptionChange::Put {
                         channel_id: Uuid::new_v4(),
                         filter: filter.map(str::to_owned),
-                        message: message.map(str::to_owned),
+                        message_template: message_template.map(str::to_owned),
                     },
                 },
                 t0(),

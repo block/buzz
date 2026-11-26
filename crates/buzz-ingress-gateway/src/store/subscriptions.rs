@@ -34,8 +34,8 @@ pub struct Subscription {
     pub channel_id: Uuid,
     /// CEL filter source; `None` matches every delivery.
     pub filter: Option<String>,
-    /// CEL message source; `None` renders the default message.
-    pub message: Option<String>,
+    /// CEL message template source; `None` renders the default message.
+    pub message_template: Option<String>,
     pub revision: i64,
     pub deleted_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -56,7 +56,7 @@ pub struct SubscriptionView {
     pub integration_id: Uuid,
     pub channel_id: Uuid,
     pub filter: Option<String>,
-    pub message: Option<String>,
+    pub message_template: Option<String>,
     pub revision: i64,
     pub deleted: bool,
     pub updated_at: DateTime<Utc>,
@@ -69,7 +69,7 @@ impl From<&Subscription> for SubscriptionView {
             integration_id: s.integration_id,
             channel_id: s.channel_id,
             filter: s.filter.clone(),
-            message: s.message.clone(),
+            message_template: s.message_template.clone(),
             revision: s.revision,
             deleted: !s.is_live(),
             updated_at: s.updated_at,
@@ -84,7 +84,7 @@ pub enum SubscriptionChange {
     Put {
         channel_id: Uuid,
         filter: Option<String>,
-        message: Option<String>,
+        message_template: Option<String>,
     },
     /// Tombstone the subscription and fail its unsent messages.
     Delete,
@@ -150,7 +150,7 @@ pub fn write_transition(
             SubscriptionChange::Put {
                 channel_id,
                 filter,
-                message,
+                message_template,
             },
             existing,
         ) => {
@@ -163,7 +163,7 @@ pub fn write_transition(
                 integration_id: write.integration_id,
                 channel_id: *channel_id,
                 filter: filter.clone(),
-                message: message.clone(),
+                message_template: message_template.clone(),
                 revision: write.revision,
                 deleted_at: None,
                 created_at: existing
@@ -181,12 +181,12 @@ fn repeats(current: &Subscription, change: &SubscriptionChange) -> bool {
         SubscriptionChange::Put {
             channel_id,
             filter,
-            message,
+            message_template,
         } => {
             current.is_live()
                 && current.channel_id == *channel_id
                 && current.filter == *filter
-                && current.message == *message
+                && current.message_template == *message_template
         }
     }
 }
@@ -308,7 +308,7 @@ mod tests {
             change: SubscriptionChange::Put {
                 channel_id: channel,
                 filter: None,
-                message: None,
+                message_template: None,
             },
         }
     }
