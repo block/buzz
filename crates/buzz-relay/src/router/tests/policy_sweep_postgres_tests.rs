@@ -158,11 +158,15 @@ mod postgres_tests {
             panic!("target")
         };
         let free_host = format!("dark-free-{}.example", uuid::Uuid::new_v4());
-        let _ = state
+        let buzz_db::CreateCommunityWithOwnerResult::Created(free_row) = state
             .db
             .create_community_with_owner(&free_host, &owner, &key)
             .await
-            .unwrap();
+            .unwrap()
+            .outcome
+        else {
+            panic!("free")
+        };
         state
             .db
             .ensure_user(row.id, &key.public_key().to_bytes())
@@ -309,6 +313,20 @@ mod postgres_tests {
         for client in [&mut compliant, &mut compliant_audio, &mut free] {
             ping_round_trip(client).await;
         }
+        // A shadow rollout closes a stored-Optional cohort member's socket;
+        // the same community outside the cohort keeps it.
+        let free_bucket = crate::nip_fi_config::rollout_bucket(*free_row.id.as_uuid());
+        for (percent, closed) in [(free_bucket, 0), (free_bucket + 1, 1)] {
+            let mut rollout = (*state).clone();
+            Arc::make_mut(&mut rollout.config).nip_fi.enforce_percent = percent;
+            assert_eq!(
+                rollout.revalidate_live_communities().await,
+                closed,
+                "{percent}"
+            );
+        }
+        policy_close(&mut free).await;
+        let mut free = authenticated_socket(addr, &free_host, "/", &key, None, false).await;
         // Global Enforce also closes an optional community's legacy socket.
         let mut enforce = (*state).clone();
         Arc::make_mut(&mut enforce.config).nip_fi.mode = buzz_auth::NipFiMode::Enforce;

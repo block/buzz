@@ -198,7 +198,7 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                             : Curves.easeInOutCubic,
                         opacity: active ? 0.5 : 0,
                         child: ClipPath(
-                          clipper: _HuddleSpeakingRingClipper(
+                          clipper: AvatarRingClipper(
                             isAgent: isAgent,
                             strokeWidth: 4 * scale,
                           ),
@@ -315,27 +315,4 @@ String _huddleParticipantLabel({
   return (profileName?.isNotEmpty == true ? profileName : null) ??
       (directoryName?.isNotEmpty == true ? directoryName : null) ??
       (pubkey.isEmpty ? 'Participant' : shortPubkey(pubkey));
-}
-
-class _HuddleSpeakingRingClipper extends CustomClipper<Path> {
-  const _HuddleSpeakingRingClipper({
-    required this.isAgent,
-    required this.strokeWidth,
-  });
-  final bool isAgent;
-  final double strokeWidth;
-
-  @override
-  Path getClip(Size size) {
-    final rect = Offset.zero & size;
-    return Path.combine(
-      PathOperation.difference,
-      avatarPath(rect, isAgent: isAgent),
-      avatarPath(rect.deflate(strokeWidth), isAgent: isAgent),
-    );
-  }
-
-  @override
-  bool shouldReclip(_HuddleSpeakingRingClipper oldClipper) =>
-      oldClipper.isAgent != isAgent || oldClipper.strokeWidth != strokeWidth;
 }

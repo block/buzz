@@ -84,6 +84,12 @@ pub mod relay_operators;
 pub mod reminder;
 /// Replaceable-event persistence and coordinate locking.
 pub mod replaceable;
+/// Queuing events stored before the search index existed.
+pub mod search_backfill;
+/// The durable queue between event admission and the search index.
+pub mod search_outbox;
+#[cfg(test)]
+mod search_outbox_postgres_tests;
 /// Durable completed snapshots from the isolated media-storage worker.
 pub mod storage_accounting;
 /// Thread metadata persistence.

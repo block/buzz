@@ -3954,10 +3954,12 @@ Photos
         final code = codeSpans.single;
         const scheme = lightColorScheme;
 
-        // Face, size and ink — the values a fenced code block is drawn with,
-        // not the package's bundled mono at its own 0.94 of the body size.
+        // Inline code scales with the message body.
         expect(code.style?.fontFamily, CodeStyle.fontFamily);
-        expect(code.style?.fontSize, closeTo(CodeStyle.fontSize, 0.001));
+        expect(
+          code.style?.fontSize,
+          closeTo(messageBodyTextStyle.fontSize! * 13 / 15, 0.001),
+        );
         expect(code.style?.color, scheme.onSurface);
 
         // Chip fill and outline come from the app's code surface rather than

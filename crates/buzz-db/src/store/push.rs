@@ -1758,6 +1758,63 @@ mod postgres_tests {
         );
     }
 
+    /// A client that lost the relay's acknowledgment of its opt-out reads the
+    /// lease back to learn what the relay holds: its own installation's
+    /// newest event, which is the inactive replacement.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn author_reads_back_the_inactive_replacement() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let keys = nostr::Keys::generate();
+        let endpoint = [42; 32];
+        let subscriptions = serde_json::json!([]);
+        let active = lease_event(&keys, "install", 100);
+        let inactive = lease_event(&keys, "install", 200);
+        for (event, generation, lease) in [
+            (
+                &active,
+                1,
+                Some(ActiveLease {
+                    endpoint_hash: &endpoint,
+                    endpoint_grant: "opaque-grant",
+                    max_class: "default",
+                    subscriptions: &subscriptions,
+                }),
+            ),
+            (&inactive, 2, None),
+        ] {
+            let outcome = accept_lease_event(
+                &pool,
+                community,
+                event,
+                "install",
+                LeaseVersion {
+                    source_event_id: event.id.as_bytes(),
+                    source_created_at: event.created_at.as_secs() as i64,
+                    generation,
+                    expires_at: i64::MAX / 2,
+                },
+                lease,
+                16,
+            )
+            .await
+            .expect("accept lease event");
+            assert_eq!(outcome, AcceptLeaseOutcome::Accepted);
+        }
+
+        let mut query = crate::event::EventQuery::for_community(community);
+        query.kinds = Some(vec![30_350]);
+        query.authors = Some(vec![keys.public_key().to_bytes().to_vec()]);
+        query.d_tag = Some("install".to_string());
+        query.limit = Some(1);
+        let events = crate::event::query_events(&pool, &query)
+            .await
+            .expect("query lease");
+        let ids: Vec<_> = events.iter().map(|e| e.event.id).collect();
+        assert_eq!(ids, vec![inactive.id]);
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn acceptance_constraint_failure_rolls_back_source_event() {

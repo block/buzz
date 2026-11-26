@@ -216,6 +216,13 @@ fn resp_was_success(status: u16) -> bool {
     (200..300).contains(&status)
 }
 
+/// A relay canvas CAS rejection (409 `conflict: canvas …`): the head moved,
+/// the expected head was deleted, or the write would not supersede the head.
+/// The canvas commands settle these by reading the canvas back.
+pub(crate) fn is_canvas_conflict(e: &CliError) -> bool {
+    matches!(e, CliError::Relay { status: 409, body } if body.contains("conflict: canvas"))
+}
+
 /// Returns `true` if a stored-event exhaustion error is ambiguous (the relay
 /// may have executed the command) and should be converted to `DeliveryUnknown`.
 ///
@@ -1361,7 +1368,7 @@ impl BuzzClient {
             // Once an attempt may have been stored, no later answer settles
             // the outcome, except a canvas 409, which the canvas command
             // resolves by looking the canvas up.
-            let settled = matches!(e, CliError::Relay { status: 409, body } if body.contains("canvas changed"));
+            let settled = is_canvas_conflict(e);
             if is_stored_event_exhaustion_ambiguous(e)
                 || (maybe_delivered.load(std::sync::atomic::Ordering::Relaxed) && !settled)
             {

@@ -89,6 +89,7 @@ class BuzzSettingMenu<T> extends StatelessWidget {
                 width: constraints.maxWidth,
                 height: constraints.maxHeight,
                 enabled: enabled,
+                consumeOutsideTap: ModalRoute.of(context) is PopupRoute,
                 eagerGestures: false,
                 deferMenuActions: false,
                 selectedIndex: options.indexWhere(
@@ -124,6 +125,7 @@ class BuzzSettingMenu<T> extends StatelessWidget {
     // The menu spans the row, like Material's dropdown menus.
     return LayoutBuilder(
       builder: (context, constraints) => MenuAnchor(
+        consumeOutsideTap: true,
         alignmentOffset: const Offset(0, Grid.half),
         // Match the app's shared popover surface.
         style: MenuStyle(

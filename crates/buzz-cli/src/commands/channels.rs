@@ -465,13 +465,34 @@ pub async fn cmd_restore_canvas(
         buzz_sdk::build_set_canvas_after_head(channel_uuid, &content, head_id, head_created_at)
             .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
     let event = client.sign_event(builder).await?;
+    submit_checked_canvas_write(client, channel_id, event, "restore", out).await
+}
+
+/// Submit a signed canvas write that carries an `expected-revision`
+/// precondition, then confirm it holds the visible head. Shared by `restore`
+/// and `set --expected`; `action` names the command in messages.
+///
+/// If the relay returns a conflict the write may still have persisted (a lost
+/// response and a retried submit), so it is reconciled against the stream
+/// before the conflict is reported. After an accepted submit, a single re-read
+/// classifies whether the write is still the head or an ancestor of it; if a
+/// concurrent write has become current this returns [`CliError::Conflict`]
+/// (exit 5) naming the persisted revision. A failed verification read reports
+/// the accepted write as success with a stderr warning.
+async fn submit_checked_canvas_write(
+    client: &BuzzClient,
+    channel_id: &str,
+    event: nostr::Event,
+    action: &str,
+    out: &mut dyn std::io::Write,
+) -> Result<(), CliError> {
     let our_id = event.id.to_hex();
     let submit_result = client.submit_event(event).await;
 
     // If the relay returned a conflict-shaped error the submit may still have
     // persisted: a prior attempt stored A(expected=H), the response was lost,
     // and the retry of identical A bytes sees RevisionMismatch — a persisted
-    // restore presented as a rejected write. Two concurrent-write shapes arise:
+    // write presented as a rejected write. Two concurrent-write shapes arise:
     //
     // - A tagged write B(expected=A) becomes head: `canvas_write_survived`
     //   returns true; A committed and is an accepted ancestor → success.
@@ -485,19 +506,20 @@ pub async fn cmd_restore_canvas(
     // then feed the four-way classification:
     //   - survived (ancestor of head)         → accepted JSON, exit 0
     //   - persisted but head unrelated to A   → supersession naming A
-    //   - genuinely absent                    → original 409 rejection
+    //   - genuinely absent                    → Conflict (exit 5), relay reason kept
     //   - either reconciliation read fails    → DeliveryUnknown naming A
     let resp = match submit_result {
         Ok(resp) => resp,
-        Err(e @ CliError::Relay { status: 409, .. }) if matches!(&e, CliError::Relay { body, .. } if body.contains("canvas changed")) =>
-        {
+        // Every relay canvas CAS rejection: the head moved, the expected head
+        // was deleted, or the write would not supersede it.
+        Err(e) if crate::client::is_canvas_conflict(&e) => {
             // Both reads use strong consistency so read-replica lag cannot
             // report a just-stored event as absent.
             let stream = match fetch_canvas_ancestry(client, channel_id).await {
                 Ok(s) => s,
                 Err(_) => {
                     return Err(CliError::DeliveryUnknown(format!(
-                        "canvas restore {our_id}: submit returned a conflict and the post-submit ancestry read failed; outcome unknown — check `buzz canvas history` before retrying"
+                        "canvas {action} {our_id}: submit returned a conflict and the post-submit ancestry read failed; outcome unknown — check `buzz canvas history` before retrying"
                     )));
                 }
             };
@@ -505,7 +527,7 @@ pub async fn cmd_restore_canvas(
                 // A is an ancestor of the live head: it committed and a later
                 // write built on it. This is the same committed state the
                 // normal accepted-submit path treats as success — return
-                // accepted JSON so the caller is not prompted to re-restore.
+                // accepted JSON so the caller is not prompted to write again.
                 // The relay's 409 response body is not an accepted response;
                 // synthesize one from the event ID we know committed.
                 let accepted_json = serde_json::json!({
@@ -527,17 +549,26 @@ pub async fn cmd_restore_canvas(
                     // head: an unconditional write superseded it. Surface as a
                     // post-write supersession so the caller knows A is durable.
                     return Err(CliError::Conflict(format!(
-                        "canvas restore {our_id} was superseded by a concurrent write; it is preserved in history — re-run restore against the current head if you still want it"
+                        "canvas {action} {our_id} was superseded by a concurrent write; it is preserved in history — re-run {action} against the current head if you still want it"
                     )));
                 }
                 Ok(false) => {
-                    // A is genuinely absent: return the original relay error unchanged.
-                    return Err(e);
+                    // A is genuinely absent: another write won the head first.
+                    // That is a write conflict (exit 5), the same as a head
+                    // that moved before submit, so scripts can tell a lost
+                    // race from a relay failure. Keep the relay's reason.
+                    let reason = match &e {
+                        CliError::Relay { body, .. } => body.clone(),
+                        other => other.to_string(),
+                    };
+                    return Err(CliError::Conflict(format!(
+                        "canvas {action} was not applied: another write changed the canvas first ({reason}) — read the current head with `buzz canvas history --limit 1` and retry against it"
+                    )));
                 }
                 Err(_) => {
                     // Cannot confirm or deny whether A was stored.
                     return Err(CliError::DeliveryUnknown(format!(
-                        "canvas restore {our_id}: submit returned a conflict and the post-submit existence check failed; outcome unknown — check `buzz canvas history` before retrying"
+                        "canvas {action} {our_id}: submit returned a conflict and the post-submit existence check failed; outcome unknown — check `buzz canvas history` before retrying"
                     )));
                 }
             }
@@ -549,22 +580,22 @@ pub async fn cmd_restore_canvas(
     // stream and classify via the SDK's shared predicate: our event is the
     // head, or reachable through the head's `expected-revision` ancestry chain
     // (a later write legitimately built on ours, possibly transitively) → the
-    // restore is live; anything else (including no head) → a concurrent write
-    // won the visible head. The restored revision is preserved in history, so
-    // surface a conflict naming it rather than reporting a hollow success. This
-    // only catches a competitor visible by now; the residual race past this
-    // read needs relay linearization (phase 2).
+    // write is live; anything else (including no head) → a concurrent write
+    // won the visible head. The write is preserved in history, so surface a
+    // conflict naming it rather than reporting a hollow success. This only
+    // catches a competitor visible by now; the residual race past this read
+    // needs relay linearization (phase 2).
     //
-    // The submit above was accepted, so the restore is durable. Only this
+    // The submit above was accepted, so the write is durable. Only this
     // verification read can still fail; when it does we must not present an
-    // accepted publish as a failed restore. Print the normal success response
+    // accepted publish as a failed write. Print the normal success response
     // naming `our_id`, warn on stderr that verification was unavailable, and
     // exit 0 — a failed read is not a conflict.
     let live_stream = match fetch_canvas_ancestry(client, channel_id).await {
         Ok(stream) => stream,
         Err(_) => {
             eprintln!(
-                "warning: canvas restore {our_id} was published but its post-write verification read failed; the restore is preserved in history — check `buzz canvas history` if a concurrent edit may have landed"
+                "warning: canvas {action} {our_id} was published but its post-write verification read failed; the write is preserved in history — check `buzz canvas history` if a concurrent edit may have landed"
             );
             let _ = writeln!(out, "{}", normalize_write_response(&resp));
             return Ok(());
@@ -572,7 +603,7 @@ pub async fn cmd_restore_canvas(
     };
     if !buzz_sdk::canvas_write_survived(&our_id, &live_stream) {
         return Err(CliError::Conflict(format!(
-            "canvas restore {our_id} was superseded by a concurrent write; it is preserved in history — re-run restore against the current head if you still want it"
+            "canvas {action} {our_id} was superseded by a concurrent write; it is preserved in history — re-run {action} against the current head if you still want it"
         )));
     }
 
@@ -2084,13 +2115,67 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
     Ok(())
 }
 
+/// Replace a channel's canvas. Without `expected` this is an unconditional
+/// replace. With `expected` (a revision event ID, or `none` for a first write)
+/// the write only lands if that revision is still the head: a moved head is a
+/// [`CliError::Conflict`] (exit 5), checked here, by the relay, and once more
+/// after the write.
 pub async fn cmd_set_canvas(
     client: &BuzzClient,
     channel_id: &str,
     content: &str,
+    expected: Option<&str>,
+    out: &mut dyn std::io::Write,
 ) -> Result<(), CliError> {
     let content = read_or_stdin(content)?;
     let channel_uuid = parse_uuid(channel_id)?;
+
+    if let Some(expected) = expected {
+        if expected != "none" {
+            validate_hex64(expected)?;
+        }
+        let head = fetch_canvas_head(client, channel_id, true).await?;
+        let head_id = head
+            .as_ref()
+            .and_then(|h| h.get("id"))
+            .and_then(|v| v.as_str());
+        let builder = match head_id {
+            None if expected == "none" => {
+                buzz_sdk::build_set_canvas(channel_uuid, &content, Some("none"))
+            }
+            Some(head_id) if head_id.eq_ignore_ascii_case(expected) => {
+                let head_created_at = head
+                    .as_ref()
+                    .and_then(|h| h.get("created_at"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                buzz_sdk::build_set_canvas_after_head(
+                    channel_uuid,
+                    &content,
+                    head_id,
+                    head_created_at,
+                )
+            }
+            Some(head_id) if expected == "none" => {
+                return Err(CliError::Conflict(format!(
+                    "the channel already has a canvas (head {head_id}) — read it with `buzz canvas get --revision {head_id}`, merge your change, and retry with --expected {head_id}"
+                )));
+            }
+            Some(head_id) => {
+                return Err(CliError::Conflict(format!(
+                    "canvas changed since revision {expected}; the head is now {head_id} — read it with `buzz canvas get --revision {head_id}`, merge your change, and retry with --expected {head_id}"
+                )));
+            }
+            None => {
+                return Err(CliError::Conflict(format!(
+                    "canvas revision {expected} is not the head: the channel has no canvas — retry with --expected none"
+                )));
+            }
+        }
+        .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
+        let event = client.sign_event(builder).await?;
+        return submit_checked_canvas_write(client, channel_id, event, "set", out).await;
+    }
 
     // `set` is an unconditional replace — no `expected-revision` tag, so the
     // relay accepts the write regardless of the current head. A moved head is
@@ -2120,7 +2205,7 @@ pub async fn cmd_set_canvas(
 
     let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
-    println!("{}", normalize_write_response(&resp));
+    let _ = writeln!(out, "{}", normalize_write_response(&resp));
     Ok(())
 }
 
@@ -2266,7 +2351,20 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
         CanvasCmd::Get { channel, revision } => {
             cmd_get_canvas(client, &channel, revision.as_deref()).await
         }
-        CanvasCmd::Set { channel, content } => cmd_set_canvas(client, &channel, &content).await,
+        CanvasCmd::Set {
+            channel,
+            content,
+            expected,
+        } => {
+            cmd_set_canvas(
+                client,
+                &channel,
+                &content,
+                expected.as_deref(),
+                &mut std::io::stdout(),
+            )
+            .await
+        }
         CanvasCmd::History { channel, limit } => cmd_canvas_history(client, &channel, limit).await,
         CanvasCmd::Restore { channel, revision } => {
             cmd_restore_canvas(client, &channel, &revision, &mut std::io::stdout()).await
@@ -3916,7 +4014,7 @@ mod set_canvas_tests {
         }]);
         let (url, submitted, _) = relay(&head.to_string()).await;
 
-        cmd_set_canvas(&client(&url), CHANNEL, "new content")
+        cmd_set_canvas(&client(&url), CHANNEL, "new content", None, &mut vec![])
             .await
             .expect("set succeeds");
 
@@ -3950,7 +4048,7 @@ mod set_canvas_tests {
         }]);
         let (url, submitted, _) = relay(&head.to_string()).await;
 
-        let err = cmd_set_canvas(&client(&url), CHANNEL, "new content")
+        let err = cmd_set_canvas(&client(&url), CHANNEL, "new content", None, &mut vec![])
             .await
             .expect_err("a poisoned future head must be refused");
 
@@ -3971,7 +4069,7 @@ mod set_canvas_tests {
     async fn set_with_no_head_creates_without_expected_revision() {
         let (url, submitted, _) = relay("[]").await;
 
-        cmd_set_canvas(&client(&url), CHANNEL, "first content")
+        cmd_set_canvas(&client(&url), CHANNEL, "first content", None, &mut vec![])
             .await
             .expect("set on empty channel succeeds");
 
@@ -4003,7 +4101,7 @@ mod set_canvas_tests {
             "tags": [["h", CHANNEL]],
         }]);
         let (url, _, query_bodies) = relay(&head.to_string()).await;
-        cmd_set_canvas(&client(&url), CHANNEL, "new content")
+        cmd_set_canvas(&client(&url), CHANNEL, "new content", None, &mut vec![])
             .await
             .expect("set succeeds");
 
@@ -4080,8 +4178,8 @@ mod set_canvas_tests {
     }
 }
 
-/// Command-level coverage for `cmd_restore_canvas`'s post-write supersession
-/// check. After publishing the restored revision, the command re-reads the head
+/// Command-level coverage for the post-write supersession check shared by
+/// `cmd_restore_canvas` and `cmd_set_canvas --expected`. After publishing the restored revision, the command re-reads the head
 /// once and classifies the outcome via the SDK's `canvas_write_survived`
 /// predicate. These pin all three post-write outcomes deterministically —
 /// controlled relay responses, no timing, no sleeps — so a revert of the
@@ -4104,7 +4202,7 @@ mod restore_canvas_tests {
     use serde_json::{json, Value};
     use tokio::net::TcpListener;
 
-    use super::cmd_restore_canvas;
+    use super::{cmd_restore_canvas, cmd_set_canvas};
     use crate::client::BuzzClient;
     use crate::CliError;
 
@@ -4271,6 +4369,54 @@ mod restore_canvas_tests {
             "created_at": created_at,
             "tags": tags,
         })
+    }
+
+    /// `set --expected` pins the head it read and goes through the same
+    /// post-write check as restore.
+    #[tokio::test]
+    async fn set_with_expected_head_pins_it_and_succeeds() {
+        let (url, submitted, _) = relay(PostHead::OurEvent).await;
+        cmd_set_canvas(&client(&url), CHANNEL, "mine", Some(HEAD), &mut vec![])
+            .await
+            .expect("set against the current head succeeds");
+        let event = submitted.lock().unwrap().clone().expect("set must publish");
+        let tags = event.get("tags").and_then(|t| t.as_array()).unwrap();
+        assert!(tags.contains(&json!(["expected-revision", HEAD])));
+    }
+
+    /// A stale `--expected` (or `none` over an existing canvas) is a conflict
+    /// before anything is published.
+    #[tokio::test]
+    async fn set_with_stale_expected_conflicts_without_publishing() {
+        for expected in [REVISION, "none"] {
+            let (url, submitted, _) = relay(PostHead::OurEvent).await;
+            let err = cmd_set_canvas(&client(&url), CHANNEL, "mine", Some(expected), &mut vec![])
+                .await
+                .expect_err("a moved head must be refused");
+            assert!(
+                matches!(&err, CliError::Conflict(m) if m.contains(HEAD)
+                    && m.contains(if expected == "none" { "already has a canvas" } else { "the head is now" })),
+                "unexpected error: {err}"
+            );
+            assert!(
+                submitted.lock().unwrap().is_none(),
+                "nothing may be published"
+            );
+        }
+    }
+
+    /// A concurrent write that wins the head after `set --expected` lands is
+    /// reported as a conflict naming `set`.
+    #[tokio::test]
+    async fn set_with_expected_reports_supersession() {
+        let (url, _, _) = relay(PostHead::Stranger).await;
+        let err = cmd_set_canvas(&client(&url), CHANNEL, "mine", Some(HEAD), &mut vec![])
+            .await
+            .expect_err("a superseded set must be reported");
+        assert!(
+            matches!(&err, CliError::Conflict(m) if m.contains("re-run set against the current head")),
+            "unexpected error: {err}"
+        );
     }
 
     /// The post-write head is our own event → restore holds the head → success.
@@ -4453,6 +4599,9 @@ mod restore_canvas_tests {
         /// A is absent (only a stranger, no A in stream or IDs lookup) → genuine
         /// conflict → original `CliError::Relay { 409, .. }` returned unchanged.
         GenuinelyAbsent,
+        /// As `GenuinelyAbsent`, but the relay rejects because the expected
+        /// head was deleted (`canvas revision does not exist`) → Conflict.
+        HeadDeleted,
         /// Ancestry read fails (HTTP 500) → `CliError::DeliveryUnknown`.
         ReadFails,
         /// Ancestry succeeds with A unreachable (canvas_write_survived = false),
@@ -4533,7 +4682,7 @@ mod restore_canvas_tests {
                                             .to_string(),
                                     )
                                 }
-                                ConflictScenario::GenuinelyAbsent => {
+                                ConflictScenario::GenuinelyAbsent | ConflictScenario::HeadDeleted => {
                                     // A was never stored — empty response.
                                     (StatusCode::OK, json!([]).to_string())
                                 }
@@ -4556,7 +4705,7 @@ mod restore_canvas_tests {
                             ConflictScenario::ReadFails => {
                                 (StatusCode::INTERNAL_SERVER_ERROR, String::new())
                             }
-                            ConflictScenario::GenuinelyAbsent => {
+                            ConflictScenario::GenuinelyAbsent | ConflictScenario::HeadDeleted => {
                                 // A is absent — genuine conflict. Stream contains
                                 // only an unrelated stranger (no A, no B).
                                 (
@@ -4627,10 +4776,14 @@ mod restore_canvas_tests {
                         }
                         // Attempt 2 (same bytes — `submit_stored_event` retry):
                         // A is already stored; B built on A; relay returns canonical 409.
+                        let reason = if matches!(scenario, ConflictScenario::HeadDeleted) {
+                            "canvas revision does not exist"
+                        } else {
+                            "canvas changed since it was loaded"
+                        };
                         (
                             StatusCode::CONFLICT,
-                            r#"{"error":"conflict: canvas changed since it was loaded"}"#
-                                .to_string(),
+                            format!(r#"{{"error":"conflict: {reason}"}}"#),
                         )
                     }
                 }),
@@ -4830,28 +4983,35 @@ mod restore_canvas_tests {
     /// block (ignoring `canvas_write_survived`) makes this return `CliError::Conflict`
     /// instead of `CliError::Relay`.
     #[tokio::test]
-    async fn conflict_shaped_submit_stays_relay_error_when_our_event_absent() {
+    async fn conflict_shaped_submit_is_a_conflict_when_our_event_absent() {
         let (url, _, _) = conflict_relay(ConflictScenario::GenuinelyAbsent).await;
         let err = cmd_restore_canvas(&client(&url), CHANNEL, REVISION, &mut vec![])
             .await
             .expect_err("a genuine conflict must error");
 
-        // Must be the original Relay error (409) — not fabricated, not Conflict.
+        // Nothing was stored and another write holds the head: a write
+        // conflict (exit 5) that keeps the relay's reason.
         match &err {
-            CliError::Relay { status, body } => {
-                assert_eq!(
-                    *status, 409,
-                    "absent case must preserve the original 409 status"
-                );
-                assert!(
-                    body.contains("canvas changed"),
-                    "absent case must preserve the original conflict body: {body}"
-                );
-            }
-            other => {
-                panic!("expected Relay error (genuine conflict, nothing stored), got {other:?}")
-            }
+            CliError::Conflict(message) => assert!(
+                message.contains("canvas changed"),
+                "absent case must keep the relay's conflict reason: {message}"
+            ),
+            other => panic!("expected Conflict (lost race, nothing stored), got {other:?}"),
         }
+    }
+
+    /// The expected head deleted between the pre-read and the submit: the relay
+    /// answers 409 `canvas revision does not exist`, which is also a conflict.
+    #[tokio::test]
+    async fn conflict_shaped_submit_is_a_conflict_when_the_head_was_deleted() {
+        let (url, _, _) = conflict_relay(ConflictScenario::HeadDeleted).await;
+        let err = cmd_restore_canvas(&client(&url), CHANNEL, REVISION, &mut vec![])
+            .await
+            .expect_err("a deleted head must error");
+        assert!(
+            matches!(&err, CliError::Conflict(m) if m.contains("canvas revision does not exist")),
+            "expected Conflict keeping the relay's reason, got {err:?}"
+        );
     }
 
     /// A conflict-shaped submit where the ancestry walk itself fails. The

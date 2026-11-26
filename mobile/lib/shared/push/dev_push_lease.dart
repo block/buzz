@@ -637,3 +637,37 @@ void _requireExactKeys(
     throw FormatException('$name contains unknown field ${unexpected.first}');
   }
 }
+
+/// What a kind-30350 lease the relay holds says: whether it is active, and its
+/// generation.
+typedef BuzzPushLeaseState = ({bool active, int generation});
+
+/// Decrypts a lease this member published, for reading back the relay's
+/// actual setting.
+BuzzPushLeaseState decryptBuzzPushLease({
+  required NostrEvent event,
+  required BuzzPushLeaseDescriptor descriptor,
+  required String nsec,
+}) {
+  final decoded = nostr.Nip19.decode(payload: nsec);
+  if (decoded.prefix != nostr.Nip19Prefix.nsec || decoded.data.length != 64) {
+    throw const FormatException('Signing key must be a 32-byte nsec');
+  }
+  if (event.kind != buzzPushLeaseKind ||
+      event.pubkey != derivePublicKeyHex(decoded.data)) {
+    throw const FormatException('Not a push lease by this member');
+  }
+  final plaintext = jsonDecode(
+    nip44Decrypt(
+      getConversationKey(decoded.data, descriptor.executorPubkey),
+      event.content,
+    ),
+  );
+  if (plaintext case {
+    'active': final bool active,
+    'generation': final int generation,
+  }) {
+    return (active: active, generation: generation);
+  }
+  throw const FormatException('Push lease plaintext is malformed');
+}

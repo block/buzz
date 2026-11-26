@@ -84,6 +84,15 @@ enum NetworkEndpoint {
   /// A live subscription the relay closed.
   relaySubscription,
 
+  /// An open relay connection coming back after it was lost, timed from the
+  /// last frame the lost connection delivered, so the time it took to notice
+  /// the loss counts too.
+  relayRecovery,
+
+  /// Opening a channel: its newest history, timed from the request to the
+  /// messages being shown.
+  channelOpen,
+
   /// The relay's HTTP query bridge: `/query`, `/count` and `/profiles/search`.
   relayHttpQuery,
 

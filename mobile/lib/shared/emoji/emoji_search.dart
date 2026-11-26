@@ -55,7 +55,7 @@ int? _subsequenceSpan(String query, String target) {
   var last = -1;
   var qi = 0;
   for (var ti = 0; ti < target.length && qi < query.length; ti++) {
-    if (target[ti] == query[qi]) {
+    if (target.codeUnitAt(ti) == query.codeUnitAt(qi)) {
       if (first == -1) first = ti;
       last = ti;
       qi++;
@@ -71,9 +71,12 @@ int? _subsequenceSpan(String query, String target) {
 EmojiMatch? scoreShortcodeMatch(String query, String shortcode) {
   final q = collapseSeparators(query);
   if (q.isEmpty) return null;
-  final target = collapseSeparators(shortcode);
-  if (target.isEmpty) return null;
+  return _scoreCollapsed(q, collapseSeparators(shortcode));
+}
 
+/// [scoreShortcodeMatch] for a query and shortcode that are already collapsed.
+EmojiMatch? _scoreCollapsed(String q, String target) {
+  if (target.isEmpty) return null;
   if (q == target) return const EmojiMatch(tier: _tierExact, score: 0);
   if (target.startsWith(q)) {
     return const EmojiMatch(tier: _tierShortcodePrefix, score: 0);
@@ -178,6 +181,43 @@ List<T> rankByShortcode<T>(
   final ranked = scored.map((entry) => entry.item).toList();
   if (limit == null || ranked.length <= limit) return ranked;
   return ranked.sublist(0, limit);
+}
+
+/// Shortcodes collapsed once, so ranking on every keystroke doesn't collapse
+/// the whole list again. [rank] matches [rankByShortcode] with a limit.
+class ShortcodeIndex<T> {
+  ShortcodeIndex(Iterable<T> items, String Function(T item) shortcodeOf)
+    : _entries = [
+        for (final item in items)
+          (
+            item: item,
+            code: shortcodeOf(item),
+            target: collapseSeparators(shortcodeOf(item)),
+          ),
+      ];
+
+  final List<({T item, String code, String target})> _entries;
+
+  /// The best [limit] items for [query], best first.
+  List<T> rank(String query, {required int limit}) {
+    final q = collapseSeparators(query);
+    if (q.isEmpty || limit <= 0) return const [];
+    final scored = <_Scored<T>>[];
+    for (final entry in _entries) {
+      final match = _scoreCollapsed(q, entry.target);
+      if (match == null) continue;
+      scored.add(
+        _Scored(
+          item: entry.item,
+          tier: match.tier,
+          score: match.score,
+          code: entry.code,
+        ),
+      );
+    }
+    scored.sort(_compare);
+    return [for (final entry in scored.take(limit)) entry.item];
+  }
 }
 
 /// Rank standard emoji by shortcode, name, and keywords, best first.

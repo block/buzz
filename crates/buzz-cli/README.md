@@ -108,7 +108,7 @@ buzz gifs share --slug <slug>                 # report selection to provider Rec
 # Paste the `cdn_url` from a search result directly into messages send --content
 
 # Custom emoji in messages
-# buzz messages send scans outgoing content for :shortcode: patterns and
+# buzz messages send and buzz messages edit scan outgoing content for :shortcode: patterns and
 # automatically attaches NIP-30 ["emoji", shortcode, url] tags from the
 # workspace palette — identical to the desktop composer behavior.
 
@@ -147,6 +147,9 @@ buzz messages vote --event <event-id> --direction up
 # Canvas
 buzz canvas get --channel <uuid>
 buzz canvas set --channel <uuid> --content "# Welcome"
+# Replace only if <rev> is still the head (from `canvas history --limit 1`);
+# a moved head exits 5. `--expected none` creates only when no canvas exists.
+buzz canvas set --channel <uuid> --content - --expected <rev>
 
 # Sidebar sections (your own sidebar, synced with Buzz desktop)
 buzz sidebar sections create --name "Engineering" --icon "🛠"

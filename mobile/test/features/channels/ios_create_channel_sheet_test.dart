@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/ios_create_channel_sheet.dart';
+import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -53,8 +54,16 @@ void main() {
                             'visibility': visibility,
                             'ttl': ttlSeconds,
                           });
+                          // What relay_session throws for a taken name,
+                          // then for a publish with the socket down.
                           if (payloads.length == 1) {
-                            throw StateError('Try again');
+                            throw const RelayEventRejectedException(
+                              'invalid: an open channel named "Test" '
+                              'already exists',
+                            );
+                          }
+                          if (payloads.length == 2) {
+                            throw RelayNotConnectedError();
                           }
                           return created;
                         },
@@ -89,10 +98,14 @@ void main() {
         return response.future;
       }
 
-      expect(
-        await create('open', null),
-        containsPair('error', contains('Try again')),
-      );
+      expect(await create('open', null), {
+        'error': 'An open channel named "Test" already exists',
+      });
+      // Only the create-specific text names the lost connection; the relay
+      // refusal above reads the same through relayErrorMessage.
+      expect(await create('open', null), {
+        'error': 'Couldn’t create channel. No connection.',
+      });
       expect(result, isNull);
       expect(configuration!['session'], session);
       expect(await create('private', 3600), {'success': true});
@@ -112,7 +125,7 @@ void main() {
       dismissed.complete(); // Native X or swipe dismissal returns no channel.
       await tester.pumpAndSettle();
       expect(result, isNull);
-      expect(payloads, hasLength(2));
+      expect(payloads, hasLength(3));
     },
   );
 }

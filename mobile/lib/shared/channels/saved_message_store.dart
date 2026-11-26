@@ -46,6 +46,14 @@ final savedMessageScopeProvider = Provider<SavedMessageScope?>((ref) {
   return pubkey == null ? null : (communityId: active.id, pubkey: pubkey);
 });
 
+/// The relay signing key saved for the active identity, read once per scope.
+/// It lets a cold, offline launch recognize relay-signed messages.
+final savedRelayAuthorProvider = FutureProvider<String?>((ref) async {
+  final scope = ref.watch(savedMessageScopeProvider);
+  if (scope == null) return null;
+  return ref.read(savedMessageStoreProvider).relayAuthor(scope);
+});
+
 /// Captures the right to read or write a page before an asynchronous load.
 final class SavedMessageTicket {
   const SavedMessageTicket._(
@@ -81,6 +89,8 @@ final savedMessageStoreProvider = Provider<SavedMessageStore>((ref) {
 
 /// A bounded, disposable store of previously opened conversations.
 final class SavedMessageStore {
+  static const maxPageEvents = 2101; // 50 rows, summaries and two aux hops.
+
   SavedMessageStore({
     required Future<Directory?> Function() root,
     required DiagnosticReporter diagnostics,
@@ -98,7 +108,8 @@ final class SavedMessageStore {
   final int databasePageLimit;
   final _scopeEpochs = <String, int>{};
   final _channelEpochs = <(String, String), int>{};
-  final _pendingEventRemovals = <(String, String), Set<String>>{};
+  final _pendingEventRemovals = <(String, String), Map<String, bool>>{};
+  final _recentMutations = <(String, String, String), bool>{};
   Future<void> _tail = Future.value();
   Future<void> _purgeMarkerTail = Future.value();
   int _activePurgeMarkers = 0;
@@ -121,10 +132,35 @@ final class SavedMessageStore {
       (_channelEpochs[(ticket._scope, ticket._page.channelId)] ?? 0) ==
           ticket._channelEpoch;
 
+  /// Live edits and deletions can be newer than a subsequent replica read.
+  ({Set<String> edited, Set<String> deleted}) threadMutations(
+    SavedMessageTicket ticket,
+    Iterable<String> ids,
+  ) {
+    final edited = <String>{};
+    final deleted = <String>{};
+    for (final id in ids) {
+      final mutation =
+          _recentMutations[(ticket._scope, ticket._page.channelId, id)];
+      if (mutation != null) (mutation ? edited : deleted).add(id);
+    }
+    return (edited: edited, deleted: deleted);
+  }
+
   /// Reads a verified page and records that the conversation was opened.
   Future<List<NostrEvent>?> read(SavedMessageTicket ticket) async {
     final result = await _forPage(ticket, _DiskAction.read);
     return isCurrent(ticket) ? result?.events : null;
+  }
+
+  /// Reads trusted events and the targets removed from this thread page.
+  Future<({List<NostrEvent> events, Map<String, bool> pruned})?> inspectThread(
+    SavedMessageTicket ticket,
+  ) async {
+    final result = await _forPage(ticket, _DiskAction.inspect);
+    final events = result?.events;
+    if (events == null || !isCurrent(ticket)) return null;
+    return (events: events, pruned: result!.pruned);
   }
 
   /// Marks a warm open without reading or decoding the saved page.
@@ -146,12 +182,44 @@ final class SavedMessageStore {
     );
   }
 
+  /// The relay signing key last saved with this identity's pages: the key
+  /// that verified them, replaced when a save finds the relay rotated it.
+  /// Null when none was saved, the cache awaits a purge, or [scope] is
+  /// removed meanwhile.
+  Future<String?> relayAuthor(SavedMessageScope scope) async {
+    final key = _scopeKey(scope);
+    final epoch = _scopeEpochs.putIfAbsent(key, () => 0);
+    final author = await _enqueue((directory) async {
+      final marker = (await _purgeMarker(directory))!;
+      final needsReset = await _withPurgeMarker(
+        () async => _needsReset ??= await _purgePending(marker),
+      );
+      if (needsReset || _scopeEpochs[key] != epoch) return null;
+      final result = await _runDisk(
+        _DiskRequest(
+          path: _path(directory, key),
+          action: _DiskAction.relayAuthor,
+          page: (channelId: '', rootId: ''),
+          databasePageLimit: databasePageLimit,
+        ),
+      );
+      if (result.reset) _reportReset();
+      return result.relayAuthor;
+    });
+    return _scopeEpochs[key] == epoch &&
+            author != null &&
+            _lowerHex64.hasMatch(author)
+        ? author
+        : null;
+  }
+
   /// Retires all in-flight work and deletes every version for this identity.
   Future<void> removeScope(SavedMessageScope scope) {
     final key = _scopeKey(scope);
     _scopeEpochs.update(key, (epoch) => epoch + 1, ifAbsent: () => 1);
     _channelEpochs.removeWhere((entry, _) => entry.$1 == key);
     _pendingEventRemovals.removeWhere((entry, _) => entry.$1 == key);
+    _recentMutations.removeWhere((entry, _) => entry.$1 == key);
     return _purge((directory) => _sweep(directory, removedScope: key));
   }
 
@@ -165,6 +233,9 @@ final class SavedMessageStore {
     final key = _scopeKey(scope);
     _retireChannel((key, channelId));
     _pendingEventRemovals.remove((key, channelId));
+    _recentMutations.removeWhere(
+      (entry, _) => entry.$1 == key && entry.$2 == channelId,
+    );
     return _purge(
       (directory) => _removeFromDisk(directory, key, channelId),
       deferDisk: deferDisk,
@@ -175,16 +246,27 @@ final class SavedMessageStore {
   void removeChannelEvents(
     SavedMessageScope scope,
     String channelId,
-    Set<String> targets,
-  ) {
+    Set<String> targets, {
+    bool edited = false,
+  }) {
     if (targets.isEmpty) return;
     final key = (_scopeKey(scope), channelId);
     _retireChannel(key);
     final pending = _pendingEventRemovals[key];
-    final batch = pending ?? <String>{};
+    final batch = pending ?? <String, bool>{};
     for (final target in targets) {
-      if (batch.length > _maxWindowEvents) break;
-      batch.add(target);
+      if (batch.length > maxPageEvents) break;
+      batch.update(
+        target,
+        (wasEdit) => wasEdit && edited,
+        ifAbsent: () => edited,
+      );
+      final targetKey = (key.$1, channelId, target);
+      final previous = _recentMutations.remove(targetKey);
+      _recentMutations[targetKey] = previous == false ? false : edited;
+      if (_recentMutations.length > maxPageEvents) {
+        _recentMutations.remove(_recentMutations.keys.first);
+      }
     }
     if (pending != null) return;
     _pendingEventRemovals[key] = batch;
@@ -194,7 +276,7 @@ final class SavedMessageStore {
           directory,
           key.$1,
           key.$2,
-          targets: batch.length > _maxWindowEvents ? null : batch,
+          targets: batch.length > maxPageEvents ? null : batch,
         ),
         shouldRun: () {
           if (!identical(_pendingEventRemovals[key], batch)) return false;
@@ -323,7 +405,7 @@ final class SavedMessageStore {
     String directory,
     String key,
     String channelId, {
-    Set<String>? targets,
+    Map<String, bool>? targets,
   }) async {
     try {
       final result = await _runDisk(
@@ -332,6 +414,7 @@ final class SavedMessageStore {
           action: _DiskAction.removeChannel,
           page: (channelId: channelId, rootId: ''),
           targets: targets,
+          payloadBudget: payloadBudget,
           databasePageLimit: databasePageLimit,
         ),
       );
@@ -352,6 +435,7 @@ final class SavedMessageStore {
     _scopeEpochs.updateAll(
       (key, epoch) => keys.contains(key) ? epoch : epoch + 1,
     );
+    _recentMutations.removeWhere((entry, _) => !keys.contains(entry.$1));
     return _enqueue((directory) => _sweep(directory, retained: keys));
   }
 
@@ -382,6 +466,9 @@ final class SavedMessageStore {
         page: ticket._page,
         events: events,
         relayAuthor: relayAuthor,
+        requiredEdits: ticket._page.rootId.isEmpty
+            ? const {}
+            : threadMutations(ticket, events.map((event) => event.id)).edited,
         payloadBudget: payloadBudget,
         databasePageLimit: databasePageLimit,
       ),
@@ -442,6 +529,8 @@ final class SavedMessageStore {
 
 // POSIX ENOENT on iOS and Android. Other errors leave the cache unavailable.
 const _noSuchFile = 2;
+
+final _lowerHex64 = RegExp(r'^[0-9a-f]{64}$');
 
 String _scopeKey(SavedMessageScope scope) => sha256
     .convert(utf8.encode('${scope.communityId}\n${scope.pubkey.toLowerCase()}'))

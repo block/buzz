@@ -61,17 +61,27 @@ void main() {
     },
   );
 
-  test('purges notifications delivered before age restriction', () async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(_channel, (call) async {
-          expect(call.method, 'purgeAgeRestrictedNotifications');
-          expect(call.arguments, isNull);
-          return null;
-        });
+  for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
+    test('purges and restores age-restricted notifications on '
+        '${platform.name}', () async {
+      debugDefaultTargetPlatformOverride = platform;
+      final methods = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_channel, (call) async {
+            methods.add(call.method);
+            expect(call.arguments, isNull);
+            return null;
+          });
 
-    await purgeAgeRestrictedBuzzNotifications();
-  });
+      await purgeAgeRestrictedBuzzNotifications();
+      await restoreAgeRestrictedBuzzNotifications();
+
+      expect(methods, [
+        'purgeAgeRestrictedNotifications',
+        'restoreAgeRestrictedNotifications',
+      ]);
+    });
+  }
 
   test('reads and exposes persisted endpoint grants on iOS', () async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
@@ -142,8 +152,8 @@ void main() {
         ],
       );
 
-      expect(firstGrant.endpointGrant, 'new-grant');
-      expect(secondGrant.endpointGrant, 'new-grant');
+      expect(firstGrant!.endpointGrant, 'new-grant');
+      expect(secondGrant!.endpointGrant, 'new-grant');
       expect(enrollmentArguments, [
         {
           'relayUrl': 'wss://relay.example/',
@@ -179,6 +189,25 @@ void main() {
       expect(pushEndpointGrants.value.single.endpointGrant, 'new-grant');
     },
   );
+
+  test('a community that opted out enrolls nothing', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    final methods = <String>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          methods.add(call.method);
+          return null;
+        });
+
+    final grant = await enrollBuzzPush(
+      'wss://relay.example/',
+      'https://gateway.example/',
+      stillWanted: () => false,
+    );
+
+    expect(grant, isNull);
+    expect(methods, isEmpty);
+  });
 
   test('a gateway reply the app cannot read is reported and still fails '
       'enrollment', () async {
@@ -459,6 +488,33 @@ void main() {
       ),
     );
   });
+
+  test(
+    'pulls a cold-start notification response from native Android',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_channel, (call) async {
+            expect(call.method, 'takePendingNotificationResponse');
+            return {
+              'eventId': 'b' * 64,
+              'communityId': 'community-id',
+              'channelId': '123e4567-e89b-42d3-a456-426614174000',
+            };
+          });
+
+      await syncPendingBuzzPushNotificationResponse();
+
+      expect(
+        pendingPushNotificationLink.value,
+        MessageDeepLink(
+          communityId: 'community-id',
+          channelId: '123e4567-e89b-42d3-a456-426614174000',
+          messageId: 'b' * 64,
+        ),
+      );
+    },
+  );
 }
 
 Map<String, Object> _grantMap(String endpointGrant) => {

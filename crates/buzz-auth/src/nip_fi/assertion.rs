@@ -122,6 +122,7 @@ pub struct VerifiedAssertion {
     owner: Option<PublicKey>,
     capabilities: CanonicalCapabilities,
     authority_deadlines: Vec<DateTime<Utc>>,
+    issued_at: DateTime<Utc>,
     assertion_policy_id: AssertionPolicyId,
     transport_contract_id: TransportContractId,
     revalidation_dependencies: RevalidationDependencies,
@@ -138,6 +139,7 @@ impl VerifiedAssertion {
         owner: Option<PublicKey>,
         capabilities: CanonicalCapabilities,
         authority_deadlines: Vec<DateTime<Utc>>,
+        issued_at: DateTime<Utc>,
         assertion_policy_id: AssertionPolicyId,
         transport_contract_id: TransportContractId,
         revalidation_dependencies: RevalidationDependencies,
@@ -153,6 +155,7 @@ impl VerifiedAssertion {
             owner,
             capabilities,
             authority_deadlines,
+            issued_at,
             assertion_policy_id,
             transport_contract_id,
             revalidation_dependencies,
@@ -209,6 +212,12 @@ impl VerifiedAssertion {
             .expect("authority_deadlines is non-empty by construction")
     }
 
+    /// The verified signed `iat`: the time-checked claim, never optional
+    /// profile evidence.  A `revoke_through` cutoff compares against this.
+    pub const fn issued_at(&self) -> DateTime<Utc> {
+        self.issued_at
+    }
+
     /// The stable assertion-policy identity.
     pub const fn assertion_policy_id(&self) -> AssertionPolicyId {
         self.assertion_policy_id
@@ -239,6 +248,7 @@ impl VerifiedAssertion {
             None,
             CanonicalCapabilities::from_pairs(vec![]),
             vec![Utc::now() + Duration::seconds(3600)],
+            Utc::now(),
             AssertionPolicyId::zero(),
             TransportContractId::zero(),
             RevalidationDependencies::new(
@@ -287,6 +297,7 @@ impl VerifiedAssertion {
             owner: None,
             capabilities: CanonicalCapabilities::from_pairs(vec![]),
             authority_deadlines,
+            issued_at: Utc::now(),
             assertion_policy_id: AssertionPolicyId::zero(),
             transport_contract_id: TransportContractId::zero(),
             revalidation_dependencies: RevalidationDependencies {
@@ -304,6 +315,13 @@ impl VerifiedAssertion {
     #[must_use]
     pub fn with_owner_for_test(mut self, owner: PublicKey) -> Self {
         self.owner = Some(owner);
+        self
+    }
+
+    /// Test-only: the same assertion with verified signed `iat` `issued_at`.
+    #[must_use]
+    pub fn with_issued_at_for_test(mut self, issued_at: DateTime<Utc>) -> Self {
+        self.issued_at = issued_at;
         self
     }
 }
