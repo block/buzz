@@ -263,6 +263,148 @@ clients MUST use `(sessionId, turnSeq)` from the decrypted payload as
 described above; `created_at` is suitable only for coarse time-window
 queries.
 
+## Delegated Metric Readers
+
+`proposed extension`
+
+An owner MAY delegate read-only access to its agents' turn metrics to a
+separate Nostr key. The reader key is intentionally not an owner credential:
+it cannot publish as the owner, administer agents, read direct messages, or
+decrypt any event outside this delegation.
+
+Delegation does not make the original owner ciphertext decryptable by another
+key. NIP-44 is pairwise, and a relay does not possess the agent plaintext or a
+key with which it could safely re-encrypt it. Publishers therefore emit one
+ordinary owner copy plus one independently encrypted recipient copy for each
+active delegated reader. Relays MUST NOT implement delegation by merely
+revealing the owner copy to the reader.
+
+### Delegation event
+
+An active grant is an owner-authored parameterized replaceable event of
+`kind:30180`, addressed by the reader pubkey:
+
+```json
+{
+  "kind": 30180,
+  "pubkey": "<owner_pubkey>",
+  "created_at": 1790000000,
+  "content": "",
+  "tags": [
+    ["d", "<reader_pubkey>"],
+    ["p", "<reader_pubkey>"],
+    ["scope", "agent-turn-metrics"],
+    ["status", "active"],
+    ["expiration", "1792592000"]
+  ],
+  "sig": "..."
+}
+```
+
+The event MUST contain exactly one tag of each of these forms:
+
+- `d`: 64-character lowercase reader pubkey, equal to `p`;
+- `p`: 64-character lowercase reader pubkey, different from the owner;
+- `scope`: exactly `agent-turn-metrics`;
+- `status`: exactly `active` or `revoked`.
+
+It MAY contain one NIP-40 `expiration` tag. An active event whose expiration is
+not strictly in the future MUST be treated as revoked. Unsupported tags do not
+expand the grant and MUST be ignored. Content MUST be empty. The author's
+current `(kind:30180, d:<reader>)` head is the complete grant state; an absent,
+expired, malformed, or revoked head grants nothing.
+
+The owner revokes access by publishing a newer event at the same coordinate
+with `status=revoked`. Re-granting requires another newer `active` head and
+creates a new grant event id. A relay MUST use standard parameterized-
+replaceable head selection, including its deterministic same-timestamp tie
+break, rather than accepting an arbitrary matching event supplied by a
+client.
+
+### Delegated recipient copy
+
+For every active grant known at turn completion, the agent MAY publish one
+additional `kind:44200` event. Its decrypted payload is byte-for-byte the same
+payload used for the owner copy, but its content is independently encrypted
+with NIP-44 v2 using `(agent_privkey, reader_pubkey)`. It has this envelope:
+
+```json
+{
+  "kind": 44200,
+  "pubkey": "<agent_pubkey>",
+  "created_at": 1790000012,
+  "content": "<NIP-44 v2 ciphertext for reader_pubkey>",
+  "tags": [
+    ["p", "<reader_pubkey>"],
+    ["owner", "<owner_pubkey>"],
+    ["agent", "<agent_pubkey>"],
+    ["delegation", "<active_kind_30180_event_id>"]
+  ],
+  "sig": "..."
+}
+```
+
+The existing owner copy remains unchanged and remains REQUIRED. A delegated
+copy MUST have exactly one `owner` and one `delegation` tag in addition to the
+existing single `p` and `agent` tags. An owner copy MUST NOT contain either
+tag. The delegated copy's `p` value MUST equal the referenced grant's reader,
+and `owner` MUST equal both the grant author and the agent's registered owner.
+
+The relay MUST reject a delegated copy unless all of the following hold:
+
+1. The referenced delegation event is a valid stored `kind:30180` event in the
+   same community.
+2. It is the current head of its `(owner, 30180, reader)` coordinate.
+3. It is active and unexpired at ingest time.
+4. The metric's `p`, `owner`, `agent`, and `delegation` tags agree with the
+   reader, owner, agent author, and grant id respectively.
+5. The relay's authenticated ownership lookup confirms that `owner` owns
+   `agent`; tag agreement alone is insufficient.
+
+Publishers and relays MUST bound delegated fan-out. The initial profile allows
+at most eight active readers per owner. A publisher that observes more than
+eight MUST emit only the owner copy and report the delegation set as invalid;
+it MUST NOT select an arbitrary subset. A relay MUST reject a ninth active
+grant. These requirements prevent a compromised owner or malformed query from
+turning one model turn into unbounded encryption and storage work.
+
+### Delegated reads and revocation
+
+A delegated reader recovers its copies with:
+
+```json
+{"kinds": [44200], "#p": ["<reader_pubkey>"], "since": <window_start>}
+```
+
+For a delegated copy, the result-level gate used by every read path MUST check
+both that the authenticated reader equals `p` and that the referenced grant is
+still the current active, unexpired head. This applies to WebSocket history and
+live fan-out, HTTP query and count, explicit event-id reads, search, push, and
+cross-node delivery. The filter-level `#p` check remains defense in depth but
+is not sufficient by itself.
+
+After revocation, the relay MUST withhold historical copies tied to the old
+grant id and MUST exclude them from counts. A later re-grant does not revive
+copies bound to an earlier grant id. Relays MAY delete inaccessible delegated
+copies after revocation, but deletion is not required for authorization.
+
+Revocation cannot erase data the reader already received and decrypted. An
+owner requiring stronger containment must use a dedicated reader key, rotate
+it when access changes, and treat the downstream dashboard as an exported data
+processor.
+
+### Client behavior for delegated copies
+
+A delegated reader MUST perform the same signature, NIP-44, payload, and
+numeric validation as an owner. It additionally MUST verify the public
+envelope agreement described above and SHOULD query the referenced delegation
+head before accepting a copy obtained from an untrusted relay.
+
+Owners aggregating their own usage MUST query owner copies (`#p` equal to the
+owner) and MUST NOT sum delegated recipient copies. Consumers that combine
+exports from multiple reader keys SHOULD deduplicate by the decrypted
+`(agent, sessionId, turnSeq, turnId)` identity when those fields are available.
+
 ## Relationship to Other NIPs
 
 - [NIP-AO](NIP-AO.md): same agent↔owner encryption and tag scoping, but
@@ -271,6 +413,8 @@ queries.
 - [NIP-09](09.md): the authoring agent (or its owner via relay policy) may
   request deletion; relays apply standard deletion semantics.
 - [NIP-40](40.md): publishers MAY set `expiration` to bound retention.
+- [NIP-33](33.md): delegated-reader grants use parameterized-replaceable head
+  selection so revocation has one authoritative state per owner and reader.
 
 ## Security Considerations
 
@@ -285,3 +429,10 @@ of the agent's private key allows decryption of captured ciphertexts.
 **Integrity of accounting.** Metrics are self-reported by the agent process.
 A compromised agent can under- or over-report. Owners requiring stronger
 guarantees must reconcile against provider-side billing.
+
+**Delegated-reader amplification.** Recipient copies multiply encryption,
+storage, query, and fan-out work. The eight-reader fail-closed cap is part of
+the security boundary, not an implementation recommendation.
+
+**Revocation limits.** Replacing a grant prevents future relay delivery but
+cannot retract plaintext or ciphertext already obtained by the reader.
