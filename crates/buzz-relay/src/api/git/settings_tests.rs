@@ -2406,6 +2406,23 @@ mod external_infra {
             "a push grant does not manage"
         );
         assert_eq!(f.set(&agent, "main", Some(&manage)).await.0, StatusCode::OK);
+        // The floor's grant cap admitted that grant, so the receipt names it.
+        let (floor_in_force, floor_named): (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT (SELECT g.detail->'state'->>'id' FROM audit_log g WHERE g.community_id = $1 \
+               AND g.action = 'governance_changed' AND g.detail->>'document' = 'floor' \
+               ORDER BY g.seq DESC LIMIT 1), \
+             (SELECT l.detail->'heads'->>'floor' FROM audit_log l WHERE l.community_id = $1 \
+               AND l.action = 'git_landed' ORDER BY l.seq DESC LIMIT 1)",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert!(floor_in_force.is_some());
+        assert_eq!(
+            floor_named, floor_in_force,
+            "a grant-reliant default-branch receipt names the floor that capped it"
+        );
         assert_eq!(
             f.set(&agent, "legacy", None).await.0,
             StatusCode::NOT_FOUND,

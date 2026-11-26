@@ -18,7 +18,10 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use buzz_core::{governance::RepoCoordinate, TenantContext};
+use buzz_core::{
+    governance::{DocumentId, RepoCoordinate},
+    TenantContext,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -193,7 +196,11 @@ impl DefaultBranchSnapshot {
                 new: &digest,
                 updates: &[],
             },
-            async |_tx, authority| {
+            async |tx, authority| {
+                // The floor's grant cap can decide whether a grant counts.
+                let floor = buzz_db::governance::head(tx, &DocumentId::Floor)
+                    .await
+                    .map_err(backend)?;
                 Ok(super::gate::Decision {
                     verdict: match authority.role {
                         Some(role) if role.has_at_least(buzz_core::channel::MemberRole::Admin) => {
@@ -205,7 +212,12 @@ impl DefaultBranchSnapshot {
                         _ => Err(refusal(MANAGE_DENIED)),
                     },
                     counted: Default::default(),
-                    heads: None,
+                    heads: Some(super::gate::Heads {
+                        floor: floor.map(|e| e.id),
+                        trusted: None,
+                        labels: None,
+                        rules: None,
+                    }),
                 })
             },
         )
