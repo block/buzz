@@ -17,6 +17,12 @@
 //!
 //! The worker runs on a dedicated `std::thread` (not async) because
 //! sherpa-onnx is CPU-bound and not Send-safe across await points.
+//!
+//! **Attribution invariant.** Every transcript this pipeline emits is signed
+//! with the local user's key, so only this device's own microphone may enter
+//! it. Audio from any other participant — decoded remote peers included — must
+//! never reach `push_audio`: transcribing it here would publish one person's
+//! speech as another's, on every listening desktop independently.
 
 use std::{
     collections::VecDeque,
@@ -53,24 +59,13 @@ const MAX_SPEECH_SAMPLES: usize = 16_000 * 30;
 /// task without holding a Mutex across await points.
 #[derive(Debug)]
 pub struct SttPipeline {
-    /// Send raw PCM bytes (f32 LE, 48 kHz mono) into the pipeline.
-    audio_tx: SyncSender<SttAudioInput>,
+    /// Send raw PCM bytes (f32 LE, 48 kHz mono) from the local microphone
+    /// into the pipeline. See the attribution invariant in the module docs.
+    audio_tx: SyncSender<Vec<u8>>,
     /// Signals the worker thread to stop.
     shutdown: Arc<AtomicBool>,
     /// Worker thread handle — taken on drop to join cleanly.
     thread: Option<thread::JoinHandle<()>>,
-}
-
-#[derive(Debug)]
-struct SttAudioInput {
-    pcm_bytes: Vec<u8>,
-    origin: SttAudioOrigin,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SttAudioOrigin {
-    Local,
-    RemoteHuman,
 }
 
 impl SttPipeline {
@@ -102,7 +97,7 @@ impl SttPipeline {
         human_floor: HumanFloor,
         output_device: Option<String>,
     ) -> Result<(Self, tokio_mpsc::Receiver<String>), String> {
-        let (audio_tx, audio_rx) = mpsc::sync_channel::<SttAudioInput>(AUDIO_QUEUE_DEPTH);
+        let (audio_tx, audio_rx) = mpsc::sync_channel::<Vec<u8>>(AUDIO_QUEUE_DEPTH);
         let (text_tx, text_rx) = tokio_mpsc::channel::<String>(64);
         let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -144,23 +139,15 @@ impl SttPipeline {
         self.thread.as_ref().is_none_or(|h| h.is_finished())
     }
 
-    /// Feed raw PCM bytes into the pipeline.
+    /// Feed raw PCM bytes from **this device's microphone** into the pipeline.
+    ///
+    /// The only audio entry point, deliberately. Its output is signed with the
+    /// local user's key, so admitting another participant's audio here would
+    /// attribute their speech to this user — see the module docs.
     ///
     /// Non-blocking. Drops audio silently if the pipeline can't keep up —
     /// better to lose frames than to stall the UI thread.
     pub fn push_audio(&self, pcm_bytes: Vec<u8>) -> Result<(), String> {
-        self.push_audio_from(pcm_bytes, SttAudioOrigin::Local)
-    }
-
-    /// Feed decoded remote-human PCM into transcription. Unlike the desktop
-    /// microphone path, this is not gated by the desktop PTT or mute state: the
-    /// remote participant already made their transmission choice on their own
-    /// device before the relay delivered these samples.
-    pub fn push_remote_audio(&self, pcm_bytes: Vec<u8>) -> Result<(), String> {
-        self.push_audio_from(pcm_bytes, SttAudioOrigin::RemoteHuman)
-    }
-
-    fn push_audio_from(&self, pcm_bytes: Vec<u8>, origin: SttAudioOrigin) -> Result<(), String> {
         // Reject non-4-byte-aligned input — would silently truncate in bytes_to_f32.
         if !pcm_bytes.len().is_multiple_of(4) {
             return Err(format!(
@@ -169,7 +156,7 @@ impl SttPipeline {
             ));
         }
         // Drop audio if the pipeline can't keep up — better than blocking the UI.
-        let _ = self.audio_tx.try_send(SttAudioInput { pcm_bytes, origin });
+        let _ = self.audio_tx.try_send(pcm_bytes);
         Ok(())
     }
 }
@@ -405,11 +392,11 @@ impl SttStreamState {
 #[derive(Debug)]
 enum SttLoopInput {
     Tick,
-    Batch(Vec<SttAudioInput>),
+    Batch(Vec<Vec<u8>>),
 }
 
 fn run_stt_receive_loop(
-    audio_rx: Receiver<SttAudioInput>,
+    audio_rx: Receiver<Vec<u8>>,
     shutdown: &AtomicBool,
     human_floor: HumanFloor,
     mut process: impl FnMut(SttLoopInput, &mut local_barge_in::LocalBargeIn),
@@ -443,7 +430,7 @@ fn run_stt_receive_loop(
 #[allow(clippy::too_many_arguments)]
 fn stt_worker(
     model_dir: PathBuf,
-    audio_rx: Receiver<SttAudioInput>,
+    audio_rx: Receiver<Vec<u8>>,
     text_tx: tokio_mpsc::Sender<String>,
     shutdown: Arc<AtomicBool>,
     ptt_active: Option<Arc<AtomicBool>>,
@@ -488,17 +475,8 @@ fn stt_worker(
         }
     };
 
-    // ── 2. Independent local and remote processing state ─────────────────────
-    // Separate resampler/VAD state prevents simultaneous desktop and remote
-    // speech from being serialized into one artificial utterance.
+    // ── 2. Local microphone processing state ─────────────────────────────────
     let mut local_stream = match SttStreamState::new() {
-        Ok(stream) => stream,
-        Err(error) => {
-            eprintln!("buzz-desktop: {error}");
-            return;
-        }
-    };
-    let mut remote_stream = match SttStreamState::new() {
         Ok(stream) => stream,
         Err(error) => {
             eprintln!("buzz-desktop: {error}");
@@ -546,28 +524,18 @@ fn stt_worker(
                 }
             }
             SttLoopInput::Batch(batch) => {
-                for input in batch {
-                    let (stream, ptt_gate, manual_gate, track_local_floor) = match input.origin {
-                        SttAudioOrigin::Local => (
-                            &mut local_stream,
-                            ptt_active.as_ref(),
-                            manual_mic_unmuted.as_ref(),
-                            true,
-                        ),
-                        SttAudioOrigin::RemoteHuman => (&mut remote_stream, None, None, false),
-                    };
+                for pcm_bytes in batch {
                     process_stt_input(
-                        stream,
-                        &input.pcm_bytes,
+                        &mut local_stream,
+                        &pcm_bytes,
                         speculative_enabled,
                         &recognizer,
                         &text_tx,
-                        ptt_gate,
-                        manual_gate,
+                        ptt_active.as_ref(),
+                        manual_mic_unmuted.as_ref(),
                         &human_floor,
                         local_barge_in_state,
                         output_device.as_deref(),
-                        track_local_floor,
                     );
                 }
             }
@@ -591,7 +559,6 @@ fn process_stt_input(
     human_floor: &HumanFloor,
     local_barge_in_state: &mut local_barge_in::LocalBargeIn,
     output_device: Option<&str>,
-    track_local_floor: bool,
 ) {
     stream
         .input_buf_48k
@@ -614,7 +581,6 @@ fn process_stt_input(
             human_floor,
             local_barge_in_state,
             output_device,
-            track_local_floor,
         );
     }
 }
@@ -671,7 +637,6 @@ fn process_16k_samples(
     human_floor: &HumanFloor,
     local_barge_in_state: &mut local_barge_in::LocalBargeIn,
     output_device: Option<&str>,
-    track_local_floor: bool,
 ) {
     let (speculative_enabled, speculative) = speculative;
     leftover.extend_from_slice(samples);
@@ -692,20 +657,17 @@ fn process_16k_samples(
             endpoint.process_frame(frame, prob, accepts_audio, flush_allowed, flush_frames);
         // Open-mic VAD semantics also apply when a PTT-mode user manually
         // opens the mic. A held shortcut keeps its explicit key-down cancel.
-        let local_barge_in = track_local_floor
-            && local_barge_in::enabled(ptt_active.is_some(), manually_open, ptt_held);
-        if track_local_floor {
-            if local_barge_in {
-                local_barge_in_state.observe(
-                    prob,
-                    action == VadFrameAction::ConfirmedOnset,
-                    human_floor,
-                    output_device,
-                    VAD_ONSET_THRESHOLD,
-                );
-            } else {
-                local_barge_in_state.release(human_floor);
-            }
+        let local_barge_in = local_barge_in::enabled(ptt_active.is_some(), manually_open, ptt_held);
+        if local_barge_in {
+            local_barge_in_state.observe(
+                prob,
+                action == VadFrameAction::ConfirmedOnset,
+                human_floor,
+                output_device,
+                VAD_ONSET_THRESHOLD,
+            );
+        } else {
+            local_barge_in_state.release(human_floor);
         }
 
         match action {
