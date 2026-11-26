@@ -134,7 +134,11 @@ Need a relay for it to connect to? Deploy a hosted one, or follow **Quick start*
 
 ### I want my own hosted relay
 
-To run a relay for your team without managing servers, you can deploy one to Railway in a click:
+To run a relay for your team without managing servers, you can deploy one to Zenith in a click:
+
+[![Deploy with Zenith](https://cdn.zenith.hosting/buttons/deploy-with-zenith.svg)](https://zenith.hosting/host/buzz)
+
+You can also deploy a relay to Railway:
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/buzz-relay-block)
 
