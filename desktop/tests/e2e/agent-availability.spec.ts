@@ -20,11 +20,11 @@ test("saved deployment with offline presence is not shown as online", async ({
   });
   await page.goto("/#/agents");
   const dot = page.getByTestId(`agent-runtime-active-${LOCAL}`);
-  await expect(dot).toHaveAttribute(
-    "aria-label",
-    "Offline deployment: Offline",
-  );
-  await expect(dot.locator("xpath=../..")).not.toHaveClass(/bg-emerald-500/);
+  const start = page.getByTestId(`agent-runtime-start-${LOCAL}`);
+  // An established-offline deployment is not live: the card offers its
+  // (redeploying) Start instead of a status dot.
+  await expect(start).toBeVisible();
+  await expect(dot).toHaveCount(0);
   await page
     .getByRole("button", { name: "Offline deployment agent profile" })
     .click();
@@ -32,10 +32,12 @@ test("saved deployment with offline presence is not shown as online", async ({
     "aria-label",
     "Offline",
   );
-  // Preserve the existing request-only lifecycle control; no inferred redeploy.
+  // The `deployed` receipt outlives a shut-down or reaped body. Established
+  // offline offers an explicit Deploy (which re-converges the provider) rather
+  // than a Shutdown aimed at nothing; nothing redeploys without the user.
   await expect(
     page.getByTestId("user-profile-agent-primary-action"),
-  ).toHaveAttribute("aria-label", "Shutdown");
+  ).toHaveAttribute("aria-label", "Deploy");
   await waitForAnimations(page);
   await page
     .getByTestId("user-profile-panel")
@@ -63,13 +65,20 @@ test("saved deployment with offline presence is not shown as online", async ({
     await expect(
       page.getByTestId("user-profile-presence-badge"),
     ).toHaveAttribute("aria-label", status[0].toUpperCase() + status.slice(1));
-    await expect(dot).toHaveAttribute(
-      "aria-label",
-      `Offline deployment: ${status[0].toUpperCase() + status.slice(1)}`,
-    );
+    if (status === "offline") {
+      await expect(start).toBeVisible();
+    } else {
+      await expect(dot).toHaveAttribute(
+        "aria-label",
+        `Offline deployment: ${status[0].toUpperCase() + status.slice(1)}`,
+      );
+    }
     await expect(
       page.getByTestId("user-profile-agent-primary-action"),
-    ).toHaveAttribute("aria-label", "Shutdown");
+    ).toHaveAttribute(
+      "aria-label",
+      status === "offline" ? "Deploy" : "Shutdown",
+    );
     if (status === "online") {
       await waitForAnimations(page);
       await page

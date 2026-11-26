@@ -29,6 +29,7 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   deleteManagedAgentWithRules,
   isManagedAgentActive,
+  isManagedAgentLive,
   respawnManagedAgentWithRules,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
@@ -111,9 +112,10 @@ export function useManagedAgentActions() {
     useAgentAvailabilityLookup(managedPubkeyList);
 
   function assertStartNotBlockedByPresence(agent: ManagedAgent) {
+    const availability = getAvailability(agent.pubkey);
     const reason = agentPresenceStartBlockReason(
-      isManagedAgentActive(agent),
-      getAvailability(agent.pubkey),
+      isManagedAgentLive(agent, availability),
+      availability,
     );
     if (reason) throw new Error(reason);
   }

@@ -2,6 +2,7 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { presenceQueryKey, usePresenceQuery } from "@/features/presence/hooks";
 import { relayClient } from "@/shared/api/relayClient";
+import { getPresence } from "@/shared/api/tauri";
 import type { PresenceLookup, PresenceStatus } from "@/shared/api/types";
 import { useRelayConnection } from "@/shared/api/useRelayConnection";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -15,6 +16,27 @@ export function resolveAgentAvailability(
   // Missing entries in a successful presence snapshot mean offline. Failed or
   // disconnected reads cannot establish availability (including cached online).
   return presenceLoaded && connected ? (status ?? "offline") : undefined;
+}
+
+/**
+ * One-shot availability for an action-time decision made outside a rendered
+ * surface (no presence subscription on that path). A failed read is unknown,
+ * never offline: unknown keeps trusting the lifecycle receipt.
+ */
+export async function fetchAgentAvailability(
+  pubkey: string,
+): Promise<PresenceStatus | undefined> {
+  const normalized = normalizePubkey(pubkey);
+  try {
+    const lookup = await getPresence([normalized]);
+    return resolveAgentAvailability(
+      lookup[normalized],
+      true,
+      relayClient.getConnectionState() === "connected",
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 /** Positive presence blocks another start, but never grants lifecycle control.
