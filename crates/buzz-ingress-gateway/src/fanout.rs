@@ -14,9 +14,9 @@
 //!
 //! CEL runs on a blocking thread: each program is parsed and evaluated on a
 //! scoped thread with a large stack, and that must not stall the runtime.
+use crate::filter::{compile_filter, compile_message_template, Budget, Delivery, EvalError};
 use crate::metrics::{record_fanout, record_forwarder_failure, FanoutResult};
 use crate::store::{ClaimedDelivery, FanoutOutcome, NewMessage, Store, StoreError, Subscription};
-use buzz_webhook_filter::{compile_filter, compile_message_template, Budget, Delivery, EvalError};
 use chrono::{DateTime, Duration, Utc};
 use std::sync::Arc;
 use tokio::task::JoinSet;
@@ -78,7 +78,7 @@ fn render(
     input: &Delivery,
     subscription: &Subscription,
 ) -> Result<Option<String>, EvalError> {
-    let compile = |e: buzz_webhook_filter::CompileError| EvalError::Failed(e.to_string());
+    let compile = |e: crate::filter::CompileError| EvalError::Failed(e.to_string());
     if let Some(source) = &subscription.filter {
         if !compile_filter(source)
             .map_err(compile)?

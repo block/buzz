@@ -4,6 +4,7 @@
 //! kind-9 channel messages.
 pub mod config;
 pub mod fanout;
+pub mod filter;
 pub mod forwarder;
 pub mod http;
 pub mod intake;

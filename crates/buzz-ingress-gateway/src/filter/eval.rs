@@ -1,7 +1,7 @@
 //! Evaluating checked programs against a delivery, within a [`Budget`].
 //!
 //! A program's cost is bounded three ways: its syntax tree by compile
-//! ([`MAX_EXPRESSION_BYTES`](crate::MAX_EXPRESSION_BYTES) and the depth
+//! ([`MAX_EXPRESSION_BYTES`](super::MAX_EXPRESSION_BYTES) and the depth
 //! limit), its loops by the budget's iteration count and time, which the
 //! interpreter checks on every comprehension iteration, and a message
 //! template's result by the budget's output size. Without loops, a program's work is bounded by its
@@ -18,7 +18,7 @@ use std::time::Duration;
 use cel::objects::{Key, Map};
 use cel::{Context, Deadline, Env, ExecutionError, Interrupt, Value};
 
-use crate::{Filter, MessageTemplate, PARSE_STACK_BYTES};
+use super::{Filter, MessageTemplate, PARSE_STACK_BYTES};
 
 /// Why evaluating a program failed. Each is the program's fault, or its
 /// input's, except [`EvalError::Unavailable`].
@@ -183,7 +183,7 @@ fn to_value(json: &serde_json::Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{compile_filter, compile_message_template};
+    use crate::filter::{compile_filter, compile_message_template};
     use serde_json::json;
 
     const BUDGET: Budget = Budget {

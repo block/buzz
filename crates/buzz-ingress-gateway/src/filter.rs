@@ -1,4 +1,4 @@
-//! CEL programs for Buzz webhook subscriptions.
+//! CEL programs for webhook subscriptions.
 //!
 //! A subscription routes an integration's webhook deliveries into a channel.
 //! It holds a filter, a CEL expression that decides whether a delivery reaches
@@ -8,13 +8,13 @@
 //! - `event`: `event.provider` and `event.type`;
 //! - `payload`: the provider's JSON body.
 //!
-//! This crate checks a program when it is configured, so a typo is refused
+//! The management API checks a program when it is configured, so a typo is refused
 //! with the admin's request instead of failing every later delivery. CEL here is
 //! dynamically typed, so the check cannot prove the result type: it refuses a
 //! program whose result is a literal of the wrong type, and evaluation refuses
 //! any other wrong result.
 //!
-//! The gateway then evaluates each program against a [`Delivery`] within a
+//! Fan-out then evaluates each program against a [`Delivery`] within a
 //! [`Budget`].
 
 mod eval;

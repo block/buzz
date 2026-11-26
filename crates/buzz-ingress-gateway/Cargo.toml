@@ -20,7 +20,7 @@ aes-gcm = "0.10"
 async-trait = "0.1"
 axum = { workspace = true }
 base64 = "0.22"
-buzz-webhook-filter = { workspace = true }
+cel = { version = "0.16", default-features = false, features = ["json", "regex"] }
 chrono = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }

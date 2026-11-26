@@ -1705,7 +1705,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
- "buzz-webhook-filter",
+ "cel",
  "chrono",
  "hex",
  "hmac 0.13.0",
@@ -2077,15 +2077,6 @@ dependencies = [
  "symphonia",
  "tempfile",
  "tokenizers",
-]
-
-[[package]]
-name = "buzz-webhook-filter"
-version = "0.1.0"
-dependencies = [
- "cel",
- "serde_json",
- "thiserror 2.0.18",
 ]
 
 [[package]]

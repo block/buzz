@@ -13,6 +13,7 @@
 //! template programs are checked here so a typo fails the request, not every delivery.
 //! Deletion is a POST because NIP-98 signs no DELETE method.
 use super::{authenticate, invalid, parse_body, store_error};
+use crate::filter::{compile_filter, compile_message_template, CompileError};
 use crate::http::{error, AppState};
 use crate::store::{SubscriptionChange, SubscriptionView, SubscriptionWrite, WriteOutcome};
 use axum::{
@@ -23,7 +24,6 @@ use axum::{
     routing::{get, post, put},
     Router,
 };
-use buzz_webhook_filter::{compile_filter, compile_message_template, CompileError};
 use serde::Deserialize;
 use uuid::Uuid;
 
