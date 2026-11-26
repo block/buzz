@@ -4,8 +4,9 @@ name: Windows Canary
 # a tag, GitHub Release, or auto-updater artifact. The installer is available
 # only as a short-lived GitHub Actions artifact for explicit testing.
 #
-# Design notes vs. signed-macos-canary.yml:
-#   - No mesh-llm: release-windows doesn't build it.
+# Design notes:
+#   - The canary builds the same mesh-llm graph as the official Windows release.
+#   - The Cargo cache key includes that feature graph to prevent cross-graph reuse.
 #   - pnpm store restore/save pattern mirrors ci.yml:149-196.
 on:
   workflow_dispatch:
@@ -110,7 +111,7 @@ jobs:
           KEY=$(scripts/desktop-release-cache-key.py \
             --platform "$RUNNER_OS" \
             --target x86_64-pc-windows-msvc \
-            --features default \
+            --features mesh-llm \
             --native-inputs "$NATIVE_TOOLCHAIN_ID")
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
           echo "Release cache key: $KEY"
@@ -146,7 +147,7 @@ jobs:
 
       - name: Build Windows NSIS installer (unsigned)
         shell: bash
-        run: cd desktop && pnpm tauri build --target "$TARGET" --bundles nsis --config src-tauri/tauri.canary.conf.json
+        run: cd desktop && pnpm tauri build --target "$TARGET" --bundles nsis --features mesh-llm --config src-tauri/tauri.canary.conf.json
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 

@@ -32,15 +32,51 @@ fn pending_client_runtime(
 
 #[tokio::test]
 async fn pending_client_status_does_not_wait_for_management_timeout() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral ingress probe port");
+    let api_base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let probe_server = tokio::spawn(async move {
+        let (mut request, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), listener.accept()).await??;
+        let mut request_prefix = [0; 15];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            request.read_exact(&mut request_prefix),
+        )
+        .await??;
+        anyhow::ensure!(
+            &request_prefix == b"GET /v1/models ",
+            "ingress status probe should request /v1/models"
+        );
+        request
+            .write_all(
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await?;
+        drop(request);
+
+        let (_tcp_probe, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), listener.accept()).await??;
+        Ok::<_, anyhow::Error>(())
+    });
     let task = tokio::spawn(async {
         std::future::pending::<anyhow::Result<mesh_llm_sdk::EmbeddedNodeHandle>>().await
     });
-    let runtime = pending_client_runtime(task);
+    let mut runtime = pending_client_runtime(task);
+    runtime.api_base_url = api_base_url;
 
     let status = tokio::time::timeout(std::time::Duration::from_secs(1), runtime.status())
         .await
         .expect("status should not wait for the SDK management probe")
         .expect("pending client should have a synthetic status");
+    tokio::time::timeout(std::time::Duration::from_secs(1), probe_server)
+        .await
+        .expect("bounded local probe server should finish")
+        .expect("local probe server should accept both ingress checks")
+        .expect("local probe server should answer the HTTP probe");
     assert_eq!(status.state, super::MeshNodeState::Starting);
     assert_eq!(status.mode, Some(super::MeshNodeMode::Client));
     let report = runtime
