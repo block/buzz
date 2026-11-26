@@ -9,3 +9,33 @@ debug = "line-tables-only"
 # cmake_minimum_required < 3.5; audiopus_sys's vendored opus declares 3.1.
 # Same workaround CI uses. A value already set in the environment wins.
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+# Always build the vendored opus rather than whatever `pkg-config` happens to
+# find on the host. `audiopus_sys`'s build.rs probes pkg-config FIRST and
+# returns early on a hit, so a system libopus silently wins over the vendored
+# source the line above exists to compile. On an Apple Silicon Mac that also
+# carries an Intel Homebrew at /usr/local, pkg-config's default search path
+# includes /usr/local/lib/pkgconfig, so an x86_64 libopus gets linked into an
+# arm64 binary and the build dies at link time with
+# "Undefined symbols for architecture arm64: _opus_encoder_create, ...".
+# CI never hits this (no Homebrew opus), which is exactly why it has to be
+# pinned here instead of left to ambient host state.
+#
+# TWO vars, deliberately, because only one of them is cache-correct:
+#
+#   LIBOPUS_NO_PKG      audiopus_sys's own documented bypass. States the intent,
+#                       but build.rs never emits
+#                       `cargo:rerun-if-env-changed=LIBOPUS_NO_PKG` — so on a
+#                       tree that already resolved to the system libopus, cargo
+#                       reuses the cached build script and this reads as INERT.
+#                       (`cargo clean -p audiopus_sys` does not reliably evict
+#                       the build-script output dir either.)
+#   OPUS_NO_PKG_CONFIG  pkg-config-rs's per-library opt-out. It IS declared via
+#                       `cargo:rerun-if-env-changed`, so setting it actually
+#                       invalidates the cached build script and forces the
+#                       vendored cmake path to run.
+#
+# Verify a build really took the intended path:
+#   grep -r 'cargo:info=Bypassed' \
+#     desktop/src-tauri/target/*/release/build/audiopus_sys-*/output
+LIBOPUS_NO_PKG = "1"
+OPUS_NO_PKG_CONFIG = "1"
