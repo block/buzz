@@ -147,6 +147,9 @@ buzz messages vote --event <event-id> --direction up
 # Canvas
 buzz canvas get --channel <uuid>
 buzz canvas set --channel <uuid> --content "# Welcome"
+# Replace only if <rev> is still the head (from `canvas history --limit 1`);
+# a moved head exits 5. `--expected none` creates only when no canvas exists.
+buzz canvas set --channel <uuid> --content - --expected <rev>
 
 # Sidebar sections (your own sidebar, synced with Buzz desktop)
 buzz sidebar sections create --name "Engineering" --icon "🛠"
