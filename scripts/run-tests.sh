@@ -366,6 +366,8 @@ run_unit_tests() {
       connection::tests::shutdown_terminalizes_auth_stalled_on_database_before_late_success \
       connection::terminal_close_delivery_tests::upgrade_would_deny_line_without_auth_logs_absent_at_close \
       handlers::event::tests::observer_owner_cache_is_scoped_to_community \
+      handlers::event::tests::fanout_event_frame_matches_legacy_format_byte_for_byte \
+      handlers::event::tests::fanout_event_frame_escapes_sub_id \
       state::tests::shared_counter_between_direct_and_fanout \
       api::bridge::postgres_tests::nip98_replay_check_logs_only_its_refusal \
       api::bridge::postgres_tests::warn_only_artifact_read_lines_keep_the_filter_summary \
