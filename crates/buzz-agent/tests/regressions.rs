@@ -1368,6 +1368,262 @@ async fn hook_stop_timeout_failopen() {
     h.shutdown().await;
 }
 
+/// Unique temp path for a fake-MCP call log (one bare tool name per line).
+fn preturn_call_log_path(tag: &str) -> String {
+    let p = std::env::temp_dir().join(format!(
+        "buzz_preturn_calllog_{tag}_{}_{:x}.log",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let s = p.to_string_lossy().to_string();
+    let _ = std::fs::remove_file(&s);
+    s
+}
+
+fn preturn_call_count(path: &str) -> usize {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.trim() == "_PreTurn")
+        .count()
+}
+
+/// Every `role=tool` message in a captured request that carries `_PreTurn`
+/// hook output (JSON-encoded `{hook, server, text}`), as the parsed body.
+fn preturn_tool_results(req: &Value) -> Vec<Value> {
+    req["messages"]
+        .as_array()
+        .map(|msgs| {
+            msgs.iter()
+                .filter(|m| m["role"] == "tool")
+                .filter_map(|m| serde_json::from_str::<Value>(m["content"].as_str()?).ok())
+                .filter(|v| v["hook"] == "_PreTurn")
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `_PreTurn` is off by default: with `MCP_HOOK_SERVERS` set and a server
+/// exposing the hook, the agent must not call it unless
+/// `BUZZ_AGENT_PRETURN_HOOK` opts in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hook_preturn_disabled_by_default() {
+    let llm = spawn_capturing_llm(vec![openai_text("done")]).await;
+    let mut h = Harness::spawn_with_env(&llm.url, &[("MCP_HOOK_SERVERS", "fake")]).await;
+    let log = preturn_call_log_path("disabled");
+    let sid = init_session_with_fake_mcp(
+        &mut h,
+        &[
+            ("FAKE_MCP_TOOL_COUNT", "1"),
+            ("FAKE_MCP_PRETURN_HOOK", "1"),
+            ("FAKE_MCP_PRETURN_TEXT", "should never appear"),
+            ("FAKE_MCP_CALL_LOG", &log),
+        ],
+    )
+    .await;
+
+    let p = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let r = h.recv_until(|v| v["id"] == json!(p)).await;
+    assert!(r.get("result").is_some(), "errored: {r}");
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+
+    assert_eq!(
+        preturn_call_count(&log),
+        0,
+        "_PreTurn called while disabled"
+    );
+    let captured = llm.captured.lock().await;
+    assert_eq!(captured.len(), 1);
+    assert!(
+        preturn_tool_results(&captured[0]).is_empty(),
+        "_PreTurn output injected while disabled"
+    );
+    h.shutdown().await;
+}
+
+/// Enabled `_PreTurn` runs once per prompt, before the first model call:
+/// its output (which echoes the `prompt` input) is already in the FIRST LLM
+/// request as a JSON-encoded tool result after the user message, and a
+/// later tool round in the same turn does not call it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hook_preturn_injects_before_first_model_call() {
+    let llm = spawn_capturing_llm(vec![
+        openai_tool_call("tc1", "fake__tool_0", json!({})),
+        openai_text("done"),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("MCP_HOOK_SERVERS", "fake"),
+            ("BUZZ_AGENT_PRETURN_HOOK", "1"),
+        ],
+    )
+    .await;
+    let log = preturn_call_log_path("inject");
+    let sid = init_session_with_fake_mcp(
+        &mut h,
+        &[
+            ("FAKE_MCP_TOOL_COUNT", "1"),
+            ("FAKE_MCP_PRETURN_HOOK", "1"),
+            ("FAKE_MCP_PRETURN_TEXT", "memory for: {prompt}"),
+            ("FAKE_MCP_CALL_LOG", &log),
+        ],
+    )
+    .await;
+
+    let p = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"hello world"}]}),
+        )
+        .await;
+    let r = h.recv_until_approving(|v| v["id"] == json!(p)).await;
+    assert!(r.get("result").is_some(), "errored: {r}");
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+
+    assert_eq!(
+        preturn_call_count(&log),
+        1,
+        "_PreTurn must fire once per turn"
+    );
+    let captured = llm.captured.lock().await;
+    assert_eq!(captured.len(), 2, "expected tool round + final text");
+
+    // First model request already carries the hook output, after the user
+    // message, as untrusted tool-result data.
+    let first = preturn_tool_results(&captured[0]);
+    assert_eq!(first.len(), 1, "missing _PreTurn output: {:?}", captured[0]);
+    assert_eq!(first[0]["server"], "fake");
+    assert!(
+        first[0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("memory for: hello world"),
+        "hook did not receive the prompt input: {:?}",
+        first[0]
+    );
+    let msgs = captured[0]["messages"].as_array().unwrap();
+    let user_idx = msgs
+        .iter()
+        .position(|m| m["role"] == "user" && m["content"] == "hello world")
+        .expect("user message present");
+    let tool_idx = msgs
+        .iter()
+        .position(|m| m["role"] == "tool")
+        .expect("tool message present");
+    assert!(
+        user_idx < tool_idx,
+        "hook output must follow the user message"
+    );
+
+    // The second round of the same turn still holds exactly that one result.
+    assert_eq!(preturn_tool_results(&captured[1]).len(), 1);
+    h.shutdown().await;
+}
+
+/// Enabled `_PreTurn` returning empty text injects nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hook_preturn_empty_output_injects_nothing() {
+    let llm = spawn_capturing_llm(vec![openai_text("done")]).await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("MCP_HOOK_SERVERS", "fake"),
+            ("BUZZ_AGENT_PRETURN_HOOK", "true"),
+        ],
+    )
+    .await;
+    let log = preturn_call_log_path("empty");
+    let sid = init_session_with_fake_mcp(
+        &mut h,
+        &[
+            ("FAKE_MCP_TOOL_COUNT", "1"),
+            ("FAKE_MCP_PRETURN_HOOK", "1"),
+            ("FAKE_MCP_CALL_LOG", &log),
+        ],
+    )
+    .await;
+
+    let p = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let r = h.recv_until(|v| v["id"] == json!(p)).await;
+    assert!(r.get("result").is_some(), "errored: {r}");
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+
+    assert_eq!(preturn_call_count(&log), 1, "_PreTurn was not called");
+    let captured = llm.captured.lock().await;
+    assert_eq!(captured.len(), 1);
+    let msgs = captured[0]["messages"].as_array().unwrap();
+    assert!(
+        !msgs.iter().any(|m| m["role"] == "tool"),
+        "empty _PreTurn output must inject nothing: {msgs:?}"
+    );
+    h.shutdown().await;
+}
+
+/// A `_PreTurn` hook slower than `BUZZ_AGENT_HOOK_TIMEOUT_MS` is fail-open:
+/// nothing is injected and the turn proceeds without waiting for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hook_preturn_timeout_failopen() {
+    let llm = spawn_capturing_llm(vec![openai_text("done")]).await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("MCP_HOOK_SERVERS", "fake"),
+            ("BUZZ_AGENT_PRETURN_HOOK", "1"),
+            ("BUZZ_AGENT_HOOK_TIMEOUT_MS", "200"),
+        ],
+    )
+    .await;
+    let sid = init_session_with_fake_mcp(
+        &mut h,
+        &[
+            ("FAKE_MCP_TOOL_COUNT", "1"),
+            ("FAKE_MCP_PRETURN_HOOK", "1"),
+            ("FAKE_MCP_PRETURN_TEXT", "too late"),
+            ("FAKE_MCP_PRETURN_DELAY", "3"),
+        ],
+    )
+    .await;
+
+    let started = Instant::now();
+    let p = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let r = h.recv_until(|v| v["id"] == json!(p)).await;
+    let elapsed = started.elapsed();
+
+    assert!(r.get("result").is_some(), "errored: {r}");
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+    assert!(
+        elapsed < Duration::from_millis(2500),
+        "did not fail-open: prompt took {elapsed:?}"
+    );
+    let captured = llm.captured.lock().await;
+    assert_eq!(captured.len(), 1);
+    assert!(
+        preturn_tool_results(&captured[0]).is_empty(),
+        "timed-out _PreTurn must inject nothing"
+    );
+    h.shutdown().await;
+}
+
 /// When a session is cancelled while a tool call is in-flight, the agent
 /// sends `notifications/cancelled` to the MCP server. With buzz-dev-mcp,
 /// this cancels the CancellationToken and kills the running shell process

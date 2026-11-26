@@ -332,7 +332,7 @@ The trust boundary is **the operator who launched the agent**. The harness, MCP 
 
 A short list, because the answer is mostly "no":
 
-- **Not a framework.** No plugins, no recipes, no slash commands, no modes. MCP servers can participate in agent lifecycle via [hook tools](../../docs/MCP_DRIVEN_HOOKS.md) (`_Stop`, `_PostCompact`), but these are advisory, fail-open, and budget-bounded — not a plugin system.
+- **Not a framework.** No plugins, no recipes, no slash commands, no modes. MCP servers can participate in agent lifecycle via [hook tools](../../docs/MCP_DRIVEN_HOOKS.md) (`_Stop`, `_PostCompact`, `_PreTurn`), but these are advisory, fail-open, and budget-bounded — not a plugin system.
 - **Not streaming.** One non-streaming HTTP POST per round. The LLM's generated text is forwarded to the client as `agent_message_chunk`, but there is no token-level streaming.
 - **Not persistent.** Everything is in-memory, per-process. No SQLite. When context fills, the agent summarizes its own history and continues (context handoff). No external persistence.
 - **Not an SDK.** This is a binary. The protocol seam is stdin/stdout. Use it from any language.
