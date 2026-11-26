@@ -554,7 +554,7 @@ An event watch selects relay events. Each matching event starts one agent task.
 | `name` | label, optional | Display name. Without it, the client chooses what to show. |
 | `enabled` | boolean | `false` stops the watch without removing it. |
 | `since` | time, ≥ 1 | Only events with `created_at` ≥ `since` match. The writer sets it when it creates the watch. |
-| `channels` | `"all"`, or an array of 1–100 unique channels | `"all"`: any channel the agent can read. Array: the event's `h` value is in the array. |
+| `channels` | `"all"`, or an array of 1–100 unique channels | `"all"`: any channel the agent can read: one it is a member of, or a public channel. A runtime matches the events it receives and need not subscribe to every public channel. Array: the event's `h` value is in the array. |
 | `kinds` | array of 0–100 unique integers ≤ 65,535 | Empty: any kind. Otherwise the event's kind is in the array. |
 | `authors` | array of 1–100 unique hex keys, optional | The event's `pubkey` is in the array. |
 | `exclude_authors` | array of 1–100 unique hex keys, optional | The event's `pubkey` is not in the array. A watch MUST NOT have both `authors` and `exclude_authors`. |
