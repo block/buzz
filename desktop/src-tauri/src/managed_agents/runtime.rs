@@ -68,7 +68,7 @@ mod setup_payload;
 use setup_payload::apply_setup_payload_env;
 
 mod stop;
-pub(crate) use stop::managed_agent_runtime_keys;
+pub(crate) use stop::{managed_agent_runtime_dial_urls, managed_agent_runtime_keys};
 pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
 
 mod sweep;
@@ -109,7 +109,7 @@ mod lifecycle;
 use lifecycle::kill_stale_tracked_processes_with;
 pub use lifecycle::{kill_stale_tracked_processes, sync_managed_agent_processes};
 mod spawn_key; // production spawn-key derivation + its regressions
-pub(crate) use spawn_key::bound_runtime_key;
+pub(crate) use spawn_key::{bound_runtime_key, spawn_relay_identity};
 
 /// Classify an agent's persona against the live catalog for the Agents-menu
 /// drift indicator. Returns `(out_of_date, orphaned)`.
@@ -481,20 +481,31 @@ pub(crate) fn spawn_with_effort_proof(
 /// publishes the triggering message before this spawn and passes its send
 /// timestamp here so the harness's first REQ replays past that message no
 /// matter how long the spawn takes. buzz-acp clamps stale floors to ~15 min.
+/// The pair identity plus the exact relay spelling the harness must dial.
+///
+/// Both come from one workspace-relay read at the call site: the key is
+/// canonical (runtime identity, receipts, logs), while `dial_url` preserves the
+/// configured authority the relay uses to bind a community.
+#[derive(Clone, Copy)]
+pub(crate) struct SpawnRelay<'a> {
+    pub(crate) key: &'a ManagedAgentRuntimeKey,
+    pub(crate) dial_url: &'a str,
+}
+
 pub fn spawn_agent_child<R: tauri::Runtime>(
     app: &AppHandle<R>,
     record: &ManagedAgentRecord,
-    relay_url: &str,
+    relay: SpawnRelay<'_>,
     admitted: &super::Admitted<'_>,
     lazy: bool,
     owner_hex: Option<&str>,
     replay_floor_unix: Option<u64>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
-    admitted.covers(relay_url)?;
+    admitted.covers(relay.dial_url)?;
     if let Some(error) = spawn_key_refusal(record) {
         return Err(error);
     }
-    let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
+    let effective_relay_url = relay.dial_url.trim().to_string();
     // Resolve the effective harness (agent command) from the linked persona, so
     // persona harness edits propagate on the next spawn; an explicit per-agent
     // override wins. `agent_args` and `mcp_command` are pure derivations of the
@@ -541,7 +552,7 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
 
-    let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
+    let log_path = super::managed_agent_runtime_log_path(app, relay.key)?;
     append_log_marker(
         &log_path,
         &format!(
@@ -579,9 +590,8 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
 
-    // The caller supplies the explicit canonical pair relay. This is the only
-    // relay this child may connect to, regardless of the record/workspace default.
-    let effective_relay_url = runtime_key.relay_url.clone();
+    // `effective_relay_url` is the workspace URL exactly as configured (see
+    // `spawn_relay_identity`); the runtime-pair key above stays canonical.
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink
     //   - nvm-managed node/npm (nvm initializes only in interactive shells)
@@ -828,7 +838,10 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
         super::spawn_snapshot::SpawnConfigInputs {
             record,
             descriptor: &descriptor,
-            relay_url: &effective_relay_url,
+            // Canonical pair identity, not the child's dial spelling: the
+            // restart-drift comparison reads this field and must not see a
+            // loopback-spelling difference on every reconcile.
+            relay_url: &relay.key.relay_url,
             team_instructions: team_instructions.as_deref(),
             system_prompt: effective_prompt.as_deref(),
             model: effective_model.as_deref(),
@@ -881,6 +894,7 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
         spawn_config,
         spawned_setup_mode,
         spawned_adapter_availability,
+        effective_relay_url,
         start_nonce,
         &record.name,
     ));
@@ -891,6 +905,7 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
         spawn_config,
         setup_mode: spawned_setup_mode,
         adapter_availability: spawned_adapter_availability,
+        dial_relay_url: effective_relay_url,
         start_nonce,
     })
 }
@@ -931,7 +946,10 @@ pub fn start_managed_agent_process<R: tauri::Runtime>(
     let mut process = spawn_agent_child(
         app,
         record,
-        &key.relay_url,
+        SpawnRelay {
+            key: &key,
+            dial_url: workspace_relay.as_str(),
+        },
         admitted,
         false,
         owner_hex,
