@@ -85,7 +85,10 @@ class MeProjectCreation {
   }
 
   /// Retry using the same ID, preserving projects already confirmed on desktop.
-  Future<void> complete(MeSync sync) async {
+  /// [mayFile] is asked again as the write is built; when it says no, this
+  /// throws [MeFilingClosed] without writing.
+  Future<void> complete(MeSync sync, {bool Function()? mayFile}) async {
+    if (mayFile?.call() == false) throw const MeFilingClosed();
     await save(sync);
     final record = sync.prefs!.getString(storageKey(sync))!;
     final head = await sync.head();
@@ -95,7 +98,7 @@ class MeProjectCreation {
         confirmed.groups.any((g) => g['id'] == id) &&
         (channelId == null || confirmed.assignments[channelId] == id);
     if (!exists || sync.prefs?.getString(sync.pendingKey) != null) {
-      await sync.update((current) {
+      await sync.update(mayFile: mayFile, (current) {
         final groups = current.groups.any((g) => g['id'] == id)
             ? current
             : MeGroups(

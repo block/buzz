@@ -23,6 +23,19 @@ class MobileHuddleShell extends HookConsumerWidget {
     final presentation = ref.watch(mobileHuddlePresentationProvider);
     final session = ref.watch(huddleSessionProvider);
     final relayStatus = ref.watch(relaySessionProvider).status;
+    // Hold the call's agent classification, and the last managed-agent
+    // records it read, while the call lasts. Minimizing pops the call page;
+    // without this, a record-only agent drops when the call comes back
+    // while the records cannot be read.
+    final huddleChannelId = session.isInSession
+        ? session.ephemeralChannelId
+        : null;
+    useEffect(() {
+      if (huddleChannelId == null) return null;
+      return ref
+          .listenManual(huddleAgentPubkeysProvider(huddleChannelId), (_, _) {})
+          .close;
+    }, [huddleChannelId]);
     _useIncomingHuddleReactions(
       context: context,
       ref: ref,
@@ -38,8 +51,6 @@ class MobileHuddleShell extends HookConsumerWidget {
     final drawerHeight =
         _mobileHuddleDrawerBaseHeight + MediaQuery.paddingOf(context).bottom;
     final surface = _huddleDrawerSurface(context);
-    final usesNativeConcentricSurface =
-        defaultTargetPlatform == TargetPlatform.iOS;
 
     return ColoredBox(
       color: drawerOpen ? surface : context.colors.surface,
@@ -59,9 +70,7 @@ class MobileHuddleShell extends HookConsumerWidget {
               key: const ValueKey('mobile-huddle-app-surface'),
               duration: duration,
               curve: _mobileHuddleDrawerCurve,
-              clipBehavior: usesNativeConcentricSurface
-                  ? Clip.none
-                  : Clip.antiAlias,
+              clipBehavior: Clip.antiAlias,
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.vertical(
                   bottom: Radius.circular(
@@ -79,20 +88,10 @@ class MobileHuddleShell extends HookConsumerWidget {
                       ]
                     : const [],
               ),
-              child: usesNativeConcentricSurface
-                  ? ConcentricSheetSurface(
-                      key: const ValueKey(
-                        'mobile-huddle-app-concentric-surface',
-                      ),
-                      enabled: drawerOpen,
-                      color: context.colors.surface,
-                      backdropColor: surface,
-                      corners: ConcentricSurfaceCorners.bottom,
-                      padding: EdgeInsets.zero,
-                      providesSheetSurface: false,
-                      child: child,
-                    )
-                  : child,
+              // Keep the app in Flutter's compositing tree. A full-size UIKit
+              // backdrop here can hide the conversation's painted layers when
+              // the Huddle is minimized in the two-pane iOS layout.
+              child: child,
             ),
           ),
           AnimatedPositioned(

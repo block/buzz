@@ -18,4 +18,9 @@ xcrun --sdk iphonesimulator swiftc -parse-as-library \
   -Xlinker -rpath -Xlinker "$frameworks" \
   "$fixture/test.swift" \
   -o "$fixture/create-channel-tests"
-xcrun simctl spawn "$device" "$fixture/create-channel-tests"
+# Both runs pin the text size, so the simulator's own setting does not matter.
+xcrun simctl spawn "$device" "$fixture/create-channel-tests" \
+  -UIPreferredContentSizeCategoryName UICTContentSizeCategoryL
+# Again at the largest text size, where rows outgrow their estimated height.
+xcrun simctl spawn "$device" "$fixture/create-channel-tests" \
+  -UIPreferredContentSizeCategoryName UICTContentSizeCategoryAccessibilityXXXL

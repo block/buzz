@@ -14,11 +14,50 @@ execution is unsupported.
 
 ## Content batches
 
+Run deletion offline with the relay, workflow engine and external writers stopped.
+Read-only preview does not require stopping them. This command does not install
+a lasting account fence.
+
 `content-batches` selects the user plus agents owned by that user **in the target
 community**. Ownership in another community does not authorize cleanup here.
 The start record reports excluded agent keys with missing or conflicting local
 ownership. Every batch rechecks ownership; a change aborts the batch. Former
 membership does not prevent cleanup of historical content.
+
+With `--relay-pubkey`, content cleanup also selects private hidden-DM visibility
+snapshots (kind 30622) for the user and currently owned agents. A snapshot must be
+signed by that trusted relay, have no channel, and have exactly one canonical
+`d` tag and one `p` tag matching its stored viewer coordinate. Conflicting,
+malformed or untrusted snapshots are left outside the supported scope. Without
+the trusted relay key, these snapshots are not selected. Selected snapshots and
+their dependent delivery records are removed, including historical soft-deleted
+rows. DM conversations, other participants' preferences and encrypted message
+copies are not selected by this rule.
+
+Content cleanup also removes signed file-metadata publications (kind 1063),
+without deleting referenced blobs. Mentions and pending delivery rows are
+removed before their source events.
+
+Workflow cleanup deletes owned definitions with no runs, approvals or linked
+schedule history, removing each definition and its unused schedule claims in the same transaction.
+The complete group must fit `--batch-size` (maximum 100 rows); otherwise planning
+fails before deletion. Increase the batch size for a larger group. More than 99
+claims on one unused definition requires a separately reviewed cleanup.
+Definitions with history and all run/approval rows are retained. For recorded
+`event` causes, it clears the signer's saved trigger text and emoji; for recorded
+`manual` causes, it empties the caller's input map. It clears the recorded
+approver's note. These field changes also apply inside another owner's workflow.
+Required trigger fields remain present, and every other field is preserved.
+Retained runs, including waiting approvals, will read the cleared inputs if
+resumed later. This change does not cancel those runs. The existing signed-event
+cleanup of kind 30620 is unchanged; retained definitions here mean database rows.
+Missing provenance, malformed input shapes, webhook payloads, execution traces
+and errors are not selected. This is partial content cleanup, not a claim of
+complete workflow erasure or stopped workflow execution.
+
+Workflow rows use the same bounded preview, fingerprint and retry checks as
+other content. New history or schedule claims block definition deletion before
+any cascade can occur. No device installations or gateway delegations are deleted.
 
 The handler preserves actual reply ancestry and other users' reactions by erasing
 selected messages into structural tombstones. Plain links, quotes and unmarked
@@ -248,9 +287,43 @@ placeholder failures and branching only. Demo media success is synthetic; real r
 An injected community failure preserves the same retry semantics as before.
 Ctrl-C releases the worker lease; after an abrupt kill wait for lease expiry.
 
+## Shared agent discovery
+
+Media, content, account, and profile cleanup use the same discovery utility in
+`buzz-db/src/store/user_deletion/agent_ownership.rs`, including account scope
+capture. It normalizes the human key, reads current direct ownership from
+`users`, and retains `(community_id, agent_pubkey)` pairs. It does not infer
+ownership from membership, recurse through agents, or exclude deactivated
+profiles. A missing profile grants no agent cleanup authority.
+
+Every invocation and retry discovers again. Content, account, and profile
+handlers use the utility inside their existing batch transactions with row
+locks when rechecking ownership. Profile cleanup compares against the identities
+that remain after its own committed batches. Media discovers once per invocation
+and uses that snapshot through inventory and deletion. Writers must remain
+stopped throughout the operation.
+
+Discovery preserves each caller's existing limits: media, content and profile
+allow 10,000 distinct identities including the human; account discovery allows
+10,000 agents. Account scope capture retains its existing total-key bound.
+Media retains every owned community for each selected agent. Ownership profiles must
+remain until all dependent cleanup completes; profile removal goes last.
+
+Media has no separate cap on `(community_id, agent_pubkey)` pairs. One agent can
+contribute a pair for every community where the human owns it, so the identity
+limit does not bound the pair count. These pairs are retained in memory, including
+the storage-matching hash set, and the full pair arrays are sent with each media
+candidate-page query. They are outside the inventory budget described below;
+memory use and query payload size grow with the number of owned agent profiles.
+
 ## Media discovery and remaining limits
 
-The target set is the human and directly owned agents across communities.
+Every invocation and retry fetches the human's current directly owned agents
+from `users`, retaining each `(community_id, agent_pubkey)` pair. The human's
+own uploads are global targets; an agent's uploads are targets only in communities
+where that human currently owns it. A missing profile or a different owner in
+another community does not authorize cleanup there. Ownership rows must remain
+until media and other dependent handlers finish.
 Candidate hashes come from `media_uploaders`, `media_uploaded` audit entries,
 and storage upload claims. A bounded database query combines candidate discovery
 with outside-uploader classification. Storage-only candidates receive the same
@@ -259,7 +332,9 @@ history filter: relay membership rows can be deleted on departure.
 
 Sharing checks span all communities for the selected hashes. Any outside
 uploader in either database source or an upload-record version protects the
-file. No per-file owner-list query is made.
+file, including the same agent's uploads in an unowned community. No per-file
+owner-list query is made. The report retains its deduplicated `target_pubkeys`;
+community ownership is used internally for every media decision.
 
 Storage discovery scans `_uploads/` for target claims, then reads candidate
 claims in a second `_uploads/` listing to protect outside claims encountered

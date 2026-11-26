@@ -408,9 +408,10 @@ test-unit:
         cargo nextest run -p buzz-audit --lib
         # Cross-pod disconnect payload tests (NIP-FI and community archive
         # fence), the shared Redis connection's timeout bounds (loopback
-        # fake peers), and the full-queue retain (no Redis dialed); all
-        # infra-free. Keep the Cargo fallback in step.
-        cargo nextest run -p buzz-pubsub --lib -E 'test(/^conn_control::tests::/) + test(/^connection::tests::/) + test(=tests::queue_full_retain_does_not_wait_and_schedules_reconciliation)'
+        # fake peers), pub/sub keepalive against a scripted fake Redis, the
+        # full-queue retain (no Redis dialed), and the NIP-FI deny-store key
+        # and rounding tests; all infra-free. Keep the Cargo fallback in step.
+        cargo nextest run -p buzz-pubsub --lib -E 'test(/^conn_control::tests::/) + test(/^connection::tests::/) + test(/^keepalive::tests::/) + test(/^subscriber::tests::keepalive::/) + test(=cache_invalidation::tests::subscriber_drops_socket_when_pong_withheld) + test(=tests::queue_full_retain_does_not_wait_and_schedules_reconciliation) + test(/^nip_fi_command_replay::tests::/)'
         # buzz-auth NIP-FI verifier doctests. The sealed-authority
         # `compile_fail` doctests prove the default-feature public API alone
         # cannot forge the issuer→JWKS authority; nextest does not run
@@ -661,11 +662,12 @@ test-unit:
         cargo nextest run -p buzz-relay --lib -E 'test(/^concurrency_limits::tests::/) + test(/^feature_flags::tests::/) + test(=handlers::auth::tests::auth_cap_sheds_a_verified_login_with_a_bare_close)'
         # Relay read caches: the admitted-connection index, the shared-read
         # gates (open set, restriction, tenant host), the community-active
-        # cache, tenant host cache, the
+        # cache, tenant host cache, the access caches' refill fences and
+        # member snapshot age, the
         # overlong-host rejection and the ban disconnect's restriction-cache
         # drop. Infra-free; the
         # database URL refuses at once. Keep scripts/run-tests.sh in step.
-        cargo nextest run -p buzz-relay --lib -E 'test(=state::tests::admitted_index_follows_every_key_change) + test(/^shared_reads::tests::/) + test(/^membership_cache::tests::/) + test(/^community_active::tests::/) + test(=state::tests::concurrent_open_channel_misses_share_the_in_flight_read) + test(=state::tests::concurrent_restriction_and_host_misses_share_the_in_flight_read) + test(=tenant::tests::app_state_resolver_serves_fresh_cached_hosts_only) + test(=tenant::tests::an_overlong_host_fails_closed_before_the_resolver) + test(=state::tests::disconnect_drops_the_cached_restriction_row)'
+        cargo nextest run -p buzz-relay --lib -E 'test(=state::tests::admitted_index_follows_every_key_change) + test(/^shared_reads::tests::/) + test(/^membership_cache::tests::/) + test(/^community_active::tests::/) + test(=state::tests::concurrent_open_channel_misses_share_the_in_flight_read) + test(/^state::tests::member_channel_invalidation_tests::/) + test(=state::tests::a_member_snapshot_ages_from_its_read_not_its_insert) + test(=state::tests::overlapping_member_reads_cache_the_first_to_finish) + test(=state::tests::an_open_read_that_straddles_an_invalidation_is_not_cached) + test(=state::tests::concurrent_restriction_and_host_misses_share_the_in_flight_read) + test(=tenant::tests::app_state_resolver_serves_fresh_cached_hosts_only) + test(=tenant::tests::an_overlong_host_fails_closed_before_the_resolver) + test(=state::tests::disconnect_drops_the_cached_restriction_row)'
         # Retain partially consumed mesh receives across housekeeping ticks.
         cargo nextest run -p buzz-relay --lib -E 'test(=mesh_boot::tests::demo_echo_retains_pending_receive_across_housekeeping_ticks)'
         # boot_lifecycle spawns the real relay binary and asserts its startup
@@ -678,9 +680,10 @@ test-unit:
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.
         cargo nextest run -p buzz-acp --lib
-        # Load generator scenario, identity, shard and stats unit tests; all
-        # infra-free. Keep scripts/run-tests.sh in step.
-        cargo nextest run -p buzz-test-client --lib -E 'test(/^loadgen::/)'
+        # Load generator and acceptance probe unit tests; all infra-free (the
+        # probe's run against a scripted in-process relay). Keep
+        # scripts/run-tests.sh in step.
+        cargo nextest run -p buzz-test-client --lib -E 'test(/^(loadgen|acceptance)::/)'
     else
         ./scripts/run-tests.sh unit
     fi

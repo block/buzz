@@ -40,6 +40,15 @@ final class NativeMessagePresentationCoordinator: NSObject, UIAdaptivePresentati
       result([:])
       return
     }
+    if call.method == "notice" {
+      if data["requestId"] as? String == requestID,
+        let sheet = presented as? NativeReactionDetailsViewController,
+        let message = data["message"] as? String {
+        sheet.showNotice(message)
+      }
+      result(nil)
+      return
+    }
     guard call.method == "reactions" else {
       result(FlutterMethodNotImplemented)
       return

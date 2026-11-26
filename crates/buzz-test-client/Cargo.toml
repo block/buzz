@@ -24,7 +24,7 @@ uuid = { workspace = true }
 url = { workspace = true }
 rustls = "0.23"
 base64 = { workspace = true }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 hex = { workspace = true }
 reqwest = { workspace = true }
 sha2 = { workspace = true }
@@ -53,3 +53,7 @@ path = "src/main.rs"
 [[bin]]
 name = "buzz-loadgen"
 path = "src/bin/loadgen.rs"
+
+[[bin]]
+name = "buzz-acceptance"
+path = "src/bin/acceptance.rs"

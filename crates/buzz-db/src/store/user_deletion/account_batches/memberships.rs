@@ -1,7 +1,7 @@
 //! Membership removal and the three signed discovery lists share one commit.
 use super::*;
 use buzz_core::CommunityId;
-use nostr::{EventBuilder, Kind, Tag, Timestamp};
+use nostr::Tag;
 
 impl UserDeletionStore {
     pub(super) async fn preflight_memberships(
@@ -171,22 +171,10 @@ pub(super) async fn rebuild(
             )
             .map_err(|e| invalid(e.to_string()))?
         };
-        let latest: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar("SELECT max(created_at) FROM events WHERE community_id=$1 AND channel_id=$2 AND kind=$3 AND pubkey=$4 AND deleted_at IS NULL")
-            .bind(community.as_uuid()).bind(channel_id).bind(kind).bind(signer.public_key().to_bytes().as_slice()).fetch_one(tx.conn()).await?;
-        let now = Timestamp::now().as_secs();
-        let timestamp = latest
-            .map(|t| (t.timestamp() as u64).saturating_add(1))
-            .unwrap_or(now)
-            .max(now);
-        let event = EventBuilder::new(Kind::Custom(kind as u16), "")
-            .tags(tags)
-            .allow_self_tagging()
-            .custom_created_at(Timestamp::from(timestamp))
-            .sign_with_keys(signer)
-            .map_err(|e| invalid(e.to_string()))?;
-        let (_, inserted) =
-            crate::replaceable::replace_addressable_event_under_lock(tx, &event, Some(channel_id))
-                .await?;
+        let (_, inserted) = crate::channel::replace_signed_group_state_under_lock(
+            tx, channel_id, kind, tags, signer,
+        )
+        .await?;
         if !inserted {
             return Err(invalid(
                 "channel list replacement failed; membership removal rolled back",

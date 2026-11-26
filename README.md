@@ -272,7 +272,7 @@ just reset          # ⚠️  Wipe data + recreate
 
 ## Community
 
-- **[Buzz feedback community](https://feedback.communities.buzz.xyz/invite/v2.25_y9TSEwLpbhuk22iYuq_xW6AELuvyN-jTmnFHwdJ0)** — ask questions, share feedback, and connect with other Buzz users
+- **[Buzz community](https://buzz.communities.buzz.xyz/invite/v2.EeLHaUAe23P7qK0NuWnsdfnH-6L0wJLDnnzpFzrG7rQ)** — connect & build plugins with the Buzz team and community
 - **[@buzzdotxyz on X](https://x.com/buzzdotxyz)** — news and updates
 
 ---

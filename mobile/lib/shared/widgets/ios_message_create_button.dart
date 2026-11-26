@@ -11,6 +11,7 @@ import '../relay/relay.dart';
 import '../theme/theme.dart';
 import 'avatar_image.dart';
 import 'duo_toolbar.dart';
+import 'native_route_controls.dart';
 
 /// The four desktop creation destinations, presented by UIKit on iOS.
 class IosMessageCreateButton extends HookConsumerWidget {
@@ -26,6 +27,7 @@ class IosMessageCreateButton extends HookConsumerWidget {
     this.sectionTitles = const {},
     this.icon = 'plus',
     this.iconSize,
+    this.trailingIconSlotWidth,
     this.foregroundColor,
     this.accessibilityLabel = 'Create',
     this.width = 64,
@@ -35,6 +37,7 @@ class IosMessageCreateButton extends HookConsumerWidget {
     this.enabled = true,
     this.selectedIndex,
     this.eagerGestures = true,
+    this.consumeOutsideTap = false,
     this.deferMenuActions = true,
     this.showIconWithLabel = false,
     this.onMenuVisibilityChanged,
@@ -50,6 +53,9 @@ class IosMessageCreateButton extends HookConsumerWidget {
   final String? avatarUrl, avatarInitial;
   final String icon;
   final double? iconSize;
+
+  /// Right-aligned visual slot inside the unchanged full-width hit target.
+  final double? trailingIconSlotWidth;
   final Color? foregroundColor;
   final String accessibilityLabel;
   final double width, height;
@@ -64,6 +70,7 @@ class IosMessageCreateButton extends HookConsumerWidget {
 
   /// Capture gestures immediately; disable for rows inside a scroll view.
   final bool eagerGestures;
+  final bool consumeOutsideTap;
 
   /// Wait for menu dismissal before actions that navigate to another route.
   final bool deferMenuActions;
@@ -80,15 +87,8 @@ class IosMessageCreateButton extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final route = ModalRoute.of(context);
-    final coveringProgress = useAnimation(
-      route?.secondaryAnimation ?? kAlwaysDismissedAnimation,
-    );
-    final nativeControlsVisible =
-        (route?.isCurrent ?? true) && coveringProgress == 0;
+    final nativeControlsVisible = useNativeRouteControlsVisible(context);
 
-    final brightness = context.theme.brightness;
-    final foreground = (foregroundColor ?? context.colors.onSurface).toARGB32();
     // Only an avatar trigger fetches media, so only it depends on the relay.
     final media = avatarInitial == null
         ? null
@@ -122,6 +122,15 @@ class IosMessageCreateButton extends HookConsumerWidget {
       ],
     );
     final avatar = useFuture(avatarFuture, preserveState: false).data;
+    if (!nativeControlsVisible) {
+      return SizedBox(width: width, height: height);
+    }
+    return HookBuilder(builder: (context) => _buildNative(context, avatar));
+  }
+
+  Widget _buildNative(BuildContext context, Uint8List? avatar) {
+    final brightness = context.theme.brightness;
+    final foreground = (foregroundColor ?? context.colors.onSurface).toARGB32();
     final channel = useState<MethodChannel?>(null);
     final latest = useRef(actions)..value = actions;
     final latestVisibility = useRef(onMenuVisibilityChanged)
@@ -149,6 +158,7 @@ class IosMessageCreateButton extends HookConsumerWidget {
       'showIconWithLabel': showIconWithLabel,
       'accessibilityLabel': accessibilityLabel,
       'menu': menu,
+      'fixedMenuOrder': mergingNavigation,
       'deferMenuActions': deferMenuActions,
     };
     // Keep one handler per channel. Replacing this effect on enabled changes
@@ -204,15 +214,13 @@ class IosMessageCreateButton extends HookConsumerWidget {
         foreground,
       ],
     );
-    // UIKit glass layers can float above the incoming Flutter route during
-    // its transition. Remove the covered route's platform view immediately.
-    if (!nativeControlsVisible) {
-      return SizedBox(width: width, height: height);
-    }
     return SizedBox(
       width: width,
       height: height,
       child: UiKitView(
+        key: mergingNavigation
+            ? ValueKey((navigationAxis, width, height))
+            : null,
         viewType: 'buzz/navigation_glass',
         gestureRecognizers: {
           if (eagerGestures)
@@ -221,18 +229,23 @@ class IosMessageCreateButton extends HookConsumerWidget {
         creationParams: {
           ...content,
           'plain': plain,
+          'consumeOutsideTap': consumeOutsideTap,
           'fillWidth': fillWidth,
-          'buttonCenterX': width / 2,
+          'buttonCenterX': trailingIconSlotWidth == null
+              ? width / 2
+              : width - trailingIconSlotWidth! / 2,
           'controlWidth': mergingNavigation && navigationAxis == Axis.horizontal
               ? 112.0
-              : width,
+              : trailingIconSlotWidth ?? width,
           'mergingNavigation': mergingNavigation,
           'menuAbove':
               mergingNavigation &&
               navigationAxis == Axis.horizontal &&
               DuoToolbarScope.maybeOf(context)?.strip != null,
           'verticalNavigation': navigationAxis == Axis.vertical,
-          'controlSize': mergingNavigation ? 56.0 : height,
+          'controlSize': mergingNavigation && navigationAxis == Axis.vertical
+              ? width
+              : height,
           'hitTargetWidth': width,
           'hitTargetHeight': height,
           'brightness': brightness.name,

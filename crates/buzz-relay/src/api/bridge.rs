@@ -936,6 +936,34 @@ const AUX_PAGE_LIMIT: i64 = buzz_db::DEFAULT_MAX_PAGE_LIMIT;
 /// loop forever against a pathological write pattern.
 const AUX_MAX_PAGES: usize = 64;
 
+/// How far before the oldest retained window row the aux hops still look.
+/// Ingest rejects any event more than 900 s from the relay clock
+/// (`MAX_TIMESTAMP_DRIFT_SECS` in `handlers/ingest.rs`), so an aux event can
+/// predate its target by at most ~30 min; a day covers that with room for
+/// data that reached the store another way. The bound lets the `#e` GIN
+/// probes prune older `events` partitions instead of scanning the
+/// community's whole history.
+const WINDOW_AUX_SINCE_MARGIN_SECS: i64 = 24 * 60 * 60;
+
+/// Lower `created_at` bound for both window aux hops: the oldest aux target
+/// (Unix seconds) minus [`WINDOW_AUX_SINCE_MARGIN_SECS`]. Every aux event, in
+/// either hop, really happened after the row it chains back to, so its
+/// timestamp is at most twice the ingest drift before that row's; the same
+/// bound covers both hops.
+/// `None` when there are no targets (no hops run).
+fn window_aux_since(
+    target_created_at: impl IntoIterator<Item = i64>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let oldest = target_created_at.into_iter().min()?;
+    let since = oldest.saturating_sub(WINDOW_AUX_SINCE_MARGIN_SECS).max(0);
+    chrono::DateTime::from_timestamp(since, 0)
+}
+
+/// Unix seconds of a stored event, for [`window_aux_since`].
+fn stored_event_secs(event: &buzz_core::StoredEvent) -> i64 {
+    i64::try_from(event.event.created_at.as_secs()).unwrap_or(i64::MAX)
+}
+
 fn build_aux_query(
     community: buzz_core::CommunityId,
     target_ids: Vec<String>,
@@ -1109,9 +1137,16 @@ async fn handle_channel_window_filter(
         let mut seen_aux: std::collections::HashSet<nostr::EventId> =
             std::collections::HashSet::new();
         let mut hop_ids = row_ids_hex.clone();
+        let aux_since = window_aux_since(
+            window
+                .rows
+                .iter()
+                .map(|row| stored_event_secs(&row.stored_event)),
+        );
         for hop_kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
-            let aux_query =
+            let mut aux_query =
                 build_aux_query(tenant.community(), std::mem::take(&mut hop_ids), hop_kinds);
+            aux_query.since = aux_since;
             let aux_events = query_all_pages(
                 aux_query,
                 AUX_PAGE_LIMIT,
@@ -1464,26 +1499,10 @@ async fn submit_event_authed(
         token_owner,
     )
     .await;
-    let nip_oa_owner = match caller.admit_member(membership) {
-        Ok(owner) => owner.or_else(|| {
-            if !state.config.require_relay_membership {
-                super::relay_members::extract_nip_oa_owner(
-                    &pubkey_bytes,
-                    auth_tag,
-                    signed_auth_created_at,
-                )
-            } else {
-                None
-            }
-        }),
-        Err(e) => {
-            return SubmitOutcome::Err {
-                response: e.into_response(),
-            };
-        }
-    };
-    if let Some(owner) = nip_oa_owner {
-        super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await;
+    if let Err(e) = caller.admit_member(membership) {
+        return SubmitOutcome::Err {
+            response: e.into_response(),
+        };
     }
 
     let auth = IngestAuth::Http {
@@ -1814,13 +1833,20 @@ async fn query_member_events(
     }
 
     // Get channels this user can access — same enforcement as WS REQ handler.
-    let mut accessible_channels = state
-        .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
+    let mut access = state
+        .get_channel_access_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    let mut accessible_channels = std::mem::take(&mut access.implicit);
     // Named-only channels (system, and types added later) are outside
     // `accessible_channels`; a filter that names one reads it in its own
     // scope only (see `handlers::system_channels`).
+    // A strong read must see the caller's own just-accepted write, such as a
+    // system channel it just created, so its named-only access comes from the
+    // database rather than a cached membership a peer pod may not have dropped.
+    let strong = raw_filters
+        .iter()
+        .any(|raw| matches!(extract_consistency(raw), Consistency::Strong));
     let mut named_only =
         crate::handlers::system_channels::readable_named_only_channels_for_filters(
             state,
@@ -1828,6 +1854,7 @@ async fn query_member_events(
             &pubkey_bytes,
             &filters,
             &accessible_channels,
+            (!strong).then_some(&access),
             None,
         )
         .await
@@ -2465,10 +2492,11 @@ async fn count_member_events(
     }
 
     // Get channels this user can access.
-    let mut accessible_channels = state
-        .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
+    let mut access = state
+        .get_channel_access_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    let mut accessible_channels = std::mem::take(&mut access.implicit);
     // Named-only channels (system, and types added later) are outside
     // `accessible_channels`; a filter that names one reads it in its own
     // scope only (see `handlers::system_channels`).
@@ -2479,6 +2507,7 @@ async fn count_member_events(
             &pubkey_bytes,
             &filters,
             &accessible_channels,
+            Some(&access),
             None,
         )
         .await
@@ -5623,6 +5652,170 @@ pub(crate) mod postgres_tests {
         );
     }
 
+    /// The channel-window aux closure reads both hops from one day before the
+    /// oldest retained row, not before the newest row or the wall clock. The
+    /// window holds a row from now and one from 40 days ago; aux on the old
+    /// row inside that bound still comes back, on the two-row page and on the
+    /// cursor page holding only the old row, and aux dated more than a day
+    /// before the old row is not read. Mutations: drop `aux_query.since`, or
+    /// widen the margin by more than a minute → the out-of-bound events return
+    /// → RED; anchor on the newest row (`.max()`) or on `Utc::now()` → the
+    /// in-bound events vanish → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn channel_window_aux_hops_read_from_a_day_before_the_oldest_row() {
+        use buzz_core::kind::{KIND_DELETION, KIND_REACTION};
+        use buzz_db::channel::{ChannelType, ChannelVisibility};
+
+        let state = bridge_handler_test_state()
+            .await
+            .expect("local Postgres and Redis");
+        let host = format!("window-aux-bound-{}.local", uuid::Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community");
+        let author = Keys::generate();
+        let (channel, _) = state
+            .db
+            .create_channel_with_id(
+                community.id,
+                uuid::Uuid::new_v4(),
+                &format!("window-aux-bound-{}", uuid::Uuid::new_v4().simple()),
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                author.public_key().to_bytes().as_slice(),
+                None,
+            )
+            .await
+            .expect("create channel");
+        let ch = channel.id.to_string();
+
+        // Ingest's ±900 s clock check and the store's channel-event floor
+        // both refuse backdated events, so the backdated aux events are
+        // stored channel-less, as a NIP-09 deletion may be; the aux hops are
+        // community-wide `#e` lookups and still find them. The old row must
+        // be in the channel, so it is written as historical data would be.
+        let now = chrono::Utc::now().timestamp() as u64;
+        let day = 86_400;
+        let build = |kind: u32, at: u64, target: Option<&nostr::EventId>| {
+            let mut builder = EventBuilder::new(Kind::Custom(kind as u16), "+")
+                .tag(Tag::parse(["h", ch.as_str()]).expect("h"));
+            if let Some(target) = target {
+                builder = builder.tag(Tag::parse(["e", &target.to_hex()]).expect("e"));
+            }
+            builder
+                .custom_created_at(nostr::Timestamp::from(at))
+                .sign_with_keys(&author)
+                .expect("sign")
+        };
+        let store = |kind: u32, at: u64, target: &nostr::EventId| {
+            let event = build(kind, at, Some(target));
+            let state = state.clone();
+            async move {
+                state
+                    .db
+                    .insert_event(community.id, &event, None)
+                    .await
+                    .expect("insert");
+                event.id
+            }
+        };
+        let new_row = build(9, now, None);
+        state
+            .db
+            .insert_event(community.id, &new_row, Some(channel.id))
+            .await
+            .expect("insert new row");
+        let old_at = now - 40 * day;
+        let old_row = build(9, old_at, None);
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("pool");
+        sqlx::query(
+            "INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at,channel_id) \
+             VALUES ($1,$2,$3,to_timestamp($4),$5,$6,$7,$8,now(),$9)",
+        )
+        .bind(community.id.as_uuid())
+        .bind(old_row.id.to_bytes().to_vec())
+        .bind(old_row.pubkey.to_bytes().to_vec())
+        .bind(old_at as f64)
+        .bind(9_i32)
+        .bind(serde_json::to_value(&old_row.tags).expect("tags"))
+        .bind(&old_row.content)
+        .bind(old_row.sig.serialize().to_vec())
+        .bind(channel.id)
+        .execute(&pool)
+        .await
+        .expect("insert old row");
+        let reaction_in = store(KIND_REACTION, old_at - day + 60, &old_row.id).await;
+        let reaction_out = store(KIND_REACTION, old_at - day - 60, &old_row.id).await;
+        let delete_in = store(KIND_DELETION, old_at - day + 120, &reaction_in).await;
+        let delete_out = store(KIND_DELETION, old_at - day - 120, &reaction_in).await;
+
+        let query = |filter: Value| {
+            let state = state.clone();
+            let host = host.clone();
+            let pubkey = author.public_key().to_hex();
+            async move {
+                let body = serde_json::to_vec(&[filter]).expect("json");
+                let (status, bytes) = post_query(state, &host, &pubkey, &body).await;
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "{}",
+                    String::from_utf8_lossy(&bytes)
+                );
+                serde_json::from_slice::<Vec<Value>>(&bytes).expect("event array")
+            }
+        };
+        let assert_old_row_aux = |events: &[Value], page: &str| {
+            let has = |id: &nostr::EventId| {
+                events
+                    .iter()
+                    .any(|e| e["id"].as_str() == Some(id.to_hex().as_str()))
+            };
+            assert!(has(&old_row.id), "{page}: old row: {events:?}");
+            assert!(
+                has(&reaction_in),
+                "{page}: hop 1 inside the bound: {events:?}"
+            );
+            assert!(
+                has(&delete_in),
+                "{page}: hop 2 inside the bound: {events:?}"
+            );
+            assert!(
+                !has(&reaction_out),
+                "{page}: hop 1 past the bound: {events:?}"
+            );
+            assert!(
+                !has(&delete_out),
+                "{page}: hop 2 past the bound: {events:?}"
+            );
+        };
+
+        let filter = serde_json::json!({
+            "kinds": [9], "#h": [&ch], "top_level": true, "include_aux": true,
+        });
+        assert_old_row_aux(&query(filter.clone()).await, "two-row page");
+
+        let mut paged = filter;
+        paged["limit"] = serde_json::json!(1);
+        let first = query(paged.clone()).await;
+        let bounds: Value = first
+            .iter()
+            .find(|e| e["kind"] == 39006)
+            .and_then(|e| e["content"].as_str())
+            .map(|content| serde_json::from_str(content).expect("bounds content"))
+            .expect("window bounds");
+        assert_eq!(bounds["has_more"], true, "{first:?}");
+        paged["until"] = bounds["next_cursor"]["created_at"].clone();
+        paged["before_id"] = bounds["next_cursor"]["id"].clone();
+        assert_old_row_aux(&query(paged).await, "cursor page");
+    }
+
     // ──────────────────────────────────────────────────────────────────────────
     // Log-capture helpers and attribution-invariant tests
     //
@@ -6204,6 +6397,118 @@ pub(crate) mod postgres_tests {
             .filter(|line| line["event"] == "http")
             .collect();
         (status, lines)
+    }
+
+    /// Full NIP-98 sign-in on a closed relay with NIP-OA admission off: an
+    /// ownerless member agent's signed `/query` with a NIP-OA tag records its
+    /// owner; removing the owner removes the agent, whose next `/query` is
+    /// refused as a non-member. A tag naming another owner than the stored one
+    /// is refused as a mismatch, not as storage trouble.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn signed_query_records_owner_and_cascades_on_closed_relay() {
+        let mut state = (*nip_fi_off_test_state().await.expect("local Postgres")).clone();
+        {
+            let config = Arc::make_mut(&mut state.config);
+            config.require_relay_membership = true;
+            config.allow_nip_oa_auth = false;
+        }
+        let state = Arc::new(state);
+        let host = format!("owner-query-{}.local", uuid::Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let (owner, agent, conflicted, other_owner) = (
+            Keys::generate(),
+            Keys::generate(),
+            Keys::generate(),
+            Keys::generate(),
+        );
+        for keys in [&owner, &agent, &conflicted] {
+            buzz_db::relay_members::add_relay_member(
+                state.db.pool(),
+                community,
+                &keys.public_key().to_hex(),
+                "member",
+                None,
+                &Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("add member");
+        }
+        let query = |keys: &Keys| {
+            let (state, host, keys) = (state.clone(), host.clone(), keys.clone());
+            let owner = owner.clone();
+            async move {
+                let mut headers =
+                    make_nip98_headers(&keys, &format!("https://{host}/query"), "POST", QUERY_BODY);
+                let tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &keys.public_key(), "")
+                    .expect("sign NIP-OA credential");
+                headers.insert("x-auth-tag", tag.parse().expect("header value"));
+                let (_guard, out) = crate::access::tests::capture_scoped();
+                let (status, _, body) =
+                    oneshot_request_full(state, "POST", "/query", &host, headers, QUERY_BODY).await;
+                let reason = out
+                    .lines()
+                    .into_iter()
+                    .find(|line| line["event"] == "http")
+                    .and_then(|line| line["reason"].as_str().map(str::to_owned));
+                (status, reason, String::from_utf8_lossy(&body).into_owned())
+            }
+        };
+
+        let (status, _, _) = query(&agent).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(state
+            .db
+            .is_agent_owner(
+                community,
+                agent.public_key().as_bytes(),
+                owner.public_key().as_bytes()
+            )
+            .await
+            .expect("owner lookup"));
+
+        buzz_db::relay_members::remove_relay_member(
+            state.db.pool(),
+            community,
+            &owner.public_key().to_hex(),
+            &Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("remove owner");
+        let (status, reason, _) = query(&agent).await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(reason.as_deref(), Some("not_relay_member"));
+
+        for keys in [&conflicted, &other_owner] {
+            state
+                .db
+                .ensure_user(community, keys.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+        }
+        assert!(state
+            .db
+            .set_agent_owner(
+                community,
+                conflicted.public_key().as_bytes(),
+                other_owner.public_key().as_bytes(),
+            )
+            .await
+            .expect("seed other owner"));
+        let (status, reason, body) = query(&conflicted).await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(reason.as_deref(), Some("owner_mismatch"));
+        assert!(
+            body.contains(crate::api::relay_members::OWNER_MISMATCH),
+            "{body}"
+        );
     }
 
     fn assert_one_auth_line(
@@ -8576,7 +8881,7 @@ pub(crate) mod postgres_tests {
                             HANDLER_TEST_ISSUER,
                             &actor.public_key(),
                             now + chrono::Duration::minutes(5),
-                            now
+                            || now
                         ),
                         CrossPodMergeResult::Merged
                     );
@@ -10266,6 +10571,16 @@ pub(crate) mod postgres_tests {
     }
 
     async fn cancel_fixture() -> CancelFixture {
+        cancel_fixture_with_reader_budget(None).await
+    }
+
+    /// `reader_budget` gives the state's replica pool a short acquire
+    /// timeout, like production's reader pool, so a read against a replica
+    /// held full sheds fast instead of waiting out sqlx's 30s default. Only a
+    /// test that holds the replica full needs it.
+    async fn cancel_fixture_with_reader_budget(
+        reader_budget: Option<std::time::Duration>,
+    ) -> CancelFixture {
         use buzz_db::channel::{ChannelType, ChannelVisibility};
         let admin_url = crate::test_support::database_url();
         let admin = sqlx::PgPool::connect(&admin_url).await.expect("admin pool");
@@ -10286,25 +10601,7 @@ pub(crate) mod postgres_tests {
                 .execute(&admin)
                 .await
                 .expect("create scratch db");
-            if role == "r" {
-                sqlx::query(sqlx::AssertSqlSafe(format!(
-                    "ALTER DATABASE {name} SET statement_timeout = '300ms'"
-                )))
-                .execute(&admin)
-                .await
-                .expect("replica statement_timeout");
-            }
-            // The replica gets a short acquire timeout, like production's
-            // reader pool, so a shed read against a held-full replica fails
-            // fast instead of waiting out sqlx's 30s default.
-            let options = sqlx::postgres::PgPoolOptions::new();
-            let options = if role == "r" {
-                options.acquire_timeout(std::time::Duration::from_secs(1))
-            } else {
-                options
-            };
-            let pool = options
-                .connect(&format!("{base}/{name}"))
+            let pool = sqlx::PgPool::connect(&format!("{base}/{name}"))
                 .await
                 .expect("connect scratch");
             buzz_db::migration::run_migrations(&pool)
@@ -10338,8 +10635,27 @@ pub(crate) mod postgres_tests {
             pools.push(pool);
             names.push(name);
         }
-        let replica = pools.pop().expect("replica");
-        let writer = pools.pop().expect("writer");
+        let [writer, setup_replica]: [sqlx::PgPool; 2] =
+            pools.try_into().expect("writer and replica");
+        // The replica's 300ms `statement_timeout` is the budget its reads are
+        // tested against, not one for migrating and seeding it, so it is set
+        // after setup and the replica is reopened: sessions read
+        // database-level settings when they start.
+        setup_replica.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "ALTER DATABASE {} SET statement_timeout = '300ms'",
+            names[1]
+        )))
+        .execute(&admin)
+        .await
+        .expect("replica statement_timeout");
+        let replica_url = format!("{base}/{}", names[1]);
+        let replica = match reader_budget {
+            Some(budget) => budgeted_reader(&replica_url, budget).await,
+            None => sqlx::PgPool::connect(&replica_url)
+                .await
+                .expect("connect replica"),
+        };
         let search_url = format!("{base}/{}", names[0]);
         let search = buzz_search::pool_options()
             .connect_with(
@@ -10394,6 +10710,50 @@ pub(crate) mod postgres_tests {
             channel: channel.to_string(),
             root: root.id.to_hex(),
             reader: Keys::generate(),
+        }
+    }
+
+    /// A pool whose acquires give up after `budget`, with every connection
+    /// already open and idle. sqlx bounds connection establishment by the
+    /// same deadline as the wait for a free connection, so a pool that still
+    /// had to connect would fail on any server stall longer than `budget`.
+    /// The pool does not ping on acquire, but sqlx still pings a connection
+    /// when it is released (`return_to_pool`) and closes it if that ping
+    /// fails. So, under one 30s deadline, this fills the pool (retrying each
+    /// timed-out connect), drops the connections, and waits for every one to
+    /// be idle again; whenever a release closed one and the pool is short, it
+    /// fills again. Afterwards an acquire waits only for a free connection,
+    /// the wait the budget is meant to bound.
+    async fn budgeted_reader(url: &str, budget: std::time::Duration) -> sqlx::PgPool {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(budget)
+            .test_before_acquire(false)
+            .connect_lazy(url)
+            .expect("reader pool");
+        let max = pool.options().get_max_connections();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if pool.size() < max {
+                let mut open = Vec::new();
+                while open.len() < max as usize {
+                    match pool.acquire().await {
+                        Ok(conn) => open.push(conn),
+                        Err(sqlx::Error::PoolTimedOut)
+                            if tokio::time::Instant::now() < deadline => {}
+                        Err(e) => panic!("open reader connection: {e}"),
+                    }
+                }
+                drop(open);
+            }
+            if pool.num_idle() == max as usize {
+                return pool;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "reader connections returned idle: {} of {max}",
+                pool.num_idle()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 
@@ -10684,7 +11044,7 @@ pub(crate) mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn shed_history_read_maps_to_503_on_every_bridge_branch() {
-        let fx = cancel_fixture().await;
+        let fx = cancel_fixture_with_reader_budget(Some(std::time::Duration::from_secs(1))).await;
         let h = [&fx.channel];
         let cases = [
             (
@@ -10721,7 +11081,13 @@ pub(crate) mod postgres_tests {
             held.push(fx.replica.acquire().await.expect("hold reader connection"));
         }
         for (branch, filter) in &cases {
+            let started = std::time::Instant::now();
             let (status, body) = fx.http("/query", filter).await;
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "shed {branch} took {:?}, not the 1s reader budget",
+                started.elapsed()
+            );
             assert_eq!(
                 (status, body["error"].as_str()),
                 (
@@ -11147,6 +11513,133 @@ pub(crate) mod postgres_tests {
             .unwrap();
         assert!(materialize().await, "a known link is still confirmed");
         assert_eq!(agent_rows().await, 0, "a known link writes nothing");
+    }
+
+    /// On a closed relay with NIP-OA admission off, an ownerless member agent's
+    /// `POST /events` with a NIP-OA tag records its owner; removing the owner
+    /// then removes the agent, and its next request is refused. A tag naming
+    /// another owner than the stored one cannot be recorded, so that request
+    /// is refused and its event is not stored.
+    /// Mutation: drop the recording step from the shared HTTP admission →
+    /// the owner stays unrecorded → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn closed_relay_http_records_owner_and_refuses_on_link_failure() {
+        let mut state = bridge_handler_test_state()
+            .await
+            .expect("local Postgres and Redis");
+        {
+            let config = Arc::make_mut(&mut Arc::get_mut(&mut state).expect("unique").config);
+            config.require_relay_membership = true;
+            config.allow_nip_oa_auth = false;
+        }
+        let tenant = fresh_tenant("http-owner-record.test");
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(tenant.community().as_uuid())
+            .bind(format!(
+                "http-owner-{}.example",
+                tenant.community().as_uuid().simple()
+            ))
+            .execute(state.db.pool())
+            .await
+            .expect("insert community");
+        let (owner, agent, other_owner, conflicted) = (
+            Keys::generate(),
+            Keys::generate(),
+            Keys::generate(),
+            Keys::generate(),
+        );
+        for keys in [&owner, &agent, &conflicted] {
+            buzz_db::relay_members::add_relay_member(
+                state.db.pool(),
+                tenant.community(),
+                &keys.public_key().to_hex(),
+                "member",
+                None,
+                &Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("add member");
+        }
+        let submit = |keys: &Keys, tag_owner: &Keys| {
+            let state = state.clone();
+            let tenant = tenant.clone();
+            let (keys, tag_owner) = (keys.clone(), tag_owner.clone());
+            async move {
+                let tag = buzz_sdk::nip_oa::compute_auth_tag(&tag_owner, &keys.public_key(), "")
+                    .expect("sign NIP-OA credential");
+                let mut headers = HeaderMap::new();
+                headers.insert("x-auth-tag", tag.parse().expect("header value"));
+                let event = EventBuilder::new(Kind::TextNote, "owner-record")
+                    .sign_with_keys(&keys)
+                    .expect("sign event");
+                let outcome = submit_event_authed(
+                    &state,
+                    &tenant,
+                    &headers,
+                    serde_json::to_vec(&event).expect("event json").as_slice(),
+                    &mut ProvenCaller {
+                        pubkey: keys.public_key(),
+                        event_id_bytes: fresh_nip98_event_id_bytes(),
+                        signed_at: Some(nostr::Timestamp::now().as_secs()),
+                        token_owner: None,
+                        slot: AccessSlot::default(),
+                    },
+                    None,
+                )
+                .await;
+                matches!(outcome, SubmitOutcome::Ok { accepted: true, .. })
+            }
+        };
+        let owns = |agent: &Keys, owner: &Keys| {
+            let (state, community) = (state.clone(), tenant.community());
+            let (agent, owner) = (agent.public_key(), owner.public_key());
+            async move {
+                state
+                    .db
+                    .is_agent_owner(community, agent.as_bytes(), owner.as_bytes())
+                    .await
+                    .expect("owner lookup")
+            }
+        };
+
+        assert!(submit(&agent, &owner).await, "the member agent is admitted");
+        assert!(owns(&agent, &owner).await, "its owner is recorded");
+        buzz_db::relay_members::remove_relay_member(
+            state.db.pool(),
+            tenant.community(),
+            &owner.public_key().to_hex(),
+            &Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("remove owner");
+        assert!(
+            !submit(&agent, &owner).await,
+            "the agent is refused after removal"
+        );
+
+        for keys in [&conflicted, &other_owner] {
+            state
+                .db
+                .ensure_user(tenant.community(), keys.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+        }
+        assert!(state
+            .db
+            .set_agent_owner(
+                tenant.community(),
+                conflicted.public_key().as_bytes(),
+                other_owner.public_key().as_bytes(),
+            )
+            .await
+            .expect("seed other owner"));
+        assert!(
+            !submit(&conflicted, &owner).await,
+            "a different stored owner refuses the request"
+        );
     }
 
     /// An agent socket admitted with no owner, then linked to its owner by a

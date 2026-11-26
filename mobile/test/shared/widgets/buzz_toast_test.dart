@@ -72,8 +72,25 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Next route'), findsOneWidget);
     expect(find.text('Retry').hitTestable(), findsOneWidget);
+    final haptics = <Object?>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'HapticFeedback.vibrate') {
+          haptics.add(call.arguments);
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
     await tester.tap(find.text('Retry'));
     await tester.pumpAndSettle();
+    expect(haptics, ['HapticFeedbackType.selectionClick']);
     expect(retries, 1);
     expect(find.text('Try again'), findsNothing);
     expect(tester.takeException(), isNull);

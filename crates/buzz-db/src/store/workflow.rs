@@ -677,8 +677,7 @@ pub async fn latest_scheduled_workflow_fire(
 /// Returns `false` when no unlinked claim matches, or the run is missing or
 /// belongs to another workflow. A link stays inside one workflow, so workflow
 /// delete, which removes that workflow's fires and runs together, never leaves
-/// a fire naming a deleted run (and, while the fire→run foreign key exists,
-/// never trips it).
+/// a fire naming a deleted run.
 pub async fn attach_scheduled_workflow_run(
     pool: &PgPool,
     community_id: CommunityId,

@@ -7,24 +7,18 @@ pub(super) async fn targets(
     subject: &str,
     lock: bool,
 ) -> Result<Vec<Vec<u8>>> {
-    let query = if lock {
-        "SELECT pubkey FROM users WHERE community_id=$1 AND agent_owner_pubkey=decode($2,'hex') ORDER BY pubkey LIMIT $3 FOR SHARE"
-    } else {
-        "SELECT pubkey FROM users WHERE community_id=$1 AND agent_owner_pubkey=decode($2,'hex') ORDER BY pubkey LIMIT $3"
-    };
-    let mut keys: Vec<Vec<u8>> = sqlx::query_scalar(query)
-        .bind(community)
-        .bind(subject)
-        .bind((MAX_TARGETS + 1) as i64)
-        .fetch_all(conn)
-        .await?;
-    keys.push(hex::decode(subject).map_err(|_| invalid("invalid target key"))?);
-    keys.sort();
-    keys.dedup();
-    if keys.len() > MAX_TARGETS {
-        return Err(invalid("content target key limit exceeded (10,000)"));
-    }
-    Ok(keys)
+    super::super::agent_ownership::discover(
+        conn,
+        subject,
+        Some(community),
+        lock,
+        super::super::agent_ownership::DiscoveryLimit::TargetKeys,
+    )
+    .await?
+    .pubkeys()
+    .iter()
+    .map(|key| hex::decode(key).map_err(|_| invalid("invalid target key")))
+    .collect()
 }
 
 pub(super) async fn excluded(

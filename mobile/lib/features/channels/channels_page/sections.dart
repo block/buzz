@@ -1,47 +1,33 @@
 part of '../channels_page.dart';
 
-const _sectionMenuItemPadding = EdgeInsets.fromLTRB(Grid.xs, 0, Grid.twelve, 0);
-
+/// A workspace. Edit actions are null where mobile can't write it: always
+/// for desktop's unified workspaces, and for legacy Solo workspaces.
 class _CustomChannelSection extends StatelessWidget {
-  final ChannelSection section;
+  final WorkspaceSection section;
   final List<Channel> channels;
-  final Set<String> unreadChannelIds;
-  final Set<String> attentionChannelIds;
-  final Set<String> mutedChannelIds;
-  final String? currentPubkey;
+  final bool Function(Channel) isVisible;
+  final SectionChatRowBuilder buildRow;
+  final Widget Function(Channel) buildDetail;
+  final int? previewLimit;
   final bool expanded;
-  final bool isFirst;
-  final bool isLast;
   final VoidCallback onToggle;
-  final VoidCallback onRename;
-  final VoidCallback onDelete;
-  final VoidCallback onMoveUp;
-  final VoidCallback onMoveDown;
+  final _SectionEdits? edits;
   final ChannelSortMode sortMode;
-  final ValueChanged<ChannelSortMode> onSortModeChange;
-  final Future<void> Function(Channel channel) onSelectChannel;
-  final void Function(Channel channel) onMarkChannelRead;
+  final ValueChanged<ChannelSortMode>? onSortModeChange;
 
   const _CustomChannelSection({
     super.key,
     required this.section,
     required this.channels,
-    required this.unreadChannelIds,
-    required this.attentionChannelIds,
-    required this.mutedChannelIds,
-    required this.currentPubkey,
+    required this.isVisible,
+    required this.buildRow,
+    required this.buildDetail,
+    required this.previewLimit,
     required this.expanded,
-    required this.isFirst,
-    required this.isLast,
     required this.onToggle,
-    required this.onRename,
-    required this.onDelete,
-    required this.onMoveUp,
-    required this.onMoveDown,
+    required this.edits,
     required this.sortMode,
     required this.onSortModeChange,
-    required this.onSelectChannel,
-    required this.onMarkChannelRead,
   });
 
   @override
@@ -51,210 +37,282 @@ class _CustomChannelSection extends StatelessWidget {
         child: _CustomSectionHeader(
           section: section,
           expanded: expanded,
-          isFirst: isFirst,
-          isLast: isLast,
           onToggle: onToggle,
-          onRename: onRename,
-          onDelete: onDelete,
-          onMoveUp: onMoveUp,
-          onMoveDown: onMoveDown,
+          edits: edits,
           sortMode: sortMode,
           onSortModeChange: onSortModeChange,
         ),
       ),
-      CollapsibleSliverBody(
+      _SectionChannelsBody(
+        sectionKey: 'group:${section.id}',
+        title: section.name,
+        buildDetail: buildDetail,
+        previewLimit: previewLimit,
         expanded: expanded,
-        sliver: SliverList.builder(
-          itemCount: channels.length,
-          findChildIndexCallback: (key) {
-            final index = channels.indexWhere((c) => ValueKey(c.id) == key);
-            return index < 0 ? null : index;
-          },
-          itemBuilder: (context, index) {
-            final channel = channels[index];
-            return _ChannelTile(
-              key: ValueKey(channel.id),
-              channel: channel,
-              isUnread: unreadChannelIds.contains(channel.id),
-              hasAttention: attentionChannelIds.contains(channel.id),
-              isMuted: mutedChannelIds.contains(channel.id),
-              currentPubkey: currentPubkey,
-              onTap: () => onSelectChannel(channel),
-              onMarkRead: () => onMarkChannelRead(channel),
-              sectionId: section.id,
-            );
-          },
-        ),
+        channels: channels,
+        isVisible: isVisible,
+        buildRow: buildRow,
       ),
     ],
   );
 }
 
+typedef _SectionEdits = ({
+  Future<void> Function() onRename,
+  Future<void> Function() onDelete,
+});
+
+/// A workspace's decorative icon: a Unicode emoji, or a community custom
+/// emoji. As on desktop, a shortcode the catalog lacks draws nothing.
+class _WorkspaceIcon extends ConsumerWidget {
+  const _WorkspaceIcon(this.icon, {this.inHeader = false});
+  final bool inHeader;
+  final String icon;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    Widget display(Widget child, [String? source]) {
+      if (!inHeader) return ExcludeSemantics(child: child);
+      return _SectionLeadingIcon(child, key: ValueKey((icon, source)));
+    }
+
+    if (!(icon.length > 2 && icon.startsWith(':') && icon.endsWith(':'))) {
+      return display(
+        FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            icon.trim(),
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: _kWorkspaceIconSize, height: 1),
+          ),
+        ),
+      );
+    }
+    final shortcode = normalizeShortcode(icon);
+    final url = shortcode == null
+        ? null
+        : ref.watch(
+            customEmojiListProvider.select(
+              (palette) => palette
+                  .where((emoji) => emoji.shortcode == shortcode)
+                  .firstOrNull
+                  ?.url,
+            ),
+          );
+    if (url == null) return display(const SizedBox.shrink());
+    return display(
+      CustomEmojiImage(
+        shortcode: shortcode!,
+        url: url,
+        size: inHeader ? _kChannelIconSize : _kWorkspaceIconSize,
+        compact: true,
+      ),
+      url,
+    );
+  }
+}
+
+const _kWorkspaceIconSize = 16.0;
+
+class _SectionLeadingIcon extends HookWidget {
+  const _SectionLeadingIcon(this.child, {super.key});
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final shift = useState(Offset.zero);
+    return Padding(
+      padding: const EdgeInsets.only(right: Grid.inventoryLabelGap),
+      child: SizedBox.square(
+        dimension: _kChannelIconSize,
+        child: Transform.translate(
+          offset: shift.value,
+          child: _EmojiArtwork(
+            onCenter: (value) {
+              if (context.mounted) shift.value = value;
+            },
+            child: ExcludeSemantics(child: child),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// Font side bearings and transparent image margins differ between emoji.
+// Measure only the painted artwork in the small header icon.
+class _EmojiArtwork extends SingleChildRenderObjectWidget {
+  const _EmojiArtwork({required this.onCenter, required super.child});
+  final ValueChanged<Offset> onCenter;
+
+  @override
+  _EmojiArtworkBoundary createRenderObject(BuildContext context) =>
+      _EmojiArtworkBoundary(onCenter);
+
+  @override
+  void updateRenderObject(BuildContext context, _EmojiArtworkBoundary object) {
+    object.onCenter = onCenter;
+  }
+}
+
+class _EmojiArtworkBoundary extends RenderRepaintBoundary {
+  _EmojiArtworkBoundary(this.onCenter);
+  ValueChanged<Offset> onCenter;
+  int revision = 0;
+  bool measuring = false;
+  bool measured = false;
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    super.paint(context, offset);
+    revision++;
+    if (measuring || measured) return;
+    measuring = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      try {
+        if (!attached || size.isEmpty) return;
+        final version = revision;
+        const scale = 3.0;
+        final image = await toImage(pixelRatio: scale);
+        try {
+          final pixels = await image.toByteData(
+            format: ImageByteFormat.rawRgba,
+          );
+          if (!attached || pixels == null) return;
+          var left = image.width;
+          var top = image.height;
+          var right = -1;
+          var bottom = -1;
+          for (var y = 0; y < image.height; y++) {
+            for (var x = 0; x < image.width; x++) {
+              if (pixels.getUint8(4 * (y * image.width + x) + 3) < 16) continue;
+              left = min(left, x);
+              right = max(right, x);
+              top = min(top, y);
+              bottom = max(bottom, y);
+            }
+          }
+          if (right >= left) {
+            measured = true;
+            onCenter(
+              Offset(
+                (image.width - left - right - 1) / (2 * scale),
+                (image.height - top - bottom - 1) / (2 * scale),
+              ),
+            );
+          }
+          if (version != revision) markNeedsPaint();
+        } finally {
+          image.dispose();
+        }
+      } finally {
+        measuring = false;
+      }
+    });
+  }
+}
+
+final _sectionEmoji = RegExp(
+  // The VM supports Unicode properties that the analyzer regex parser omits.
+  // ignore: valid_regexps
+  r'\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20E3',
+  unicode: true,
+);
+
 class _CustomSectionHeader extends StatelessWidget {
-  final ChannelSection section;
+  final WorkspaceSection section;
   final bool expanded;
-  final bool isFirst;
-  final bool isLast;
   final VoidCallback onToggle;
-  final VoidCallback onRename;
-  final VoidCallback onDelete;
-  final VoidCallback onMoveUp;
-  final VoidCallback onMoveDown;
+  final _SectionEdits? edits;
   final ChannelSortMode sortMode;
-  final ValueChanged<ChannelSortMode> onSortModeChange;
+  final ValueChanged<ChannelSortMode>? onSortModeChange;
 
   const _CustomSectionHeader({
     required this.section,
     required this.expanded,
-    required this.isFirst,
-    required this.isLast,
     required this.onToggle,
-    required this.onRename,
-    required this.onDelete,
-    required this.onMoveUp,
-    required this.onMoveDown,
+    required this.edits,
     required this.sortMode,
     required this.onSortModeChange,
   });
 
   @override
   Widget build(BuildContext context) {
-    final sectionColor = navigationHeadingForeground(context);
+    final label = section.name;
+    // Older section names can include their emoji as the first grapheme.
+    final first = label.characters.firstOrNull;
+    final hasPrefix =
+        section.icon?.trim().isNotEmpty != true &&
+        first != null &&
+        _sectionEmoji.hasMatch(first) &&
+        label.length > first.length;
+    final sectionIcon = hasPrefix ? first : section.icon?.trim();
+    final edits = this.edits;
+    final onSortModeChange = this.onSortModeChange;
+    Future<void> openOptions(BuildContext buttonContext) async {
+      final action = await showSectionViewSheet(
+        buttonContext,
+        title: label,
+        group: sectionSortGroupKey(section.id),
+        sortMode: sortMode,
+        onSort: (mode) => onSortModeChange?.call(mode),
+        custom: edits != null,
+      );
+      if (!buttonContext.mounted || edits == null) return;
+      switch (action) {
+        case 'rename':
+          edits.onRename();
+        case 'delete':
+          edits.onDelete();
+      }
+    }
+
+    final messages = MessagesSectionOptions.active(context);
+    final inset = messages
+        ? Grid.inventoryRowInset
+        : _kSectionHeaderVerticalPadding;
     return GestureDetector(
       onTap: onToggle,
       behavior: HitTestBehavior.opaque,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(
-          Grid.gutter,
-          _kSectionHeaderVerticalPadding,
-          Grid.gutter,
-          _kSectionHeaderVerticalPadding,
+        padding: EdgeInsets.fromLTRB(
+          MessagesSectionOptions.leadingInset(context),
+          messages ? Grid.inventorySectionTopInset : inset,
+          Grid.twelve,
+          inset,
         ),
         child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             Expanded(
-              child: _SectionLabel(
-                label: section.name,
+              // The options button stays its own screen-reader stop.
+              child: Semantics(
+                label: label,
+                button: true,
                 expanded: expanded,
-                color: sectionColor,
+                onTap: onToggle,
+                excludeSemantics: true,
+                child: SectionHeadingLabel(
+                  expanded: expanded,
+                  label: hasPrefix
+                      ? label.substring(first.length).trimLeft()
+                      : label,
+                  icon: switch (sectionIcon) {
+                    final icon? when icon.trim().isNotEmpty => _WorkspaceIcon(
+                      icon,
+                      inHeader: true,
+                    ),
+                    _ => null,
+                  },
+                ),
               ),
             ),
-            if (_usesNativeSectionMenu(context))
-              IosMessageCreateButton(
-                key: ValueKey('section-menu-${section.id}'),
-                icon: 'more',
-                accessibilityLabel: '${section.name} options',
-                width: 44,
-                height: 44,
-                plain: true,
-                iconSize: 14,
-                foregroundColor: navigationAccessoryForeground(context),
-                selectedIndex: sortMode == ChannelSortMode.recent ? 3 : 4,
-                dividerBefore: const {3, 5},
-                destructiveIndices: const {5},
-                actions: [
-                  (
-                    label: 'Rename section',
-                    symbol: 'pencil',
-                    onPressed: onRename,
-                  ),
-                  (
-                    label: 'Move up',
-                    symbol: 'arrow.up',
-                    onPressed: isFirst ? null : onMoveUp,
-                  ),
-                  (
-                    label: 'Move down',
-                    symbol: 'arrow.down',
-                    onPressed: isLast ? null : onMoveDown,
-                  ),
-                  (
-                    label: 'Sort: Recent',
-                    symbol: '',
-                    onPressed: () => onSortModeChange(ChannelSortMode.recent),
-                  ),
-                  (
-                    label: 'Sort: A–Z',
-                    symbol: '',
-                    onPressed: () => onSortModeChange(ChannelSortMode.alpha),
-                  ),
-                  (
-                    label: 'Delete section',
-                    symbol: 'trash',
-                    onPressed: onDelete,
-                  ),
-                ],
-              )
-            else
+            if (!messages)
               Builder(
-                builder: (buttonContext) => _SectionOptionsButton(
+                builder: (buttonContext) => SectionOptionsButton(
                   key: ValueKey('section-menu-${section.id}'),
-                  tooltip: '${section.name} options',
-                  icon: Icon(
-                    BuzzIcons.ellipsis,
-                    size: 14,
-                    color: navigationAccessoryForeground(context),
-                  ),
-                  onPressed: () async {
-                    final value = await showAnchoredPopover<String>(
-                      context: buttonContext,
-                      width: 216,
-                      alignment: AnchoredPopoverAlignment.end,
-                      surfaceKey: ValueKey('section-popover-${section.id}'),
-                      items: [
-                        const PopupMenuItem(
-                          value: 'rename',
-                          padding: _sectionMenuItemPadding,
-                          child: _SectionMenuItemContent(
-                            icon: BuzzIcons.pencil,
-                            label: 'Rename section',
-                          ),
-                        ),
-                        PopupMenuItem(
-                          value: 'move_up',
-                          enabled: !isFirst,
-                          padding: _sectionMenuItemPadding,
-                          child: const _SectionMenuItemContent(
-                            icon: BuzzIcons.arrowUp,
-                            label: 'Move up',
-                          ),
-                        ),
-                        PopupMenuItem(
-                          value: 'move_down',
-                          enabled: !isLast,
-                          padding: _sectionMenuItemPadding,
-                          child: const _SectionMenuItemContent(
-                            icon: BuzzIcons.arrowDown,
-                            label: 'Move down',
-                          ),
-                        ),
-                        ..._sortMenuItems(sortMode),
-                        PopupMenuItem(
-                          value: 'delete',
-                          padding: _sectionMenuItemPadding,
-                          child: _SectionMenuItemContent(
-                            icon: BuzzIcons.trash2,
-                            label: 'Delete section',
-                            color: context.colors.error,
-                          ),
-                        ),
-                      ],
-                    );
-                    switch (value) {
-                      case 'rename':
-                        onRename();
-                      case 'move_up':
-                        onMoveUp();
-                      case 'move_down':
-                        onMoveDown();
-                      case _kSortRecentMenuValue:
-                        onSortModeChange(ChannelSortMode.recent);
-                      case _kSortAlphaMenuValue:
-                        onSortModeChange(ChannelSortMode.alpha);
-                      case 'delete':
-                        onDelete();
-                    }
-                  },
+                  tooltip: '$label options',
+                  onPressed: () => openOptions(buttonContext),
                 ),
               ),
           ],
@@ -264,129 +322,36 @@ class _CustomSectionHeader extends StatelessWidget {
   }
 }
 
-class _SectionMenuItemContent extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final Color? color;
-
-  const _SectionMenuItemContent({
-    required this.icon,
-    required this.label,
-    this.color,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Icon(icon, size: 16, color: color),
-        const SizedBox(width: Grid.xxs),
-        Flexible(
-          child: Text(
-            label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: color == null ? null : TextStyle(color: color),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _SectionNameDialog extends HookWidget {
-  final String title;
-  final String confirmLabel;
-  final String initialValue;
-
-  const _SectionNameDialog({
-    required this.title,
-    required this.confirmLabel,
-    this.initialValue = '',
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final controller = useTextEditingController(text: initialValue);
-
-    void confirm() {
-      final name = controller.text.trim();
-      if (name.isNotEmpty) Navigator.of(context).pop(name);
-    }
-
-    return AlertDialog(
-      title: Text(title),
-      content: TextField(
-        controller: controller,
-        autofocus: true,
-        decoration: const InputDecoration(labelText: 'Name'),
-        onSubmitted: (_) => confirm(),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        TextButton(onPressed: confirm, child: Text(confirmLabel)),
-      ],
-    );
-  }
-}
-
-const _kSortRecentMenuValue = 'sort_recent';
-const _kSortAlphaMenuValue = 'sort_alpha';
-
-PopupMenuItem<String> _sortMenuItem({
-  required String value,
-  required String label,
-  required bool selected,
-}) => CheckedPopupMenuItem(value: value, checked: selected, child: Text(label));
-
-List<PopupMenuEntry<String>> _sortMenuItems(
-  ChannelSortMode current, {
-  bool showDivider = true,
-}) => [
-  if (showDivider) const PopupMenuDivider(),
-  _sortMenuItem(
-    value: _kSortRecentMenuValue,
-    label: 'Sort: Recent',
-    selected: current == ChannelSortMode.recent,
-  ),
-  _sortMenuItem(
-    value: _kSortAlphaMenuValue,
-    label: 'Sort: A–Z',
-    selected: current == ChannelSortMode.alpha,
-  ),
-];
-
 class _ChannelSection extends StatelessWidget {
   final String title;
+
+  /// The sort and filter group key, such as `channels` or `dms`.
+  final String group;
   final bool expanded;
   final VoidCallback onToggle;
   final List<Channel> channels;
-  final Set<String> unreadChannelIds;
-  final Set<String> attentionChannelIds;
-  final Set<String> mutedChannelIds;
-  final String? currentPubkey;
+  final bool Function(Channel) isVisible;
+  final SectionChatRowBuilder buildRow;
+  final Widget Function(Channel) buildDetail;
+  final int? previewLimit;
   final String emptyLabel;
   final ChannelSortMode? sortMode;
   final ValueChanged<ChannelSortMode>? onSortModeChange;
-  final Future<void> Function(Channel channel) onSelectChannel;
 
   const _ChannelSection({
     super.key,
     required this.title,
+    required this.group,
     required this.expanded,
     required this.onToggle,
     required this.channels,
-    required this.unreadChannelIds,
-    required this.attentionChannelIds,
-    required this.mutedChannelIds,
-    required this.currentPubkey,
+    required this.isVisible,
+    required this.buildRow,
+    required this.buildDetail,
+    required this.previewLimit,
     required this.emptyLabel,
     this.sortMode,
     this.onSortModeChange,
-    required this.onSelectChannel,
   });
 
   @override
@@ -395,62 +360,106 @@ class _ChannelSection extends StatelessWidget {
       SliverToBoxAdapter(
         child: _SectionHeader(
           label: title,
+          group: group,
           expanded: expanded,
           onToggle: onToggle,
           sortMode: sortMode,
           onSortModeChange: onSortModeChange,
         ),
       ),
-      CollapsibleSliverBody(
+      _SectionChannelsBody(
+        sectionKey: group,
+        title: title,
+        buildDetail: buildDetail,
+        previewLimit: previewLimit,
         expanded: expanded,
-        sliver: channels.isEmpty
-            ? SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.only(
-                    left: _kChannelLabelInset,
-                    right: _kChannelSectionInset,
-                    top: Grid.half,
-                    bottom: Grid.half,
-                  ),
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      emptyLabel,
-                      style: contentListBodyTextStyle.copyWith(
-                        color: context.colors.onSurfaceVariant.withValues(
-                          alpha: 0.65,
-                        ),
-                      ),
-                    ),
+        channels: channels,
+        isVisible: isVisible,
+        emptySliver: SliverToBoxAdapter(
+          child: Padding(
+            padding: EdgeInsets.only(
+              left: MessagesSectionOptions.leadingInset(context),
+              right: _kChannelSectionInset,
+              top: Grid.half,
+              bottom: Grid.half,
+            ),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                emptyLabel,
+                style: contentListBodyTextStyle.copyWith(
+                  color: context.colors.onSurfaceVariant.withValues(
+                    alpha: 0.65,
                   ),
                 ),
-              )
-            : SliverList.builder(
-                itemCount: channels.length,
-                findChildIndexCallback: (key) {
-                  final index = channels.indexWhere(
-                    (c) => ValueKey(c.id) == key,
-                  );
-                  return index < 0 ? null : index;
-                },
-                itemBuilder: (context, index) {
-                  final channel = channels[index];
-                  return _ChannelTile(
-                    key: ValueKey(channel.id),
-                    channel: channel,
-                    isUnread: unreadChannelIds.contains(channel.id),
-                    hasAttention: attentionChannelIds.contains(channel.id),
-                    isMuted: mutedChannelIds.contains(channel.id),
-                    currentPubkey: currentPubkey,
-                    onTap: () => onSelectChannel(channel),
-                    onMarkRead: null,
-                    sectionId: null,
-                  );
-                },
               ),
+            ),
+          ),
+        ),
+        buildRow: buildRow,
       ),
     ],
   );
+}
+
+class _SectionChannelsBody extends StatelessWidget {
+  final String title;
+  final String sectionKey;
+  const _SectionChannelsBody({
+    required this.sectionKey,
+    required this.title,
+    required this.expanded,
+    required this.channels,
+    required this.isVisible,
+    required this.buildRow,
+    required this.buildDetail,
+    required this.previewLimit,
+    this.emptySliver,
+  });
+
+  final bool expanded;
+  final List<Channel> channels;
+  final bool Function(Channel) isVisible;
+  final SectionChatRowBuilder buildRow;
+  final Widget Function(Channel) buildDetail;
+  final int? previewLimit;
+  final Widget? emptySliver;
+
+  @override
+  Widget build(BuildContext context) {
+    final messages = MessagesSectionOptions.active(context);
+    final matching = channels.where(isVisible).toList();
+    final displayed = matching.take(previewLimit ?? matching.length).toList();
+    final hiddenCount = channels.length - displayed.length;
+    return CollapsibleSliverBody(
+      expanded: expanded,
+      sliver: channels.isEmpty && emptySliver != null
+          ? emptySliver!
+          : SliverList.builder(
+              itemCount: displayed.length + (hiddenCount == 0 ? 0 : 1),
+              findChildIndexCallback: (key) {
+                final index = displayed.indexWhere(
+                  (c) => key is ValueKey<String> && c.id == key.value,
+                );
+                return index < 0 ? null : index;
+              },
+              itemBuilder: (context, index) {
+                if (index < displayed.length) {
+                  return buildRow(displayed[index]);
+                }
+                return SectionShowMore(
+                  liveContent: (ref) =>
+                      _watchSectionChats(ref, sectionKey, title, messages),
+                  leadingInset: MessagesSectionOptions.leadingInset(context),
+                  buildRow: buildRow,
+                  title: title,
+                  channels: channels,
+                  buildDetail: buildDetail,
+                );
+              },
+            ),
+    );
+  }
 }
 
 class _EmptyState extends StatelessWidget {
@@ -485,13 +494,17 @@ class _EmptyState extends StatelessWidget {
 
 class _SectionHeader extends StatelessWidget {
   final String label;
+  final String group;
   final bool expanded;
   final VoidCallback onToggle;
   final ChannelSortMode? sortMode;
+
+  /// Null when the sort is read-only; the menu still offers filters.
   final ValueChanged<ChannelSortMode>? onSortModeChange;
 
   const _SectionHeader({
     required this.label,
+    required this.group,
     required this.expanded,
     required this.onToggle,
     this.sortMode,
@@ -500,80 +513,51 @@ class _SectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final sectionColor = navigationHeadingForeground(context);
+    void openOptions(BuildContext buttonContext, ChannelSortMode mode) {
+      showSectionViewSheet(
+        buttonContext,
+        title: label,
+        group: group,
+        sortMode: mode,
+        onSort: (value) => onSortModeChange?.call(value),
+      );
+    }
 
+    final messages = MessagesSectionOptions.active(context);
+    final inset = messages
+        ? Grid.inventoryRowInset
+        : _kSectionHeaderVerticalPadding;
     return GestureDetector(
       onTap: onToggle,
       behavior: HitTestBehavior.opaque,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(
-          Grid.gutter,
-          _kSectionHeaderVerticalPadding,
-          Grid.gutter,
-          _kSectionHeaderVerticalPadding,
+        padding: EdgeInsets.fromLTRB(
+          MessagesSectionOptions.leadingInset(context),
+          messages ? Grid.inventorySectionTopInset : inset,
+          Grid.twelve,
+          inset,
         ),
         child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             Expanded(
-              child: _SectionLabel(
-                label: label,
+              child: Semantics(
+                button: true,
                 expanded: expanded,
-                color: sectionColor,
+                label: label,
+                excludeSemantics: true,
+                onTap: onToggle,
+                child: SectionHeadingLabel(label: label, expanded: expanded),
               ),
             ),
-            if (sortMode case final mode?) ...[
-              if (_usesNativeSectionMenu(context))
-                IosMessageCreateButton(
+            if (sortMode case final mode? when !messages) ...[
+              Builder(
+                builder: (buttonContext) => SectionOptionsButton(
                   key: ValueKey('sort-menu-$label'),
-                  icon: 'more',
-                  accessibilityLabel: '$label options',
-                  width: 44,
-                  height: 44,
-                  plain: true,
-                  iconSize: 14,
-                  foregroundColor: navigationAccessoryForeground(context),
-                  selectedIndex: mode == ChannelSortMode.recent ? 0 : 1,
-                  actions: [
-                    (
-                      label: 'Sort: Recent',
-                      symbol: '',
-                      onPressed: () =>
-                          onSortModeChange?.call(ChannelSortMode.recent),
-                    ),
-                    (
-                      label: 'Sort: A–Z',
-                      symbol: '',
-                      onPressed: () =>
-                          onSortModeChange?.call(ChannelSortMode.alpha),
-                    ),
-                  ],
-                )
-              else
-                Builder(
-                  builder: (buttonContext) => _SectionOptionsButton(
-                    key: ValueKey('sort-menu-$label'),
-                    tooltip: '$label options',
-                    icon: Icon(
-                      BuzzIcons.ellipsis,
-                      size: 14,
-                      color: navigationAccessoryForeground(context),
-                    ),
-                    onPressed: () async {
-                      final value = await showAnchoredPopover<String>(
-                        context: buttonContext,
-                        width: 216,
-                        alignment: AnchoredPopoverAlignment.end,
-                        surfaceKey: ValueKey('sort-popover-$label'),
-                        items: _sortMenuItems(mode, showDivider: false),
-                      );
-                      if (value == _kSortRecentMenuValue) {
-                        onSortModeChange?.call(ChannelSortMode.recent);
-                      } else if (value == _kSortAlphaMenuValue) {
-                        onSortModeChange?.call(ChannelSortMode.alpha);
-                      }
-                    },
-                  ),
+                  tooltip: '$label options',
+                  onPressed: () => openOptions(buttonContext, mode),
                 ),
+              ),
             ],
           ],
         ),
@@ -582,101 +566,24 @@ class _SectionHeader extends StatelessWidget {
   }
 }
 
-class _SectionLabel extends StatelessWidget {
-  const _SectionLabel({
-    required this.label,
-    required this.expanded,
-    required this.color,
-  });
-
-  final String label;
-  final bool expanded;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(top: Grid.xxs),
-    child: Row(
-      children: [
-        Flexible(
-          child: Text(
-            label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: navigationSectionTextStyle.copyWith(
-              color: color,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ),
-        const SizedBox(width: Grid.quarter),
-        _SectionChevron(
-          expanded: expanded,
-          color: navigationAccessoryForeground(context),
-        ),
-      ],
-    ),
-  );
-}
-
-class _SectionChevron extends StatelessWidget {
-  final bool expanded;
-  final Color color;
-
-  const _SectionChevron({required this.expanded, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    final reducedMotion = MediaQuery.of(context).disableAnimations;
-
-    return AnimatedRotation(
-      turns: expanded ? 0 : -0.25,
-      duration: reducedMotion ? Duration.zero : sectionExpandDuration,
-      curve: sectionExpandCurve,
-      child: Icon(BuzzIcons.chevronDown, size: 14, color: color),
-    );
-  }
-}
-
-bool _usesNativeSectionMenu(BuildContext context) =>
-    defaultTargetPlatform == TargetPlatform.iOS &&
-    (DuoToolbarScope.maybeStripOf(context) ?? FoldGeometry.of(context).strip) !=
-        null;
-
-class _SectionOptionsButton extends StatelessWidget {
-  const _SectionOptionsButton({
-    super.key,
-    required this.tooltip,
-    required this.icon,
-    required this.onPressed,
-  });
-
-  final String tooltip;
-  final Widget icon;
+class _MessagesOptionsButton extends StatelessWidget {
+  const _MessagesOptionsButton({required this.onPressed});
   final VoidCallback onPressed;
 
   @override
-  Widget build(BuildContext context) => Semantics(
-    button: true,
-    label: tooltip,
-    onTap: onPressed,
-    excludeSemantics: true,
-    child: Tooltip(
-      message: tooltip,
-      child: SizedBox.square(
-        dimension: 44,
-        child: InkWell(
-          onTap: onPressed,
-          borderRadius: BorderRadius.circular(Radii.full),
-          child: Align(
-            alignment: Alignment.centerRight,
-            child: SizedBox(
-              width: _kChannelIconSize,
-              child: Center(child: icon),
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
+  Widget build(BuildContext context) {
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return IosGlassNavigationButton(
+        icon: IosGlassNavigationIcon.more,
+        semanticLabel: 'Messages options',
+        controlSize: buzzNavigationActionSize,
+        onPressed: onPressed,
+      );
+    }
+    return IconButton(
+      tooltip: 'Messages options',
+      icon: const Icon(BuzzIcons.ellipsis),
+      onPressed: onPressed,
+    );
+  }
 }

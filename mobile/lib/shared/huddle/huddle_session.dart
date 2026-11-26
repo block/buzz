@@ -182,7 +182,7 @@ final huddleSessionProvider =
       HuddleSessionNotifier.new,
     );
 
-/// Owns one foreground mobile Huddle and wires native Opus media to its socket.
+/// Owns one mobile Huddle and wires native Opus media to its socket.
 final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
   HuddleMedia? _media;
   HuddleTransportClient? _transport;

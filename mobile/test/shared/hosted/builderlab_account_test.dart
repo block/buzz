@@ -1,3 +1,4 @@
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/hosted/known_community_sync.dart';
 import '../community/community_storage_test.dart' show FakeSecureStorage;
 import 'dart:async';
@@ -269,6 +270,61 @@ void main() {
     await tester.pump();
     expect((await retry).subject, 'account-1');
   });
+
+  for (final (name, body) in [
+    ('a body that is not JSON', '{"oops"'),
+    ('a body that is not an object', '[]'),
+  ]) {
+    test('$name is reported as an account response error', () async {
+      final reporter = _RecordingDiagnostics();
+      final client = BuilderlabAccountClient(
+        httpClient: MockClient((_) async => http.Response(body, 200)),
+        diagnostics: reporter,
+      );
+      await expectLater(
+        client.exchange(code: 'code', verifier: verifier),
+        throwsA(AccountFailure.invalidResponse),
+      );
+      expect(reporter.errors, [
+        (FormatException, DiagnosticOperation.accountResponse),
+      ]);
+    });
+  }
+
+  // 200 responses that parse but lack what the client requires.
+  for (final (name, exchange, me) in <(String, Object, Object)>[
+    ('an exchange with no credential', <String, Object>{}, <String, Object>{}),
+    (
+      'a session with no subject',
+      {'session_credential': 'secret', 'expires_at': expiry},
+      {'expires_at': expiry},
+    ),
+    (
+      'a session with an unreadable expiry',
+      {'session_credential': 'secret', 'expires_at': expiry},
+      {'subject': 'account-1', 'expires_at': 'soon'},
+    ),
+  ]) {
+    test('$name is reported as an account response error', () async {
+      final reporter = _RecordingDiagnostics();
+      final client = BuilderlabAccountClient(
+        httpClient: MockClient(
+          (request) async => http.Response(
+            jsonEncode(request.url.path.endsWith('/exchange') ? exchange : me),
+            200,
+          ),
+        ),
+        diagnostics: reporter,
+      );
+      await expectLater(
+        client.exchange(code: 'code', verifier: verifier),
+        throwsA(AccountFailure.invalidResponse),
+      );
+      expect(reporter.errors, [
+        (FormatException, DiagnosticOperation.accountResponse),
+      ]);
+    });
+  }
 
   test('invalid verification cannot persist an exchanged credential', () async {
     final transport = MockClient(
@@ -558,6 +614,62 @@ void main() {
     }
   });
 
+  test('a read-only client never removes the session it shares', () async {
+    FlutterSecureStorage.setMockInitialValues({
+      storageKey: record('account-1', 'old'),
+    });
+    final oldChecked = Completer<void>();
+    var revoked = false;
+    http.Response verified() => http.Response(
+      jsonEncode({'subject': 'account-1', 'expires_at': expiry}),
+      200,
+    );
+    final foreground = BuilderlabAccountClient(
+      httpClient: MockClient((request) async {
+        if (request.url.path.endsWith('/exchange')) {
+          return http.Response(
+            jsonEncode({'session_credential': 'new', 'expires_at': expiry}),
+            200,
+          );
+        }
+        return verified();
+      }),
+    );
+    final wake = BuilderlabAccountClient(
+      readOnlySession: true,
+      httpClient: MockClient((request) async {
+        final credential = request.headers['X-BB-Session-Credential'];
+        if (credential == 'old') {
+          await oldChecked.future;
+          return http.Response('{}', 401);
+        }
+        if (request.url.path.endsWith('/me')) {
+          return revoked ? http.Response('{}', 401) : verified();
+        }
+        return http.Response('{}', 401);
+      }),
+    );
+
+    // The user signs in again while the wake's check of the old session is
+    // pending; its rejection must not delete the new one.
+    final restoring = wake.restore();
+    await foreground.exchange(code: 'code', verifier: verifier);
+    oldChecked.complete();
+    expect(await restoring, isNull);
+    expect(jsonDecode((await stored())!)['credential'], 'new');
+
+    // Nor may a request whose session check is rejected.
+    expect((await wake.restore())!.subject, 'account-1');
+    revoked = true;
+    await expectLater(
+      wake.currentIdentity(),
+      throwsA(AccountFailure.signedOut),
+    );
+    expect(wake.account, isNull);
+    expect(jsonDecode((await stored())!)['credential'], 'new');
+    expect(foreground.account!.subject, 'account-1');
+  });
+
   test(
     'unreadable record is a storage failure, not an absent session',
     () async {
@@ -678,4 +790,15 @@ class _SessionStorage extends FlutterSecureStorage {
     await holdDelete;
     await super.delete(key: key);
   }
+}
+
+class _RecordingDiagnostics extends NoopDiagnosticReporter {
+  final errors = <(Type, DiagnosticOperation)>[];
+
+  @override
+  void reportError(
+    Object error,
+    StackTrace? stackTrace, {
+    required DiagnosticOperation operation,
+  }) => errors.add((error.runtimeType, operation));
 }

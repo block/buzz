@@ -15,6 +15,9 @@ import '../../shared/hosted/builderlab_account.dart';
 import '../../shared/hosted/hosted_relay_auth.dart';
 import '../../shared/hosted/native_media_headers.dart';
 import '../../shared/relay/relay_provider.dart';
+import '../../shared/relay/relay_session_types.dart';
+import '../../shared/relay/relay_socket.dart';
+import '../../shared/widgets/buzz_toast.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
@@ -52,19 +55,97 @@ const _pillGlyphSize = 16.0;
 /// [emoji], removes the reaction; otherwise adds it.
 ///
 /// Used by channel detail, thread detail, and system message rows to avoid
-/// duplicating the toggle wiring.
-void toggleReaction(WidgetRef ref, TimelineMessage message, String emoji) {
+/// duplicating the toggle wiring. Takes the page's [ProviderContainer] rather
+/// than a row's ref, so a toggle from a sheet still lands after a new message
+/// rebuilds the row away.
+void toggleReaction(
+  BuildContext context,
+  ProviderContainer container,
+  TimelineMessage message,
+  String emoji,
+) {
   final reaction = message.reactions.where((r) => r.emoji == emoji).firstOrNull;
   if (reaction == null) return;
-  final actions = ref.read(channelActionsProvider);
+  final actions = container.read(channelActionsProvider);
   if (reaction.reactedByCurrentUser && reaction.currentUserReactionId != null) {
-    actions.removeReaction(reaction.currentUserReactionId!, emoji);
+    reportReactionFailure(
+      context,
+      actions.removeReaction(reaction.currentUserReactionId!, emoji),
+      adding: false,
+    );
   } else {
     // Only adding counts as a use — removing a reaction shouldn't promote the
     // emoji in the frequently-used ranking.
-    ref.read(recentEmojiProvider.notifier).record(emoji);
-    actions.addReaction(message.id, emoji, targetAuthor: message.pubkey);
+    container.read(recentEmojiProvider.notifier).record(emoji);
+    reportReactionFailure(
+      context,
+      actions.addReaction(message.id, emoji, targetAuthor: message.pubkey),
+      adding: true,
+    );
   }
+}
+
+/// Tells the user when a reaction they just added or removed didn't reach the
+/// relay. Reaction taps don't wait for the publish, so every caller hands its
+/// publish here; otherwise a failure (most often tapping while offline) is an
+/// uncaught error and the pill just doesn't change.
+///
+/// Only the relay's own outcomes are handled here. Anything else, such as the
+/// signer failing before the event goes out, still escapes as an uncaught
+/// error after its toast, so diagnostics see it with its stack.
+void reportReactionFailure(
+  BuildContext context,
+  Future<void> publish, {
+  required bool adding,
+}) {
+  // An async catch rather than `catchError`: a grouped removal's
+  // `Future.wait` is a `Future<List<void>>` at runtime, whose `catchError`
+  // handler would have to return a list.
+  unawaited(() async {
+    try {
+      await publish;
+    } catch (error, stackTrace) {
+      final message = _reactionFailureMessage(error, adding: adding);
+      if (message != null) {
+        // The native reaction sheet covers Flutter's overlay, so it shows the
+        // notice itself; otherwise a toast shows above any route or sheet.
+        final shown = await NativeMessagePresentation.showNotice(message);
+        if (!shown && context.mounted) {
+          showBuzzToast(context, message, kind: ToastKind.error);
+        }
+      }
+      if (!_isRelayOutcome(error)) {
+        Error.throwWithStackTrace(error, stackTrace);
+      }
+    }
+  }());
+}
+
+bool _isRelayOutcome(Object error) =>
+    error is RelayNotConnectedError ||
+    error is RelayAckTimeoutError ||
+    error is RelayAckLostError ||
+    error is RelayEventRejectedException;
+
+/// What to tell the user about a failed reaction publish, or null when it
+/// isn't a failure. A lost or late acknowledgement may follow the relay
+/// accepting it, so those say "not confirmed": "Try again" there could have
+/// the user undo a reaction that landed.
+String? _reactionFailureMessage(Object error, {required bool adding}) {
+  final verb = adding ? 'add' : 'remove';
+  final action = adding ? 'Reaction' : 'Removal';
+  return switch (error) {
+    // The relay already has this exact reaction, as after a double tap or
+    // re-picking one of your reactions from the picker.
+    RelayEventRejectedException(:final message)
+        when message.startsWith('duplicate:') =>
+      null,
+    RelayNotConnectedError() => 'Couldn’t $verb reaction. No connection.',
+    RelayAckTimeoutError() =>
+      "$action not confirmed. The relay didn't respond.",
+    RelayAckLostError() => '$action not confirmed. Connection lost.',
+    _ => 'Couldn’t $verb reaction. Try again.',
+  };
 }
 
 /// Arm a burst for a reaction that is about to be added from somewhere the pill
@@ -73,34 +154,63 @@ void toggleReaction(WidgetRef ref, TimelineMessage message, String emoji) {
 /// Pill taps don't go through here: they burst immediately, because the pill is
 /// already on screen. Adding a reaction you already have is a no-op on the
 /// relay, so it shouldn't celebrate either.
-void armReactionBurst(WidgetRef ref, TimelineMessage message, String emoji) {
+void armReactionBurst(
+  ProviderContainer container,
+  TimelineMessage message,
+  String emoji,
+) {
   final alreadyReacted = message.reactions.any(
     (reaction) => reaction.emoji == emoji && reaction.reactedByCurrentUser,
   );
   if (alreadyReacted) return;
-  ref.read(pendingReactionBurstProvider.notifier).arm(message.id, emoji);
+  container.read(pendingReactionBurstProvider.notifier).arm(message.id, emoji);
 }
 
-/// Open the emoji picker and add whatever the user chooses as a reaction to
-/// [message].
+/// Returns a check that a reaction picked later still belongs to the community
+/// that was active now.
+///
+/// A notification can switch the active community while a picker is open. The
+/// picked reaction targets a message from the old one, so it is dropped rather
+/// than signed by the new account.
+bool Function() captureReactionCommunity(ProviderContainer container) {
+  final opened = container.read(relayConfigProvider);
+  return () => container.read(relayConfigProvider).isSameCommunity(opened);
+}
+
+/// Returns the callback for a row's `+` that opens the emoji picker and adds
+/// whatever the user chooses as a reaction to [message].
 ///
 /// Shared by the `+` pill in the channel timeline and in the thread view so the
 /// recency bookkeeping and burst arming can't drift apart between them.
-void showAddReactionPicker({
+///
+/// Call it while the row builds. A new message can rebuild the row away before
+/// the callback runs or while the picker is open, so it holds the page's
+/// container and navigator rather than the row's context.
+VoidCallback addReactionPickerFor({
   required BuildContext context,
-  required WidgetRef ref,
   required TimelineMessage message,
 }) {
-  showEmojiPicker(
-    context: context,
-    onSelect: (emoji) {
-      ref.read(recentEmojiProvider.notifier).record(emoji);
-      armReactionBurst(ref, message, emoji);
-      ref
-          .read(channelActionsProvider)
-          .addReaction(message.id, emoji, targetAuthor: message.pubkey);
-    },
-  );
+  final container = ProviderScope.containerOf(context, listen: false);
+  final navigator = Navigator.of(context);
+  return () {
+    if (!navigator.mounted) return;
+    final stillCurrent = captureReactionCommunity(container);
+    showEmojiPicker(
+      context: navigator.context,
+      onSelect: (emoji) {
+        if (!stillCurrent()) return;
+        container.read(recentEmojiProvider.notifier).record(emoji);
+        armReactionBurst(container, message, emoji);
+        reportReactionFailure(
+          navigator.context,
+          container
+              .read(channelActionsProvider)
+              .addReaction(message.id, emoji, targetAuthor: message.pubkey),
+          adding: true,
+        );
+      },
+    );
+  };
 }
 
 class ReactionRow extends HookWidget {
@@ -502,12 +612,27 @@ Future<void> showReactionDetailSheet({
   VoidCallback? onAddReaction,
 }) async {
   if (reactions.value.isEmpty) return;
+  // A notification can switch community while the sheet is up (or while the
+  // native tray dismisses); nothing picked here may go out as the new account.
+  final stillCurrent = captureReactionCommunity(
+    ProviderScope.containerOf(context, listen: false),
+  );
+  void guardedToggle(String emoji) {
+    if (stillCurrent()) onToggle(emoji);
+  }
+
+  final add = onAddReaction;
+  final guardedAdd = add == null
+      ? null
+      : () {
+          if (stillCurrent()) add();
+        };
   if (await _showNativeReactionDetails(
     context,
     channelId,
     reactions,
-    onToggle,
-    onAddReaction,
+    guardedToggle,
+    guardedAdd,
   )) {
     return;
   }
@@ -532,8 +657,8 @@ Future<void> showReactionDetailSheet({
         return _ReactionDetailSheet(
           channelId: channelId,
           reactions: value,
-          onToggle: onToggle,
-          onAddReaction: onAddReaction,
+          onToggle: guardedToggle,
+          onAddReaction: guardedAdd,
         );
       },
     ),
@@ -917,7 +1042,7 @@ Future<bool> _showNativeReactionDetails(
       updateReactions();
     }());
     try {
-      final sheetColors = utilitySurfaceThemeData(theme).colorScheme;
+      final sheetColors = utilitySheetThemeData(theme).colorScheme;
       final pending = NativeMessagePresentation.present('reactions', {
         'requestId': requestId,
         'sheetColor': sheetColors.surface.toARGB32(),
@@ -944,6 +1069,8 @@ Future<bool> _showNativeReactionDetails(
       paletteSubscription.close();
     }
   });
-  if (addRequested && context.mounted) onAddReaction?.call();
+  // The row may be gone after the native tray's dismissal animation; the
+  // callback holds what it needs, so an Add the user tapped still opens.
+  if (addRequested) onAddReaction?.call();
   return handled;
 }

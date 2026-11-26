@@ -60,12 +60,13 @@ final class NativeChannelActionsSheetCoordinator: NSObject, UIAdaptivePresentati
         let content = NativeChannelContentController(flutter: flutter, data: data)
         content.close = { [weak self] in self?.finish(nil) }
         let navigation = UINavigationController(rootViewController: content)
-        navigation.modalPresentationStyle = .formSheet
+        let isPhone = presenter.traitCollection.userInterfaceIdiom == .phone && presenter.traitCollection.horizontalSizeClass == .compact
+        navigation.modalPresentationStyle = isPhone ? .pageSheet : .formSheet
         navigation.overrideUserInterfaceStyle = data["dark"] as? Bool == true ? .dark : .light
         navigation.preferredContentSize = CGSize(width: 540, height: max(320, presenter.view.bounds.height - 48))
         navigation.sheetPresentationController?.detents = [.large()]
         #if canImport(UIKit, _version: 9127.0.85)
-        if #available(iOS 27.0, *) { navigation.sheetPresentationController?.preferredPlacement = .center }
+        if #available(iOS 27.0, *), !isPhone { navigation.sheetPresentationController?.preferredPlacement = .center }
         #endif
         self.navigation = navigation
         let timeout = DispatchWorkItem { [weak self] in
@@ -110,7 +111,6 @@ final class NativeChannelActionsSheetCoordinator: NSObject, UIAdaptivePresentati
           self.contentChannel?.invokeMethod("update", arguments: self.payload)
           self.needsContentUpdate = false
         }
-        (self.navigation?.viewControllers.first as? NativeChannelContentController)?.reveal()
         reply(nil)
       case "select":
         reply(nil)
@@ -162,7 +162,6 @@ private final class NativeChannelContentController: UIViewController {
   var close: (() -> Void)?
   private let flutter: FlutterViewController
   private let background: UIColor
-  private let loading = UIActivityIndicatorView(style: .medium)
   // Flutter scrollables receive raw touches, not UIScrollView pan recognizers.
   // Claim drags in the content without cancelling those touches, so UIKit's
   // sheet pan waits instead of moving the sheet or cancelling Flutter's drag.
@@ -172,7 +171,8 @@ private final class NativeChannelContentController: UIViewController {
   init(flutter: FlutterViewController, data: [String: Any]) {
     self.flutter = flutter
     let colors = data["colors"] as? [String: Any]
-    let argb = (colors?["container"] as? NSNumber)?.uint32Value ?? 0xfff2f2f7
+    let surfaceKey = data["dark"] as? Bool == true ? "control" : "container"
+    let argb = (colors?[surfaceKey] as? NSNumber)?.uint32Value ?? 0xfff2f2f7
     background = UIColor(red: CGFloat((argb >> 16) & 255) / 255,
                          green: CGFloat((argb >> 8) & 255) / 255,
                          blue: CGFloat(argb & 255) / 255,
@@ -205,13 +205,7 @@ private final class NativeChannelContentController: UIViewController {
       flutter.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
     ])
     flutter.didMove(toParent: self)
-    loading.translatesAutoresizingMaskIntoConstraints = false
-    view.addSubview(loading)
-    NSLayoutConstraint.activate([
-      loading.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-      loading.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-    ])
-    loading.startAnimating()
+
   }
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
@@ -229,5 +223,4 @@ private final class NativeChannelContentController: UIViewController {
     }
   }
 
-  func reveal() { loading.stopAnimating() }
 }

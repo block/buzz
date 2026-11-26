@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
@@ -154,6 +155,96 @@ void main() {
       expect(auth.backgrounds.last, isTrue);
     },
   );
+
+  test('a tombstone refusal reports only while its community or no one is '
+      'the member reports name', () async {
+    // After the active community is removed, reports name the next one while
+    // the outbox still publishes the removed community's tombstone.
+    final overrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = overrides);
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    final origin = 'ws://127.0.0.1:${server.port}';
+    server.listen((request) async {
+      if (WebSocketTransformer.isUpgradeRequest(request)) {
+        final socket = await WebSocketTransformer.upgrade(request);
+        socket.add(jsonEncode(['AUTH', 'challenge']));
+        socket.listen((message) {
+          final frame = jsonDecode(message as String) as List<dynamic>;
+          final event = frame[1] as Map<String, dynamic>;
+          final accepted = frame.first == 'AUTH';
+          socket.add(
+            jsonEncode([
+              'OK',
+              event['id'],
+              accepted,
+              accepted ? '' : 'invalid: bad signature',
+            ]),
+          );
+        });
+        return;
+      }
+      request.response
+        ..headers.contentType = ContentType('application', 'nostr+json')
+        ..write(
+          jsonEncode(_descriptorJson(origin, nostr.Keys.generate().public)),
+        )
+        ..close();
+    });
+    final auth = _AssertingRelayAuth();
+    addTearDown(auth.dispose);
+    final record = BuzzPushLeaseRevocationRecord(
+      relayUrl: 'http://127.0.0.1:${server.port}',
+      relayOrigin: origin,
+      memberPubkey: keys.public,
+      nsec: keys.nsec,
+      installationId: 'c' * 32,
+      generation: 7,
+      expiresAt: null,
+      attemptCount: 0,
+      nextAttemptAt: 0,
+    );
+
+    final diagnostics = _RecordingDiagnostics()
+      ..setMember(nostr.Keys.generate().public);
+    await expectLater(
+      publishBuzzPushLeaseRevocation(
+        record,
+        relayAuth: auth,
+        diagnostics: diagnostics,
+      ),
+      throwsA(anything),
+    );
+    expect(diagnostics.operations, isEmpty);
+
+    diagnostics.setMember(keys.public);
+    await expectLater(
+      publishBuzzPushLeaseRevocation(
+        record,
+        relayAuth: auth,
+        diagnostics: diagnostics,
+      ),
+      throwsA(anything),
+    );
+    expect(diagnostics.operations, [DiagnosticOperation.relayRejection]);
+
+    // With no member set, as after the last community is removed, the report
+    // carries the install identifier.
+    diagnostics.setMember(null);
+    await expectLater(
+      publishBuzzPushLeaseRevocation(
+        record,
+        relayAuth: auth,
+        diagnostics: diagnostics,
+      ),
+      throwsA(anything),
+    );
+    expect(diagnostics.operations, [
+      DiagnosticOperation.relayRejection,
+      DiagnosticOperation.relayRejection,
+    ]);
+  });
 
   test('community removal journals one precise lease address', () async {
     final outbox = _outbox(
@@ -479,6 +570,24 @@ BuzzPushEndpointGrant _grant({required int expiresAt}) => BuzzPushEndpointGrant(
   generation: 1,
   expiresAt: expiresAt,
 );
+
+class _RecordingDiagnostics extends NoopDiagnosticReporter {
+  final operations = <DiagnosticOperation>[];
+  String? _member;
+
+  @override
+  String? get member => _member;
+
+  @override
+  void setMember(String? pubkey) => _member = pubkey;
+
+  @override
+  void reportError(
+    Object error,
+    StackTrace? stackTrace, {
+    required DiagnosticOperation operation,
+  }) => operations.add(operation);
+}
 
 class _Clock {
   _Clock(this.seconds);

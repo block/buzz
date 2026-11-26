@@ -42,7 +42,6 @@ class _IOSAttachmentPopoverCoordinator {
   Future<bool> present({
     required Object owner,
     required BuildContext sourceContext,
-    required BuildContext composerContext,
     required Future<void> Function(XFile image) onCapture,
     required Future<void> Function(List<XFile> photos) onChoosePhotos,
     required VoidCallback onAllPhotos,
@@ -81,7 +80,7 @@ class _IOSAttachmentPopoverCoordinator {
       }
       if (!identical(_activeOwner, owner)) return false;
       final supported = supportResult == true;
-      if (!supported || !sourceContext.mounted || !composerContext.mounted) {
+      if (!supported || !sourceContext.mounted) {
         _clearOwner(owner);
         return false;
       }
@@ -92,15 +91,6 @@ class _IOSAttachmentPopoverCoordinator {
         return false;
       }
       final origin = renderObject.localToGlobal(Offset.zero);
-      final composerBox = composerContext.findRenderObject();
-      final isDuo =
-          (DuoToolbarScope.maybeOf(composerContext)?.strip ??
-              FoldGeometry.of(composerContext).strip) !=
-          null;
-      final cameraCenterX =
-          isDuo && composerBox is RenderBox && composerBox.hasSize
-          ? composerBox.localToGlobal(Offset(composerBox.size.width / 2, 0)).dx
-          : null;
 
       _didPresent = true;
       final didPresent =
@@ -109,7 +99,6 @@ class _IOSAttachmentPopoverCoordinator {
             'y': origin.dy,
             'width': renderObject.size.width,
             'height': renderObject.size.height,
-            'cameraCenterX': ?cameraCenterX,
           }) ??
           false;
       if (!identical(_activeOwner, owner)) return false;
@@ -200,7 +189,6 @@ class _IOSAttachmentPopoverController {
 
   Future<bool> present({
     required BuildContext sourceContext,
-    required BuildContext composerContext,
     required Future<void> Function(XFile image) onCapture,
     required Future<void> Function(List<XFile> photos) onChoosePhotos,
     required VoidCallback onAllPhotos,
@@ -210,7 +198,6 @@ class _IOSAttachmentPopoverController {
   }) => _iosAttachmentPopoverCoordinator.present(
     owner: this,
     sourceContext: sourceContext,
-    composerContext: composerContext,
     onCapture: onCapture,
     onChoosePhotos: onChoosePhotos,
     onAllPhotos: onAllPhotos,

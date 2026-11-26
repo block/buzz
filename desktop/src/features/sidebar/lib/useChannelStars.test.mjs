@@ -29,7 +29,7 @@ test("same-second star and unstar mutations survive at capacity", async () => {
   const originalSubscribeLive = relayClient.subscribeLive;
   const originalSubscribeToReconnects = relayClient.subscribeToReconnects;
   const originalDateNow = Date.now;
-  const updatedAt = 1_234_567;
+  const updatedAt = 1_790_000_000;
   Date.now = () => updatedAt * 1_000;
   relayClient.fetchEvents = async () => [];
   relayClient.subscribeLive = async () => async () => {};
@@ -65,8 +65,15 @@ test("same-second star and unstar mutations survive at capacity", async () => {
       );
       assert.deepEqual(persisted.channels["a-target"], {
         starred: expectedStarred,
-        updatedAt,
+        updatedAt: updatedAt * 1_000,
       });
+      const reverse = expectedStarred ? "unstarChannel" : "starChannel";
+      act(() => result.current[reverse]("a-target"));
+      assert.deepEqual(readChannelStarsStore(pubkey).channels["a-target"], {
+        starred: !expectedStarred,
+        updatedAt: updatedAt * 1_000 + 1,
+      });
+      assert.equal(persisted.channels["z-channel-499"].updatedAt, updatedAt);
       unmount();
     }
   } finally {

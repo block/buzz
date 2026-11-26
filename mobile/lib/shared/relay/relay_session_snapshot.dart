@@ -24,11 +24,17 @@ extension on RelaySessionNotifier {
       }
     }
 
-    Future<http.Response> send(http.Request request, int maxBytes) async {
+    // Only the `/query` POST is a [RelayCall.query]; the discovery GET is not.
+    Future<http.Response> send(
+      http.Request request,
+      int maxBytes, {
+      bool query = false,
+    }) async {
       final response = await _httpQueryClient.sendBounded(
         request,
         maxBytes: maxBytes,
         timeout: timeout,
+        call: query ? RelayCall.query : null,
         decorate: (client, active) => HostedRelayHttpClient(
           _snapshotAuth,
           config,
@@ -45,7 +51,9 @@ extension on RelaySessionNotifier {
           maxInflatedBytes: maxBytes,
         );
         _activateRateLimitGateFromHttpError(text);
-        throw RelayException(response.statusCode, text);
+        throw query
+            ? RelayQueryException(response.statusCode, text)
+            : RelayException(response.statusCode, text);
       }
       return response;
     }
@@ -91,16 +99,48 @@ extension on RelaySessionNotifier {
           nsec: nsec,
         ),
       });
-    final response = await send(request, readStateSnapshotMaxEnvelopeBytes);
+    final response = await send(
+      request,
+      readStateSnapshotMaxEnvelopeBytes,
+      query: true,
+    );
     // Inflating, parsing and Schnorr verification must not block Flutter's
     // UI isolate.
-    final events = await _snapshotDecoder((
-      bytes: response.bodyBytes,
-      contentType: response.headers['content-type'],
-      viewer: viewer,
-      community: community,
-    ));
+    final List<NostrEvent> events;
+    try {
+      events = await _snapshotDecoder((
+        bytes: response.bodyBytes,
+        contentType: response.headers['content-type'],
+        viewer: viewer,
+        community: community,
+      ));
+    } catch (error, stackTrace) {
+      // A retired session reports that, not whatever its bytes decoded to.
+      checkContext();
+      _diagnostics.reportError(
+        error,
+        stackTrace,
+        operation: DiagnosticOperation.relayQuery,
+      );
+      rethrow;
+    }
     checkContext();
     return events;
+  }
+
+  void _activateRateLimitGateFromHttpError(String body) {
+    final dynamic decoded;
+    try {
+      decoded = jsonDecode(body);
+    } on FormatException {
+      return;
+    }
+    if (decoded is! Map<String, dynamic>) return;
+    final message = decoded['error'];
+    if (message is! String ||
+        classifyRelayClosed(message) != RelayClosedClass.rateLimited) {
+      return;
+    }
+    _rateLimitGate.activate(parseRateLimitRetrySeconds(message));
   }
 }

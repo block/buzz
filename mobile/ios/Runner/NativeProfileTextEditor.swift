@@ -7,6 +7,7 @@ import UIKit
 final class NativeProfileTextEditorCoordinator: NSObject,
   UIAdaptivePresentationControllerDelegate
 {
+  private let sectionEmojiChannel: FlutterMethodChannel
   private let channel: FlutterMethodChannel
   private weak var parentViewController: UIViewController?
   private weak var presentedController: UIViewController?
@@ -20,6 +21,7 @@ final class NativeProfileTextEditorCoordinator: NSObject,
       name: "buzz/profile_text_editor",
       binaryMessenger: messenger
     )
+    sectionEmojiChannel = FlutterMethodChannel(name: "buzz/section_emoji", binaryMessenger: messenger)
     self.parentViewController = parentViewController
     super.init()
     channel.setMethodCallHandler { [weak self] call, result in
@@ -37,7 +39,7 @@ final class NativeProfileTextEditorCoordinator: NSObject,
       }
       return
     }
-    guard call.method == "present" || call.method == "presentChannel" || call.method == "presentProject" else {
+    guard call.method == "present" || call.method == "presentChannel" || call.method == "presentProject" || call.method == "presentSection" else {
       result(FlutterMethodNotImplemented)
       return
     }
@@ -74,6 +76,7 @@ final class NativeProfileTextEditorCoordinator: NSObject,
         pageBackgroundColor: UIColor(argb: pageBackgroundArgb.uint32Value),
         containerBackgroundColor: UIColor(argb: containerBackgroundArgb.uint32Value),
         containerCornerRadius: CGFloat(containerCornerRadius.doubleValue),
+        requireNonEmpty: arguments["requireNonEmpty"] as? Bool ?? false,
         allowUnchangedSubmission: allowUnchangedSubmission,
         channelDescription: call.method == "presentChannel" ? arguments["description"] as? String : nil,
         originalName: arguments["originalName"] as? String,
@@ -83,6 +86,7 @@ final class NativeProfileTextEditorCoordinator: NSObject,
         canvasContent: arguments["canvasContent"] as? String ?? "",
         canvasLoaded: arguments["canvasLoaded"] as? Bool ?? false,
         isProjectEditor: call.method == "presentProject",
+        sectionEmoji: call.method == "presentSection" ? arguments : nil,
         result: result
       )
     }
@@ -131,6 +135,7 @@ final class NativeProfileTextEditorCoordinator: NSObject,
     pageBackgroundColor: UIColor,
     containerBackgroundColor: UIColor,
     containerCornerRadius: CGFloat,
+    requireNonEmpty: Bool = false,
     allowUnchangedSubmission: Bool,
     channelDescription: String?,
     originalName: String?,
@@ -140,6 +145,7 @@ final class NativeProfileTextEditorCoordinator: NSObject,
     canvasContent: String,
     canvasLoaded: Bool,
     isProjectEditor: Bool,
+    sectionEmoji: [String: Any]?,
     result: @escaping FlutterResult
   ) {
     guard presentedController == nil else {
@@ -175,6 +181,7 @@ final class NativeProfileTextEditorCoordinator: NSObject,
       pageBackgroundColor: pageBackgroundColor,
       containerBackgroundColor: containerBackgroundColor,
       containerCornerRadius: containerCornerRadius,
+      requireNonEmpty: requireNonEmpty,
       allowUnchangedSubmission: allowUnchangedSubmission,
       channelDescription: channelDescription,
       originalName: originalName,
@@ -187,6 +194,13 @@ final class NativeProfileTextEditorCoordinator: NSObject,
       onCancel: { [weak self] in self?.finish(value: nil) },
       onSet: { [weak self] value in self?.finish(value: value) }
     )
+    if let sectionEmoji {
+      editor.configureSectionEmoji(sectionEmoji) { [weak self] completion in
+        self?.sectionEmojiChannel.invokeMethod("choose", arguments: nil) { result in
+          completion(result as? [String: Any])
+        }
+      }
+    }
     let navigationController = UINavigationController(rootViewController: editor)
     navigationController.overrideUserInterfaceStyle = brightness == "dark"
       ? .dark
@@ -281,6 +295,7 @@ final class NativeProfileTextEditorViewController:
   private let pageBackgroundColor: UIColor
   private let containerBackgroundColor: UIColor
   private let containerCornerRadius: CGFloat
+  private let requireNonEmpty: Bool
   private let allowUnchangedSubmission: Bool
   private let onCancel: () -> Void
   private let onSet: (Any) -> Void
@@ -297,6 +312,50 @@ final class NativeProfileTextEditorViewController:
   private let isProjectEditor: Bool
   private var hasFocusedEditor = false
   private var isChannelEditor: Bool { channelDescription != nil }
+
+  private var originalSectionIcon: String?
+  private var sectionIcon = ""
+  private let emojiButton = UIButton(type: .system)
+
+  func configureSectionEmoji(_ initial: [String: Any],
+    choose: @escaping (@escaping ([String: Any]?) -> Void) -> Void) {
+    originalSectionIcon = initial["icon"] as? String ?? ""
+    emojiButton.accessibilityLabel = "Choose section emoji"
+    emojiButton.backgroundColor = containerBackgroundColor
+    emojiButton.layer.cornerRadius = 26
+    emojiButton.titleLabel?.font = .systemFont(ofSize: 24)
+    displaySectionSelection(initial)
+    emojiButton.addAction(UIAction { [weak self] _ in
+      guard let self else { return }
+      self.textField.resignFirstResponder()
+      self.emojiButton.isEnabled = false
+      choose { [weak self] selection in
+        guard let self else { return }
+        self.emojiButton.isEnabled = true
+        if let selection {
+          self.displaySectionSelection(selection)
+          self.updateNavigation()
+        }
+        self.textField.becomeFirstResponder()
+      }
+    }, for: .touchUpInside)
+  }
+
+  private func displaySectionSelection(_ selection: [String: Any]) {
+    sectionIcon = selection["icon"] as? String ?? ""
+    emojiButton.accessibilityValue = sectionIcon.isEmpty ? nil : sectionIcon
+    let custom = sectionIcon.hasPrefix(":") && sectionIcon.hasSuffix(":")
+    var image: UIImage?
+    if let bytes = selection["iconBytes"] as? FlutterStandardTypedData,
+       let source = UIImage(data: bytes.data) {
+      image = source.preparingThumbnail(of: CGSize(width: 26, height: 26))?.withRenderingMode(.alwaysOriginal)
+    }
+    if image == nil && (sectionIcon.isEmpty || custom) {
+      image = UIImage(systemName: custom ? "sparkles" : "face.smiling")
+    }
+    emojiButton.setImage(image, for: .normal)
+    emojiButton.setTitle(image == nil ? sectionIcon : nil, for: .normal)
+  }
 
   private lazy var textField: UITextField = {
     let field = UITextField()
@@ -350,6 +409,7 @@ final class NativeProfileTextEditorViewController:
     pageBackgroundColor: UIColor,
     containerBackgroundColor: UIColor,
     containerCornerRadius: CGFloat,
+    requireNonEmpty: Bool = false,
     allowUnchangedSubmission: Bool,
     channelDescription: String?,
     originalName: String?,
@@ -368,6 +428,7 @@ final class NativeProfileTextEditorViewController:
     self.pageBackgroundColor = pageBackgroundColor
     self.containerBackgroundColor = containerBackgroundColor
     self.containerCornerRadius = containerCornerRadius
+    self.requireNonEmpty = requireNonEmpty
     self.allowUnchangedSubmission = allowUnchangedSubmission
     self.channelDescription = channelDescription
     self.originalName = originalName
@@ -431,6 +492,7 @@ final class NativeProfileTextEditorViewController:
   }
 
   private var hasUnsavedChanges: Bool {
+    if let originalSectionIcon, sectionIcon != originalSectionIcon { return true }
     if isProjectEditor {
       return !currentValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -460,7 +522,7 @@ final class NativeProfileTextEditorViewController:
   }
 
   private func updateNavigation() {
-    navigationItem.rightBarButtonItem?.isEnabled = canEditDetails && hasUnsavedChanges
+    navigationItem.rightBarButtonItem?.isEnabled = canEditDetails && hasUnsavedChanges && validText
       && (!isChannelEditor || !canonicalChannelName.isEmpty)
       && (!isProjectEditor || (
         !currentValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -498,8 +560,12 @@ final class NativeProfileTextEditorViewController:
       .trimmingCharacters(in: .whitespacesAndNewlines)
   }
 
+  private var validText: Bool {
+    !requireNonEmpty || !currentValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
   @objc private func setTapped() {
-    guard canEditDetails && hasUnsavedChanges else { return }
+    guard canEditDetails && hasUnsavedChanges && validText else { return }
     if isProjectEditor {
       let name = currentValue.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !name.isEmpty, currentValue.count <= 120 else { return }
@@ -507,6 +573,8 @@ final class NativeProfileTextEditorViewController:
     } else if isChannelEditor {
       guard !canonicalChannelName.isEmpty else { return }
       onSet(["action": "save", "name": canonicalChannelName, "description": textView.text ?? ""])
+    } else if originalSectionIcon != nil {
+      onSet(["name": currentValue, "icon": sectionIcon])
     } else {
       onSet(currentValue)
     }
@@ -608,6 +676,29 @@ final class NativeProfileTextEditorViewController:
         placeholderLabel.topAnchor.constraint(equalTo: textView.topAnchor),
       ])
       placeholderLabel.isHidden = !textView.text.isEmpty
+    } else if originalSectionIcon != nil {
+      cell.backgroundColor = .clear
+      cell.clipsToBounds = false
+      let fieldContainer = UIView()
+      fieldContainer.layer.cornerRadius = containerCornerRadius
+      fieldContainer.layer.cornerCurve = .continuous
+      fieldContainer.backgroundColor = containerBackgroundColor
+      fieldContainer.addSubview(textField)
+      let row = UIStackView(arrangedSubviews: [emojiButton, fieldContainer])
+      row.spacing = 8
+      row.translatesAutoresizingMaskIntoConstraints = false
+      cell.contentView.addSubview(row)
+      NSLayoutConstraint.activate([
+        row.leadingAnchor.constraint(equalTo: cell.contentView.leadingAnchor),
+        row.trailingAnchor.constraint(equalTo: cell.contentView.trailingAnchor),
+        row.topAnchor.constraint(equalTo: cell.contentView.topAnchor),
+        row.bottomAnchor.constraint(equalTo: cell.contentView.bottomAnchor),
+        emojiButton.widthAnchor.constraint(equalTo: row.heightAnchor),
+        textField.leadingAnchor.constraint(equalTo: fieldContainer.leadingAnchor, constant: 16),
+        textField.trailingAnchor.constraint(equalTo: fieldContainer.trailingAnchor, constant: -16),
+        textField.topAnchor.constraint(equalTo: fieldContainer.topAnchor),
+        textField.bottomAnchor.constraint(equalTo: fieldContainer.bottomAnchor),
+      ])
     } else {
       cell.contentView.addSubview(textField)
       NSLayoutConstraint.activate([

@@ -9,6 +9,13 @@ import 'ios_navigation_bar.dart';
 /// The package estimate describes the cover display's taller status cluster.
 const double duoInnerDisplayEstimatedRailClearance = 110;
 
+/// Space above the 44-point controls of an iOS pane header on Duo.
+///
+/// Duo panes report no top safe area, so headers reserve this room below the
+/// window's top edge. The native bar in `IosNavigationBar.swift` uses the same
+/// value.
+const double duoHeaderTopClearance = 24;
+
 /// Whether Duo controls should use the compact cover arrangement.
 bool isCompactDuoWindow(BuildContext context) {
   // Subscribe to resizing even inside a pane whose MediaQuery is narrower.

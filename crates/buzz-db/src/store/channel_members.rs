@@ -10,7 +10,10 @@ use uuid::Uuid;
 use crate::channel::{row_to_channel_record, ChannelRecord};
 use crate::error::{DbError, Result};
 use crate::{AdmittedTx, Db, ReadAt};
-use buzz_core::CommunityId;
+use buzz_core::{
+    kind::{KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS},
+    CommunityId, StoredEvent,
+};
 use buzz_datastore_tracing::datastore_span;
 
 pub use buzz_core::channel::MemberRole;
@@ -33,6 +36,16 @@ pub struct MemberRecord {
     pub invited_by: Option<Vec<u8>>,
     /// When the member was removed, if applicable.
     pub removed_at: Option<DateTime<Utc>>,
+}
+
+/// A conditional role change for an existing Solo member.
+pub struct SoloMemberRoleChange {
+    /// The member whose role is being edited.
+    pub target: nostr::PublicKey,
+    /// The active role the signer saw when confirming.
+    pub expected_role: MemberRole,
+    /// The requested access (admin, participating, or viewing only).
+    pub role: MemberRole,
 }
 
 /// Namespace for the per-channel membership advisory lock. Serializes the
@@ -60,9 +73,34 @@ pub(crate) async fn acquire_channel_membership_lock(
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<()> {
+    take_channel_membership_lock(tx, community_id, channel_id, false).await
+}
+
+/// Take the per-channel membership lock in shared mode: a DM message holds it
+/// while it reads and clears hides, so it never overlaps a hide (which takes
+/// it exclusively) yet never waits on another message.
+pub(crate) async fn acquire_channel_membership_lock_shared(
+    tx: &mut PgConnection,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<()> {
+    take_channel_membership_lock(tx, community_id, channel_id, true).await
+}
+
+async fn take_channel_membership_lock(
+    tx: &mut PgConnection,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    shared: bool,
+) -> Result<()> {
+    let sql = if shared {
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))"
+    } else {
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))"
+    };
     crate::observability::observe_advisory_lock(
         crate::observability::LockType::Membership,
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        sqlx::query(sql)
             .bind(format!(
                 "{CHANNEL_MEMBERSHIP_LOCK_NAMESPACE}{}:{}",
                 community_id.as_uuid(),
@@ -269,8 +307,8 @@ pub async fn lock_channel_memberships_in_transaction<'tx>(
 /// rolls back, so a join cannot commit into a channel archived concurrently.
 /// `FOR UPDATE` would invert the lock order against a membership writer that
 /// key-share locks `channels` after taking the advisory membership lock
-/// ([`ChannelMembershipLocks::insert_auto_membership`]'s channel check, and a
-/// membership INSERT's foreign key while it exists); `FOR NO KEY UPDATE` still
+/// ([`ChannelMembershipLocks::insert_auto_membership`]'s channel check);
+/// `FOR NO KEY UPDATE` still
 /// blocks archive (a non-key update) and a delete, but is compatible with
 /// `KEY SHARE`. Re-reading under the lock is safe: the caller already holds it.
 pub async fn lock_channel_archived_at_in_transaction(
@@ -1658,6 +1696,31 @@ pub async fn get_accessible_channel_ids(
     Ok(ids)
 }
 
+/// Channel IDs split by how a query reaches them: the legacy-type channels
+/// in its implicit scope, and the named-only channels with their type (see
+/// [`get_readable_named_only_channels`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelSet {
+    /// Channels of legacy types ([`buzz_core::channel::LEGACY_CHANNEL_TYPES`]).
+    pub implicit: Vec<Uuid>,
+    /// Channels of every other type, with the type as text.
+    pub named_only: Vec<(Uuid, String)>,
+}
+
+impl FromIterator<(Uuid, String)> for ChannelSet {
+    fn from_iter<I: IntoIterator<Item = (Uuid, String)>>(rows: I) -> Self {
+        let mut set = Self::default();
+        for (id, channel_type) in rows {
+            if buzz_core::channel::LEGACY_CHANNEL_TYPES.contains(&channel_type.as_str()) {
+                set.implicit.push(id);
+            } else {
+                set.named_only.push((id, channel_type));
+            }
+        }
+        set
+    }
+}
+
 /// The member half of [`get_accessible_channel_ids`]: legacy-type channels
 /// where the pubkey is an active member.
 pub async fn get_member_channel_ids(
@@ -1665,28 +1728,43 @@ pub async fn get_member_channel_ids(
     community_id: CommunityId,
     pubkey: &[u8],
 ) -> Result<Vec<Uuid>> {
+    Ok(get_member_channels_read_at(pool, community_id, pubkey)
+        .await?
+        .value
+        .implicit)
+}
+
+/// Every channel where the pubkey is an active member, split by type, with
+/// when its connection was checked out. Its implicit half is
+/// [`get_member_channel_ids`]; its named-only half is the member part of
+/// [`get_readable_named_only_channels`].
+pub async fn get_member_channels_read_at(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkey: &[u8],
+) -> Result<ReadAt<ChannelSet>> {
     let mut connection = crate::observability::acquire_writer(
         pool,
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
-    let sql = format!(
+    let read_at = std::time::Instant::now();
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
         r#"
-        SELECT cm.channel_id
+        SELECT cm.channel_id, c.channel_type::text
         FROM channel_members cm
         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
         WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.removed_at IS NULL
-          AND {member_types}
         "#,
-        member_types = crate::store::channel::legacy_channel_type_sql("c.channel_type"),
-    );
-    // Built only from the constant type list.
-    sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
-        .bind(community_id.as_uuid())
-        .bind(pubkey)
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(Into::into)
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkey)
+    .fetch_all(&mut *connection)
+    .await?;
+    Ok(ReadAt {
+        value: rows.into_iter().collect(),
+        read_at,
+    })
 }
 
 /// The open half of [`get_accessible_channel_ids`]: listed open channels of
@@ -1695,37 +1773,39 @@ pub async fn get_listed_open_channel_ids(
     pool: &PgPool,
     community_id: CommunityId,
 ) -> Result<Vec<Uuid>> {
-    Ok(get_listed_open_channel_ids_read_at(pool, community_id)
+    Ok(get_listed_open_channels_read_at(pool, community_id)
         .await?
-        .value)
+        .value
+        .implicit)
 }
 
-/// [`get_listed_open_channel_ids`], with when its connection was checked out.
-pub async fn get_listed_open_channel_ids_read_at(
+/// Every listed open channel, split by type, with when its connection was
+/// checked out. Its implicit half is [`get_listed_open_channel_ids`]; its
+/// named-only half is the listed part of [`get_readable_named_only_channels`].
+pub async fn get_listed_open_channels_read_at(
     pool: &PgPool,
     community_id: CommunityId,
-) -> Result<ReadAt<Vec<Uuid>>> {
+) -> Result<ReadAt<ChannelSet>> {
     let mut connection = crate::observability::acquire_writer(
         pool,
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
     let read_at = std::time::Instant::now();
-    let sql = format!(
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
         r#"
-        SELECT id
+        SELECT id, channel_type::text
         FROM channels
         WHERE community_id = $1 AND visibility = 'open' AND NOT unlisted AND deleted_at IS NULL
-          AND {open_types}
         "#,
-        open_types = crate::store::channel::legacy_channel_type_sql("channel_type"),
-    );
-    // Built only from the constant type list.
-    let value = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
-        .bind(community_id.as_uuid())
-        .fetch_all(&mut *connection)
-        .await?;
-    Ok(ReadAt { value, read_at })
+    )
+    .bind(community_id.as_uuid())
+    .fetch_all(&mut *connection)
+    .await?;
+    Ok(ReadAt {
+        value: rows.into_iter().collect(),
+        read_at,
+    })
 }
 
 /// Appends the channels of `more` that `ids` lacks.
@@ -1756,7 +1836,9 @@ pub struct ReadableNamedOnlyChannel {
 ///   one also has it through [`get_accessible_channel_ids`]; listing it here
 ///   as well is harmless, since a filter's scope is deduplicated.
 ///
-/// Uncached, so a caller can trust it for a channel the request names. A
+/// Uncached, so a caller can trust it for a channel the request names. With
+/// no names, it is the named-only halves of [`get_member_channels_read_at`] and
+/// [`get_listed_open_channels_read_at`] together, which the relay caches. A
 /// read reaches one only by naming it, or, for system channels, by opting in
 /// to them. The opt-in needs every listed system channel, so those are all
 /// loaded; an unlisted channel is loaded only when named, since a community
@@ -1860,6 +1942,33 @@ pub async fn named_only_channels_among(
         crate::store::channel::legacy_channel_type_sql("channel_type")
     );
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(community_id.as_uuid())
+        .bind(channel_ids)
+        .fetch_all(&mut *connection)
+        .await?)
+}
+
+/// The channels in `channel_ids` the channel directory lists
+/// ([`crate::store::channel::LISTED_CHANNEL_SQL`]). Push lets a non-member's
+/// lease match a mention only in these.
+pub async fn listed_channels_among(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_ids: &[Uuid],
+) -> Result<Vec<Uuid>> {
+    if channel_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let sql = format!(
+        "SELECT id FROM channels WHERE community_id = $1 AND id = ANY($2) AND {}",
+        crate::store::channel::LISTED_CHANNEL_SQL
+    );
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(community_id.as_uuid())
         .bind(channel_ids)
         .fetch_all(&mut *connection)
@@ -2437,6 +2546,164 @@ impl Db {
         .await
     }
 
+    /// Store a signed Solo role command, its membership change, and both
+    /// relay-signed membership lists in one transaction. A duplicate returns
+    /// the stored command with no new lists.
+    #[datastore_span(name = "change_solo_member_role_with_event", system = "postgresql")]
+    pub async fn change_solo_member_role_with_event(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        change: SoloMemberRoleChange,
+        event: &nostr::Event,
+        relay_signer: &nostr::Keys,
+    ) -> Result<(StoredEvent, Vec<StoredEvent>)> {
+        let actor = event.pubkey.to_bytes();
+        let target = change.target.to_bytes();
+        let denied = |reason: &str| DbError::AccessDenied(reason.to_owned());
+        if actor == target || change.expected_role == MemberRole::Owner {
+            return Err(denied("cannot change a Solo owner's role"));
+        }
+        let read_agent_owner = match (change.expected_role, change.role) {
+            (MemberRole::Admin | MemberRole::Member | MemberRole::Bot, MemberRole::Guest) => false,
+            (MemberRole::Admin | MemberRole::Guest, MemberRole::Member)
+            | (MemberRole::Member | MemberRole::Bot | MemberRole::Guest, MemberRole::Admin) => true,
+            _ => return Err(denied("unsupported Solo member role transition")),
+        };
+
+        let mut tx = crate::begin_community_event_write_transaction(
+            &self.pool,
+            community,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
+        // Roster replacement takes its coordinate lock before the membership
+        // lock. Account cleanup takes both list locks in this same order.
+        let relay_pubkey = relay_signer.public_key().to_bytes();
+        let admins_kind = KIND_NIP29_GROUP_ADMINS as i32;
+        let members_kind = KIND_NIP29_GROUP_MEMBERS as i32;
+        for kind in [admins_kind, members_kind] {
+            crate::replaceable::take_replacement_lock(
+                &mut tx,
+                kind,
+                &relay_pubkey,
+                Some(channel_id),
+            )
+            .await?;
+        }
+        lock_channel_for_member_put(&mut tx, channel_id).await?;
+        let (stored, inserted) = crate::event::insert_event_with_thread_metadata_tx(
+            &mut tx,
+            event,
+            Some(channel_id),
+            None,
+        )
+        .await?;
+        if !inserted {
+            tx.rollback().await?;
+            return Ok((stored, Vec::new()));
+        }
+
+        let channel = get_channel_tx(tx.conn(), community, channel_id).await?;
+        if channel.channel_type != "stream"
+            || channel.visibility != "private"
+            || !channel.labels.iter().any(|label| label == "buzz.solo")
+        {
+            return Err(denied("channel is not a Solo chat"));
+        }
+        if channel.archived_at.is_some() {
+            return Err(denied("channel is archived"));
+        }
+        let actor_role = get_active_role_tx(tx.conn(), community, channel_id, &actor).await?;
+        if actor_role.as_deref() != Some(MemberRole::Owner.as_str()) {
+            return Err(denied("only a Solo chat owner may change member roles"));
+        }
+
+        // Only the relay's verified ownership record establishes agent identity.
+        let agent_owner: Option<Vec<u8>> = if read_agent_owner {
+            sqlx::query_scalar(
+                "SELECT agent_owner_pubkey FROM users \
+                 WHERE community_id = $1 AND pubkey = $2 AND agent_owner_pubkey IS NOT NULL",
+            )
+            .bind(community.as_uuid())
+            .bind(target.as_slice())
+            .fetch_optional(tx.conn())
+            .await?
+        } else {
+            None
+        };
+        let role = match change.role {
+            MemberRole::Admin if agent_owner.as_deref() != Some(actor.as_slice()) => {
+                return Err(denied(
+                    "only an agent's owner may grant it Admin in a Solo chat",
+                ))
+            }
+            MemberRole::Member if agent_owner.is_some() => MemberRole::Bot,
+            MemberRole::Member if change.expected_role == MemberRole::Guest => {
+                return Err(denied(
+                    "only a verified agent may move from Viewing only to Participating",
+                ))
+            }
+            role => role,
+        };
+
+        // Update the active row in place. The same channel lock serializes
+        // removal and role writes, and a mismatch never inserts a membership.
+        let affected = sqlx::query(
+            "UPDATE channel_members SET role = $4::member_role \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3 \
+               AND removed_at IS NULL AND role = $5::member_role",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .bind(target.as_slice())
+        .bind(role.as_str())
+        .bind(change.expected_role.as_str())
+        .execute(tx.conn())
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(denied(
+                "membership or role changed; refresh before trying again",
+            ));
+        }
+        crate::insert_mentions_in_transaction(&mut tx, event, Some(channel_id)).await?;
+
+        let members = select_active_members(tx.conn(), community, channel_id).await?;
+        let group_id = channel_id.to_string();
+        let identity = channel.identity();
+        let mut group_state = Vec::with_capacity(2);
+        for (kind, tags) in [
+            (
+                admins_kind,
+                crate::channel::group_admins_tags(&group_id, &identity, &members),
+            ),
+            (
+                members_kind,
+                crate::channel::group_members_tags(&group_id, Some(&identity), &members),
+            ),
+        ] {
+            let tags = tags.map_err(|error| DbError::InvalidData(error.to_string()))?;
+            let (snapshot, inserted) = crate::channel::replace_signed_group_state_under_lock(
+                &mut tx,
+                channel_id,
+                kind,
+                tags,
+                relay_signer,
+            )
+            .await?;
+            if !inserted {
+                return Err(DbError::InvalidData(
+                    "Solo group state replacement failed".into(),
+                ));
+            }
+            group_state.push(snapshot);
+        }
+        tx.commit().await?;
+        Ok((stored, group_state))
+    }
+
     /// Removes a member from a channel.
     #[datastore_span(name = "remove_member", system = "postgresql")]
     pub async fn remove_member(
@@ -2621,35 +2888,29 @@ impl Db {
         get_active_membership_ids_bulk_read_at(&self.pool, community_id, pubkeys, limit).await
     }
 
-    /// Channel IDs where a pubkey is an active member. See [`get_member_channel_ids`].
+    /// Every channel where a pubkey is an active member, split by type, with
+    /// when its connection was checked out. See [`get_member_channels_read_at`].
+    /// The span keeps the name of the read it replaced, so dashboards keep
+    /// their history.
     #[datastore_span(name = "get_member_channel_ids", system = "postgresql")]
-    pub async fn get_member_channel_ids(
+    pub async fn get_member_channels_read_at(
         &self,
         community_id: CommunityId,
         pubkey: &[u8],
-    ) -> Result<Vec<Uuid>> {
-        get_member_channel_ids(&self.pool, community_id, pubkey).await
+    ) -> Result<ReadAt<ChannelSet>> {
+        get_member_channels_read_at(&self.pool, community_id, pubkey).await
     }
 
-    /// A community's listed open channel IDs. See [`get_listed_open_channel_ids`].
-    pub async fn get_listed_open_channel_ids(
-        &self,
-        community_id: CommunityId,
-    ) -> Result<Vec<Uuid>> {
-        Ok(self
-            .get_listed_open_channel_ids_read_at(community_id)
-            .await?
-            .value)
-    }
-
-    /// [`Self::get_listed_open_channel_ids`], with when its connection was
-    /// checked out, for caches that bound staleness from the read.
+    /// Every listed open channel, split by type, with when its connection
+    /// was checked out, for caches that bound staleness from the read. See
+    /// [`get_listed_open_channels_read_at`]. The span keeps the name of the
+    /// read it replaced, so dashboards keep their history.
     #[datastore_span(name = "get_listed_open_channel_ids", system = "postgresql")]
-    pub async fn get_listed_open_channel_ids_read_at(
+    pub async fn get_listed_open_channels_read_at(
         &self,
         community_id: CommunityId,
-    ) -> Result<ReadAt<Vec<Uuid>>> {
-        get_listed_open_channel_ids_read_at(&self.pool, community_id).await
+    ) -> Result<ReadAt<ChannelSet>> {
+        get_listed_open_channels_read_at(&self.pool, community_id).await
     }
 
     /// The channels of non-legacy types a pubkey can read (member, or open
@@ -2685,6 +2946,16 @@ impl Db {
         channel_ids: &[Uuid],
     ) -> Result<Vec<(Uuid, String)>> {
         named_only_channels_among(&self.pool, community_id, channel_ids).await
+    }
+
+    /// The channels in `channel_ids` the channel directory lists.
+    #[datastore_span(name = "listed_channels_among", system = "postgresql")]
+    pub async fn listed_channels_among(
+        &self,
+        community_id: CommunityId,
+        channel_ids: &[Uuid],
+    ) -> Result<Vec<Uuid>> {
+        listed_channels_among(&self.pool, community_id, channel_ids).await
     }
 
     /// Returns large active-channel rosters whose relay-authored snapshots differ.

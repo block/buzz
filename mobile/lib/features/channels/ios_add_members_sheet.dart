@@ -131,7 +131,7 @@ class _IosAddMembersSheetState extends State<IosAddMembersSheet> {
 
   Future<void> _present() async {
     if (!mounted) return;
-    final theme = utilitySurfaceThemeData(Theme.of(context));
+    final theme = utilitySheetThemeData(Theme.of(context));
     try {
       await _channel.invokeMethod<void>('present', {
         ..._state,

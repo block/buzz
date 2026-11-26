@@ -1569,7 +1569,7 @@ mod partition_alert_tests {
 
     const RUNS: &str = "buzz_partition_audit_runs_total";
     const LAST_SUCCESS: &str = "buzz_partition_audit_last_success_timestamp_seconds";
-    const MANAGED_TABLES: [&str; 2] = ["delivery_log", "events"];
+    const MANAGED_TABLES: [&str; 1] = ["events"];
 
     /// Sample value by `table` label for every sample of `metric` in a scrape.
     /// Counters with several `outcome` labels keep the last sample per table.

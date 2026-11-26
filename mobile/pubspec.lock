@@ -1319,6 +1319,22 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.3.8"
+  sentry:
+    dependency: transitive
+    description:
+      name: sentry
+      sha256: "490ff077d819c07511e4b1b07bcdf7117a87c3cb10b55b56081ac0a56d85d467"
+      url: "https://pub.dev"
+    source: hosted
+    version: "10.5.0"
+  sentry_flutter:
+    dependency: "direct main"
+    description:
+      name: sentry_flutter
+      sha256: "67e5cb6b78a5b32036472d75d9b553b8ca7e71d46243b79dc9e3e423945a7d9b"
+      url: "https://pub.dev"
+    source: hosted
+    version: "10.5.0"
   share_plus:
     dependency: "direct main"
     description:
@@ -1500,6 +1516,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.4.0"
+  sqlite3:
+    dependency: "direct main"
+    description:
+      name: sqlite3
+      sha256: "8765980411f9b6733534efe9d014fad0750fa649590598772c04692deb34886b"
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.9.1"
   stack_trace:
     dependency: transitive
     description:
@@ -1861,5 +1885,5 @@ packages:
     source: hosted
     version: "2.2.4"
 sdks:
-  dart: ">=3.11.4 <4.0.0"
+  dart: ">=3.12.0 <4.0.0"
   flutter: ">=3.47.9"

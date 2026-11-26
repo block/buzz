@@ -18,7 +18,6 @@ final class NativeAttachmentPopoverViewController:
   }
 
   private let channel: FlutterMethodChannel
-  private let cameraHorizontalOffset: CGFloat
   private let expandedWidth: CGFloat
   private let maximumMenuHeight: CGFloat
   private let expandedHeight = NativeAttachmentMenuLayout.maximumHeight
@@ -64,12 +63,10 @@ final class NativeAttachmentPopoverViewController:
   init(
     channel: FlutterMethodChannel,
     expandedWidth: CGFloat,
-    cameraHorizontalOffset: CGFloat = 0,
     maximumMenuHeight: CGFloat = NativeAttachmentMenuLayout.maximumHeight
   ) {
     self.channel = channel
     self.expandedWidth = expandedWidth
-    self.cameraHorizontalOffset = cameraHorizontalOffset
     self.maximumMenuHeight = maximumMenuHeight
     super.init(nibName: nil, bundle: nil)
     preferredContentSize = NativeAttachmentMenuLayout.size(
@@ -139,6 +136,16 @@ final class NativeAttachmentPopoverViewController:
     super.viewWillDisappear(animated)
     invalidateCameraCapture()
     stopCamera()
+  }
+
+  override func viewDidDisappear(_ animated: Bool) {
+    super.viewDidDisappear(animated)
+    // Zoom dismissal can finish without the popover delegate callback. Release
+    // the bridge owner when this presentation ends, not when a child covers it.
+    // Programmatic finishes deliver their selected media before notifying.
+    if !isFinishing, isBeingDismissed || presentingViewController == nil {
+      notifyDismissalIfNeeded()
+    }
   }
 
   override func traitCollectionDidChange(
@@ -293,13 +300,17 @@ final class NativeAttachmentPopoverViewController:
     selectionTask = nil
     Self.removeTemporaryFiles(selectedPhotoPaths)
     selectedPhotoPaths = []
-    stopCamera()
+    // Reject pending startup callbacks immediately, but keep the live preview
+    // attached while the outgoing camera surface fades back into the menu.
+    cameraStartupGeneration += 1
+    cameraIsStarting = false
 
     let menu = makeMenuView()
     transition(
       to: .menu,
       content: menu,
       completion: { [weak self] in
+        self?.stopCamera()
         self?.removePhotoPicker()
       }
     )
@@ -342,33 +353,29 @@ final class NativeAttachmentPopoverViewController:
       ? CGSize(width: expandedWidth, height: expandedHeight)
       : menuSize
 
+    // Lay out the destination once at its final size. The glass host clips
+    // it during the morph, so Photos never reflows from menu-sized columns.
     nextView.translatesAutoresizingMaskIntoConstraints = false
     contentHost.addSubview(nextView)
-    NSLayoutConstraint.activate([
+    let fixedSize = [
+      nextView.widthAnchor.constraint(equalToConstant: targetSize.width),
+      nextView.heightAnchor.constraint(equalToConstant: targetSize.height),
+    ]
+    NSLayoutConstraint.activate(fixedSize + [
       nextView.leadingAnchor.constraint(equalTo: contentHost.leadingAnchor),
-      nextView.trailingAnchor.constraint(equalTo: contentHost.trailingAnchor),
-      nextView.topAnchor.constraint(equalTo: contentHost.topAnchor),
       nextView.bottomAnchor.constraint(equalTo: contentHost.bottomAnchor),
     ])
     contentHost.layoutIfNeeded()
-
-    let shouldAnimate = !UIAccessibility.isReduceMotionEnabled
-    // Do not expose embedded surfaces while the popover changes size. In
-    // particular, PHPicker visibly reflows its grid from the compact menu
-    // width to the expanded width if it is allowed to paint during this step.
     nextView.alpha = 0
     visibleContentView = nextView
     surface = nextSurface
 
-    let duration = shouldAnimate ? (isExpanding ? 0.24 : 0.2) : 0
     UIView.animate(
-      withDuration: duration,
+      withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : 0.28,
       delay: 0,
-      options: [
-        .beginFromCurrentState,
-        .allowUserInteraction,
-        .curveEaseInOut,
-      ]
+      usingSpringWithDamping: 0.9,
+      initialSpringVelocity: 0,
+      options: [.beginFromCurrentState, .allowUserInteraction]
     ) {
       self.preferredContentSize = targetSize
       if let popover = self.popoverPresentationController,
@@ -377,33 +384,22 @@ final class NativeAttachmentPopoverViewController:
         popover.sourceRect = NativeAttachmentPopoverAnchorLayout.sourceRect(
           anchorBounds: sourceView.bounds,
           keyboardDismissalOffset: self.keyboardDismissalOffset,
-          isExpanded: isExpanding,
-          horizontalOffset: nextSurface == .camera ? self.cameraHorizontalOffset : 0
+          isExpanded: isExpanding
         )
       }
       previousView?.alpha = 0
+      nextView.alpha = 1
       self.view.layoutIfNeeded()
-    } completion: { _ in
+    } completion: { [weak self] _ in
       previousView?.removeFromSuperview()
-      self.view.layoutIfNeeded()
-
-      let reveal = {
-        UIView.animate(
-          withDuration: shouldAnimate ? 0.14 : 0,
-          delay: 0,
-          options: [
-            .beginFromCurrentState,
-            .allowUserInteraction,
-            .curveEaseOut,
-          ]
-        ) {
-          nextView.alpha = 1
-        } completion: { _ in
-          completion?()
-        }
-      }
-
-      reveal()
+      // An interrupted transition must not finish a later surface's work.
+      guard let self, self.visibleContentView === nextView else { return }
+      NSLayoutConstraint.deactivate(fixedSize)
+      NSLayoutConstraint.activate([
+        nextView.trailingAnchor.constraint(equalTo: self.contentHost.trailingAnchor),
+        nextView.topAnchor.constraint(equalTo: self.contentHost.topAnchor),
+      ])
+      completion?()
     }
   }
 

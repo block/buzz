@@ -55,13 +55,10 @@ class CollapsibleSliverBody extends HookWidget {
         if (value == 0) return const SliverToBoxAdapter();
         return SliverIgnorePointer(
           ignoring: !expanded,
-          sliver: SliverFadeTransition(
-            opacity: animation,
-            sliver: _ClippedSectionSliver(
-              factor: value,
-              expanded: expanded,
-              sliver: child!,
-            ),
+          sliver: _ClippedSectionSliver(
+            factor: value,
+            expanded: expanded,
+            sliver: child!,
           ),
         );
       },
@@ -111,13 +108,6 @@ class _RenderClippedSection extends RenderProxySliver {
     markNeedsSemanticsUpdate();
   }
 
-  double get _scale =>
-      sectionCollapsedScaleY + (1 - sectionCollapsedScaleY) * _factor;
-
-  Matrix4 get _transform => Matrix4.identity()
-    ..translateByDouble(0, -constraints.scrollOffset * (1 - _scale), 0, 1)
-    ..scaleByDouble(1, _scale, 1, 1);
-
   @override
   void performLayout() {
     assert(constraints.axisDirection == AxisDirection.down);
@@ -157,33 +147,8 @@ class _RenderClippedSection extends RenderProxySliver {
       needsCompositing,
       offset,
       Rect.fromLTWH(0, 0, constraints.crossAxisExtent, geometry!.paintExtent),
-      (context, offset) => context.pushTransform(
-        needsCompositing,
-        offset,
-        _transform,
-        (context, offset) => context.paintChild(child!, offset),
-      ),
+      super.paint,
     );
-  }
-
-  @override
-  bool hitTestChildren(
-    SliverHitTestResult result, {
-    required double mainAxisPosition,
-    required double crossAxisPosition,
-  }) => BoxHitTestResult.wrap(result).addWithOutOfBandPosition(
-    paintTransform: _transform,
-    hitTest: (result) => child!.hitTest(
-      SliverHitTestResult.wrap(result),
-      mainAxisPosition:
-          (mainAxisPosition + constraints.scrollOffset * (1 - _scale)) / _scale,
-      crossAxisPosition: crossAxisPosition,
-    ),
-  );
-
-  @override
-  void applyPaintTransform(RenderObject child, Matrix4 transform) {
-    transform.multiply(_transform);
   }
 
   @override

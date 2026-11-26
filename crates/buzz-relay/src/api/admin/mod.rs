@@ -6468,9 +6468,11 @@ mod postgres_tests {
             target_event_id.as_slice(),
             None, // no parent
             None,
+            &nostr::Keys::generate(),
         )
         .await
-        .expect("execute_delete_with_marker");
+        .expect("execute_delete_with_marker")
+        .0;
         assert!(committed, "delete mutation+marker must commit");
 
         // Crash point: step_marker is set but action not yet finalized.

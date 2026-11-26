@@ -27,6 +27,7 @@ pub mod cache_invalidation;
 pub mod conn_control;
 /// The shared Redis command connection.
 pub mod connection;
+mod keepalive;
 pub use connection::{
     redis_connection, RedisConnection, REDIS_CONNECT_TIMEOUT, REDIS_RESPONSE_TIMEOUT,
 };
@@ -61,9 +62,9 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, Notify};
 use crate::cache_invalidation::{
     cache_invalidation_channel, CacheInvalidation, ScopedCacheInvalidation,
 };
-pub use crate::conn_control::NipFiDisconnect;
 use crate::conn_control::{conn_control_channel, ConnControl, ScopedConnControl};
 pub use crate::conn_control::{decode_nip_fi_disconnect, encode_nip_fi_disconnect};
+pub use crate::conn_control::{NipFiDisconnect, NipFiSubscription};
 pub use crate::topic::{channel_key, global_key, EventTopic, EventTopicKey};
 
 /// A Nostr event received on a scoped Redis event topic, broadcast to local subscribers.
@@ -140,6 +141,7 @@ pub struct PubSubManager {
     cache_invalidation_tx: broadcast::Sender<ScopedCacheInvalidation>,
     conn_control_tx: broadcast::Sender<ScopedConnControl>,
     nip_fi_disconnect_tx: broadcast::Sender<NipFiDisconnect>,
+    nip_fi_subscription: watch::Sender<NipFiSubscription>,
     link: watch::Sender<LinkState>,
 }
 
@@ -172,6 +174,7 @@ impl PubSubManager {
             cache_invalidation_tx,
             conn_control_tx,
             nip_fi_disconnect_tx,
+            nip_fi_subscription: watch::Sender::new(NipFiSubscription::default()),
             link: watch::Sender::new(LinkState::default()),
         })
     }
@@ -230,6 +233,7 @@ impl PubSubManager {
         conn_control::run_nip_fi_disconnect_subscriber(
             self.redis_url.clone(),
             self.nip_fi_disconnect_tx.clone(),
+            self.nip_fi_subscription.clone(),
             channels,
         )
         .await;
@@ -361,6 +365,12 @@ impl PubSubManager {
     /// Returns a new broadcast receiver for cross-pod NIP-FI disconnect commands.
     pub fn subscribe_nip_fi_disconnect(&self) -> broadcast::Receiver<NipFiDisconnect> {
         self.nip_fi_disconnect_tx.subscribe()
+    }
+
+    /// Watch the NIP-FI disconnect subscription: every confirmed subscribe
+    /// and every loss bumps its epoch.
+    pub fn watch_nip_fi_subscription(&self) -> watch::Receiver<NipFiSubscription> {
+        self.nip_fi_subscription.subscribe()
     }
 
     /// Publish a cache-key drop to all pods. Fire-and-forget at the call site:

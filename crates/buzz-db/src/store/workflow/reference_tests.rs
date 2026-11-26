@@ -1,6 +1,6 @@
 //! A writer into a workflow table rejects a missing parent in application
-//! code. Each test drops the foreign keys it covers from the per-test database
-//! first, so a pass proves the in-transaction check rather than the constraint.
+//! code. The schema has no foreign keys, so a pass proves the in-transaction
+//! check.
 
 use super::*;
 use crate::user::ensure_user;
@@ -79,11 +79,6 @@ const DEFINITION: &str = r#"{"trigger":{"on":"manual"},"steps":[]}"#;
 #[ignore = "requires Postgres"]
 async fn create_workflow_rejects_missing_owner_or_channel_without_foreign_keys() {
     let (db, community) = setup().await;
-    crate::test_support::drop_foreign_keys_between(
-        &db.pool,
-        &[("workflows", "users"), ("workflows", "channels")],
-    )
-    .await;
     let owner = [0x11; 32];
     let create = |channel: Option<Uuid>, owner: [u8; 32]| {
         let pool = db.pool.clone();
@@ -124,11 +119,6 @@ async fn create_workflow_rejects_missing_owner_or_channel_without_foreign_keys()
 #[ignore = "requires Postgres"]
 async fn upsert_workflow_rejects_missing_owner_or_channel_without_foreign_keys() {
     let (db, community) = setup().await;
-    crate::test_support::drop_foreign_keys_between(
-        &db.pool,
-        &[("workflows", "users"), ("workflows", "channels")],
-    )
-    .await;
     let owner = [0x12; 32];
     let upsert = |channel: Option<Uuid>, owner: [u8; 32]| {
         let pool = db.pool.clone();
@@ -231,8 +221,6 @@ async fn upsert_workflow_rejects_missing_owner_or_channel_without_foreign_keys()
 #[ignore = "requires Postgres"]
 async fn create_workflow_run_rejects_missing_workflow_without_foreign_key() {
     let (db, community) = setup().await;
-    crate::test_support::drop_foreign_keys_between(&db.pool, &[("workflow_runs", "workflows")])
-        .await;
     let owner = [0x13; 32];
 
     assert_not_found(
@@ -283,14 +271,6 @@ async fn create_workflow_run_rejects_missing_workflow_without_foreign_key() {
 #[ignore = "requires Postgres"]
 async fn create_approval_rejects_missing_workflow_or_run_without_foreign_keys() {
     let (db, community) = setup().await;
-    crate::test_support::drop_foreign_keys_between(
-        &db.pool,
-        &[
-            ("workflow_approvals", "workflows"),
-            ("workflow_approvals", "workflow_runs"),
-        ],
-    )
-    .await;
     let owner = [0x14; 32];
     let workflow = new_workflow(&db, community, &owner).await;
     let run = create_workflow_run(
@@ -363,18 +343,13 @@ async fn create_approval_rejects_missing_workflow_or_run_without_foreign_keys() 
 }
 
 /// The owner and channel checks hold `FOR KEY SHARE` on the parent rows, so a
-/// concurrent delete or key update of a parent waits for the writer. The
-/// foreign keys are dropped, so only the explicit lock can block the writer
-/// behind a parent held `FOR UPDATE`.
+/// concurrent delete or key update of a parent waits for the writer. No foreign
+/// key exists, so only the explicit lock can block the writer behind a parent
+/// held `FOR UPDATE`.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn workflow_writers_key_share_lock_owner_and_channel_without_foreign_keys() {
     let (db, community) = setup().await;
-    crate::test_support::drop_foreign_keys_between(
-        &db.pool,
-        &[("workflows", "users"), ("workflows", "channels")],
-    )
-    .await;
     let owner = [0x15; 32];
     ensure_user(&db.pool, community, &owner)
         .await

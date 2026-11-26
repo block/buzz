@@ -63,7 +63,6 @@ pub(super) const CHILDREN: &[Table] = &[
     Table { name:"push_match_queue", key:"jsonb_build_object('event_id',t.event_id)", identity:"event_id=($2->>'event_id')::bytea", selector:"t.event_id=ANY($3::bytea[])" },
     Table { name:"push_wake_outbox", key:"jsonb_build_object('id',t.id)", identity:"id=($2->>'id')::uuid", selector:"t.event_id=ANY($3::bytea[])" },
     Table { name:"operator_listener_outbox", key:"jsonb_build_object('id',t.id)", identity:"id=($2->>'id')::uuid", selector:"t.event_id=ANY($3::bytea[])" },
-    Table { name:"delivery_log", key:"jsonb_build_object('id',t.id,'delivered_at',t.delivered_at)", identity:"id=($2->>'id')::bigint AND delivered_at=($2->>'delivered_at')::timestamptz", selector:"t.event_id=ANY($3::bytea[])" },
 ];
 
 pub(super) async fn collect(

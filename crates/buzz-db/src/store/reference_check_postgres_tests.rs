@@ -1,7 +1,6 @@
 //! Writers that name a channel or a user reject a missing parent in
-//! application code. Each test drops the foreign keys it covers from the
-//! per-test database first, so a pass proves the in-transaction check rather
-//! than the constraint.
+//! application code. The schema has no foreign keys, so a pass proves the
+//! in-transaction check.
 //!
 //! The relay-member references (join-policy acceptances) are covered next to
 //! the removal path they race, in `relay_members.rs`.
@@ -82,8 +81,6 @@ fn assert_not_found<T: std::fmt::Debug>(result: Result<T>, what: &str) {
 #[ignore = "requires Postgres"]
 async fn insert_auto_membership_rejects_missing_channel_without_foreign_key() {
     let (db, community) = setup().await;
-    crate::test_support::drop_foreign_keys_between(&db.pool, &[("channel_members", "channels")])
-        .await;
     let member = [0x41; 32];
     let creator = [0x42; 32];
     let other = new_community(&db).await;
@@ -191,7 +188,7 @@ async fn lock_channel_archived_at_distinguishes_missing_from_not_archived() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn set_agent_owner_rejects_missing_owner_with_and_without_foreign_key() {
+async fn set_agent_owner_rejects_missing_owner_without_foreign_key() {
     let (db, community) = setup().await;
     let agent = [0x51; 32];
     let owner = [0x52; 32];
@@ -209,21 +206,10 @@ async fn set_agent_owner_rejects_missing_owner_with_and_without_foreign_key() {
         .expect("read owner")
     };
 
-    // With the owner foreign key intact the contract is the same: the check
-    // runs before the UPDATE, so a missing owner is `NotFound` rather than a
-    // foreign key violation, and the agent keeps no owner.
-    assert_not_found(
-        set_agent_owner(&db.pool, community, &agent, &owner).await,
-        "owner",
-    );
-    assert_eq!(stored_owner(db.pool.clone(), agent).await, None);
     assert_not_found(
         set_agent_owner(&db.pool, community, &[0x53; 32], &owner).await,
         "agent pubkey",
     );
-
-    // Now the foreign key is gone and the application check stands alone.
-    crate::test_support::drop_foreign_keys_between(&db.pool, &[("users", "users")]).await;
 
     // Unknown owner: refused, and the agent keeps no owner.
     assert_not_found(
@@ -299,8 +285,6 @@ fn thread_meta(event: &nostr::Event, channel: Uuid) -> crate::event::ThreadMetad
 #[ignore = "requires Postgres"]
 async fn thread_metadata_writers_reject_missing_channel_without_foreign_key() {
     let (db, community) = setup().await;
-    crate::test_support::drop_foreign_keys_between(&db.pool, &[("thread_metadata", "channels")])
-        .await;
     let keys = nostr::Keys::generate();
     let other = new_community(&db).await;
     let elsewhere = new_channel(&db, other).await;
@@ -429,8 +413,6 @@ fn new_action(channel_id: Option<Uuid>) -> crate::moderation::NewAction<'static>
 #[ignore = "requires Postgres"]
 async fn moderation_report_rejects_missing_channel_without_foreign_key() {
     let (db, community) = setup().await;
-    crate::test_support::drop_foreign_keys_between(&db.pool, &[("moderation_reports", "channels")])
-        .await;
     let other = new_community(&db).await;
     let elsewhere = new_channel(&db, other).await;
 
@@ -492,8 +474,6 @@ async fn moderation_report_rejects_missing_channel_without_foreign_key() {
 #[ignore = "requires Postgres"]
 async fn moderation_action_rejects_missing_channel_without_foreign_key() {
     let (db, community) = setup().await;
-    crate::test_support::drop_foreign_keys_between(&db.pool, &[("moderation_actions", "channels")])
-        .await;
     let other = new_community(&db).await;
     let elsewhere = new_channel(&db, other).await;
 
@@ -541,8 +521,6 @@ async fn report_state(db: &Db, community: CommunityId, id: Uuid) -> (String, Opt
 #[ignore = "requires Postgres"]
 async fn report_resolution_writers_reject_missing_channel_without_foreign_key() {
     let (db, community) = setup().await;
-    crate::test_support::drop_foreign_keys_between(&db.pool, &[("moderation_actions", "channels")])
-        .await;
     let actor = [0x71; 32];
     let target = [0x72; 32];
     let missing = Uuid::new_v4();
@@ -650,8 +628,6 @@ async fn report_resolution_writers_reject_missing_channel_without_foreign_key() 
 #[ignore = "requires Postgres"]
 async fn direct_action_claim_rejects_missing_channel_without_foreign_key() {
     let (db, community) = setup().await;
-    crate::test_support::drop_foreign_keys_between(&db.pool, &[("moderation_actions", "channels")])
-        .await;
     let actor = [0x81; 32];
     let author = [0x82; 32];
     let event_id = [0x83; 32];
@@ -697,18 +673,13 @@ async fn direct_action_claim_rejects_missing_channel_without_foreign_key() {
 // -- Lock tests ---------------------------------------------------------------
 
 /// The channel and owner checks hold `FOR KEY SHARE` on the parent rows, so a
-/// concurrent delete or key update of a parent waits for the writer. The
-/// foreign keys are dropped, so only the explicit lock can block the writer
-/// behind a parent held `FOR UPDATE`.
+/// concurrent delete or key update of a parent waits for the writer. No foreign
+/// key exists, so only the explicit lock can block the writer behind a parent
+/// held `FOR UPDATE`.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn reference_checks_key_share_lock_parents_without_foreign_keys() {
     let (db, community) = setup().await;
-    crate::test_support::drop_foreign_keys_between(
-        &db.pool,
-        &[("moderation_actions", "channels"), ("users", "users")],
-    )
-    .await;
     let channel = new_channel(&db, community).await;
     let agent = [0x91; 32];
     let owner = [0x92; 32];

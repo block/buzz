@@ -9,6 +9,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
+import '../diagnostics/diagnostic_reporter.dart';
 import '../community/community.dart';
 import 'first_agent_bestie.dart';
 import '../me/default_agent.dart';
@@ -113,6 +114,7 @@ final remoteAgentControllerProvider = Provider<RemoteAgentController>((ref) {
       ref.invalidate(defaultAgentProvider);
     },
     relayAuth: ref.watch(hostedRelayAuthProvider),
+    diagnostics: ref.read(diagnosticReporterProvider),
   );
   ref.onDispose(controller.dispose);
   return controller;
@@ -212,6 +214,7 @@ class RemoteAgentController extends ChangeNotifier {
     required this.account,
     required AccountIdentityStore keys,
     required this.relayAuth,
+    this.diagnostics = const NoopDiagnosticReporter(),
     this.onCreated,
   }) : _keys = keys {
     account.subjectChanges.addListener(_accountChanged);
@@ -220,6 +223,7 @@ class RemoteAgentController extends ChangeNotifier {
   final BuilderlabAccountClient account;
   final AccountIdentityStore _keys;
   final HostedRelayAuth relayAuth;
+  final DiagnosticReporter diagnostics;
 
   /// Completes community preferences before clearing the resumable setup.
   final Future<void> Function(Community community, String pubkey)? onCreated;
@@ -791,6 +795,7 @@ class RemoteAgentController extends ChangeNotifier {
       await submitSignedEventOnce(
         wsUrl: config.wsUrl,
         headers: await relayAuth.headers(config, fresh: true),
+        diagnostics: diagnostics,
         nsec: key.nsec,
         kind: 30177,
         content: jsonEncode({
@@ -814,6 +819,7 @@ class RemoteAgentController extends ChangeNotifier {
         await submitSignedEventOnce(
           wsUrl: config.wsUrl,
           headers: await relayAuth.headers(config, fresh: true),
+          diagnostics: diagnostics,
           nsec: key.nsec,
           kind: 5,
           content: '',

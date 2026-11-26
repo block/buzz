@@ -31,6 +31,7 @@ use crate::relay_members::{write_nip43_membership_snapshot, MembershipWrite};
 use crate::{CommunityId, Db};
 
 mod claim_owner;
+mod manage;
 mod revocation;
 
 /// Test-only pause point in the invite claim, keyed by community so
@@ -85,6 +86,11 @@ pub(crate) mod test_hook {
     }
 }
 pub use claim_owner::{claim_relay_membership_with_owner, MembershipClaimResult};
+use manage::lock_actor_role;
+pub use manage::{
+    list_relay_invites, revoke_relay_invite, InviteSelector, InviteStatus, InviteSummary,
+    RevokedInvite, MAX_INVITE_LIST_LIMIT,
+};
 pub(crate) use revocation::{revoke_banned_issuer_invites, revoke_restricted_agent_invites};
 
 /// Outcome of a v2 invite claim. Expected invalid/expired/exhausted states are
@@ -147,8 +153,8 @@ pub struct MintedInvite {
     /// The full v2 code string (`v2.<base64url secret>`). Returned to the caller
     /// exactly once; the database stores only the SHA-256 hash.
     pub code: String,
-    /// When the invite expires (UTC).
-    pub expires_at: DateTime<Utc>,
+    /// When the invite expires (UTC); `None` for an invite that never expires.
+    pub expires_at: Option<DateTime<Utc>>,
     /// `None` means unlimited; `Some(n)` means at most `n` uses.
     pub max_uses: Option<i32>,
     /// Remaining uses at mint time (equals `max_uses` when bounded, `None`
@@ -247,18 +253,9 @@ async fn mint(
     )
     .await?;
     lock_admission(tx.conn(), community).await?;
-    if require_admin {
-        let role: Option<String> = sqlx::query_scalar(
-            "SELECT role FROM relay_members \
-             WHERE community_id = $1 AND pubkey = $2 FOR SHARE",
-        )
-        .bind(community.as_uuid())
-        .bind(created_by)
-        .fetch_optional(tx.conn())
-        .await?;
-        if !matches!(role.as_deref(), Some("owner" | "admin")) {
-            return Err(crate::DbError::InviteIssuerNotAdmin);
-        }
+    if require_admin && !manage::is_admin(lock_actor_role(tx.conn(), community, created_by).await?)
+    {
+        return Err(crate::DbError::InviteIssuerNotAdmin);
     }
     if principal_restricted(tx.conn(), community, created_by).await? {
         return Err(crate::DbError::InviteRestricted);
@@ -282,7 +279,7 @@ async fn mint(
 
     Ok(MintedInvite {
         code,
-        expires_at,
+        expires_at: Some(expires_at),
         max_uses,
         uses_remaining: max_uses,
         invite_id,
@@ -597,8 +594,9 @@ pub async fn claim_relay_invite_with_owner(
     let invite_id: uuid::Uuid = invite.try_get("id")?;
     let max_uses: Option<i32> = invite.try_get("max_uses")?;
     let use_count: i32 = invite.try_get("use_count")?;
-    let expires_at: DateTime<Utc> = invite.try_get("expires_at")?;
-    if expires_at <= Utc::now() {
+    // `None` never expires; revocation and use limits still apply below.
+    let expires_at: Option<DateTime<Utc>> = invite.try_get("expires_at")?;
+    if expires_at.is_some_and(|at| at <= Utc::now()) {
         tx.rollback().await?;
         log_claim_outcome(
             community,
@@ -961,30 +959,12 @@ mod postgres_tests {
         }
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn mint_after_quiescing_returns_typed_fence_without_persisting() {
-        let scratch =
-            ScratchDb::create(&crate::test_support::database_url(), "relay_invite_fence").await;
-        let db = crate::Db::new(&crate::DbConfig {
-            database_url: scratch.url().to_owned(),
-            max_connections: 5,
-            min_connections: 0,
-            ..crate::DbConfig::default()
-        })
-        .await
-        .expect("connect invite deletion test DB");
-        db.migrate().await.expect("migrate invite deletion test DB");
-        let pool = db.pool.clone();
+    /// Move `community` on `host` into deletion quiescing, where every
+    /// community write is fenced.
+    pub(super) async fn quiesce(db: &crate::Db, host: &str, community: CommunityId) {
         let store = db.deletion_store();
-        let host = format!("relay-invite-fence-{}.example", Uuid::new_v4().simple());
-        let community = db
-            .ensure_configured_community(&host)
-            .await
-            .expect("create fenced invite community")
-            .id;
         let request = store
-            .submit(Some(&host), "owner", None, None)
+            .submit(Some(host), "owner", None, None)
             .await
             .expect("submit deletion request");
         let empty_digest = hex::encode(sha2::Sha256::digest([]));
@@ -1031,6 +1011,30 @@ mod postgres_tests {
             .begin_quiescing(&claim.lease)
             .await
             .expect("begin quiescing");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn mint_after_quiescing_returns_typed_fence_without_persisting() {
+        let scratch =
+            ScratchDb::create(&crate::test_support::database_url(), "relay_invite_fence").await;
+        let db = crate::Db::new(&crate::DbConfig {
+            database_url: scratch.url().to_owned(),
+            max_connections: 5,
+            min_connections: 0,
+            ..crate::DbConfig::default()
+        })
+        .await
+        .expect("connect invite deletion test DB");
+        db.migrate().await.expect("migrate invite deletion test DB");
+        let pool = db.pool.clone();
+        let host = format!("relay-invite-fence-{}.example", Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create fenced invite community")
+            .id;
+        quiesce(&db, &host, community).await;
 
         let error = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
             .await
@@ -1417,3 +1421,6 @@ mod owner_admission_postgres_tests;
 
 #[cfg(test)]
 mod writer_protocol_postgres_tests;
+
+#[cfg(test)]
+mod manage_postgres_tests;
