@@ -1,5 +1,7 @@
 //! Read-only gauges over the `search_outbox` queue: how much is waiting and
-//! how long the oldest change has waited.
+//! how long the oldest change has waited. Only the relay that holds the
+//! indexer lease samples them, so the fleet reads the queue once per
+//! interval, not once per relay.
 //!
 //! - `buzz_search_outbox_depth`: queued rows, counted up to
 //!   [`DEPTH_COUNT_CAP`] so a long outage cannot make the count itself slow;
@@ -13,7 +15,7 @@ use sqlx::PgPool;
 use crate::SearchError;
 
 /// Rows counted at most; a deeper queue reports this value.
-pub const DEPTH_COUNT_CAP: i64 = 1_000_000;
+pub const DEPTH_COUNT_CAP: i64 = 100_000;
 
 /// How often the relay samples the queue.
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(15);

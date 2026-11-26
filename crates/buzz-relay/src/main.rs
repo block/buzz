@@ -51,13 +51,21 @@ async fn connect_audit_pool(config: &DbConfig) -> anyhow::Result<sqlx::PgPool> {
 /// Publish the search outbox's depth and index lag every
 /// [`buzz_search::outbox_metrics::SAMPLE_INTERVAL`], starting at a random
 /// point in the first interval so a fleet restart does not sample in step.
-async fn sample_search_outbox(pool: sqlx::PgPool) {
+/// Only while `leading`: the relay holding the indexer lease samples for
+/// the fleet.
+async fn sample_search_outbox(
+    pool: sqlx::PgPool,
+    leading: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
     let interval = buzz_search::outbox_metrics::SAMPLE_INTERVAL;
     tokio::time::sleep(interval.mul_f64(rand::random::<f64>())).await;
     let mut ticks = tokio::time::interval(interval);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         ticks.tick().await;
+        if !leading.load(std::sync::atomic::Ordering::Relaxed) {
+            continue;
+        }
         if let Err(error) = buzz_search::outbox_metrics::record(&pool).await {
             warn!(error_kind = %error.kind(), "search outbox sample failed");
         }
@@ -1195,9 +1203,10 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     }
 
     if let Some(indexer) = search_indexer {
+        let leading = indexer.leading();
         tokio::spawn(indexer.run());
         info!("search indexer started");
-        tokio::spawn(sample_search_outbox(state.db.pool().clone()));
+        tokio::spawn(sample_search_outbox(state.db.pool().clone(), leading));
     }
 
     // Admin outbox delivery worker — drives `relay_admin_outbox` rows.

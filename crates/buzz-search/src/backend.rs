@@ -217,6 +217,7 @@ pub(crate) async fn primary(
     let result = search.await;
     let outcome = match &result {
         Ok(result) => hits_outcome(query, result),
+        Err(error) if error.is_timeout() => "timeout",
         Err(_) => "error",
     };
     record(engine, "primary", started.elapsed(), outcome);
@@ -231,13 +232,17 @@ async fn shadow(
     query: SearchQuery,
     deadline: Duration,
     postgres: oneshot::Receiver<Option<Vec<[u8; 32]>>>,
-    _permit: OwnedSemaphorePermit,
+    permit: OwnedSemaphorePermit,
 ) {
     let started = Instant::now();
     let outcome = tokio::time::timeout(deadline, index.search(&query)).await;
     let elapsed = started.elapsed();
+    // The slot bounds OpenSearch queries in flight, not Postgres: free it
+    // before waiting for Postgres' hits.
+    drop(permit);
     let (opensearch_outcome, opensearch_hits, error_kind) = match outcome {
         Ok(Ok(result)) => (hits_outcome(&query, &result), Some(top_ids(&result)), None),
+        Ok(Err(error)) if error.is_timeout() => ("timeout", None, Some(error.kind())),
         Ok(Err(error)) => ("error", None, Some(error.kind())),
         Err(_) => ("timeout", None, None),
     };

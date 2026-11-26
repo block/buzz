@@ -332,15 +332,26 @@ impl Recorded {
     }
 }
 
-/// A stand-in for an OpenSearch cluster that accepts connections and either
-/// never answers or answers every request with HTTP 500.
+/// How a [`FakeCluster`] answers every request.
+#[derive(Clone, Copy, Debug)]
+enum Answer {
+    /// Never answers.
+    Hang,
+    /// HTTP 500.
+    Error,
+    /// A search OpenSearch ended at its own timeout (`timed_out: true`).
+    TimedOut,
+}
+
+/// A stand-in for an OpenSearch cluster that accepts connections and
+/// answers every request the same way.
 struct FakeCluster {
     index: SearchIndex,
     connections: Arc<AtomicUsize>,
 }
 
 impl FakeCluster {
-    async fn start(answer_500: bool) -> Self {
+    async fn start(answer: Answer) -> Self {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -354,15 +365,22 @@ impl FakeCluster {
                 tokio::spawn(async move {
                     let mut request = [0u8; 16 * 1024];
                     let _ = socket.read(&mut request).await;
-                    if answer_500 {
-                        let _ = socket
-                            .write_all(
-                                b"HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
-                            )
-                            .await;
-                    } else {
-                        tokio::time::sleep(Duration::from_secs(120)).await;
-                    }
+                    let (status, body) = match answer {
+                        Answer::Hang => {
+                            tokio::time::sleep(Duration::from_secs(120)).await;
+                            return;
+                        }
+                        Answer::Error => ("500 Internal Server Error", "{}"),
+                        Answer::TimedOut => (
+                            "200 OK",
+                            r#"{"timed_out":true,"_shards":{"failed":0},"hits":{"hits":[]}}"#,
+                        ),
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
                 });
             }
         });
@@ -469,7 +487,7 @@ async fn the_flag_picks_the_backend_for_the_whole_relay_while_it_runs() {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires Postgres and Redis"]
 async fn at_zero_opensearch_is_never_queried() {
-    let cluster = FakeCluster::start(true).await;
+    let cluster = FakeCluster::start(Answer::Error).await;
     let f = Fixture::new(cluster.index.clone(), Duration::from_secs(1)).await;
     let c = f.community().await;
     let needle = word("zero");
@@ -567,10 +585,11 @@ async fn shadow_serves_postgres_and_records_both_backends() {
     f.delete().await;
 }
 
-/// At 1, an OpenSearch that hangs or fails neither slows nor fails the
-/// response; its searches count as a timeout or an error.
+/// At 1, an OpenSearch that hangs, times out or fails neither slows nor
+/// fails the response; its searches count as a timeout or an error.
 /// Mutation: await the shadow search before returning → RED (the hanging
-/// cluster holds the REQ for the deadline).
+/// cluster holds the REQ for the deadline). Count `timed_out: true` as an
+/// error → RED.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires Postgres and Redis"]
 async fn a_slow_or_failing_shadow_does_not_touch_the_response() {
@@ -578,8 +597,12 @@ async fn a_slow_or_failing_shadow_does_not_touch_the_response() {
     let recorder = DebuggingRecorder::new();
     let _metrics = metrics::set_default_local_recorder(&recorder);
     let mut recorded = Recorded::new(&recorder);
-    for (answer_500, outcome) in [(false, "timeout"), (true, "error")] {
-        let cluster = FakeCluster::start(answer_500).await;
+    for (answer, outcome) in [
+        (Answer::Hang, "timeout"),
+        (Answer::TimedOut, "timeout"),
+        (Answer::Error, "error"),
+    ] {
+        let cluster = FakeCluster::start(answer).await;
         let f = Fixture::new(cluster.index.clone(), DEADLINE).await;
         let c = f.community().await;
         f.set_backend(1);
@@ -604,29 +627,43 @@ async fn a_slow_or_failing_shadow_does_not_touch_the_response() {
     }
 }
 
-/// At 2, an OpenSearch failure fails the search through the usual CLOSED
-/// error: no silent fallback to Postgres.
-/// Mutation: answer from Postgres when OpenSearch fails → RED.
+/// At 2, an OpenSearch failure or timeout fails the search through the
+/// usual CLOSED error: no silent fallback to Postgres. A timeout counts as
+/// one, apart from other errors.
+/// Mutation: answer from Postgres when OpenSearch fails → RED. Count a
+/// timeout as an error → RED.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires Postgres and Redis"]
 async fn at_two_an_opensearch_failure_fails_the_search() {
     let recorder = DebuggingRecorder::new();
     let _metrics = metrics::set_default_local_recorder(&recorder);
     let mut recorded = Recorded::new(&recorder);
-    let cluster = FakeCluster::start(true).await;
-    let f = Fixture::new(cluster.index.clone(), Duration::from_secs(1)).await;
-    let c = f.community().await;
-    f.set_backend(2);
-    let needle = word("down");
-    f.post(&c, c.private, &needle).await;
+    for (answer, outcome) in [(Answer::Error, "error"), (Answer::TimedOut, "timeout")] {
+        let cluster = FakeCluster::start(answer).await;
+        let f = Fixture::new(cluster.index.clone(), Duration::from_secs(1)).await;
+        let c = f.community().await;
+        f.set_backend(2);
+        let needle = word("down");
+        f.post(&c, c.private, &needle).await;
 
-    assert_eq!(
-        f.search(&c, &c.owner, &needle).await,
-        Err(super::req::SEARCH_FAILED_CLOSED.to_owned())
-    );
-    recorded.collect();
-    assert_eq!(recorded.requests("opensearch", "primary", "error"), 1);
-    assert_eq!(recorded.requests("postgres", "primary", "hits"), 0);
+        assert_eq!(
+            f.search(&c, &c.owner, &needle).await,
+            Err(super::req::SEARCH_FAILED_CLOSED.to_owned()),
+            "{outcome}"
+        );
+        recorded.collect();
+        assert_eq!(
+            recorded.requests("opensearch", "primary", outcome),
+            1,
+            "{outcome}"
+        );
+        assert_eq!(
+            recorded.requests("postgres", "primary", "hits"),
+            0,
+            "{outcome}"
+        );
+        recorded.counters.clear();
+    }
 }
 
 /// At every value, each hit is re-read from Postgres and re-checked: a
@@ -852,7 +889,7 @@ async fn prefix_searches_stay_on_postgres_and_are_counted() {
     let recorder = DebuggingRecorder::new();
     let _metrics = metrics::set_default_local_recorder(&recorder);
     let mut recorded = Recorded::new(&recorder);
-    let cluster = FakeCluster::start(true).await;
+    let cluster = FakeCluster::start(Answer::Error).await;
     let f = Fixture::new(cluster.index.clone(), Duration::from_secs(1)).await;
     let c = f.community().await;
     let needle = word("prefixed");
@@ -907,7 +944,7 @@ async fn searches_of_unindexed_kinds_stay_on_postgres() {
     let recorder = DebuggingRecorder::new();
     let _metrics = metrics::set_default_local_recorder(&recorder);
     let mut recorded = Recorded::new(&recorder);
-    let cluster = FakeCluster::start(true).await;
+    let cluster = FakeCluster::start(Answer::Error).await;
     let f = Fixture::new(cluster.index.clone(), Duration::from_secs(1)).await;
     let c = f.community().await;
     let needle = word("unindexed")[..16].to_owned();

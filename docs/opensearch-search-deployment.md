@@ -91,11 +91,16 @@ psql -c "SELECT setval('search_index_version', GREATEST((SELECT last_value FROM 
 | Metric | Act when |
 | --- | --- |
 | `buzz_search_index_lag_seconds` | It keeps growing: the indexer is failing or too slow. After an outage it stays up for up to a minute. |
+| `buzz_search_outbox_depth` | It keeps growing, as with the lag. Counted up to 100,000 rows. |
 | `buzz_search_index_rejected_total` | It rises steadily: the cluster refuses those documents for good, and their rows stay queued. |
 | `buzz_search_index_version_conflicts_total` | It is not zero: the version sequence handed out values again (below). |
 | `buzz_search_backfill_complete` | `1` means every stored message of the community is queued, not yet indexed. Move searches to OpenSearch once it is `1` for every community and `search_outbox` has emptied. |
 | `buzz_search_shadow_overlap_ratio` | In shadow mode: the share of the top 10 hits both backends returned. |
-| `buzz_search_requests_total{backend="opensearch", outcome="error"}` | It rises: at `2` each one is a failed search. |
+| `buzz_search_requests_total{backend="opensearch", outcome="error"}` | It rises: at `2` each one is a failed search. `outcome="timeout"` counts the searches that ran out of time apart. |
+| `buzz_search_opensearch_skipped_total` | Searches at `1` or `2` that ran on Postgres anyway, by `reason`. `shadow_busy` rising means shadows are being dropped because 32 are already in flight. |
+| `buzz_search_backend_flag_invalid_total` | It is not zero: `search.backend` holds a value other than `0`, `1` or `2`, which means `0`. |
+
+Only the relay that holds the indexer lease samples the lag and depth, every 15 seconds. A relay that lost the lease keeps reporting its last values, as it does for `buzz_search_backfill_complete`.
 
 ## Choosing the search backend
 
