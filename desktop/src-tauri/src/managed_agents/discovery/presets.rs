@@ -5,7 +5,7 @@ use crate::managed_agents::{
     AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus, HarnessSource,
 };
 
-use super::normalize_agent_args;
+use super::{normalize_agent_args, normalize_command_identity};
 
 /// Static data for a well-known tier-2 ACP harness.
 pub(super) struct PresetHarness {
@@ -253,6 +253,28 @@ pub(crate) fn preset_harness_ids() -> &'static [&'static str] {
         .as_slice()
 }
 
+/// Launch args for the [`PRESET_HARNESSES`] entry whose command matches
+/// `command`, when an agent has a command but no resolvable runtime preset id.
+///
+/// That happens for agents pinned only through `agent_command_override` (or a
+/// command resolved from the global `preferred_runtime`) with an empty
+/// `agent_args`: `resolve_effective_harness_descriptor` finds no harness
+/// definition to copy args from, so the spawn would run the bare command. For
+/// ACP-native CLIs (`omp`, `opencode`, `kimi`, `cursor-agent`, `devin`, …) the
+/// bare command is an interactive TUI, which under headless Buzz has no
+/// controlling TTY and never answers ACP `initialize`.
+///
+/// Matching goes through [`normalize_command_identity`], so a bare name, an
+/// absolute path (`/opt/homebrew/bin/omp`) and a Windows `.exe` all resolve to
+/// the same preset.
+pub(crate) fn preset_args_for_command(command: &str) -> Option<Vec<String>> {
+    let identity = normalize_command_identity(command);
+    PRESET_HARNESSES
+        .iter()
+        .find(|preset| normalize_command_identity(preset.command) == identity)
+        .map(|preset| preset.args.iter().map(|arg| arg.to_string()).collect())
+}
+
 /// Return the primary command for a preset harness by id, or `None` if the id
 /// is not a known preset.
 ///
@@ -329,7 +351,7 @@ mod tests {
 
     use crate::managed_agents::{AcpAvailabilityStatus, AuthStatus, HarnessSource};
 
-    use super::{preset_catalog_entry, PresetHarness, PRESET_HARNESSES};
+    use super::{preset_args_for_command, preset_catalog_entry, PresetHarness, PRESET_HARNESSES};
 
     /// Amp-shaped preset: an ACP adapter wrapping a separately installed CLI.
     const ADAPTER_PRESET: PresetHarness = PresetHarness {
@@ -600,5 +622,35 @@ mod tests {
             entry.max_parallelism, None,
             "uncapped preset (devin) must have max_parallelism: None"
         );
+    }
+
+    /// A command-only pin (override or `preferred_runtime`, no `runtime` id,
+    /// empty `agent_args`) must still resolve the preset's ACP-mode args.
+    #[test]
+    fn preset_args_for_command_matches_bare_and_absolute_commands() {
+        assert_eq!(
+            preset_args_for_command("omp"),
+            Some(vec!["acp".to_string()])
+        );
+        assert_eq!(
+            preset_args_for_command("/opt/homebrew/bin/omp"),
+            Some(vec!["acp".to_string()])
+        );
+        assert_eq!(
+            preset_args_for_command("C:\\tools\\omp.exe"),
+            Some(vec!["acp".to_string()])
+        );
+        assert_eq!(
+            preset_args_for_command("grok"),
+            Some(vec![
+                "agent".to_string(),
+                "--always-approve".to_string(),
+                "stdio".to_string()
+            ])
+        );
+        // Presets that take no args keep resolving to an empty list.
+        assert_eq!(preset_args_for_command("amp-acp"), Some(Vec::new()));
+        // Unknown commands must not invent args.
+        assert_eq!(preset_args_for_command("my-fancy-cli"), None);
     }
 }
