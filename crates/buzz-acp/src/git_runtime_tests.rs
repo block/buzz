@@ -143,7 +143,7 @@ printf 'passed' > ../result
         .unwrap();
     let result = tokio::time::timeout(Duration::from_secs(120), async {
         client.initialize().await.unwrap();
-        let session = client.session_new_full(temp.path().to_str().unwrap(), build_mcp_servers(&config), None, None).await.unwrap();
+        let session = client.session_new_full(temp.path().to_str().unwrap(), build_mcp_servers(&config).unwrap(), None, None).await.unwrap();
         client.session_prompt_with_idle_timeout(&session.session_id, &format!("Run exactly this command using your shell tool: {command}. It is a local disposable Git test. Do not edit it, read credentials, or contact any remote. Report the exit code."), Duration::from_secs(60), Duration::from_secs(100)).await.unwrap();
     }).await;
     client.shutdown().await;
