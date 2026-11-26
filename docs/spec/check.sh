@@ -324,6 +324,7 @@ gcheck state-for-community       ReadsAreGovernedAndRecorded   reads      state-
 gcheck unrecorded-read           ReadsAreGovernedAndRecorded   reads      unrecorded-read
 gcheck read-skips-owner-admission ReadsAreGovernedAndRecorded authority read-skips-owner-admission
 gcheck archive-drops-record      RecordOnlyGrows               reads      archive-drops-record
+gcheck archive-ignored          LandsUnderCurrentAuthority    reads      archive-ignored
 gcheck repo-admin-floor          GovernanceByCurrentAuthority  governance repo-admin-floor
 gcheck repo-admin-labels         GovernanceByCurrentAuthority  governance repo-admin-labels
 gcheck head-by-maintainer        GovernanceByCurrentAuthority  governance head-by-maintainer
@@ -358,6 +359,7 @@ gcheck lands-over-lower-grant NeverLandsOverLowerGrant authority
 gcheck lands-owner-outside NeverLandsWithOwnerOutside authority
 gcheck lands-by-unowned-agent NeverLandsByUnownedAgent authority
 gcheck reads-by-grant-only-agent NeverReadsByGrantOnlyAgent fence
+gcheck reads-archived       NeverReadsArchived reads
 gcheck rebinds             NeverRebinds       governance
 gcheck owned-by-approval   NeverOwnedByApproval attest
 gcheck stale-base-counts   NeverCountsOldBase staleok

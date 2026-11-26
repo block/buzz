@@ -131,6 +131,7 @@ Gov == INSTANCE GitGovernance WITH
     Faults <- {},
     commRole <- IF revoked THEN [Owned EXCEPT ![b] = "none"] ELSE Owned,
     chanRole <- ChanRoleHere,
+    archived <- [x \in {ch} |-> FALSE],
     owner <- [x \in {g1, g2} |-> b],
     grants <- IF clock < Expiry THEN GrantsHere ELSE {},
     gov <- GovDocs, ver <- [d \in DocIdsHere |-> 0], sent <- {}, govlog <- {},

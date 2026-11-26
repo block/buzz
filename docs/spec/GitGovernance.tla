@@ -55,7 +55,18 @@
 (*     then; one removed after approving no longer counts.                 *)
 (*   - Code owners come from the ref being changed, so a change cannot     *)
 (*     name its own reviewers, and owning code grants no access.           *)
-(*   - A requirement the relay does not know denies.                       *)
+(*   - A requirement the relay does not know denies.  There are no review  *)
+(*     groups here: a group rule is such a requirement.  The relay refuses *)
+(*     code-owner and group rules when a command is authored and denies    *)
+(*     them at the decision; this module still accepts them in documents,  *)
+(*     the looser side, so its code-owner checks are the design target.    *)
+(*   - An agent's recorded owner is a person (TypeOK).  The relay does not *)
+(*     refuse an owner that is itself an owned agent; it reads ownership   *)
+(*     one level deep, at Git and in its ban cascade, so a chain of owners *)
+(*     is outside this module.                                             *)
+(*   - Archiving a repo's channel freezes its refs: no push lands.  Roles  *)
+(*     survive, so reads and governance go on, and a rebind out of the     *)
+(*     channel is how the repo is unfrozen.                                *)
 (*   - A governance document changes only by a command that names the      *)
 (*     document and the version it replaces, signed by a key that holds    *)
 (*     the authority when the command is applied; so a captured command    *)
@@ -136,6 +147,7 @@ DocIds == {<<"floor", None>>, <<"trusted", None>>}
 VARIABLES
     commRole,   \* commRole[k]: "none" (not admitted, or banned), "member", "admin"
     chanRole,   \* chanRole[ch][k]: k's role in channel ch
+    archived,   \* archived[ch]: channel ch is archived
     owner,      \* owner[a]: the first owner recorded for agent a, or None
     grants,     \* live grants: <<agent, repo, level>>, level a channel role
     gov,        \* gov[d]: the name of governance document d's current body
@@ -154,7 +166,7 @@ VARIABLES
     audit,      \* the record of reads
     act         \* the step just taken (history, for the properties)
 
-govVars == <<commRole, chanRole, owner, grants, gov, ver, sent, govlog>>
+govVars == <<commRole, chanRole, archived, owner, grants, gov, ver, sent, govlog>>
 gitVars == <<refs, visible, pushed, brought, pending, reserved, approvals, posts>>
 vars    == <<govVars, gitVars, receipts, audit, act>>
 
@@ -172,6 +184,7 @@ ChanFenced(ch) == \E r \in Repos : ChanOf(r) = ch /\ Fenced(r)
 Init ==
     /\ commRole = Init_.commRole
     /\ chanRole = Init_.chanRole
+    /\ archived = [ch \in Channels |-> FALSE]
     /\ owner = Init_.owner
     /\ grants = Init_.grants
     /\ gov = Init_.gov
@@ -235,16 +248,17 @@ Holds(k, r, n) == Rank[CreditedRole(k, r)] >= Rank[n]
 \* Who may replace a governance document.
 MayCommand(k, d) ==
     LET r == d[2] IN
-    CASE d[1] \in {"floor", "trusted"} ->
-            commRole[k] = "admin"
-              \/ ("repo-admin-floor" \in Faults /\ \E x \in Repos : Holds(k, x, "admin"))
-      [] d[1] = "labels" ->
-            commRole[k] = "admin" \/ ("repo-admin-labels" \in Faults /\ Holds(k, r, "admin"))
-      [] d[1] = "rules" -> Holds(k, r, "admin")
-      [] d[1] = "head" ->
-            Holds(k, r, "admin") \/ ("head-by-maintainer" \in Faults /\ k = RepoKey[r])
-      [] d[1] = "bind" ->
-            Holds(k, r, "admin") \/ ("announcer-rebinds" \in Faults /\ k = RepoKey[r])
+    /\ d[1] \in {"floor", "trusted", "labels"} /\ Owned(k) => commRole[owner[k]] = "admin"
+    /\ CASE d[1] \in {"floor", "trusted"} ->
+               commRole[k] = "admin"
+                 \/ ("repo-admin-floor" \in Faults /\ \E x \in Repos : Holds(k, x, "admin"))
+         [] d[1] = "labels" ->
+               commRole[k] = "admin" \/ ("repo-admin-labels" \in Faults /\ Holds(k, r, "admin"))
+         [] d[1] = "rules" -> Holds(k, r, "admin")
+         [] d[1] = "head" ->
+               Holds(k, r, "admin") \/ ("head-by-maintainer" \in Faults /\ k = RepoKey[r])
+         [] d[1] = "bind" ->
+               Holds(k, r, "admin") \/ ("announcer-rebinds" \in Faults /\ k = RepoKey[r])
 
 \* A rebind of r must also come from an admin of the channel it binds to,
 \* in its own right: a grant for r reaches r, not that channel.
@@ -345,6 +359,7 @@ Meets(x, p, c) ==
       [] OTHER                  -> "skip-unknown" \in Faults
 
 RefOk(p, c) ==
+    /\ ~archived[ChanOf(p.repo)] \/ "archive-ignored" \in Faults
     /\ c.old = refs[p.repo][c.ref]
     /\ Holds(p.by, p.repo, Need(p.repo, c))
     /\ \A x \in EffectiveRules(p.repo, c.ref) : Meets(x, p, c)
@@ -376,7 +391,7 @@ Sign(k, d, b) ==
     /\ ~\E x \in sent : x.by = k /\ x.doc = d /\ x.body = b
     /\ sent' = sent \cup {m}
     /\ act' = [kind |-> "sign"]
-    /\ UNCHANGED <<commRole, chanRole, owner, grants, gov, ver, govlog, gitVars, receipts, audit>>
+    /\ UNCHANGED <<archived, commRole, chanRole, owner, grants, gov, ver, govlog, gitVars, receipts, audit>>
 
 \* A delivery of command m applied to document d.  The command names its
 \* document, so d is m.doc; the seeded error "command-unbound" lets it
@@ -392,7 +407,7 @@ Deliver(m, d) ==
     /\ govlog' = IF "unrecorded-governance" \in Faults THEN govlog
                  ELSE govlog \cup {[cmd |-> m, doc |-> d, ver |-> ver[d]]}
     /\ act' = [kind |-> "govern", cmd |-> m, doc |-> d]
-    /\ UNCHANGED <<commRole, chanRole, owner, grants, sent, gitVars, receipts, audit>>
+    /\ UNCHANGED <<archived, commRole, chanRole, owner, grants, sent, gitVars, receipts, audit>>
 
 \* A channel admin adds, removes or re-roles a member: a key admitted, with
 \* an admitted owner if it has one, whose own role in the channel is admin.
@@ -409,7 +424,7 @@ SetRole(k, x) ==
     /\ chanRole[x[1]][x[2]] # x[3]
     /\ chanRole' = [chanRole EXCEPT ![x[1]][x[2]] = x[3]]
     /\ act' = [kind |-> "role", by |-> k, ch |-> x[1]]
-    /\ UNCHANGED <<commRole, owner, grants, gov, ver, sent, govlog, gitVars, receipts, audit>>
+    /\ UNCHANGED <<archived, commRole, owner, grants, gov, ver, sent, govlog, gitVars, receipts, audit>>
 
 \* A community admin bans a key: it holds no authority anywhere.  Banning
 \* an agent is how a grant it carries is stopped before its window ends.
@@ -418,7 +433,7 @@ Ban(x) ==
     /\ reserved = {} \/ "ban-unfenced" \in Faults
     /\ commRole' = [commRole EXCEPT ![x[2]] = "none"]
     /\ act' = [kind |-> "ban", by |-> x[1]]
-    /\ UNCHANGED <<chanRole, owner, grants, gov, ver, sent, govlog, gitVars, receipts, audit>>
+    /\ UNCHANGED <<archived, chanRole, owner, grants, gov, ver, sent, govlog, gitVars, receipts, audit>>
 
 \* An agent presents an owner attestation.  The community keeps the first
 \* owner it recorded; a later attestation naming someone else changes nothing.
@@ -428,7 +443,7 @@ Register(g) ==
     /\ reserved = {}
     /\ owner' = [owner EXCEPT ![g[1]] = g[2]]
     /\ act' = [kind |-> "register"]
-    /\ UNCHANGED <<commRole, chanRole, grants, gov, ver, sent, govlog, gitVars, receipts, audit>>
+    /\ UNCHANGED <<archived, commRole, chanRole, grants, gov, ver, sent, govlog, gitVars, receipts, audit>>
 
 \* An owner signs its agent a grant for a repo at a level.  It is a tag, not
 \* a relay write, so the owner can sign one at any time and nothing waits
@@ -438,7 +453,7 @@ Grant(g) ==
     /\ g \notin grants /\ owner[g[1]] # None
     /\ grants' = grants \cup {g}
     /\ act' = [kind |-> "grant"]
-    /\ UNCHANGED <<commRole, chanRole, owner, gov, ver, sent, govlog, gitVars, receipts, audit>>
+    /\ UNCHANGED <<archived, commRole, chanRole, owner, gov, ver, sent, govlog, gitVars, receipts, audit>>
 
 \* Grants expire, any number at the same moment.  Expiry needs no one to
 \* act and waits for nothing, so a push accepted under a grant can publish
@@ -446,7 +461,7 @@ Grant(g) ==
 Expire(G) ==
     /\ grants' = grants \ G
     /\ act' = [kind |-> "expire"]
-    /\ UNCHANGED <<commRole, chanRole, owner, gov, ver, sent, govlog, gitVars, receipts, audit>>
+    /\ UNCHANGED <<archived, commRole, chanRole, owner, gov, ver, sent, govlog, gitVars, receipts, audit>>
 
 \* A channel admin edits the channel's own topic labels.  They describe the
 \* channel; they are not the repo's protected labels.
@@ -455,17 +470,18 @@ ChannelTag(k, r, b) ==
     /\ gov' = IF "channel-tags-protect" \in Faults
               THEN [gov EXCEPT ![<<"labels", r>>] = b] ELSE gov
     /\ act' = [kind |-> "channel-tag"]
-    /\ UNCHANGED <<commRole, chanRole, owner, grants, ver, sent, govlog, gitVars, receipts, audit>>
+    /\ UNCHANGED <<archived, commRole, chanRole, owner, grants, ver, sent, govlog, gitVars, receipts, audit>>
 
-\* The repo's channel is archived: its roles end.  The record outlives it.
+\* The repo's channel is archived: its refs freeze, its roles stay.  The
+\* record outlives it.
 Archive(r) ==
-    /\ \E k \in Keys : chanRole[ChanOf(r)][k] # "none"
+    /\ ~archived[ChanOf(r)]
     /\ ~ChanFenced(ChanOf(r))
-    /\ chanRole' = [chanRole EXCEPT ![ChanOf(r)] = [k \in Keys |-> "none"]]
+    /\ archived' = [archived EXCEPT ![ChanOf(r)] = TRUE]
     /\ receipts' = IF "archive-drops-record" \in Faults
                    THEN {x \in receipts : x.repo # r} ELSE receipts
     /\ act' = [kind |-> "archive"]
-    /\ UNCHANGED <<commRole, owner, grants, gov, ver, sent, govlog, gitVars, audit>>
+    /\ UNCHANGED <<commRole, chanRole, owner, grants, gov, ver, sent, govlog, gitVars, audit>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
@@ -507,7 +523,7 @@ Approve(e) ==
            base |-> refs[e[2]][e[3]],
            held |-> "eligibility-at-approve" \in Faults /\ Holds(e[1], e[2], "member")]}
     /\ act' = [kind |-> "approve"]
-    /\ UNCHANGED <<commRole, chanRole, grants, gov, ver, sent, govlog,
+    /\ UNCHANGED <<archived, commRole, chanRole, grants, gov, ver, sent, govlog,
                    refs, visible, pushed, brought, pending, reserved, posts, receipts, audit>>
 
 \* Anyone can post a check result.  Only a trusted one counts.
@@ -648,6 +664,7 @@ Spec == Init /\ [][Next]_vars
 TypeOK ==
     /\ commRole \in [Keys -> {"none", "member", "admin"}]
     /\ chanRole \in [Channels -> [Keys -> ChanRoles]]
+    /\ archived \in [Channels -> BOOLEAN]
     /\ owner \in [Agents -> People \cup {None}]
     /\ grants \subseteq Agents \X Repos \X (ChanRoles \ {"none"})
     /\ refs \in [Repos -> [Refs -> CommitOrNone]]
@@ -730,6 +747,7 @@ Accepted(p) == act'.kind = "accept" /\ act'.p = p /\ act'.ok
 LandsUnderCurrentAuthority ==
     [][\A p \in pending : Accepted(p) =>
           \A c \in p.cmds :
+             /\ ~archived[ChanOf(p.repo)]
              /\ c.old = refs[p.repo][c.ref]
              /\ MayAct(p.by, p.repo, Baseline(c))
              /\ \A x \in Governing(p.repo, c.ref) : Satisfied(x, p, c)]_vars
@@ -787,7 +805,9 @@ CommandsApplyOnceWhereMeant ==
 GovernanceByCurrentAuthority ==
     [][act'.kind = "govern" =>
           LET k == act'.cmd.by  d == act'.doc IN
-          /\ d[1] \in {"floor", "trusted", "labels"} => commRole[k] = "admin"
+          /\ d[1] \in {"floor", "trusted", "labels"} =>
+                /\ commRole[k] = "admin"
+                /\ k \in Agents /\ owner[k] # None => commRole[owner[k]] = "admin"
           /\ d[1] \in {"rules", "head", "bind"} => MayAct(k, d[2], "admin")
           /\ d[1] = "bind" => commRole[k] # "none" /\ chanRole[Content[act'.cmd.body]][k] = "admin"]_vars
 
@@ -852,6 +872,7 @@ ReservationsFenced ==
     [][\A r \in Repos : Fenced(r) =>
           /\ commRole' = commRole /\ owner' = owner
           /\ chanRole'[ChanOf(r)] = chanRole[ChanOf(r)]
+          /\ archived'[ChanOf(r)] = archived[ChanOf(r)]
           /\ \A d \in DocIds : d[2] \in {None, r} => gov'[d] = gov[d]
           /\ act'.kind # "expire" => {x \in grants : x[2] = r} \subseteq grants']_vars
 
@@ -910,6 +931,8 @@ NeverLandsByUnownedAgent ==
 NeverReadsByGrantOnlyAgent ==
     [][act'.kind = "read" /\ act'.by \in Agents =>
           chanRole[ChanOf(act'.repo)][act'.by] # "none"]_vars
+\* A repo whose channel is archived is still read.
+NeverReadsArchived == [][act'.kind = "read" => ~archived[ChanOf(act'.repo)]]_vars
 NeverRebinds == ~\E x \in govlog : x.doc[1] = "bind"
 \* An approval's attestation records the agent's owner.
 NeverOwnedByApproval == [][act'.kind = "approve" => owner' = owner]_vars
