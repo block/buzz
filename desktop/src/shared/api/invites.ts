@@ -1,18 +1,10 @@
 import { relayHttpFromWs } from "@/shared/api/inviteHelpers";
-import {
-  getRelayHttpUrl,
-  invokeTauri,
-  signRelayEvent,
-} from "@/shared/api/tauri";
+import { invokeTauri, signRelayEvent } from "@/shared/api/tauri";
 
-// Relay invite data layer. Both endpoints are NIP-98-authed HTTP POSTs
-// (mirrors the read path in moderation.ts, plus the payload tag the relay
-// requires for signed POST bodies):
-//
-// - POST /api/invites        — mint a code (relay checks owner/admin role)
-// - POST /api/invites/claim  — claim a code, signed by the *joining* key.
-//   This one targets an arbitrary relay (the invite's relay, not necessarily
-//   the active community), so the claim helper takes an explicit ws URL.
+// Relay invite data layer. Minting goes through the native `mint_invite`
+// command. Claiming is a NIP-98-authed WebView POST to /api/invites/claim,
+// signed by the *joining* key against the invite's relay (not necessarily the
+// active community), so the claim helper takes an explicit ws URL.
 
 const NIP98_KIND = 27235;
 
@@ -190,23 +182,26 @@ export async function acceptJoinPolicy(
   return ((await response.json()) as { receipt: string }).receipt;
 }
 
-/** Mint an invite code on the active community's relay (owner/admin only). */
+/**
+ * Mint an invite code on the active community's relay (owner/admin only).
+ *
+ * Sent through native networking: macOS App Transport Security blocks
+ * WebView requests to plain-HTTP relays before they leave the machine.
+ */
 export async function mintInvite(options?: {
   ttlSecs?: number;
   maxUses?: number | null;
 }): Promise<MintedInvite> {
-  const base = await getRelayHttpUrl();
-  const payload: Record<string, unknown> = {};
-  if (options?.ttlSecs != null) payload.ttl_secs = options.ttlSecs;
-  if (options?.maxUses != null) payload.max_uses = options.maxUses;
-  const body = JSON.stringify(payload);
-  const raw = await invitePost<{
+  const raw = await invokeTauri<{
     code: string;
     expires_at: number;
     url: string;
     max_uses: number | null;
     uses_remaining: number | null;
-  }>(base, "/api/invites", body);
+  }>("mint_invite", {
+    ttlSecs: options?.ttlSecs ?? null,
+    maxUses: options?.maxUses ?? null,
+  });
   return {
     code: raw.code,
     expiresAt: raw.expires_at,

@@ -82,130 +82,62 @@ test("getJoinPolicy maps the native command response", async () => {
   }
 });
 
-// --- mintInvite serialization ---
+// --- mintInvite ---
 
-// The test-loader transpiles TS imports. tauri.ts imports `invoke` from
-// @tauri-apps/api/core, which calls `window.__TAURI_INTERNALS__.invoke`.
-// We stub that here so getRelayHttpUrl() and signRelayEvent() work in node.
-
-function setupTauriStubs(
-  httpBase,
-  authEvent = {
-    id: "x",
-    sig: "y",
-    pubkey: "z",
-    kind: 27235,
-    created_at: 1,
-    tags: [],
-  },
-) {
-  const calls = { invokeArgs: [] };
-  globalThis.window = globalThis.window ?? {};
-  globalThis.window.__TAURI_INTERNALS__ = {
-    invoke: async (command, args) => {
-      calls.invokeArgs.push({ command, args });
-      if (command === "get_relay_http_url") return httpBase;
-      if (command === "sign_event") return JSON.stringify(authEvent);
-      throw new Error(`Unexpected Tauri command: ${command}`);
+async function withMintCommand(response, run) {
+  const previousWindow = globalThis.window;
+  const calls = [];
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke(command, args) {
+        calls.push({ command, args });
+        return Promise.resolve(response);
+      },
     },
   };
-  return calls;
+  try {
+    await run(calls);
+  } finally {
+    globalThis.window = previousWindow;
+  }
 }
 
-function teardownTauriStubs() {
-  delete globalThis.window.__TAURI_INTERNALS__;
-}
+const MINTED = {
+  code: "v2.abc123",
+  expires_at: 1785100000,
+  url: "https://relay.example/invite/v2.abc123",
+  max_uses: 10,
+  uses_remaining: 10,
+};
 
-test("mintInvite serializes bounded max_uses in the request body", async () => {
-  setupTauriStubs("https://relay.example");
-  try {
-    const originalFetch = globalThis.fetch;
-    let capturedBody;
-    globalThis.fetch = async (_url, init) => {
-      capturedBody = JSON.parse(init.body);
-      return new Response(
-        JSON.stringify({
-          code: "v2.abc123",
-          expires_at: 1785100000,
-          url: "https://relay.example/invite/v2.abc123",
-          max_uses: 10,
-          uses_remaining: 10,
-        }),
-      );
-    };
-    try {
-      const result = await mintInvite({ ttlSecs: 259200, maxUses: 10 });
-      assert.equal(capturedBody.ttl_secs, 259200);
-      assert.equal(capturedBody.max_uses, 10);
-      assert.equal(result.code, "v2.abc123");
-      assert.equal(result.maxUses, 10);
-      assert.equal(result.usesRemaining, 10);
-      assert.equal(result.expiresAt, 1785100000);
-      assert.equal(result.url, "https://relay.example/invite/v2.abc123");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  } finally {
-    teardownTauriStubs();
-  }
+test("mintInvite mints through the native command and maps the response", async () => {
+  await withMintCommand(MINTED, async (calls) => {
+    assert.deepEqual(await mintInvite({ ttlSecs: 259200, maxUses: 10 }), {
+      code: "v2.abc123",
+      expiresAt: 1785100000,
+      url: "https://relay.example/invite/v2.abc123",
+      maxUses: 10,
+      usesRemaining: 10,
+    });
+    assert.deepEqual(calls, [
+      { command: "mint_invite", args: { ttlSecs: 259200, maxUses: 10 } },
+    ]);
+  });
 });
 
-test("mintInvite omits max_uses when null (unlimited)", async () => {
-  setupTauriStubs("https://relay.example");
-  try {
-    const originalFetch = globalThis.fetch;
-    let capturedBody;
-    globalThis.fetch = async (_url, init) => {
-      capturedBody = JSON.parse(init.body);
-      return new Response(
-        JSON.stringify({
-          code: "v2.abc123",
-          expires_at: 1785100000,
-          url: "https://relay.example/invite/v2.abc123",
-          max_uses: null,
-          uses_remaining: null,
-        }),
-      );
-    };
-    try {
-      const result = await mintInvite({ ttlSecs: 259200, maxUses: null });
-      assert.equal(capturedBody.ttl_secs, 259200);
-      assert.equal(Object.hasOwn(capturedBody, "max_uses"), false);
-      assert.equal(result.maxUses, null);
-      assert.equal(result.usesRemaining, null);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  } finally {
-    teardownTauriStubs();
-  }
-});
-
-test("mintInvite omits max_uses when not provided (unlimited default)", async () => {
-  setupTauriStubs("https://relay.example");
-  try {
-    const originalFetch = globalThis.fetch;
-    let capturedBody;
-    globalThis.fetch = async (_url, init) => {
-      capturedBody = JSON.parse(init.body);
-      return new Response(
-        JSON.stringify({
-          code: "v2.abc123",
-          expires_at: 1785100000,
-          url: "https://relay.example/invite/v2.abc123",
-          max_uses: null,
-          uses_remaining: null,
-        }),
-      );
-    };
-    try {
+test("mintInvite sends null max uses for unlimited invites", async () => {
+  await withMintCommand(
+    { ...MINTED, max_uses: null, uses_remaining: null },
+    async (calls) => {
+      await mintInvite({ ttlSecs: 86400, maxUses: null });
       await mintInvite({ ttlSecs: 86400 });
-      assert.equal(capturedBody.ttl_secs, 86400);
-      assert.equal(Object.hasOwn(capturedBody, "max_uses"), false);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  } finally {
-    teardownTauriStubs();
-  }
+      assert.deepEqual(
+        calls.map(({ args }) => args),
+        [
+          { ttlSecs: 86400, maxUses: null },
+          { ttlSecs: 86400, maxUses: null },
+        ],
+      );
+    },
+  );
 });
