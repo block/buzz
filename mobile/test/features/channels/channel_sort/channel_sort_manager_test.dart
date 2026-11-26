@@ -316,6 +316,7 @@ class _RecordingSignedEventRelay implements SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     FutureOr<void> Function(NostrEvent event)? onSigned,
+    Future<bool> Function()? mayPublish,
   }) async {
     submitCount++;
     onSigned?.call(
@@ -362,6 +363,15 @@ class _FakeRelaySession extends RelaySessionNotifier {
     }
     return historyEvents;
   }
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
+  }) => subscribe(filter, onEvent, onClosed: onClosed);
 
   @override
   Future<void Function()> subscribe(

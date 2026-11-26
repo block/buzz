@@ -31,6 +31,40 @@ application:
   apnsCert:
     secretName: buzz-push-gateway
     secretKey: apns-identity.pem
+# Android is off unless enabled. Enabling it needs the package, at least one
+# signing certificate digest and the Firebase project and service account.
+android:
+  enabled: false
+  # Exact application package the attestation must name.
+  packageName: com.example.buzz
+  # SHA-256 digests (64 hex characters each) of the app's signing certificates.
+  signingCertDigests: []
+  # Verified boot keys (SHA-256 digests, 64 hex characters each) accepted when
+  # the hardware reports a self-signed boot state. Empty accepts stock Android
+  # only. Add the published keys of a custom operating system to support it.
+  bootKeyDigests: []
+  # Seconds the attestation revocation list may go without a successful refresh
+  # before Android enrollment fails closed.
+  revocationGraceSeconds: 604800
+  fcmProjectId: example-project
+  # Secret holding Google's credential JSON: a service account key, or an AWS
+  # workload identity federation config (type external_account) for keyless
+  # access. Federation also needs AWS_REGION and AWS credentials in the pod.
+  # As shipped, the chart supports IRSA, whose webhook injects both. EKS Pod
+  # Identity also needs a region and a NetworkPolicy egress rule to the agent
+  # (169.254.170.23/32, TCP 80), which this chart does not add.
+  fcmCredentials:
+    secretName: buzz-push-gateway
+    secretKey: fcm-credentials.json
+  # Optional PEM bundle replacing the built-in Google attestation roots, for a
+  # reviewed root rollout. Empty secretName keeps the built-in roots.
+  attestationRoots:
+    secretName: ""
+    secretKey: android-attestation-roots.pem
+# Rate limit on signed installation calls, per attested key and replica.
+signedCallRateLimit:
+  windowSeconds: 60
+  maxCalls: 30
 appAttestRoot:
   secretName: buzz-push-gateway
   secretKey: app-attest-root.pem

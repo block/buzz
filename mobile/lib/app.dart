@@ -38,6 +38,7 @@ import 'features/pairing/pairing_page.dart';
 import 'features/pairing/pairing_provider.dart';
 import 'features/channels/agent_activity/observer_subscription.dart';
 import 'features/channels/channel_detail_page.dart';
+import 'features/channels/notification_reply.dart';
 import 'shared/widgets/app_route_observer.dart';
 import 'shared/widgets/root_page_route.dart';
 import 'features/profile/profile_provider.dart';
@@ -53,8 +54,11 @@ import 'shared/auth/auth.dart';
 import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/emoji/emoji_burst.dart';
 import 'shared/relay/relay.dart';
+import 'shared/diagnostics/diagnostic_navigation_observer.dart';
+import 'shared/diagnostics/diagnostic_reporter.dart';
 import 'shared/theme/theme.dart';
 import 'shared/widgets/buzz_loading_indicator.dart';
+import 'shared/read_state/failed_clear_notice.dart';
 import 'shared/widgets/buzz_toast_host.dart';
 import 'shared/widgets/covered_route_keyboard_insets.dart';
 
@@ -358,10 +362,13 @@ class App extends HookConsumerWidget {
         ref.read(pairingProvider.notifier).reset();
       }
     });
-    final communityTheme = ageSignalState != AgeSignalState.restricted
-        ? ref.watch(communityThemeProvider)
-        : defaultCommunityTheme;
-    final themeMode = communityTheme.mode;
+    final restricted = ageSignalState == AgeSignalState.restricted;
+    final communityTheme = restricted
+        ? defaultCommunityTheme
+        : ref.watch(communityThemeProvider);
+    final themeMode = restricted
+        ? defaultCommunityTheme.mode
+        : ref.watch(appearanceModeProvider);
     // The app rebuilds on every lifecycle change. A new ThemeData never
     // equals the last one, so MaterialApp would animate between identical
     // themes, and each frame of that makes every message re-parse its
@@ -406,6 +413,9 @@ class App extends HookConsumerWidget {
     // Start listening for buzz:// links immediately (even pre-auth) so a
     // cold-start link survives until the authenticated UI can dispatch it.
     ref.watch(pendingDeepLinkProvider);
+    // Unconditional: iOS may launch the app in the background only to send a
+    // notification reply, and no later frame may come to rebuild this.
+    ref.listen(notificationReplySenderProvider, (_, _) {});
 
     void applyBadge(UnreadBadgeState state) {
       if (state.highPriorityCount > 0) {
@@ -442,23 +452,25 @@ class App extends HookConsumerWidget {
         AuthStatus.authenticated => HostedAppGate(
           authenticated: true,
           child: CoveredRouteKeyboardInsets(
-            child: HomePage(
-              onAgents: showAgents,
-              defaultAgentBuilder: (context) => DefaultAgentLauncher(
-                onChooseAgent: () => showAgents(context, createOnOpen: true),
+            child: FailedClearNotice(
+              child: HomePage(
+                onAgents: showAgents,
+                defaultAgentBuilder: (context) => DefaultAgentLauncher(
+                  onChooseAgent: () => showAgents(context, createOnOpen: true),
+                ),
+                openBestieConversation: openBestieConversation,
+                mePageBuilder: (_, chat, workspace) => MePage(
+                  sliver: true,
+                  newChatAction: chat,
+                  newWorkspaceAction: workspace,
+                ),
+                backgroundHost: defaultTargetPlatform == TargetPlatform.iOS
+                    ? const QuickSendHost()
+                    : null,
+                settingsPageBuilder: _buildSettingsPage,
+                communityInvitePageBuilder: (_) => const CommunityInvitePage(),
+                communityAppearancePageBuilder: (_) => const ThemePickerPage(),
               ),
-              openBestieConversation: openBestieConversation,
-              mePageBuilder: (_, chat, workspace) => MePage(
-                sliver: true,
-                newChatAction: chat,
-                newWorkspaceAction: workspace,
-              ),
-              backgroundHost: defaultTargetPlatform == TargetPlatform.iOS
-                  ? const QuickSendHost()
-                  : null,
-              settingsPageBuilder: _buildSettingsPage,
-              communityInvitePageBuilder: (_) => const CommunityInvitePage(),
-              communityAppearancePageBuilder: (_) => const ThemePickerPage(),
             ),
           ),
         ),
@@ -469,10 +481,34 @@ class App extends HookConsumerWidget {
       },
     );
     final latestHome = useRef<Widget?>(null)..value = home;
+    final screenTrail = ref.read(diagnosticScreenTrailProvider);
+    final screenObserver = useMemoized(screenTrail.observer);
+    useEffect(() => screenObserver.dispose, [screenObserver]);
+    // The root page's content changes in place as auth settles (splash, then
+    // onboarding or Home) with no navigation, so name it again.
+    final homeKind = authState.when(
+      loading: () => null,
+      error: (_, _) => false,
+      data: (state) => state.status,
+    );
+    useEffect(() {
+      screenObserver.refresh();
+      return null;
+    }, [homeKind]);
+    // The age restriction replaces the navigator rather than covering a route.
+    // It is named only as `other`: its own name would reveal an age signal.
+    useEffect(() {
+      screenTrail.cover(
+        ageSignalState == AgeSignalState.restricted
+            ? DiagnosticScreen.other
+            : null,
+      );
+      return null;
+    }, [ageSignalState]);
 
     return MaterialApp(
       navigatorKey: _mobileRootNavigatorKey,
-      navigatorObservers: [appRouteObserver],
+      navigatorObservers: [appRouteObserver, screenObserver],
       title: 'Buzz',
       debugShowCheckedModeBanner: false,
       theme: lightTheme,

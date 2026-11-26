@@ -29,11 +29,10 @@ enum NativeAttachmentPopoverAnchorLayout {
   static func sourceRect(
     anchorBounds: CGRect,
     keyboardDismissalOffset: CGFloat,
-    isExpanded: Bool,
-    horizontalOffset: CGFloat = 0
+    isExpanded: Bool
   ) -> CGRect {
     anchorBounds.offsetBy(
-      dx: horizontalOffset,
+      dx: 0,
       dy: keyboardDismissalOffset
         + (isExpanded ? expandedVerticalOffset : 0)
     )
@@ -41,6 +40,18 @@ enum NativeAttachmentPopoverAnchorLayout {
 }
 
 enum NativeAttachmentPopoverPresentationLayout {
+  @MainActor
+  static func transitionSource(in host: UIView, sourceRect: CGRect) -> UIView? {
+    var candidate = host.hitTest(
+      CGPoint(x: sourceRect.midX, y: sourceRect.midY), with: nil
+    )
+    while let view = candidate, view !== host {
+      if view is UIButton { return view }
+      candidate = view.superview
+    }
+    return nil
+  }
+
   static func keyboardDismissalOffset(
     sourceRect: CGRect,
     containerBounds: CGRect,
@@ -126,13 +137,9 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
         height: CGFloat(truncating: height)
       )
       DispatchQueue.main.async { [weak self] in
-        let cameraCenterX = (arguments["cameraCenterX"] as? NSNumber).map {
-          CGFloat(truncating: $0)
-        }
         result(
           self?.presentPopover(
-            sourceRect: sourceRect,
-            cameraCenterX: cameraCenterX
+            sourceRect: sourceRect
           ) ?? false
         )
       }
@@ -155,7 +162,7 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
   }
 
   @MainActor
-  private func presentPopover(sourceRect: CGRect, cameraCenterX: CGFloat?) -> Bool {
+  private func presentPopover(sourceRect: CGRect) -> Bool {
     guard #available(iOS 26.0, *) else { return false }
     guard presentedController == nil else { return true }
     let rootViewController =
@@ -172,6 +179,13 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
       convertedRect = sourceRect
     }
 
+    // Zoom from the actual glass control, rather than an invisible rectangle.
+    // Keep a separate anchor for popover positioning as expanded panels move.
+    let transitionSource = sourceView.flatMap { host in
+      NativeAttachmentPopoverPresentationLayout.transitionSource(
+        in: host, sourceRect: convertedRect
+      )
+    }
     if let sourceView {
       let keyboardDismissalOffset =
         NativeAttachmentPopoverPresentationLayout.keyboardDismissalOffset(
@@ -202,18 +216,17 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
     let availableWidth = max(
       320,
       min(
-        (sourceView?.bounds.width ?? UIScreen.main.bounds.width) - 24,
+        (sourceView?.bounds.width ?? UIScreen.main.bounds.width) - 40,
         430
       )
     )
     let controller = NativeAttachmentPopoverViewController(
       channel: channel,
-      expandedWidth: availableWidth,
-      cameraHorizontalOffset: cameraCenterX.map { $0 - sourceRect.midX } ?? 0
+      expandedWidth: availableWidth
     )
     controller.modalPresentationStyle = .popover
-    controller.preferredTransition = .zoom { [weak anchorView] _ in
-      anchorView
+    controller.preferredTransition = .zoom { [weak transitionSource, weak anchorView] _ in
+      transitionSource ?? anchorView
     }
     controller.onDismiss = { [weak self] in
       self?.presentedController = nil
@@ -228,6 +241,16 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
     popover.sourceView = anchorView
     popover.sourceRect = anchorView.bounds
     popover.permittedArrowDirections = [.down]
+    // iOS 27 adds a 28-point system inset to these margins. Compensate
+    // for it so the expanded content meets the 20-point message rail.
+    let horizontalMargin: CGFloat
+    if #available(iOS 27.0, *) {
+      horizontalMargin = -8
+    } else {
+      horizontalMargin = 20
+    }
+    popover.popoverLayoutMargins.left = horizontalMargin
+    popover.popoverLayoutMargins.right = horizontalMargin
     popover.backgroundColor = .clear
     popover.delegate = controller
 

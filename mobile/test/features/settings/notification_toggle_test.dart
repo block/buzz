@@ -10,6 +10,7 @@ import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/push/push_bootstrap.dart';
 import 'package:buzz/shared/push/push_lease_revocation_outbox.dart';
 import 'package:buzz/shared/crypto/nip44.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/relay/nostr_models.dart';
 import 'package:buzz/shared/relay/signed_event_relay.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
@@ -17,6 +18,7 @@ import 'package:buzz/shared/push/push_relay_capability_provider.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
 import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
+import 'package:buzz/shared/relay/relay_socket.dart';
 import 'package:buzz/shared/relay/relay_session.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
@@ -39,8 +41,9 @@ void main() {
   });
   for (final outcome in [
     'accepted',
-    'failed',
-    'pending',
+    'refused',
+    'unanswered',
+    'still active',
     'scaled',
     'unset preference',
   ]) {
@@ -128,11 +131,16 @@ void main() {
       }
       await storage.saveActiveId(community.id);
 
+      final reports = _RecordingDiagnostics();
       final cleanup = Completer<void>();
       final showingSettings = ValueNotifier(true);
       addTearDown(showingSettings.dispose);
       final snapshots = <List<Community>>[];
       final tombstones = <int?>[];
+      // What the relay says the lease is when the app checks after an
+      // unanswered opt-out.
+      var leaseReads = 0;
+      Object? leaseReadError = StateError('relay unreachable');
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
@@ -147,10 +155,17 @@ void main() {
             communityPushLeaseDeactivatorProvider.overrideWithValue((
               community, {
               generation,
+              deadline,
             }) async {
               tombstones.add(generation);
-              if (outcome == 'failed') throw StateError('relay unavailable');
-              if (outcome == 'pending') await cleanup.future;
+              if (outcome == 'refused') {
+                throw const RelayEventRejectedException('blocked');
+              }
+              if (outcome == 'still active') {
+                throw SignedEventUnacknowledged(TimeoutException('no OK'));
+              }
+              // Hangs past the deadline, then lands late.
+              if (outcome == 'unanswered') await cleanup.future;
               await publishBuzzPushLeaseTombstone(
                 descriptor: _descriptor,
                 installationId: community.pushLeaseInstallationId!,
@@ -163,6 +178,13 @@ void main() {
                 ).submit,
               );
             }),
+            communityPushLeaseReaderProvider.overrideWithValue((
+              community,
+            ) async {
+              leaseReads++;
+              if (leaseReadError case final error?) throw error;
+              return (active: outcome == 'still active', generation: 9);
+            }),
             buzzPushLeaseRevocationStorageProvider.overrideWithValue(
               BuzzPushLeaseRevocationStorage(secure: FakeSecureStorage()),
             ),
@@ -172,6 +194,7 @@ void main() {
               discoveries++;
               return _descriptor;
             }),
+            diagnosticReporterProvider.overrideWithValue(reports),
             appLifecycleProvider.overrideWith(_Lifecycle.new),
           ],
           child: BuzzPushBootstrap(
@@ -231,33 +254,108 @@ void main() {
         statusHeight,
         reason: 'single-line settings rows share a height',
       );
+      Future<void> reconnect() async {
+        session.setStatus(SessionStatus.disconnected);
+        await tester.pumpAndSettle();
+        session.setStatus(SessionStatus.connected);
+        await tester.pumpAndSettle();
+      }
+
+      const warning = 'Could not confirm that notifications were turned off.';
       await tester.tap(find.byType(Switch));
+      if (outcome == 'unanswered') {
+        // Until the relay answers, the row says off is not yet confirmed,
+        // and holds the switch so Off, On, Off can't race the first attempt.
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('Turning off…'), findsOneWidget);
+        expect(tester.widget<Switch>(find.byType(Switch)).onChanged, isNull);
+        await tester.tap(find.text('Notifications'));
+        await tester.pump();
+        expect(tombstones, [9]);
+        await tester.pump(pushOptOutTimeout + const Duration(seconds: 1));
+      }
       await tester.pumpAndSettle();
-      final stored = (await storage.loadAll()).single;
-      expect(stored.pushNotificationsEnabled, isFalse);
-      expect(
-        stored.pushSubscriptionState.pendingTombstoneGeneration,
-        outcome == 'failed' || outcome == 'pending'
-            ? greaterThanOrEqualTo(9)
-            : isNull,
-      );
-      expect(tombstones.first, 9);
-      expect(
-        tombstones.length,
-        lessThanOrEqualTo(2),
-        reason: 'failed cleanup must not defeat the retry backoff',
-      );
+      expect(find.text('Turning off…'), findsNothing);
+      expect(tombstones, [9]);
       expect(discoveries, 2);
-      session.setStatus(SessionStatus.disconnected);
-      await tester.pumpAndSettle();
-      session.setStatus(SessionStatus.connected);
-      await tester.pumpAndSettle();
+      if (outcome != 'accepted' &&
+          outcome != 'scaled' &&
+          outcome != 'unset preference') {
+        // A failed opt-out shows the confirmed On, with the warning.
+        expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+        expect(find.text(warning), findsOneWidget);
+        expect(find.text('Notifications may continue.'), findsOneWidget);
+        expect(
+          tester.getSemantics(
+            find.byKey(const ValueKey('push-opt-out-failed')),
+          ),
+          isSemantics(isLiveRegion: true),
+        );
+      }
+      var stored = (await storage.loadAll()).single;
+      if (outcome == 'refused') {
+        // The relay never stored it, so push is simply back on, and the
+        // community stays in the native snapshot.
+        expect(stored.pushNotificationsEnabled, isTrue);
+        expect(stored.pushSubscriptionState.pendingTombstoneGeneration, isNull);
+        expect(snapshots.last.single.pushNotificationsEnabled, isTrue);
+        // A reconnect retries nothing and reads nothing.
+        await reconnect();
+        expect(tombstones, [9]);
+        expect(leaseReads, 0);
+        expect(find.text(warning), findsOneWidget);
+        await tester.pumpWidget(const SizedBox.shrink());
+        semantics.dispose();
+        debugDefaultTargetPlatformOverride = null;
+        return;
+      }
+      expect(stored.pushNotificationsEnabled, isFalse);
+      expect(snapshots.last.single.pushNotificationsEnabled, isFalse);
+      if (outcome == 'unanswered' || outcome == 'still active') {
+        // The relay may hold it: the opt-out stays saved as a guard.
+        expect(stored.pushSubscriptionState.pendingTombstoneGeneration, 9);
+        // The app asks the relay right away, and again on each sync until it
+        // answers. A read that fails changes nothing and retries nothing.
+        expect(leaseReads, 1);
+        await reconnect();
+        expect(leaseReads, 2);
+        expect(tombstones, [9]);
+        expect(find.text(warning), findsOneWidget);
+        // The next sync that can shows what the relay holds.
+        leaseReadError = null;
+        await reconnect();
+        expect(leaseReads, 3);
+        expect(tombstones, [9]);
+        stored = (await storage.loadAll()).single;
+        expect(stored.pushSubscriptionState.pendingTombstoneGeneration, isNull);
+        if (outcome == 'still active') {
+          expect(stored.pushNotificationsEnabled, isTrue);
+          expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+          expect(find.text(warning), findsOneWidget);
+          await tester.pumpWidget(const SizedBox.shrink());
+          semantics.dispose();
+          debugDefaultTargetPlatformOverride = null;
+          return;
+        }
+        expect(stored.pushNotificationsEnabled, isFalse);
+        expect(stored.pushSubscriptionState.acceptedGeneration, 9);
+        expect(find.text(warning), findsNothing);
+        // A settled opt-out isn't read again.
+        await reconnect();
+        expect(leaseReads, 3);
+      } else {
+        expect(stored.pushSubscriptionState.pendingTombstoneGeneration, isNull);
+        await reconnect();
+        expect(leaseReads, 0);
+      }
       expect(
         session.leases.where((lease) => lease['active'] == true),
         hasLength(1),
       );
-      expect(discoveries, 3);
-      expect(snapshots.last.single.pushNotificationsEnabled, isFalse);
+      // Each reconnect discovers capability again.
+      final discovered = discoveries;
+      expect(discovered, greaterThan(2));
       final offSwitch = tester.widget<Switch>(find.byType(Switch));
       expect(offSwitch.value, isFalse);
       expect(offSwitch.onChanged, isNotNull);
@@ -278,7 +376,7 @@ void main() {
             're-enabling must publish an active lease before the renewal timer',
       );
       expect(session.leases.last['generation'], greaterThan(tombstones.last!));
-      if (outcome == 'pending') {
+      if (outcome == 'unanswered') {
         cleanup.complete();
         await tester.pumpAndSettle();
         expect(
@@ -294,7 +392,7 @@ void main() {
         isTrue,
         reason: 'a delayed old tombstone cannot supersede the new active lease',
       );
-      expect(discoveries, 4);
+      expect(discoveries, discovered + 1);
       // A real reconnect must still discover capability again.
       (container.read(relaySessionProvider.notifier) as _Connected).setStatus(
         SessionStatus.disconnected,
@@ -305,14 +403,53 @@ void main() {
         SessionStatus.connected,
       );
       await tester.pumpAndSettle();
-      expect(discoveries, 5);
+      expect(discoveries, discovered + 2);
       expect(tester.widget<Switch>(find.byType(Switch)).onChanged, isNotNull);
+      // A gateway reply the app cannot read is reported while the signing
+      // member is still the reported member, and not after a community switch.
+      messenger.setMockMethodCallHandler(
+        nativePush,
+        (call) async => switch (call.method) {
+          'enrollPush' => throw PlatformException(
+            code: 'gateway_response_invalid',
+          ),
+          'startRegistration' ||
+          'syncPushSnapshot' ||
+          'takePendingNotificationResponse' => null,
+          _ => throw StateError('Unexpected native call ${call.method}'),
+        },
+      );
+      reports.member = nostr.Keys('1' * 64).public;
+      apnsDeviceToken.value = 'test-apns-token-2';
+      await tester.pumpAndSettle();
+      expect(reports.operations, [DiagnosticOperation.pushGatewayResponse]);
+      reports.member = 'e' * 64;
+      apnsDeviceToken.value = 'test-apns-token-3';
+      await tester.pumpAndSettle();
+      expect(reports.operations, hasLength(1));
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
       semantics.dispose();
       debugDefaultTargetPlatformOverride = null;
     });
+  }
+}
+
+class _RecordingDiagnostics extends NoopDiagnosticReporter {
+  final operations = <DiagnosticOperation>[];
+
+  @override
+  String? member;
+
+  @override
+  void reportError(
+    Object error,
+    StackTrace? stackTrace, {
+    required DiagnosticOperation operation,
+  }) {
+    operations.add(operation);
+    super.reportError(error, stackTrace, operation: operation);
   }
 }
 
@@ -334,6 +471,7 @@ class _Connected extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
   }) async {
     expect(event.kind, buzzPushLeaseKind);
     final plaintext = nip44Decrypt(

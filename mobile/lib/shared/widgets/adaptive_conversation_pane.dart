@@ -4,6 +4,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:duo_kit/duo_kit.dart';
 
+import '../diagnostics/diagnostic_navigation_observer.dart';
 import 'duo_toolbar.dart';
 import 'app_route_observer.dart';
 import 'covered_route_keyboard_insets.dart';
@@ -69,6 +70,7 @@ bool popCompactConversationDestination(Route<dynamic> route) {
 
 /// Selection belongs to the workspace, rather than to a particular display pose.
 class ConversationPaneController extends ChangeNotifier {
+  final _nativeHeaderKey = GlobalKey();
   String? selectedId;
   WidgetBuilder? detailBuilder;
   bool animateSelection = true;
@@ -122,6 +124,29 @@ class ConversationPaneScope
         settings.key == controller!.selectionKey;
   }
 
+  /// Keeps the native header surface alive across immediate sidebar selections.
+  /// Conversation state still belongs to its separately keyed route.
+  static GlobalKey? nativeHeaderKeyOf(BuildContext context) {
+    final controller = maybeOf(context);
+    if (!isBaseRouteOf(context) || !_isWide(context)) return null;
+    return controller?._nativeHeaderKey;
+  }
+
+  /// A replaced zero-duration page can remain mounted until frame cleanup.
+  /// It must relinquish the shared header before the next page adopts it.
+  static bool isReplacedBaseRouteOf(BuildContext context) {
+    final settings = ModalRoute.of(context)?.settings;
+    return settings is _ConversationDetailPage &&
+        !isBaseRouteOf(context) &&
+        _isWide(context);
+  }
+
+  static bool _isWide(BuildContext context) => usesConversationPanes(
+    context,
+    windowSize:
+        View.of(context).physicalSize / View.of(context).devicePixelRatio,
+  );
+
   /// Depends only on [active], which flips whenever a route covers the pane,
   /// so readers of [maybeOf] (rows, the list) don't rebuild with it.
   static bool isActiveOf(BuildContext context) =>
@@ -158,11 +183,13 @@ class AdaptiveConversationPane extends HookConsumerWidget {
     this.listWidthFraction,
     this.preferredListWidth,
     this.persistentSelection = false,
+    this.requireFoldForSplit = false,
     this.listToolbarSlots = 0,
     super.key,
   });
 
   final bool persistentSelection;
+  final bool requireFoldForSplit;
 
   /// Rail slots reserved for workspace controls that stay active in wide mode.
   final int listToolbarSlots;
@@ -182,6 +209,10 @@ class AdaptiveConversationPane extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final routeObserver = useMemoized(appRouteObserver.createNestedObserver);
+    final screenObserver = useMemoized(
+      ref.read(diagnosticScreenTrailProvider).observer,
+    );
+    useEffect(() => screenObserver.dispose, [screenObserver]);
     final navigator = useMemoized(() => GlobalKey<NavigatorState>());
     final ownerRoute = ModalRoute.of(context);
     useEffect(() {
@@ -215,7 +246,9 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                 ? stripWidth
                 : 0.0;
             final contentWidth = constraints.maxWidth - stripWidth;
-            final wide = usesConversationPanes(context, strip: strip);
+            final wide =
+                (!requireFoldForSplit || strip != null) &&
+                usesConversationPanes(context, strip: strip);
             final book = wide ? bookDivisionOf(context) : null;
             final selected = controller.selectedId;
             if (ownerRoute != null) {
@@ -345,7 +378,10 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                                     child: Navigator(
                                       requestFocus: selected != null,
                                       key: navigator,
-                                      observers: [routeObserver],
+                                      observers: [
+                                        routeObserver,
+                                        screenObserver,
+                                      ],
                                       pages: [
                                         if (!(wide &&
                                             persistentSelection &&
@@ -385,26 +421,18 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                                                   ),
                                           ),
                                         if (selected != null)
-                                          if (controller.animateSelection)
-                                            MaterialPage<void>(
-                                              key: controller.selectionKey,
-                                              child: _CoveringDetail(
-                                                covering: coveringDetail,
-                                                mounted: mountedDetails,
-                                                builder:
-                                                    controller.detailBuilder!,
-                                              ),
-                                            )
-                                          else
-                                            _ImmediateDetailPage(
-                                              key: controller.selectionKey,
-                                              builder: (_) => _CoveringDetail(
-                                                covering: coveringDetail,
-                                                mounted: mountedDetails,
-                                                builder:
-                                                    controller.detailBuilder!,
-                                              ),
+                                          _ConversationDetailPage(
+                                            key: controller.selectionKey,
+                                            animate:
+                                                !wide &&
+                                                controller.animateSelection,
+                                            child: _CoveringDetail(
+                                              covering: coveringDetail,
+                                              mounted: mountedDetails,
+                                              builder:
+                                                  controller.detailBuilder!,
                                             ),
+                                          ),
                                       ],
                                       onDidRemovePage: (page) {
                                         if (page.key ==
@@ -546,17 +574,50 @@ class _CoveringDetail extends HookWidget {
   }
 }
 
-/// Allows a detail with its own shared-element motion to own the transition.
-class _ImmediateDetailPage extends Page<void> {
-  const _ImmediateDetailPage({required this.builder, super.key});
-  final WidgetBuilder builder;
+/// Keeps the route identity stable across layout changes. Sidebar selections
+/// are immediate; compact navigation retains the platform push and back swipe.
+class _ConversationDetailPage extends MaterialPage<void> {
+  const _ConversationDetailPage({
+    required this.animate,
+    required super.child,
+    super.key,
+  });
+
+  final bool animate;
 
   @override
-  Route<void> createRoute(BuildContext context) => PageRouteBuilder<void>(
-    settings: this,
-    transitionDuration: Duration.zero,
-    reverseTransitionDuration: Duration.zero,
-    pageBuilder: (context, _, _) => builder(context),
+  Route<void> createRoute(BuildContext context) =>
+      _ConversationDetailRoute(this);
+}
+
+class _ConversationDetailRoute extends MaterialPageRoute<void> {
+  _ConversationDetailRoute(_ConversationDetailPage page)
+    : super(builder: (_) => page.child, settings: page);
+
+  _ConversationDetailPage get _page => settings as _ConversationDetailPage;
+
+  @override
+  Widget buildContent(BuildContext context) => _page.child;
+
+  @override
+  Duration get transitionDuration =>
+      _page.animate ? super.transitionDuration : Duration.zero;
+
+  @override
+  Duration get reverseTransitionDuration =>
+      _page.animate ? super.reverseTransitionDuration : Duration.zero;
+
+  @override
+  Widget buildTransitions(
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) => super.buildTransitions(
+    context,
+    _page.animate ? animation : kAlwaysCompleteAnimation,
+    secondaryAnimation,
+    child,
   );
 }
 
@@ -583,6 +644,7 @@ class AdaptiveConversationDestination extends HookConsumerWidget {
     this.listWidthFraction,
     this.controller,
     this.persistentSelection = false,
+    this.requireFoldForSplit = false,
     this.listToolbarSlots = 0,
     this.preferredListWidth,
     super.key,
@@ -591,6 +653,7 @@ class AdaptiveConversationDestination extends HookConsumerWidget {
   /// Optional list share of the usable width; defaults to the compact sidebar.
   final ConversationPaneController? controller;
   final bool persistentSelection;
+  final bool requireFoldForSplit;
 
   /// Rail slots reserved for workspace controls that stay active in wide mode.
   final int listToolbarSlots;
@@ -620,6 +683,7 @@ class AdaptiveConversationDestination extends HookConsumerWidget {
             active: DuoToolbarScope.maybeOf(context)?.active ?? true,
             controller: controller,
             persistentSelection: persistentSelection,
+            requireFoldForSplit: requireFoldForSplit,
             listToolbarSlots: listToolbarSlots,
             emptyLabel: emptyLabel,
             listWidthFraction: listWidthFraction,

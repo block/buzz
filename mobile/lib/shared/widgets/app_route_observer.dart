@@ -1,5 +1,7 @@
 import 'package:flutter/widgets.dart';
 
+import 'bottom_up_page_route.dart';
+
 /// Shared route lifecycle for native navigation and recording cleanup.
 final appRouteObserver = AppRouteObserver();
 
@@ -29,6 +31,12 @@ class AppRouteObserver extends RouteObserver<ModalRoute<dynamic>> {
     super.didPop(route, previousRoute);
     if (route is! TransitionRoute<dynamic> ||
         previousRoute is! ModalRoute<dynamic>) {
+      return;
+    }
+    // Capture this while the sheet still owns its retention. Its completion
+    // also releases that retention, before some reveal callbacks run.
+    if (route is PopupRoute &&
+        BottomUpPageRoute.hasRetainedControls(previousRoute)) {
       return;
     }
     route.completed.then((_) {

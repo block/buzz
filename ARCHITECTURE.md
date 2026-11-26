@@ -467,7 +467,7 @@ All database access. Uses `sqlx::query()` (runtime, not compile-time macros) —
 | `channel.rs` | Channel CRUD, membership management, role enforcement (transactional) |
 | `feed.rs` | `query_mentions` (INNER JOIN event_mentions), `query_needs_action`, `query_activity` |
 | `workflow.rs` | Full workflow/run/approval CRUD; SHA-256 hashed approval tokens |
-| `partition.rs` | Monthly range partitioning for `events` and `delivery_log` tables: read-only catalog audit plus advisory-locked, time-bounded maintenance that creates uncovered months and advances an empty catch-all (`partition/maintenance.rs`) |
+| `partition.rs` | Monthly range partitioning for the `events` table: read-only catalog audit plus advisory-locked, time-bounded maintenance that creates uncovered months and advances an empty catch-all (`partition/maintenance.rs`) |
 | `dm.rs` | DM channel management |
 | `reaction.rs` | Reaction storage and retrieval |
 | `thread.rs` | Thread/reply tracking |
@@ -743,7 +743,7 @@ pub struct ConnectionState {
 pub enum AuthState { Pending { challenge: String }, Authenticated(AuthContext), Failed }
 ```
 
-**Community FI admission:** Protected HTTP and root/audio WebSocket requests read the normalized Host's active authentication policy from the primary database. Stored `requires_nip_fi` OR global enforce requires FI; repair mode denies first. HTTP middleware shares one request-local policy read with handlers. Root NIP-11 and `/info` publish a no-store host-specific requirement and compatible capability fields. Policy lookup failure is unavailable, never optional. See [community auth upgrades](docs/community-auth-upgrades.md); completed activation additionally requires existing-session drain evidence.
+**Community FI admission:** Protected HTTP and root/audio WebSocket requests read the normalized Host's active authentication policy from the primary database. Stored `requires_nip_fi` OR global enforce requires FI, as does membership in the shadow-mode `BUZZ_NIP_FI_ENFORCE_PERCENT` cohort; repair mode denies first. HTTP middleware shares one request-local policy read with handlers. Root NIP-11 and `/info` publish a no-store host-specific requirement and compatible capability fields. Policy lookup failure is unavailable, never optional. See [community auth upgrades](docs/community-auth-upgrades.md); completed activation additionally requires existing-session drain evidence.
 
 **HTTP endpoints:**
 

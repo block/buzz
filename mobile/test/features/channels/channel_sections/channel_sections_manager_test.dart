@@ -71,11 +71,11 @@ void main() {
 
     manager.createSection('Design', icon: '🎨', channelId: 'design-chat');
     final id = manager.store.sections.single.id;
-    manager.updateSection(id, icon: ':design:');
+    manager.renameSection(id, null, icon: ':design:');
     expect(manager.store.sections.single.name, 'Design');
-    manager.updateSection(id, name: 'Creative');
+    manager.renameSection(id, 'Creative');
     expect(manager.store.sections.single.icon, ':design:');
-    manager.updateSection(id, clearIcon: true);
+    manager.renameSection(id, null, clearIcon: true);
 
     final cached = ChannelSectionsStorage(
       prefs,
@@ -376,6 +376,15 @@ class _DelayedSubscribeRelaySession extends RelaySessionNotifier {
   }) async => const [];
 
   @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
+  }) => subscribe(filter, onEvent, onClosed: onClosed);
+
+  @override
   Future<void Function()> subscribe(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
@@ -459,6 +468,15 @@ class _RateLimitedRelaySession extends RelaySessionNotifier {
     }
     return historyEvents;
   }
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
+  }) => subscribe(filter, onEvent, onClosed: onClosed);
 
   @override
   Future<void Function()> subscribe(

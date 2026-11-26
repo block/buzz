@@ -182,10 +182,34 @@ use crate::nip_fi_shadow::{Stage, WouldDeny};
 ///
 /// Sealed: only implementations in this crate are accepted.
 pub(crate) trait HttpDenyMap: sealed::Sealed {
-    /// Returns `true` when `(issuer, pubkey)` has an active deny entry at
-    /// `now` (`now < until`).  Implementations fail closed: a poisoned or
-    /// unavailable backing store returns `true` (deny).
-    fn is_denied(&self, issuer: &str, pubkey: &PublicKey, now: DateTime<Utc>) -> bool;
+    /// Returns `true` when an entry for `(issuer, pubkey)` active at `now`
+    /// (`now < until`) covers an assertion whose verified signed `iat` is
+    /// `issued_at`.  Implementations fail closed: a poisoned or unavailable
+    /// backing store returns `true` (deny).
+    fn is_denied(
+        &self,
+        issuer: &str,
+        pubkey: &PublicKey,
+        issued_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> bool;
+
+    /// The verdict for `(issuer, pubkey)` and `issued_at` from one read, so a
+    /// refusal keeps its cause: unavailable while the deny set is restoring,
+    /// else denied or allowed.
+    fn deny_status(
+        &self,
+        issuer: &str,
+        pubkey: &PublicKey,
+        issued_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> buzz_auth::DenyStatus {
+        if self.is_denied(issuer, pubkey, issued_at, now) {
+            buzz_auth::DenyStatus::Denied
+        } else {
+            buzz_auth::DenyStatus::Allowed
+        }
+    }
 }
 
 pub(crate) mod sealed {
@@ -194,10 +218,26 @@ pub(crate) mod sealed {
 
 impl sealed::Sealed for buzz_auth::NipFiDenyMap {}
 impl HttpDenyMap for buzz_auth::NipFiDenyMap {
-    /// Delegates to [`buzz_auth::NipFiDenyMap::is_denied`], which is issuer-
+    /// Delegates to [`buzz_auth::NipFiDenyMap::denies`], which is issuer-
     /// scoped and returns `true` on a poisoned shard.
-    fn is_denied(&self, issuer: &str, pubkey: &PublicKey, now: DateTime<Utc>) -> bool {
-        buzz_auth::NipFiDenyMap::is_denied(self, issuer, pubkey, now)
+    fn is_denied(
+        &self,
+        issuer: &str,
+        pubkey: &PublicKey,
+        issued_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        self.denies(issuer, pubkey, issued_at, now)
+    }
+
+    fn deny_status(
+        &self,
+        issuer: &str,
+        pubkey: &PublicKey,
+        issued_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> buzz_auth::DenyStatus {
+        buzz_auth::NipFiDenyMap::deny_status(self, issuer, pubkey, issued_at, now)
     }
 }
 
@@ -215,7 +255,7 @@ impl HttpDenyMap for buzz_auth::NipFiDenyMap {
 struct NoDenyMapConfigured;
 impl sealed::Sealed for NoDenyMapConfigured {}
 impl HttpDenyMap for NoDenyMapConfigured {
-    fn is_denied(&self, _issuer: &str, _pubkey: &PublicKey, _now: DateTime<Utc>) -> bool {
+    fn is_denied(&self, _: &str, _: &PublicKey, _: DateTime<Utc>, _: DateTime<Utc>) -> bool {
         false
     }
 }
@@ -500,7 +540,9 @@ where
             }
             let reason = match deny.stage {
                 Stage::Pairing => Some("nip_fi_http_key_mismatch"),
-                Stage::DenySet => Some("nip_fi_http_denied_pubkey"),
+                Stage::DenySet if deny.class == DenialClass::AuthorizationDenied => {
+                    Some("nip_fi_http_denied_pubkey")
+                }
                 _ => None,
             };
             if let Some(reason) = reason {
@@ -749,11 +791,12 @@ where
     // Step 7: deny-map check — (iss, pubkey) and, for an agent assertion,
     // (iss, owner) must not be in an active deny window.  Private-state
     // denial.  [FI-INV-14] [NIP-FI.md:624-627]
-    if assertion_denied(deny_map, &assertion, Utc::now()) {
-        return Err(denied(
-            crate::nip_fi_shadow::DENY_SET,
-            crate::access::AuthReason::DenySet,
-        ));
+    if let Some(refusal) = assertion_denied(deny_map, &assertion, Utc::now()) {
+        let reason = match refusal.class {
+            DenialClass::AuthorizationDenied => crate::access::AuthReason::DenySet,
+            _ => crate::access::AuthReason::AuthorizationUnavailable,
+        };
+        return Err(denied(refusal, reason));
     }
 
     Ok((proof, assertion))
@@ -871,7 +914,7 @@ mod tests {
     struct AlwaysAdmitStubDenyMap;
     impl sealed::Sealed for AlwaysAdmitStubDenyMap {}
     impl HttpDenyMap for AlwaysAdmitStubDenyMap {
-        fn is_denied(&self, _issuer: &str, _pubkey: &PublicKey, _now: DateTime<Utc>) -> bool {
+        fn is_denied(&self, _: &str, _: &PublicKey, _: DateTime<Utc>, _: DateTime<Utc>) -> bool {
             false
         }
     }
@@ -1091,7 +1134,13 @@ mod tests {
         struct FixedDenyMap(bool);
         impl sealed::Sealed for FixedDenyMap {}
         impl HttpDenyMap for FixedDenyMap {
-            fn is_denied(&self, _: &str, _: &PublicKey, _: DateTime<Utc>) -> bool {
+            fn is_denied(
+                &self,
+                _: &str,
+                _: &PublicKey,
+                _: DateTime<Utc>,
+                _: DateTime<Utc>,
+            ) -> bool {
                 self.0
             }
         }
@@ -1637,14 +1686,14 @@ mod tests {
         use crate::nip_fi_shadow::EnforcedProof;
         let mut state = (*crate::state::tests::test_state().await).clone();
         for global in [NipFiMode::Off, NipFiMode::Shadow, NipFiMode::Enforce] {
-            for stored_required in [false, true] {
+            for policy_required in [false, true] {
                 std::sync::Arc::make_mut(&mut state.config).nip_fi.mode = global;
-                let mode = global.with_requirement(stored_required);
+                let mode = global.with_requirement(policy_required);
                 let policy = crate::nip_fi_policy::Policy {
                     community_id: uuid::Uuid::new_v4(),
                     mode,
                     required: mode.enforces(),
-                    stored_required,
+                    policy_required,
                     mapped: true,
                 };
                 let recorder = metrics_util::debugging::DebuggingRecorder::new();
@@ -1701,7 +1750,7 @@ mod tests {
                 } else {
                     assert!(
                         strict.is_empty(),
-                        "{global:?} stored={stored_required}: {strict:?}"
+                        "{global:?} stored={policy_required}: {strict:?}"
                     );
                 }
             }
@@ -2057,6 +2106,46 @@ mod tests {
         }
     }
 
+    /// A restoring deny map refuses protected HTTP 503
+    /// `authorization unavailable`, never 403 `authorization denied`.
+    #[test]
+    fn restoring_deny_map_refuses_http_as_unavailable() {
+        use buzz_auth::{IssuerCapacity, NipFiDenyMap};
+        let (agent, owner) = (any_pubkey(), any_pubkey());
+        let verifier = AgentVerifier(crate::nip_fi_shadow_session::tests::owned_assertion(
+            agent, owner,
+        ));
+        let map = NipFiDenyMap::new(
+            8,
+            vec![IssuerCapacity {
+                issuer: "test-issuer".to_owned(),
+                capacity: 8,
+            }],
+        );
+        let now = Utc::now();
+        map.merge_cross_pod_deny(
+            "test-issuer",
+            &owner,
+            now + chrono::Duration::hours(1),
+            || now,
+        );
+        map.begin_restore();
+        let headers = bearer_headers("Bearer a.b.c");
+        let refused = admit_stateless(
+            &headers,
+            || Ok(Nip98Proof::new(agent, ())),
+            &communities(),
+            Some(&verifier as &dyn VerifyAssertion),
+            NipFiMode::Enforce,
+            &map,
+        )
+        .now_or_never()
+        .expect("env resolution never waits");
+        let (status, body) = denial_parts(refused);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, b"authorization unavailable\n");
+    }
+
     // Pins: step 7 reads the owner of an agent assertion. With the owner's
     // deny entry live, enforce denies the agent with the deny-map row and
     // shadow records the would-deny; without it, enforce admits and the
@@ -2097,7 +2186,12 @@ mod tests {
         assert_eq!(admission.assertion().and_then(|a| a.owner()), Some(owner));
 
         let now = Utc::now();
-        map.merge_cross_pod_deny("test-issuer", &owner, now + chrono::Duration::hours(1), now);
+        map.merge_cross_pod_deny(
+            "test-issuer",
+            &owner,
+            now + chrono::Duration::hours(1),
+            || now,
+        );
         let (status, body) = denial_parts(admit(NipFiMode::Enforce, &map));
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body, b"authorization denied\n");

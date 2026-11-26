@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:ui' as ui;
 
 import 'package:buzz/features/channels/add_members_sheet.dart';
+import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
@@ -21,6 +22,7 @@ final _existing = 'e' * 64;
 final _avatar =
     'data:image/svg+xml,${Uri.encodeComponent('<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72"><rect width="72" height="72" fill="#0000ff"/></svg>')}';
 const _bridge = MethodChannel('buzz/add_members_sheet');
+const _dialog = MethodChannel('buzz/confirmation_dialog');
 
 class _Cache extends UserCacheNotifier {
   @override
@@ -46,6 +48,28 @@ class _Actions extends Fake implements ChannelActions {
     calls.add(pubkeys);
     if (failBob) throw AddMembersException({_bob: 'Try again'});
   }
+
+  final dmCalls = <DmHistory>[];
+  @override
+  Future<Channel> addToDm({
+    required String channelId,
+    required List<String> pubkeys,
+    required DmHistory history,
+  }) async {
+    dmCalls.add(history);
+    // A person joining a DM of two people needs the history choice.
+    if (history == DmHistory.ask) throw const DmNeedsHistoryChoice();
+    return Channel(
+      id: channelId,
+      name: channelId,
+      channelType: 'dm',
+      visibility: 'private',
+      description: '',
+      createdBy: _existing,
+      createdAt: DateTime(2026),
+      memberCount: 3,
+    );
+  }
 }
 
 Future<void> _pump(
@@ -53,6 +77,7 @@ Future<void> _pump(
   _Actions actions, {
   Map<String, String>? people,
   Set<String>? agents,
+  bool isDm = false,
 }) async {
   await tester.pumpWidget(
     ProviderScope(
@@ -77,7 +102,9 @@ Future<void> _pump(
               onPressed: () => showAddChannelMembersSheet(
                 context: context,
                 channelId: 'channel',
-                existingPubkeys: {_existing},
+                // A DM of two people asks before adding a third.
+                existingPubkeys: isDm ? {_existing, 'c' * 64} : {_existing},
+                isDm: isDm,
               ),
               child: const Text('Open picker'),
             ),
@@ -327,6 +354,60 @@ void main() {
         await tester.pumpWidget(const SizedBox());
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
             .setMockMethodCallHandler(_bridge, null);
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
+
+  testWidgets(
+    'iOS DM history choice returns the native picker to idle when cancelled',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final states = <Map<Object?, Object?>>[];
+      final methods = <String>[];
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(_bridge, (call) async {
+        methods.add(call.method);
+        if (call.method != 'dismiss') {
+          states.add(Map<Object?, Object?>.from(call.arguments as Map));
+        }
+        return null;
+      });
+      // Cancel, then a failed alert, then Include history.
+      final answers = <Object?>[null, 'fail', 1];
+      messenger.setMockMethodCallHandler(_dialog, (call) async {
+        final answer = answers.removeAt(0);
+        if (answer == 'fail') {
+          throw PlatformException(code: 'presentation_failed');
+        }
+        return answer;
+      });
+      try {
+        final actions = _Actions();
+        await _pump(tester, actions, agents: const {}, isDm: true);
+        final session = states.last['session'] as String;
+        await _event(tester, session, 'query', {'value': 'Al'});
+        await _settleSearch(tester);
+        await _event(tester, session, 'toggle', {'pubkey': _alice});
+        // The native sheet marks itself busy before it sends submit, so each
+        // unfinished choice must hand it the idle state again.
+        for (var attempt = 0; attempt < 2; attempt++) {
+          final sent = methods.length;
+          await _event(tester, session, 'submit');
+          expect(methods.sublist(sent), contains('update'));
+          expect(states.last['submitting'], isFalse);
+          expect(states.last['selected'] as List, hasLength(1));
+        }
+        expect(states.last['error'], isNotNull);
+        expect(actions.dmCalls, [DmHistory.ask, DmHistory.ask]);
+        await _event(tester, session, 'submit');
+        expect(actions.dmCalls.last, DmHistory.include);
+        expect(methods.last, 'dismiss');
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        messenger.setMockMethodCallHandler(_bridge, null);
+        messenger.setMockMethodCallHandler(_dialog, null);
         debugDefaultTargetPlatformOverride = null;
       }
     },

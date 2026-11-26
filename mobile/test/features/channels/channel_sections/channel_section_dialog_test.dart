@@ -1,5 +1,6 @@
-import 'package:buzz/features/channels/channel_sections/channel_section_dialog.dart';
+import 'package:buzz/features/channels/channel_actions_sheet.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
+import 'package:buzz/features/channels/channels_page.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
 import 'package:buzz/shared/emoji/emoji_data_provider.dart';
@@ -45,10 +46,13 @@ void main() {
             body: Builder(
               builder: (context) => TextButton(
                 onPressed: () async {
-                  final edit = await showChannelSectionDialog(
-                    context,
-                    section: section,
-                  );
+                  final existing = section;
+                  final edit = existing == null
+                      ? await showChannelSectionDialog(
+                          context,
+                          inScope: () => true,
+                        )
+                      : await showSectionRenameEditor(context, existing);
                   if (edit != null) {
                     section = ChannelSection(
                       id: 'design',

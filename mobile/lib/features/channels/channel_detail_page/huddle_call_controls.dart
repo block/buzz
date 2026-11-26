@@ -3,12 +3,14 @@ part of '../channel_detail_page.dart';
 class _HuddleCallControls extends StatelessWidget {
   const _HuddleCallControls({
     required this.isMuted,
+    this.inRail = false,
     required this.isSpeakerEnabled,
     required this.onToggleMute,
     required this.onToggleSpeaker,
     required this.onReact,
   });
 
+  final bool inRail;
   final bool isMuted;
   final bool isSpeakerEnabled;
   final VoidCallback onToggleMute;
@@ -17,53 +19,75 @@ class _HuddleCallControls extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final microphone = _HuddleRoundControl(
+      useGlass: true,
+      key: const ValueKey('huddle-mute-toggle'),
+      tooltip: isMuted ? 'Unmute' : 'Mute',
+      glassSemanticLabel: isMuted ? 'Microphone off' : 'Microphone on',
+      icon: isMuted ? BuzzIcons.micOff : BuzzIcons.mic,
+      foregroundColor: isMuted
+          ? context.colors.onSurface
+          : context.colors.onPrimary,
+      backgroundColor: isMuted
+          ? context.colors.surfaceContainerHighest
+          : context.colors.primary,
+      dimension: inRail ? _huddleRailControlSize : 80,
+      toggled: isMuted,
+      glassSelected: !isMuted,
+      useHapticFeedback: true,
+      onPressed: onToggleMute,
+    );
+    final speaker = _HuddleRoundControl(
+      useGlass: true,
+      key: const ValueKey('huddle-speaker-toggle'),
+      tooltip: isSpeakerEnabled ? 'Use earpiece' : 'Use speaker',
+      glassSemanticLabel: isSpeakerEnabled ? 'Speaker on' : 'Speaker off',
+      icon: BuzzIcons.volume2,
+      foregroundColor: isSpeakerEnabled
+          ? context.colors.onPrimary
+          : context.colors.onSurface,
+      backgroundColor: isSpeakerEnabled
+          ? context.colors.primary
+          : context.colors.surfaceContainerHighest,
+      dimension: inRail ? _huddleRailControlSize : 80,
+      toggled: isSpeakerEnabled,
+      useHapticFeedback: true,
+      onPressed: onToggleSpeaker,
+    );
     return Padding(
       key: const ValueKey('huddle-call-controls'),
       padding: const EdgeInsets.only(top: Grid.xxs),
-      child: Row(
+      child: Flex(
+        direction: inRail ? Axis.vertical : Axis.horizontal,
+        mainAxisSize: MainAxisSize.min,
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          _HuddleRoundControl(
-            key: const ValueKey('huddle-speaker-toggle'),
-            tooltip: isSpeakerEnabled ? 'Use earpiece' : 'Use speaker',
-            icon: BuzzIcons.volume2,
-            foregroundColor: isSpeakerEnabled
-                ? context.colors.onPrimary
-                : context.colors.onSurface,
-            backgroundColor: isSpeakerEnabled
-                ? context.colors.primary
-                : context.colors.surfaceContainerHighest,
-            dimension: 80,
-            toggled: isSpeakerEnabled,
-            useHapticFeedback: true,
-            onPressed: onToggleSpeaker,
+          inRail ? microphone : speaker,
+          SizedBox(
+            width: inRail ? 0 : Grid.sm,
+            height: inRail ? _huddleRailControlGap : 0,
           ),
-          const SizedBox(width: Grid.sm),
-          _HuddleRoundControl(
-            key: const ValueKey('huddle-mute-toggle'),
-            tooltip: isMuted ? 'Unmute' : 'Mute',
-            icon: isMuted ? BuzzIcons.micOff : BuzzIcons.mic,
-            foregroundColor: isMuted
-                ? context.colors.onSurface
-                : context.colors.onPrimary,
-            backgroundColor: isMuted
-                ? context.colors.surfaceContainerHighest
-                : context.colors.primary,
-            dimension: 80,
-            toggled: isMuted,
-            useHapticFeedback: true,
-            onPressed: onToggleMute,
-          ),
-          const SizedBox(width: Grid.sm),
-          _HuddleRoundControl(
-            key: const ValueKey('huddle-emoji-reactions'),
-            tooltip: 'Emoji reactions',
-            icon: BuzzIcons.smilePlus,
-            foregroundColor: context.colors.onSurface,
-            backgroundColor: context.colors.surfaceContainerHighest,
-            dimension: 80,
-            useHapticFeedback: true,
-            onPressed: onReact,
+          inRail ? speaker : microphone,
+          // Keep reactions available for a future return to the call controls.
+          Visibility(
+            visible: false,
+            child: Padding(
+              padding: EdgeInsets.only(
+                left: inRail ? 0 : Grid.sm,
+                top: inRail ? _huddleRailControlGap : 0,
+              ),
+              child: _HuddleRoundControl(
+                useGlass: true,
+                key: const ValueKey('huddle-emoji-reactions'),
+                tooltip: 'Emoji reactions',
+                icon: BuzzIcons.smilePlus,
+                foregroundColor: context.colors.onSurface,
+                backgroundColor: context.colors.surfaceContainerHighest,
+                dimension: inRail ? _huddleRailControlSize : 80,
+                useHapticFeedback: true,
+                onPressed: onReact,
+              ),
+            ),
           ),
         ],
       ),
@@ -80,8 +104,11 @@ class _HuddleRoundControl extends StatelessWidget {
     required this.backgroundColor,
     required this.onPressed,
     this.dimension = 64,
+    this.useGlass = false,
     this.showTooltip = true,
     this.toggled,
+    this.glassSelected,
+    this.glassSemanticLabel,
     this.useHapticFeedback = false,
   });
 
@@ -91,8 +118,15 @@ class _HuddleRoundControl extends StatelessWidget {
   final Color backgroundColor;
   final VoidCallback? onPressed;
   final double dimension;
+  static const iconSize = 28.0;
+  final bool useGlass;
   final bool showTooltip;
   final bool? toggled;
+  final bool? glassSelected;
+
+  /// The native glass button marks [glassSelected] with UIKit's selected
+  /// trait, so its label names the state rather than the action.
+  final String? glassSemanticLabel;
   final bool useHapticFeedback;
 
   @override
@@ -105,6 +139,37 @@ class _HuddleRoundControl extends StatelessWidget {
             }
             onPressed!();
           };
+
+    if (useGlass && defaultTargetPlatform == TargetPlatform.iOS) {
+      final selected = glassSelected ?? toggled ?? false;
+      final tint = icon == BuzzIcons.phoneOff
+          ? context.colors.error
+          : selected
+          ? context.colors.primary
+          : context.colors.onSurface;
+      return IosGlassNavigationButton(
+        icon: IosGlassNavigationIcon.close,
+        label: '', // Flutter retains the existing Tabler glyph.
+        semanticLabel: glassSemanticLabel ?? tooltip,
+        onPressed: effectiveOnPressed,
+        width: dimension,
+        height: dimension,
+        controlSize: dimension,
+        foregroundColor: tint,
+        isSelected: selected,
+        artwork: Icon(
+          icon,
+          size: iconSize,
+          color: onPressed == null
+              ? tint.withValues(alpha: 0.5)
+              : selected
+              ? Theme.of(context).brightness == Brightness.dark
+                    ? Colors.black
+                    : Colors.white
+              : tint,
+        ),
+      );
+    }
 
     return Semantics(
       label: tooltip,
@@ -124,7 +189,7 @@ class _HuddleRoundControl extends StatelessWidget {
               disabledForegroundColor: foregroundColor.withValues(alpha: 0.5),
               disabledBackgroundColor: backgroundColor.withValues(alpha: 0.5),
             ),
-            icon: Icon(icon, size: 28),
+            icon: Icon(icon, size: iconSize),
           ),
         ),
       ),

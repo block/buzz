@@ -1,5 +1,6 @@
 import 'package:http/http.dart' as http;
 import 'package:buzz/shared/http/app_http_client.dart';
+import 'relay_call_error.dart';
 
 /// Lightweight HTTP context for talking to the Buzz relay.
 ///
@@ -45,4 +46,19 @@ class RelayException implements Exception {
     }
     return 'RelayException($statusCode): $trimmedBody';
   }
+}
+
+/// The relay's `/query` answered with a non-2xx status.
+///
+/// Callers that retry, fall back or give up read the [RelayException] status
+/// and body as before. A diagnostic report of one is tagged with the call and
+/// a reason class taken from the status alone, never the body.
+class RelayQueryException extends RelayException implements RelayCallError {
+  RelayQueryException(super.statusCode, super.body);
+
+  @override
+  RelayCall get call => RelayCall.query;
+
+  @override
+  RelayReason get reason => RelayReason.fromHttpStatus(statusCode);
 }

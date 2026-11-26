@@ -1,41 +1,46 @@
-import 'package:flutter/material.dart';
-import 'package:flutter_hooks/flutter_hooks.dart';
+part of '../channel_actions_sheet.dart';
 
-import '../../../shared/emoji/emoji_picker.dart';
-import '../../../shared/theme/buzz_icons.dart';
-import '../../../shared/widgets/modal_presentation.dart';
-import 'channel_section_emoji.dart';
-import 'channel_sections_storage.dart';
-
-/// Edits a section name and optional emoji without saving on dismissal.
+/// Collects a name and optional emoji for a new section.
 Future<({String name, String? icon})?> showChannelSectionDialog(
   BuildContext context, {
-  ChannelSection? section,
+  required bool Function() inScope,
 }) => showBuzzDialog<({String name, String? icon})>(
   context: context,
-  builder: (_) => _SectionDialog(section: section),
+  builder: (_) => _SectionDialog(inScope: inScope),
 );
 
-class _SectionDialog extends HookWidget {
-  const _SectionDialog({required this.section});
+class _SectionDialog extends HookConsumerWidget {
+  const _SectionDialog({required this.inScope});
 
-  final ChannelSection? section;
+  final bool Function() inScope;
 
   @override
-  Widget build(BuildContext context) {
-    final name = useTextEditingController(text: section?.name ?? '');
-    final icon = useState(section?.icon);
+  Widget build(BuildContext context, WidgetRef ref) {
+    final name = useTextEditingController();
+    final icon = useState<String?>(null);
     final placeholder = const Icon(BuzzIcons.smilePlus);
+    ref.listen(relayConfigProvider, (_, _) {
+      if (!inScope()) _closeOwnRoute(context);
+    });
+    // A switch before the first frame found no dialog to close.
+    useEffect(() {
+      if (!inScope()) {
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _closeOwnRoute(context),
+        );
+      }
+      return null;
+    }, const []);
 
     void confirm() {
       final trimmed = name.text.trim();
-      if (trimmed.isNotEmpty) {
+      if (trimmed.isNotEmpty && inScope()) {
         Navigator.of(context).pop((name: trimmed, icon: icon.value));
       }
     }
 
     return AlertDialog(
-      title: Text(section == null ? 'New Section' : 'Rename Section'),
+      title: const Text('New Section'),
       scrollable: true,
       content: Column(
         mainAxisSize: MainAxisSize.min,
@@ -84,10 +89,7 @@ class _SectionDialog extends HookWidget {
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
-        TextButton(
-          onPressed: confirm,
-          child: Text(section == null ? 'Create' : 'Rename'),
-        ),
+        FilledButton(onPressed: confirm, child: const Text('Create')),
       ],
     );
   }

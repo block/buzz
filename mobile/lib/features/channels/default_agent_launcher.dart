@@ -13,13 +13,14 @@ import '../../shared/me/me_sync.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/agent_navigation_icon.dart';
+import '../../shared/widgets/navigation_button_surface.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/preset_agent_avatar.dart';
-import '../../shared/widgets/navigation_button_surface.dart';
 import '../../shared/widgets/buzz_callout.dart';
 import 'first_agent_callout.dart';
 import 'empty_bestie_avatar.dart';
 import 'bestie_conversation.dart';
+import 'bestie_transcription_control.dart';
 
 /// Persistent shortcut to the agent chosen in Agents.
 class DefaultAgentLauncher extends HookConsumerWidget {
@@ -27,6 +28,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
   final VoidCallback onChooseAgent;
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final diameter = NavigationGlassGroup.diameterOf(context);
     final preference = ref.watch(defaultAgentProvider);
     final scope = ref.watch(meSyncProvider);
     final pubkey = preference.isLoading ? null : preference.value;
@@ -100,6 +102,16 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       }
     }
 
+    Widget withTranscription(Widget child) {
+      if (scope.config.nsec?.isNotEmpty != true) return child;
+      return BestieTranscriptionControl(
+        key: ValueKey('transcription:${scope.cacheKey}'),
+        scope: scope.cacheKey,
+        recipient: preference.isLoading || preference.hasError ? null : pubkey,
+        child: child,
+      );
+    }
+
     return BuzzCallout(
       message: 'Create your first agent',
       visible: showCallout,
@@ -116,36 +128,38 @@ class DefaultAgentLauncher extends HookConsumerWidget {
             fallback: const AgentNavigationIcon(size: 24),
           ),
       ],
-      child: NavigationButtonSurface(
-        child: SizedBox.square(
-          dimension: 56,
-          child: IconButton(
-            tooltip: label,
-            padding: EdgeInsets.zero,
-            onPressed: opening.value || preference.isLoading ? null : open,
-            icon: ExcludeSemantics(
-              child: resolving.value
-                  ? const SizedBox.square(
-                      dimension: 22,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : pubkey == null
-                  ? preference.isLoading || preference.hasError
-                        ? const AgentNavigationIcon(size: 24)
-                        : const EmptyBestieAvatar()
-                  : usesInsetAgentArtwork(profile?.avatarUrl)
-                  ? PresetAgentAvatar(
-                      imageUrl: profile!.avatarUrl!,
-                      size: 47.88,
-                      fallback: Center(child: Text(profile.initial)),
-                    )
-                  : AvatarImage(
-                      imageUrl: profile?.avatarUrl,
-                      radius: 18,
-                      isAgent: true,
-                      backgroundColor: context.controlSurface,
-                      fallback: Center(child: Text(profile?.initial ?? 'A')),
-                    ),
+      child: withTranscription(
+        SizedBox(
+          child: SizedBox.square(
+            dimension: diameter,
+            child: IconButton(
+              tooltip: label,
+              padding: EdgeInsets.zero,
+              onPressed: opening.value || preference.isLoading ? null : open,
+              icon: ExcludeSemantics(
+                child: resolving.value
+                    ? const SizedBox.square(
+                        dimension: 22,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : pubkey == null
+                    ? preference.isLoading || preference.hasError
+                          ? const AgentNavigationIcon(size: 24)
+                          : const EmptyBestieAvatar()
+                    : usesInsetAgentArtwork(profile?.avatarUrl)
+                    ? PresetAgentAvatar(
+                        imageUrl: profile!.avatarUrl!,
+                        size: diameter * 0.855,
+                        fallback: Center(child: Text(profile.initial)),
+                      )
+                    : AvatarImage(
+                        imageUrl: profile?.avatarUrl,
+                        radius: 18,
+                        isAgent: true,
+                        backgroundColor: context.controlSurface,
+                        fallback: Center(child: Text(profile?.initial ?? 'A')),
+                      ),
+              ),
             ),
           ),
         ),

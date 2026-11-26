@@ -129,6 +129,9 @@ class _IOSInlinePhotoPicker extends HookWidget {
         children: [
           UiKitView(
             viewType: _inlinePhotoPickerViewType,
+            gestureRecognizers: {
+              Factory<OneSequenceGestureRecognizer>(EagerGestureRecognizer.new),
+            },
             creationParamsCodec: const StandardMessageCodec(),
             onPlatformViewCreated: (viewId) {
               pickerChannel.value = MethodChannel(

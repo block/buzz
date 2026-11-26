@@ -4,6 +4,7 @@
 //! lookup as evidence that an event has no replies.
 //! Exact probes cover lowercase and uppercase references. Mixed-case references
 //! without thread metadata are not guaranteed; normal metadata uses binary IDs.
+//! A NIP-PM pin or unpin command is never a reply: its `e` tag names its target.
 use super::*;
 
 const MAX_CANDIDATES: i64 = 10_000;
@@ -13,6 +14,7 @@ pub(super) const CANDIDATES_SQL: &str = "SELECT e.id,e.created_at,e.tags
          CROSS JOIN LATERAL (
            SELECT e.id,e.created_at,e.tags FROM events e
            WHERE e.community_id=$1 AND e.tags @> probe.tags
+           AND NOT(e.kind=ANY($4))
            AND NOT EXISTS(SELECT 1 FROM thread_metadata tm
              WHERE tm.community_id=e.community_id AND tm.event_id=e.id
                AND tm.event_created_at=e.created_at)
@@ -61,6 +63,7 @@ pub(super) async fn needed(
         .bind(community)
         .bind(json!(probes))
         .bind(MAX_CANDIDATES + 1)
+        .bind(crate::pins::COMMAND_KINDS.as_slice())
         .fetch_all(&mut *conn)
         .await?;
     sqlx::query("SELECT set_config('statement_timeout',$1,true)")

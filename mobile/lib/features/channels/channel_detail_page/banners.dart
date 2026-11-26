@@ -1,5 +1,39 @@
 part of '../channel_detail_page.dart';
 
+class _PreviewRefreshNotice extends StatelessWidget {
+  const _PreviewRefreshNotice({required this.onRetry});
+
+  final VoidCallback? onRetry;
+
+  @override
+  Widget build(BuildContext context) => ColoredBox(
+    color: context.colors.surface,
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: kMinInteractiveDimension),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
+        child: Row(
+          children: [
+            Expanded(
+              child: Semantics(
+                liveRegion: true,
+                child: Text(
+                  onRetry == null
+                      ? 'Showing saved messages.'
+                      : 'Showing saved messages. Refresh failed.',
+                  style: context.textTheme.bodySmall,
+                ),
+              ),
+            ),
+            if (onRetry != null)
+              TextButton(onPressed: onRetry, child: const Text('Retry')),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
 class _ReadOnlyNotice extends HookConsumerWidget {
   final Channel channel;
 

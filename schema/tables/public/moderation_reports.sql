@@ -4,7 +4,7 @@
 -- moderators in the queue but never revealed to the reported author.
 
 CREATE TABLE moderation_reports (
-    community_id        UUID NOT NULL REFERENCES communities(id),
+    community_id        UUID NOT NULL,
     id                  UUID NOT NULL DEFAULT gen_random_uuid(),
     -- The signed kind:1984 event id (stored for audit/idempotency).
     report_event_id     BYTEA NOT NULL CHECK (length(report_event_id) = 32),
@@ -36,13 +36,7 @@ CREATE TABLE moderation_reports (
         (target_kind = 'event'  AND target_event_id IS NOT NULL AND target_pubkey IS NULL     AND target_blob_sha256 IS NULL) OR
         (target_kind = 'pubkey' AND target_event_id IS NULL     AND target_pubkey IS NOT NULL AND target_blob_sha256 IS NULL) OR
         (target_kind = 'blob'   AND target_event_id IS NULL     AND target_pubkey IS NULL     AND target_blob_sha256 IS NOT NULL)
-    ),
-    -- Same-community channel provenance (channels are soft-deleted, never
-    -- hard-deleted, so this FK cannot dangle).
-    FOREIGN KEY (community_id, channel_id) REFERENCES channels (community_id, id),
-    -- Same-community resolution provenance: a report can only be resolved by an
-    -- action row in its own community.
-    FOREIGN KEY (community_id, action_id) REFERENCES moderation_actions (community_id, id)
+    )
 );
 
 -- Queue reads: open reports, newest first, per community.

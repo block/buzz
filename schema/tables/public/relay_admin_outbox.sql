@@ -3,7 +3,7 @@
 
 CREATE TABLE relay_admin_outbox (
     id          UUID NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
-    action_id   UUID NOT NULL REFERENCES relay_admin_actions(id),
+    action_id   UUID NOT NULL,
     -- Delivery task type: 'tombstone' | 'system_message' | 'reporter_notice'.
     task_type   TEXT NOT NULL,
     -- Task payload (JSON).

@@ -763,31 +763,10 @@ pub async fn cmd_send_message(
             .map_err(|e| CliError::Other(format!("build_forum_comment failed: {e}")))?
         }
         None | Some(9) => {
-            // Scan final_content for `:shortcode:` patterns and attach NIP-30
-            // emoji tags for any that resolve in the workspace palette.
-            // Palette resolution is scoped to kind 9: forum builders (45001,
-            // 45003) do not accept emoji_tags, so resolving early would pay
-            // the relay query and immediately discard the result.
-            // The fetch is skipped entirely when content has no `:`, keeping
-            // plain sends at zero extra RTTs.  Palette resolution is
-            // decorative enrichment — a fetch or parse failure must not block
-            // delivery of a valid message; on error, degrade to no emoji tags
-            // and log a diagnostic to stderr.
-            let emoji_tags = if final_content.contains(':') {
-                match crate::commands::emoji::resolve_emoji_tags_for_content(client, &final_content)
-                    .await
-                {
-                    Ok(tags) => tags,
-                    Err(e) => {
-                        eprintln!(
-                            "warning: emoji palette fetch failed ({e}); sending without emoji tags"
-                        );
-                        Vec::new()
-                    }
-                }
-            } else {
-                Vec::new()
-            };
+            // Forum builders (45001, 45003) do not accept emoji tags, so only
+            // kind 9 pays for the palette lookup.
+            let emoji_tags =
+                crate::commands::emoji::emoji_tags_for_content(client, &final_content).await;
             let builder = buzz_sdk::build_message(
                 channel_uuid,
                 &final_content,

@@ -1,8 +1,6 @@
 //! Direct ownership is rediscovered per handler and checked in each batch.
 use super::*;
 
-const MAX_AGENTS: i64 = 10_000;
-
 impl UserDeletionStore {
     /// Fetch the target's current directly owned agents in this community, then
     /// print or apply bounded account batches. Retries repeat discovery.
@@ -76,21 +74,18 @@ pub(super) async fn agents(
     target: &str,
     lock: bool,
 ) -> Result<Vec<String>> {
-    let sql = if lock {
-        "SELECT encode(pubkey,'hex') FROM users WHERE community_id=$1 AND agent_owner_pubkey=decode($2,'hex') AND pubkey<>decode($2,'hex') ORDER BY pubkey LIMIT $3 FOR SHARE"
-    } else {
-        "SELECT encode(pubkey,'hex') FROM users WHERE community_id=$1 AND agent_owner_pubkey=decode($2,'hex') AND pubkey<>decode($2,'hex') ORDER BY pubkey LIMIT $3"
-    };
-    let keys: Vec<String> = sqlx::query_scalar(sql)
-        .bind(community)
-        .bind(target)
-        .bind(MAX_AGENTS + 1)
-        .fetch_all(conn)
-        .await?;
-    if keys.len() > MAX_AGENTS as usize {
-        return Err(invalid("account handler exceeds agent limit"));
-    }
-    Ok(keys)
+    Ok(super::super::agent_ownership::discover(
+        conn,
+        target,
+        Some(community),
+        lock,
+        super::super::agent_ownership::DiscoveryLimit::AgentRows,
+    )
+    .await?
+    .agents
+    .into_iter()
+    .map(|(_, key)| key)
+    .collect())
 }
 
 pub(super) async fn recheck(conn: &mut PgConnection, options: &Options, lock: bool) -> Result<()> {

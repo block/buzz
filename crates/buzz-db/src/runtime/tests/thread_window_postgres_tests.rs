@@ -99,6 +99,7 @@ async fn thread_window_upper_fence_terminal_snapshot_and_fallback() {
         kinds: &[5, 40003],
         accessible: &[channel],
         cursor: None,
+        since: None,
     };
     let mut budget = ScanBudget::default();
     let stale = session

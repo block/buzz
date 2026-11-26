@@ -193,7 +193,7 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
                 Expanded(
                   child: Text(
                     'Recent photos',
-                    style: context.textTheme.titleSmall?.copyWith(
+                    style: bodyLargeTextStyle.copyWith(
                       color: context.colors.onSurface,
                       fontWeight: FontWeight.w600,
                     ),
@@ -204,7 +204,7 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
                     padding: const EdgeInsets.only(right: Grid.half),
                     child: Text(
                       '$selectedCount selected',
-                      style: context.textTheme.labelMedium?.copyWith(
+                      style: messageCaptionTextStyle.copyWith(
                         color: context.colors.onSurfaceVariant,
                       ),
                     ),
@@ -225,7 +225,7 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
                       child: Text(
                         error,
                         key: const ValueKey('photo-gallery-error'),
-                        style: context.textTheme.bodySmall?.copyWith(
+                        style: messageCaptionTextStyle.copyWith(
                           color: context.colors.error,
                         ),
                         textAlign: TextAlign.center,
@@ -367,9 +367,9 @@ class _RecentPhotoTile extends StatelessWidget {
                     ),
                     child: Text(
                       '${selectionIndex + 1}',
-                      style: context.textTheme.labelSmall?.copyWith(
+                      style: messageBylineTextStyle.copyWith(
                         color: context.colors.onPrimary,
-                        fontWeight: FontWeight.w700,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
                   ),
@@ -406,7 +406,7 @@ class _PhotoGalleryMessage extends StatelessWidget {
             const SizedBox(height: Grid.xxs),
             Text(
               title,
-              style: context.textTheme.titleSmall?.copyWith(
+              style: bodyLargeTextStyle.copyWith(
                 color: context.colors.onSurface,
               ),
               textAlign: TextAlign.center,
@@ -414,7 +414,7 @@ class _PhotoGalleryMessage extends StatelessWidget {
             const SizedBox(height: Grid.quarter),
             Text(
               message,
-              style: context.textTheme.bodySmall?.copyWith(
+              style: messageCaptionTextStyle.copyWith(
                 color: context.colors.onSurfaceVariant,
               ),
               textAlign: TextAlign.center,

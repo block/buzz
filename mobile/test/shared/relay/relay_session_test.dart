@@ -13,6 +13,7 @@ import 'package:buzz/features/channels/agent_activity/observer_subscription.dart
 import 'package:buzz/features/channels/agent_activity/observer_models.dart';
 import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/community/community.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/relay/relay_query_response.dart';
 
@@ -678,6 +679,23 @@ void main() {
       );
     });
 
+    test('a body that fails to decode is reported', () async {
+      final reporter = _RecordingDiagnostics();
+      final harness = _queryHarness(
+        client: http_testing.MockClient((_) async => json('{"oops"')),
+        diagnostics: reporter,
+      );
+      addTearDown(harness.container.dispose);
+
+      await expectLater(
+        harness.session.queryRelay(const []),
+        throwsA(isA<FormatException>()),
+      );
+      expect(reporter.errors, [
+        (FormatException, DiagnosticOperation.relayQuery),
+      ]);
+    });
+
     test('an error status keeps its body and skips decoding', () async {
       var decodes = 0;
       const body = '{"error":"nope"}';
@@ -721,10 +739,12 @@ void main() {
     });
 
     test('a retired session reports retirement, not a decode error', () async {
+      final reporter = _RecordingDiagnostics();
       final decoder = _GatedDecoder();
       final harness = _queryHarness(
         client: http_testing.MockClient((_) async => json('{"oops"')),
         queryDecoder: decoder.call,
+        diagnostics: reporter,
       );
       addTearDown(harness.container.dispose);
 
@@ -735,6 +755,7 @@ void main() {
       decoder.gate.complete();
 
       await outcome;
+      expect(reporter.errors, isEmpty);
     });
 
     test('an age restriction during decoding discards the events', () async {
@@ -1307,6 +1328,39 @@ void main() {
       expect(sockets, hasLength(1));
       expect(sockets.single.disposeCalls, 0);
       expect(session.state.status, SessionStatus.connected);
+    },
+  );
+
+  test(
+    'a subscriber that throws is reported and the rest of its batch still arrives',
+    () async {
+      final reporter = _RecordingDiagnostics();
+      final delivered = <String>[];
+      final flush = await _batchWithThrowingSubscriber(reporter, delivered);
+
+      flush();
+
+      expect(delivered, ['event-2']);
+      expect(reporter.errors, [
+        (StateError, DiagnosticOperation.eventSubscriber),
+      ]);
+    },
+  );
+
+  test(
+    'with no destination, a throwing subscriber surfaces as uncaught and the batch still arrives',
+    () async {
+      final delivered = <String>[];
+      final flush = await _batchWithThrowingSubscriber(
+        const NoopDiagnosticReporter(),
+        delivered,
+      );
+      final uncaught = <Object>[];
+
+      runZonedGuarded(flush, (error, _) => uncaught.add(error));
+
+      expect(delivered, ['event-2']);
+      expect(uncaught, [isA<StateError>()]);
     },
   );
 
@@ -1927,6 +1981,26 @@ void main() {
     session.debugDispose();
   });
 
+  test('gated history cannot register on a replacement relay', () async {
+    final gate = RelayRateLimitGate();
+    final harness = _queryHarness(
+      gate: gate,
+      client: http_testing.MockClient((_) async => http.Response('[]', 200)),
+    );
+    addTearDown(harness.container.dispose);
+    gate.activate(4);
+    final retired = expectLater(
+      harness.session.fetchHistory(_channelFilter),
+      throwsStateError,
+    );
+    harness.container.invalidate(relayConfigProvider);
+    harness.container.read(relaySessionProvider);
+    final replacement = _RecordingRelaySocket();
+    harness.session.debugAttachSocketForTest(replacement);
+    await retired;
+    expect(_reqs(replacement), isEmpty);
+  });
+
   test('rate-limited history CLOSED gates the next REQ', () async {
     final gateTimers = <_ManualTimer>[];
     final gate = RelayRateLimitGate(
@@ -2237,6 +2311,313 @@ void main() {
       reason: 'only `rate-limited:` rejections signal back-pressure',
     );
   });
+
+  test('an invalid rejection is reported without the relay text', () async {
+    final reporter = _RecordingDiagnostics();
+    final harness = _queryHarness(
+      client: http_testing.MockClient((_) async => http.Response('[]', 200)),
+      diagnostics: reporter,
+    );
+    addTearDown(harness.container.dispose);
+    final session = harness.session;
+    session.debugAttachSocketForTest(_RecordingRelaySocket());
+
+    final archived = session.publish(_event(id: 'event-1'));
+    session.debugHandleMessage([
+      'OK',
+      'event-1',
+      false,
+      'invalid: channel is archived',
+    ]);
+    await expectLater(archived, throwsA(isA<Exception>()));
+    // A read-state retry past the relay's clock window, which the app
+    // recovers from.
+    final stale = session.publish(_event(id: 'event-stale'));
+    session.debugHandleMessage([
+      'OK',
+      'event-stale',
+      false,
+      'invalid: event timestamp too far from server time',
+    ]);
+    await expectLater(stale, throwsA(isA<Exception>()));
+    // Ordinary outcomes of Add Members (for an agent's policy or a guest) and
+    // of a sole owner's Leave.
+    for (final (id, reason) in [
+      ('event-policy', 'invalid: policy:nobody'),
+      ('event-owner-only', 'invalid: policy:owner_only'),
+      ('event-last-owner', 'invalid: cannot remove the last owner'),
+      (
+        'event-guest-add',
+        'invalid: only members can add people in this channel',
+      ),
+    ]) {
+      final refused = session.publish(_event(id: id));
+      session.debugHandleMessage(['OK', id, false, reason]);
+      await expectLater(refused, throwsA(isA<Exception>()));
+    }
+    expect(reporter.errors, isEmpty);
+
+    final invalid = session.publish(_event(id: 'event-2'));
+    session.debugHandleMessage([
+      'OK',
+      'event-2',
+      false,
+      'invalid: bad signature',
+    ]);
+    await expectLater(invalid, throwsA(isA<Exception>()));
+    session.debugHandleMessage(['CLOSED', 'sub-1', 'invalid: bad filter']);
+    // No pending publish, as for a typing indicator or a reply after timeout.
+    session.debugHandleMessage([
+      'OK',
+      'event-3',
+      false,
+      'invalid: bad signature',
+    ]);
+
+    expect(reporter.errors, [
+      (RelayInvalidRequest, DiagnosticOperation.relayRejection),
+      (RelayInvalidRequest, DiagnosticOperation.relayRejection),
+      (RelayInvalidRequest, DiagnosticOperation.relayRejection),
+    ]);
+  });
+
+  group('errors from relay calls say which call and why', () {
+    test('a rejected publish carries the call and reason class', () async {
+      final session = RelaySessionNotifier();
+      session.debugAttachSocketForTest(_RecordingRelaySocket());
+
+      final publish = session.publish(_event());
+      session.debugHandleMessage([
+        'OK',
+        'event-1',
+        false,
+        'rate-limited: slow down',
+      ]);
+
+      await expectLater(
+        publish,
+        throwsA(
+          isA<RelayEventRejectedException>()
+              .having((error) => error.call, 'call', RelayCall.publish)
+              .having(
+                (error) => error.reason,
+                'reason',
+                RelayReason.rateLimited,
+              ),
+        ),
+      );
+    });
+
+    test('an escaped error keeps the stack of the call', () async {
+      final session = RelaySessionNotifier();
+      session.debugAttachSocketForTest(_RecordingRelaySocket());
+
+      final publish = _publishFromTheCaller(session);
+      session.debugHandleMessage(['OK', 'event-1', false, 'invalid: bad']);
+
+      StackTrace? stack;
+      try {
+        await publish;
+      } on RelayEventRejectedException catch (_, trace) {
+        stack = trace;
+      }
+      expect(stack.toString(), contains('_publishFromTheCaller'));
+    });
+
+    test(
+      'a publish held by the rate limit keeps the stack of its caller',
+      () async {
+        final gateTimers = <_ManualTimer>[];
+        final gate = RelayRateLimitGate(
+          timerFactory: (duration, callback) {
+            final timer = _ManualTimer(duration, callback);
+            gateTimers.add(timer);
+            return timer;
+          },
+        );
+        final session = RelaySessionNotifier(rateLimitGate: gate);
+        session.debugAttachSocketForTest(_RecordingRelaySocket());
+        gate.activate(4);
+
+        final publish = _publishFromTheCaller(session);
+        gateTimers.single.fire();
+        await Future<void>.delayed(Duration.zero);
+        session.debugHandleMessage(['OK', 'event-1', false, 'invalid: bad']);
+
+        StackTrace? stack;
+        try {
+          await publish;
+        } on RelayEventRejectedException catch (_, trace) {
+          stack = trace;
+        }
+        expect(stack.toString(), contains('_publishFromTheCaller'));
+      },
+    );
+
+    test(
+      'a history request held by the rate limit keeps the stack of its caller',
+      () async {
+        final gateTimers = <_ManualTimer>[];
+        final gate = RelayRateLimitGate(
+          timerFactory: (duration, callback) {
+            final timer = _ManualTimer(duration, callback);
+            gateTimers.add(timer);
+            return timer;
+          },
+        );
+        final session = RelaySessionNotifier(rateLimitGate: gate);
+        final socket = _RecordingRelaySocket();
+        session.debugAttachSocketForTest(socket);
+        gate.activate(4);
+
+        final history = _fetchHistoryFromTheCaller(session);
+        gateTimers.single.fire();
+        await Future<void>.delayed(Duration.zero);
+        session.debugHandleMessage([
+          'CLOSED',
+          _reqs(socket).last[1] as String,
+          'restricted: not a member',
+        ]);
+
+        StackTrace? stack;
+        try {
+          await history;
+        } on RelayClosedException catch (_, trace) {
+          stack = trace;
+        }
+        expect(stack.toString(), contains('_fetchHistoryFromTheCaller'));
+      },
+    );
+
+    test('a submit held by signing keeps the stack of its caller', () async {
+      final session = RelaySessionNotifier();
+      final socket = _RecordingRelaySocket();
+      session.debugAttachSocketForTest(socket);
+      final relay = SignedEventRelay(
+        session: session,
+        nsec: nostr.Keys.generate().nsec,
+      );
+
+      final submit = _submitFromTheCaller(relay);
+      await Future<void>.delayed(Duration.zero);
+      final sent = socket.messages.single;
+      session.debugHandleMessage([
+        'OK',
+        (sent[1] as Map<String, dynamic>)['id'],
+        false,
+        'invalid: bad',
+      ]);
+
+      StackTrace? stack;
+      try {
+        await submit;
+      } on RelayEventRejectedException catch (_, trace) {
+        stack = trace;
+      }
+      expect(stack.toString(), contains('_submitFromTheCaller'));
+    });
+
+    test('an unacknowledged publish is a timeout of the publish', () async {
+      final session = RelaySessionNotifier();
+      session.debugAttachSocketForTest(_RecordingRelaySocket());
+
+      await expectLater(
+        session.publish(_event(), timeout: Duration.zero),
+        throwsA(
+          isA<RelayAckTimeoutError>()
+              .having((error) => error.call, 'call', RelayCall.publish)
+              .having((error) => error.duration, 'duration', Duration.zero)
+              .having(
+                (error) => error.toString(),
+                'text',
+                'TimeoutException: Event event-1 not acknowledged '
+                    'within 0:00:00.000000',
+              ),
+        ),
+      );
+    });
+
+    test('a history timeout is a timeout of the history call', () async {
+      final session = RelaySessionNotifier();
+
+      await expectLater(
+        session.fetchHistory(
+          const NostrFilter(kinds: [39002]),
+          timeout: const Duration(milliseconds: 1),
+        ),
+        throwsA(
+          isA<RelayTimeoutException>()
+              .having((error) => error.call, 'call', RelayCall.history)
+              .having((error) => error.reason, 'reason', RelayReason.timeout)
+              .having(
+                (error) => error.toString(),
+                'text',
+                'TimeoutException: Relay history request timed out after '
+                    '0:00:00.001000',
+              ),
+        ),
+      );
+    });
+
+    test('a query timeout is a timeout of the query', () async {
+      final harness = _queryHarness(client: _ControlledHttpClient());
+      addTearDown(harness.container.dispose);
+
+      await expectLater(
+        harness.session.queryRelay(const [], timeout: Duration.zero),
+        throwsA(
+          isA<RelayTimeoutException>().having(
+            (error) => error.call,
+            'call',
+            RelayCall.query,
+          ),
+        ),
+      );
+    });
+
+    test('a history CLOSED carries the call and the relay prefix', () async {
+      final socket = _RecordingRelaySocket();
+      final session = RelaySessionNotifier();
+      session.debugAttachSocketForTest(socket);
+
+      final history = session.fetchHistory(_channelFilter);
+      session.debugHandleMessage([
+        'CLOSED',
+        _reqs(socket).last[1] as String,
+        'restricted: not a member',
+      ]);
+
+      await expectLater(
+        history,
+        throwsA(
+          isA<RelayClosedException>()
+              .having((error) => error.call, 'call', RelayCall.history)
+              .having((error) => error.reason, 'reason', RelayReason.restricted)
+              .having(
+                (error) => error.toString(),
+                'text',
+                'Exception: restricted: not a member',
+              ),
+        ),
+      );
+    });
+
+    test('a live subscribe CLOSED carries the call', () async {
+      final session = RelaySessionNotifier();
+
+      final subscribe = session.subscribe(_channelFilter, (_) {});
+      session.debugHandleMessage(['CLOSED', 'l-1', 'blocked: no']);
+
+      await expectLater(
+        subscribe,
+        throwsA(
+          isA<RelayClosedException>()
+              .having((error) => error.call, 'call', RelayCall.subscribe)
+              .having((error) => error.reason, 'reason', RelayReason.blocked),
+        ),
+      );
+    });
+  });
 }
 
 class _ControlledHttpClient extends http.BaseClient {
@@ -2319,6 +2700,7 @@ _QueryHarness _queryHarness({
   required http.Client client,
   RelayQueryDecoder? queryDecoder,
   AgeSignalNotifier? age,
+  DiagnosticReporter? diagnostics,
 }) {
   final session = RelaySessionNotifier(
     httpClient: client,
@@ -2328,6 +2710,8 @@ _QueryHarness _queryHarness({
   final container = ProviderContainer(
     overrides: [
       if (age != null) ageSignalProvider.overrideWith(() => age),
+      if (diagnostics != null)
+        diagnosticReporterProvider.overrideWithValue(diagnostics),
       authProvider.overrideWith(() => _PendingAuthNotifier()),
       relaySessionProvider.overrideWith(() => session),
       relayConfigProvider.overrideWith(
@@ -2415,6 +2799,20 @@ class _FakeRelayConfigNotifier extends RelayConfigNotifier {
   @override
   RelayConfig build() => RelayConfig(baseUrl: _baseUrl, nsec: _nsec);
 }
+
+Future<NostrEvent> _publishFromTheCaller(RelaySessionNotifier session) =>
+    session.publish(_event());
+
+Future<List<NostrEvent>> _fetchHistoryFromTheCaller(
+  RelaySessionNotifier session,
+) => session.fetchHistory(_channelFilter);
+
+Future<NostrEvent> _submitFromTheCaller(SignedEventRelay relay) => relay.submit(
+  kind: 1,
+  content: '',
+  tags: const [],
+  onSigned: (_) => Future<void>.delayed(Duration.zero),
+);
 
 NostrEvent _event({int createdAt = 20, String id = 'event-1'}) {
   return NostrEvent(
@@ -2511,4 +2909,83 @@ class _MutableAgeNotifier extends AgeSignalNotifier {
 class _PendingAuthNotifier extends AuthNotifier {
   @override
   Future<AuthState> build() => Completer<AuthState>().future;
+}
+
+class _RecordingDiagnostics extends NoopDiagnosticReporter {
+  final errors = <(Type, DiagnosticOperation)>[];
+
+  @override
+  void reportError(
+    Object error,
+    StackTrace? stackTrace, {
+    required DiagnosticOperation operation,
+  }) => errors.add((error.runtimeType, operation));
+}
+
+/// Subscribes a handler that throws on `event-1` and buffers `event-1` and
+/// `event-2`. Returns the flush that delivers them.
+Future<void Function()> _batchWithThrowingSubscriber(
+  DiagnosticReporter reporter,
+  List<String> delivered,
+) async {
+  final sockets = <_ControlledRelaySocket>[];
+  final keychain = nostr.Keys.generate();
+  final auth = _ReloadingAuthNotifier()..pubkey = keychain.public;
+  final session = RelaySessionNotifier(
+    socketFactory:
+        ({
+          required wsUrl,
+          required nsec,
+          required onMessage,
+          required onConnected,
+          required onDisconnected,
+        }) {
+          final socket = _ControlledRelaySocket(
+            wsUrl: wsUrl,
+            nsec: nsec,
+            onMessage: onMessage,
+            onConnected: onConnected,
+            onDisconnected: onDisconnected,
+          );
+          sockets.add(socket);
+          return socket;
+        },
+  );
+  final container = ProviderContainer(
+    overrides: [
+      relaySessionProvider.overrideWith(() => session),
+      relayConfigProvider.overrideWith(
+        () => _FakeRelayConfigNotifier(
+          baseUrl: 'https://relay.example',
+          nsec: keychain.nsec,
+        ),
+      ),
+      authProvider.overrideWith(() => auth),
+      diagnosticReporterProvider.overrideWithValue(reporter),
+    ],
+  );
+  addTearDown(container.dispose);
+  await container.read(authProvider.future);
+  final listener = container.listen(relaySessionProvider, (_, _) {});
+  addTearDown(listener.close);
+  await Future<void>.delayed(Duration.zero);
+  sockets.single.connectSuccessfully();
+
+  final subscribed = session.subscribe(_channelFilter, (event) {
+    if (event.id == 'event-1') throw StateError('handler bug');
+    delivered.add(event.id);
+  });
+  await Future<void>.delayed(Duration.zero);
+  final subId = sockets.single.sent.single[1];
+  session.debugHandleSocketMessageForTest(['EOSE', subId]);
+  await subscribed;
+
+  for (final id in ['event-1', 'event-2']) {
+    session.debugHandleSocketMessageForTest([
+      'EVENT',
+      subId,
+      _event(id: id).toJson(),
+    ]);
+  }
+  return session.debugFlushEventBuffer;
 }

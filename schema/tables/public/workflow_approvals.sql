@@ -3,7 +3,7 @@
 -- community's same hash (conformance).
 
 CREATE TABLE workflow_approvals (
-    community_id    UUID NOT NULL REFERENCES communities(id),
+    community_id    UUID NOT NULL,
     token           BYTEA NOT NULL,
     workflow_id     UUID NOT NULL,
     run_id          UUID NOT NULL,
@@ -17,11 +17,7 @@ CREATE TABLE workflow_approvals (
     denied_at       TIMESTAMPTZ,
     expires_at      TIMESTAMPTZ NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (community_id, token),
-    FOREIGN KEY (community_id, workflow_id)
-        REFERENCES workflows (community_id, id) ON DELETE CASCADE,
-    FOREIGN KEY (community_id, run_id)
-        REFERENCES workflow_runs (community_id, id) ON DELETE CASCADE
+    PRIMARY KEY (community_id, token)
 );
 
 CREATE INDEX idx_workflow_approvals_workflow ON workflow_approvals (community_id, workflow_id);

@@ -20,6 +20,12 @@
       "sha256": "792966649266bfcebdb79de54e8ed3880746f58efd77427a0f43e88c650d79d0"
     },
     {
+      "name": "enroll_android",
+      "domain": "buzz.push.enroll.android.v1",
+      "transcript": "buzz.push.enroll.android.v1\n{\"v\":1,\"audience\":\"https://push.buzz.xyz/v1/installations\",\"challenge_id\":\"11111111-1111-4111-8111-111111111111\",\"challenge\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\",\"endpoint\":\"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20\",\"endpoint_epoch\":1,\"expires_at\":1752624000}",
+      "sha256": "1a6ec24cb436e3ef9c8eb9e2b87b83ffa536d25f6a562197ce56fe1f978eb430"
+    },
+    {
       "name": "delegate",
       "domain": "buzz.push.delegate.v1",
       "transcript": "buzz.push.delegate.v1\n{\"v\":1,\"audience\":\"https://push.buzz.xyz/v1/delegations\",\"challenge_id\":\"11111111-1111-4111-8111-111111111111\",\"challenge\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\",\"installation_handle\":\"22222222-2222-4222-8222-222222222222\",\"endpoint_epoch\":1,\"generation\":1,\"relay_pubkey\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"not_before\":1752620000,\"expires_at\":1752624000}",

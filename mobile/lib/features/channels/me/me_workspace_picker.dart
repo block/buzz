@@ -3,6 +3,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../../shared/me/me_sync.dart';
+import '../channel_sections/channel_sections_provider.dart';
 import '../../../shared/me/me_recovery.dart';
 import 'me_recovery_dialog.dart';
 import 'me_settings_sheet.dart';
@@ -35,17 +36,33 @@ useMeWorkspace(
   final sync = enabled ? ref.watch(meSyncProvider) : null;
   final groupState = enabled ? ref.watch(meGroupsProvider) : null;
   final groups = groupState?.value;
-  final current = channelId == null ? selected : groups?.assignments[channelId];
-  final name =
-      groups?.groups
-              .where((group) => group['id'] == current)
-              .firstOrNull?['name']
-          as String?;
+  // Desktop's unified workspaces own filing once they exist; show that
+  // placement read-only rather than the legacy Solo record's.
+  final unified = enabled
+      ? ref.watch(channelSectionsProvider.select((s) => !s.editable))
+      : false;
+  final layout = unified ? ref.watch(sidebarLayoutProvider) : null;
+  final current = layout != null
+      ? (channelId == null ? null : layout.assignments[channelId])
+      : channelId == null
+      ? selected
+      : groups?.assignments[channelId];
+  final name = layout != null
+      ? layout.section(current ?? '')?.name
+      : groups?.groups
+                .where((group) => group['id'] == current)
+                .firstOrNull?['name']
+            as String?;
   final label = current == null
       ? 'Choose workspace'
       : 'Workspace: ${name ?? "Unavailable workspace"}';
   Future<void> choose(String picked) async {
-    if (sync == null || busy.value) return;
+    // Read now: a menu opened before the unified record arrived is stale.
+    if (sync == null ||
+        busy.value ||
+        !ref.read(channelSectionsProvider).editable) {
+      return;
+    }
     if (picked == '+reload') {
       ref.invalidate(meGroupsProvider);
       return;
@@ -58,6 +75,7 @@ useMeWorkspace(
         onSelected?.call(project);
       } else {
         await sync.update(
+          mayFile: () => ref.read(channelSectionsProvider).editable,
           (groups) => groups.place(
             channelId,
             group: project,
@@ -83,12 +101,13 @@ useMeWorkspace(
 
   final available =
       enabled &&
+      !unified &&
       !locked &&
       !busy.value &&
       (groups != null || groupState?.hasError == true);
   return (
     busy: busy.value,
-    name: current == null ? 'No Workspace' : name ?? 'Unavailable workspace',
+    name: current == null ? 'No workspace' : name ?? 'Unavailable workspace',
     openPicker: !available
         ? null
         : ({MeSettingsPresenter? present}) async {
@@ -140,7 +159,7 @@ useMeWorkspace(
       key: const ValueKey('me-workspace-button'),
       tooltip: label,
       enabled: available,
-      icon: const Icon(BuzzIcons.workspace),
+      icon: const Icon(BuzzIcons.folder),
       onSelected: choose,
       itemBuilder: (_) => [
         CheckedPopupMenuItem(
@@ -163,7 +182,7 @@ useMeWorkspace(
     ),
     nativeAction: IosNavigationAction(
       label: label,
-      icon: BuzzIcons.workspace,
+      icon: BuzzIcons.folder,
       sharesBackground: false,
       children: !available
           ? const []

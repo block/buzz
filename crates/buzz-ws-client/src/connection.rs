@@ -120,18 +120,22 @@ impl NostrWsConnection {
         Ok(Self::from_stream(ws, url))
     }
 
-    /// [`Self::connect`], but opens a plaintext TCP connection to `addr`
-    /// (`host:port`) instead of resolving the URL's host.
+    /// [`Self::connect_with_headers`], but opens a plaintext TCP connection to
+    /// `addr` (`host:port`) instead of resolving the URL's host.
     ///
     /// The URL still supplies the `Host` header and NIP-42 relay tag, even when
     /// it is `wss://`, so a client inside the relay's cluster can reach a
     /// community through the relay's plaintext service address and still
     /// authenticate for the community's public URL.
-    pub async fn connect_to_addr(url: &str, addr: &str) -> Result<Self, WsClientError> {
+    pub async fn connect_to_addr(
+        url: &str,
+        addr: &str,
+        headers: HeaderMap,
+    ) -> Result<Self, WsClientError> {
         let parsed = url
             .parse::<url::Url>()
             .map_err(|e| WsClientError::Url(e.to_string()))?;
-        let request = upgrade_request(&parsed, HeaderMap::new())?;
+        let request = upgrade_request(&parsed, headers)?;
         let tcp = tokio::net::TcpStream::connect(addr)
             .await
             .map_err(|e| WsClientError::WebSocket(e.into()))?;
@@ -497,7 +501,7 @@ mod tests {
         });
         let url = format!("ws://{addr}");
         let _conn = if via_addr {
-            NostrWsConnection::connect_to_addr(&url, &addr).await
+            NostrWsConnection::connect_to_addr(&url, &addr, headers).await
         } else {
             NostrWsConnection::connect_with_headers(&url, headers).await
         }
@@ -517,10 +521,13 @@ mod tests {
     async fn caller_user_agent_replaces_default() {
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static("example/1.0"));
-        assert_eq!(
-            upgrade_user_agent(headers, false).await,
-            Some(HeaderValue::from_static("example/1.0"))
-        );
+        for via_addr in [false, true] {
+            assert_eq!(
+                upgrade_user_agent(headers.clone(), via_addr).await,
+                Some(HeaderValue::from_static("example/1.0")),
+                "via_addr={via_addr}"
+            );
+        }
     }
 
     /// A relay that answers NIP-42 AUTH by closing with `code`, as the relay

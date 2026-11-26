@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/mentions/mention_tags.dart';
@@ -6,6 +8,7 @@ import '../channels/channel_management_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'channel.dart';
+import 'composer_send_origin.dart';
 import 'me/me_messages_provider.dart';
 import 'channel_messages_provider.dart';
 import 'message_mention_pubkeys.dart';
@@ -52,7 +55,10 @@ class SendMessage {
   /// If [rootEventId] is null it defaults to [parentEventId] (direct reply to
   /// thread head). Tags are built to match the desktop's `buildReplyTags`
   /// convention with `root` / `reply` markers. Pass [mediaTags] to append
-  /// relay-validated `imeta` tags and NIP-30 `emoji` tags.
+  /// relay-validated `imeta` tags and NIP-30 `emoji` tags. [mayPublish] is
+  /// asked after every wait, once the event is signed and shown locally and
+  /// right before it is published; when it says no, nothing is published,
+  /// the local message is removed and this throws.
   Future<void> call({
     required String channelId,
     required String content,
@@ -61,6 +67,9 @@ class SendMessage {
     List<String>? mentionPubkeys,
     Channel? channel,
     List<List<String>> mediaTags = const [],
+    FutureOr<void> Function(NostrEvent)? beforePublish,
+    void Function()? validateDelivery,
+    Future<bool> Function()? mayPublish,
   }) async {
     _ensureDeliveryValid();
     // Use explicitly passed pubkeys, or resolve @mentions against
@@ -120,11 +129,16 @@ class SendMessage {
         kind: EventKind.streamMessage,
         content: content,
         tags: tags,
-        onSigned: (event) {
+        onSigned: (event) async {
+          await beforePublish?.call(event);
+          _ensureDeliveryValid();
+          validateDelivery?.call();
           localMessage = event;
           _markLocalMessageForAnimation(channelId, event.id);
           _addLocalMessage(channelId, event);
+          ComposerSendOrigin.didInsertLocalMessage();
         },
+        mayPublish: mayPublish,
       );
       final event = localMessage;
       if (event != null) _completeLocalMessage(channelId, event.id);
@@ -180,7 +194,7 @@ class SendMessage {
 
   void _ensureDeliveryValid() {
     if (_isDeliveryValid?.call() == false) {
-      throw StateError(
+      throw ActiveCommunityChangedError(
         'Message delivery cancelled because the active community changed',
       );
     }

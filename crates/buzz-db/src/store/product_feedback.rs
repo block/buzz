@@ -59,9 +59,8 @@ pub struct ProductFeedbackRecord {
 /// changing its source community; callers intentionally receive the same
 /// successful acknowledgment in both cases.
 ///
-/// The community must exist, and nothing is written when it does not: while
-/// the foreign key to `communities` exists it rejects the insert first, and
-/// once the key is dropped this returns [`DbError::NotFound`]. Any lifecycle
+/// The community must exist, and nothing is written when it does not: this
+/// returns [`DbError::NotFound`]. Any lifecycle
 /// state qualifies: the table is provenance-only
 /// and unfenced (`docs/database.md`), so feedback stays writable while its
 /// community is being deleted, and the purge clears its provenance.
@@ -94,7 +93,7 @@ pub async fn insert(
     .fetch_one(&mut *tx)
     .await?;
     let id = row.try_get("id")?;
-    // Check after the write, as the foreign key did: the purge locks feedback
+    // Check after the write: the purge locks feedback
     // rows before the community, so taking the community first would deadlock
     // with a replay that overlaps it.
     crate::store::reference_check::require_community(&mut tx, community).await?;
@@ -232,11 +231,6 @@ mod postgres_tests {
         let pool = PgPool::connect(&crate::test_support::database_url())
             .await
             .expect("connect test database");
-        crate::test_support::drop_foreign_keys_between(
-            &pool,
-            &[("product_feedback", "communities")],
-        )
-        .await;
         pool
     }
 
@@ -342,8 +336,8 @@ mod postgres_tests {
 
     /// The check holds `FOR KEY SHARE` on the community row, so a concurrent
     /// delete of that row (which locks it `FOR UPDATE` first) and the insert
-    /// are ordered. With the foreign key dropped, only the explicit lock can
-    /// block the insert behind a community held `FOR UPDATE`.
+    /// are ordered. No foreign key exists, so only the explicit lock can block
+    /// the insert behind a community held `FOR UPDATE`.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn insert_key_share_locks_community_without_foreign_key() {

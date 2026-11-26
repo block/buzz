@@ -116,6 +116,37 @@ void main() {
     expect(beeFinder, findsNothing);
   });
 
+  testWidgets(
+    'a fling back to the top bounces without revealing or refreshing',
+    (tester) async {
+      final controller = ScrollController(initialScrollOffset: 180);
+      addTearDown(controller.dispose);
+      var refreshes = 0;
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          child: BeeRefreshIndicator(
+            onRefresh: () async {
+              refreshes++;
+            },
+            child: ListView(
+              controller: controller,
+              children: const [SizedBox(height: 2000)],
+            ),
+          ),
+        ),
+      );
+      await tester.fling(find.byType(ListView), const Offset(0, 120), 2500);
+      var bounced = false;
+      for (var frame = 0; frame < 75; frame++) {
+        await tester.pump(const Duration(milliseconds: 16));
+        bounced |= controller.offset < -40;
+        expect(find.byType(FlappingBee), findsNothing);
+      }
+      expect(bounced, isTrue);
+      expect(refreshes, 0);
+    },
+  );
+
   testWidgets('tracks each stage of an active pull', (tester) async {
     tester.view.physicalSize = const Size(420, 912);
     tester.view.devicePixelRatio = 1;
@@ -160,9 +191,12 @@ void main() {
       greaterThan(restingContentTop),
     );
 
-    await gesture.moveBy(const Offset(0, 44));
+    await gesture.moveBy(const Offset(0, 20));
     await tester.pump();
 
+    expect(beeFinder, findsNothing);
+    await gesture.moveBy(const Offset(0, 80));
+    await tester.pump();
     final earlyTop = tester.getTopLeft(beeFinder).dy;
     final partialOpacity = tester.widget<Opacity>(
       find.byKey(const ValueKey('bee-refresh-opacity')),
@@ -387,15 +421,16 @@ void main() {
       ),
     );
 
-    await tester.timedDrag(
-      find.byType(ListView),
-      const Offset(0, 160),
-      const Duration(milliseconds: 400),
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byType(ListView)),
     );
+    await gesture.moveBy(const Offset(0, 80));
     await tester.pump();
 
     final bee = tester.widget<FlappingBee>(find.byType(FlappingBee));
     expect(bee.flapAmount, 0);
+    await gesture.up();
+    await tester.pumpAndSettle();
   });
 
   testWidgets('provides elastic always-scrollable physics', (tester) async {

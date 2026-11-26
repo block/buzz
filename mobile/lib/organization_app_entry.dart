@@ -141,7 +141,7 @@ class OrganizationAppEntry extends HookConsumerWidget {
         } ??
         switch (signIn.failureCode) {
           null => null,
-          final code => 'Couldn’t sign in ($code). Try again.',
+          final code => 'Couldn’t sign in ($code). ${signIn.failureAdvice}',
         };
 
     return PairingPage(

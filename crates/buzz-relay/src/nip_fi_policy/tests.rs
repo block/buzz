@@ -108,7 +108,7 @@ fn effective_mode_truth_table() {
                 (NipFiMode::Shadow, true) => NipFiMode::Enforce,
                 _ => global,
             };
-            assert_eq!(effective(global, required), expected);
+            assert_eq!(global.with_requirement(required), expected);
         }
     }
 }
@@ -159,6 +159,76 @@ async fn mode_stored_requirement_and_proof_matrix() {
             }
         }
     }
+}
+
+// The fixture's community (nil UUID) has bucket 69: in the cohort at 70, out at 69.
+#[tokio::test]
+async fn rollout_cohort_matrix_matches_stored_required() {
+    for global in [
+        NipFiMode::Off,
+        NipFiMode::Shadow,
+        NipFiMode::Enforce,
+        NipFiMode::DenyProtected,
+    ] {
+        for stored in [false, true] {
+            for percent in [69, 70] {
+                let (base, source, _, _) = fixture(global).await;
+                source.required.store(stored, Ordering::SeqCst);
+                let mut state = (*base).clone();
+                Arc::make_mut(&mut state.config).nip_fi.enforce_percent = percent;
+                let cohort = percent == 70;
+                let widened = stored || (global == NipFiMode::Shadow && cohort);
+                let policy = resolve(&state, &headers("required.example", false))
+                    .await
+                    .unwrap();
+                let case = format!("{global:?} stored={stored} cohort={cohort}");
+                assert_eq!(policy.policy_required, widened, "{case}");
+                assert_eq!(policy.mode, global.with_requirement(widened), "{case}");
+                assert_eq!(
+                    policy.required,
+                    !global.is_off() && (widened || global.enforces()),
+                    "{case}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn rollout_community_in_shadow_is_enforced_and_required_in_nip11() {
+    let (base, source, key, _) = fixture(NipFiMode::Shadow).await;
+    source.required.store(false, Ordering::SeqCst);
+    let mut state = (*base).clone();
+    Arc::make_mut(&mut state.config).nip_fi.enforce_percent = 70;
+    let result = admit_nip_fi_http_on_state(
+        &state,
+        &headers("required.example", false),
+        &crate::access::AccessSlot::default(),
+        || Ok(Nip98Proof::new(key, ())),
+    )
+    .await;
+    assert_eq!(result.err().unwrap().status(), StatusCode::UNAUTHORIZED);
+    let document = crate::nip11::nip11_document(&state, "required.example")
+        .await
+        .unwrap();
+    assert!(document.requires_nip_fi);
+
+    Arc::make_mut(&mut state.config).nip_fi.communities = Default::default();
+    assert!(
+        crate::nip11::nip11_document(&state, "required.example")
+            .await
+            .is_err(),
+        "a rollout community without a binding cannot advertise Required"
+    );
+
+    Arc::make_mut(&mut state.config).nip_fi.enforce_percent = 69;
+    let document = crate::nip11::nip11_document(&state, "required.example")
+        .await
+        .unwrap();
+    assert!(
+        !document.requires_nip_fi,
+        "outside the cohort stays Optional"
+    );
 }
 
 #[tokio::test]
@@ -617,8 +687,7 @@ async fn unmapped_legacy_rejection_scope_never_yields_an_admission_proof() {
         community_id: uuid::Uuid::nil(),
         mode: NipFiMode::Off,
         required: false,
-        stored_required: false,
-
+        policy_required: false,
         mapped: false,
     };
     with_policy(policy, async {

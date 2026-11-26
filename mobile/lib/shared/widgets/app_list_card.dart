@@ -11,6 +11,8 @@ class AppListCard extends StatelessWidget {
     super.key,
     this.label,
     this.dividerIndent,
+    this.iconColumnWidth,
+    this.clipBehavior = Clip.antiAlias,
     this.verticalPadding = Grid.xxs,
     this.horizontalPadding = Grid.gutter,
     required this.children,
@@ -18,11 +20,13 @@ class AppListCard extends StatelessWidget {
 
   /// Rendered above the card in sentence case, as written — no uppercasing.
   final String? label;
+  final Clip clipBehavior;
 
   /// Separator inset from the card edge. Defaults to the standard row label
   /// column, clearing a leading icon. Icon-free cards can pass [_inset] so
   /// separators align with their row content on both sides.
   final double? dividerIndent;
+  final double? iconColumnWidth;
 
   /// Outer padding above and below this section.
   ///
@@ -37,10 +41,6 @@ class AppListCard extends StatelessWidget {
 
   static const _inset = Grid.xs;
 
-  /// Separators start at the label column, clearing the leading icon.
-  static const _dividerIndent = _inset + _iconColumnWidth;
-  static const _iconColumnWidth = 22.0 + Grid.xs;
-
   @override
   Widget build(BuildContext context) {
     final separated = <Widget>[];
@@ -50,7 +50,7 @@ class AppListCard extends StatelessWidget {
           Divider(
             height: 1,
             thickness: 1,
-            indent: dividerIndent ?? _dividerIndent,
+            indent: dividerIndent ?? _inset + (iconColumnWidth ?? 22) + Grid.xs,
             endIndent: _inset,
             // The scheme's own border tokens are derived from the page surface,
             // which lands them within a few levels of the card fill — invisible.
@@ -94,9 +94,10 @@ class AppListCard extends StatelessWidget {
             color: context.colors.surfaceContainerHighest,
             borderRadius: BorderRadius.circular(Radii.container),
             // Keeps row ripples inside the rounded corners.
-            clipBehavior: Clip.antiAlias,
+            clipBehavior: clipBehavior,
             child: AppListInset(
               horizontal: _inset,
+              iconColumnWidth: iconColumnWidth,
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: separated,

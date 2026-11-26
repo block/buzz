@@ -65,6 +65,8 @@ dependencies:
   flutter_cache_manager: ^3.5.0
   file: ^7.0.1
   path: ^1.9.1
+  sentry_flutter: ^10.5.0
+  sqlite3: 3.9.1
 
 dev_dependencies:
   leak_tracker: ^11.0.2

@@ -3594,6 +3594,7 @@ async fn thread_window_statement_cancel_propagates_without_writer_rerun() {
         kinds: &[7],
         accessible: &accessible,
         cursor: None,
+        since: None,
     };
     match session
         .thread_window_aux(&aux, &mut ScanBudget::default())

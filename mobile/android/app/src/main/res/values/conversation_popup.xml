@@ -1,0 +1,10 @@
+<resources>
+    <style name="ConversationPopupAbove">
+        <item name="android:windowEnterAnimation">@anim/conversation_popup_above</item>
+        <item name="android:windowExitAnimation">@android:anim/fade_out</item>
+    </style>
+    <style name="ConversationPopupBelow">
+        <item name="android:windowEnterAnimation">@anim/conversation_popup_below</item>
+        <item name="android:windowExitAnimation">@android:anim/fade_out</item>
+    </style>
+</resources>

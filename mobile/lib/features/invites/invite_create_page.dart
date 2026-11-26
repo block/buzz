@@ -280,5 +280,4 @@ class _InviteMessage extends StatelessWidget {
   }
 }
 
-String _inviteErrorMessage(Object error) =>
-    error.toString().replaceFirst('Exception: ', '');
+String _inviteErrorMessage(Object error) => relayErrorText(error);

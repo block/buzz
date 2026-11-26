@@ -36,7 +36,7 @@ class _ChannelSheetApp extends HookWidget {
     Color color(String key, Color fallback) =>
         colors[key] is int ? Color(colors[key] as int) : fallback;
     final scheme = base.colorScheme;
-    final theme = utilitySurfaceThemeData(
+    final theme = utilitySheetThemeData(
       base.copyWith(
         colorScheme: scheme.copyWith(
           surface: color('surface', scheme.surface),
@@ -45,6 +45,7 @@ class _ChannelSheetApp extends HookWidget {
             scheme.surfaceContainerHighest,
           ),
           surfaceContainer: color('control', scheme.surfaceContainer),
+          surfaceContainerHigh: color('high', scheme.surfaceContainerHigh),
           onSurface: color('onSurface', scheme.onSurface),
           onSurfaceVariant: color('onSurfaceVariant', scheme.onSurfaceVariant),
           primary: color('primary', scheme.primary),
@@ -79,10 +80,13 @@ class ChannelSheetContent extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
+    final solo = data['solo'] == true;
     final nameKey = useMemoized(GlobalKey.new);
     final details = data['details'] is Map
         ? Channel.fromJson(Map<String, dynamic>.from(data['details'] as Map))
         : null;
+    final aligned = solo || (details != null && !details.isDm);
+    final memberSize = aligned ? Grid.md : Grid.lg;
     final sections = (data['sections'] as List? ?? const [])
         .map(
           (section) => (section as List)
@@ -106,6 +110,7 @@ class ChannelSheetContent extends HookWidget {
             if (details != null)
               _ChannelDetailsHero(
                 channel: details,
+                icon: solo ? BuzzIcons.messageCircle : null,
                 nameKey: nameKey,
                 displayName: title,
                 avatar: avatarUrl.isEmpty
@@ -140,18 +145,6 @@ class ChannelSheetContent extends HookWidget {
                                   : null,
                               isEnabled: select(sections[index][i]) != null,
                               onTap: select(sections[index][i]) ?? () {},
-                              iconWidget: sections[index][i]['symbol'] == 'star'
-                                  ? TablerStarIcon(
-                                      filled:
-                                          sections[index][i]['label'] ==
-                                          'Unstar',
-                                      color:
-                                          sections[index][i]['label'] ==
-                                              'Unstar'
-                                          ? context.colors.primary
-                                          : context.colors.onSurface,
-                                    )
-                                  : null,
                             ),
                           ),
                         ],
@@ -161,8 +154,9 @@ class ChannelSheetContent extends HookWidget {
                 )
               else
                 AppListCard(
-                  dividerIndent: details != null && index == 1
-                      ? Grid.xs + 40 + Grid.xs
+                  iconColumnWidth: aligned ? Grid.md : null,
+                  dividerIndent: !solo && details != null && index == 1
+                      ? Grid.xs + memberSize + Grid.xs
                       : null,
                   label:
                       details != null &&
@@ -173,8 +167,32 @@ class ChannelSheetContent extends HookWidget {
                   verticalPadding: _channelDetailsSectionPadding,
                   children: [
                     for (final row in sections[index])
-                      if (row['member'] is Map)
+                      if (row['agent'] case final Map agent)
+                        AppListRowRaw(
+                          leading: AvatarImage(
+                            imageUrl: agent['avatarUrl'] as String?,
+                            radius: 16,
+                            isAgent: agent['selected'] == true,
+                            backgroundColor: context.controlSurface,
+                            fallback: agent['selected'] == true
+                                ? Text(agent['initial'] as String)
+                                : const Icon(BuzzIcons.plus, size: 20),
+                          ),
+                          title: Text(
+                            row['label'] as String,
+                            style: context.textTheme.bodyLarge,
+                          ),
+                          subtitle: Text(
+                            row['subtitle'] as String,
+                            style: context.textTheme.bodySmall,
+                          ),
+                          trailing: const _ChannelDetailsChevron(),
+                          onTap: select(row),
+                        )
+                      else if (row['member'] is Map)
                         _ChannelMemberPreviewRow(
+                          size: memberSize,
+                          padding: aligned ? Grid.xs : Grid.xxs,
                           member: ChannelMember(
                             pubkey: (row['member'] as Map)['pubkey'] as String,
                             role: (row['member'] as Map)['role'] as String,
@@ -199,16 +217,17 @@ class ChannelSheetContent extends HookWidget {
                               (row['member'] as Map)['archived'] == true,
                           onMemberTap: (_, _) => onSelect(row['id'] as String),
                         )
-                      else if (details != null &&
-                          index == 1 &&
-                          (row['label'] == 'Add members' ||
-                              row['label'] == 'See all'))
+                      else if (row['memberAction'] == true ||
+                          details != null &&
+                              index == 1 &&
+                              (row['label'] == 'Add members' ||
+                                  row['label'] == 'See all'))
                         AppListRowRaw(
                           leading: row['label'] == 'See all'
-                              ? const SizedBox.square(dimension: 40)
+                              ? SizedBox.square(dimension: memberSize)
                               : Container(
-                                  width: 40,
-                                  height: 40,
+                                  width: memberSize,
+                                  height: memberSize,
                                   decoration: BoxDecoration(
                                     color: context.colors.surfaceContainer,
                                     shape: BoxShape.circle,
@@ -223,14 +242,16 @@ class ChannelSheetContent extends HookWidget {
                             style: context.textTheme.bodyLarge,
                           ),
                           trailing: const _ChannelDetailsChevron(),
-                          verticalPadding: Grid.xxs,
+                          verticalPadding: aligned ? Grid.xs : Grid.xxs,
                           onTap: select(row),
                         )
                       else
                         AppListRow(
                           icon: _sheetIcon(row['symbol']),
                           title: row['label'] as String,
-                          trailing: row['symbol'] == 'folder'
+                          trailing:
+                              (row['symbol'] == 'folder' ||
+                                  row['symbol'] == 'workspaceFolder')
                               ? const _ChannelDetailsChevron()
                               : row['symbol'] == 'loading'
                               ? BuzzLoadingIndicator(
@@ -253,8 +274,12 @@ class ChannelSheetContent extends HookWidget {
 }
 
 IconData _sheetIcon(Object? symbol) => switch (symbol) {
-  'star' => BuzzIcons.star,
+  'pin' => BuzzIcons.pinned,
+  'pin.slash' => BuzzIcons.pinnedOff,
   'checkmark' => BuzzIcons.checkCheck,
+  'envelope' => BuzzIcons.mail,
+  'headphones' => BuzzIcons.headphones,
+  'workspaceFolder' => BuzzIcons.folder,
   'folder' => BuzzIcons.folderInput,
   'bell' => BuzzIcons.bell,
   'bell.slash' => BuzzIcons.bellOff,

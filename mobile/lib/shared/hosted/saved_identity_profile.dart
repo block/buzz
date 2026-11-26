@@ -103,6 +103,9 @@ final savedIdentityProfileProvider = FutureProvider.autoDispose
             if (!active || response == null) return null;
             // Retain the queue slot until bounded decoding actually finishes.
             return await _decodeProfile(response.$1, response.$2, pubkey);
+          } on TimeoutException {
+            noteHttpDeadline(request);
+            rethrow;
           } finally {
             // Retire this attempt before another relay can be tried.
             requesting = false;

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="notification_channel_direct_messages">Direct messages</string>
+    <string name="notification_channel_mentions">Mentions</string>
+    <string name="notification_channel_other">Other</string>
+    <string name="notification_new_activity">New activity</string>
+    <string name="notification_you">You</string>
+</resources>

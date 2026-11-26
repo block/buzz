@@ -21,6 +21,8 @@ thiserror = { workspace = true }
 nostr = { workspace = true }
 futures-util = { workspace = true }
 arc-swap = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

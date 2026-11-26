@@ -18,7 +18,7 @@ pub struct Args {
     /// Print selected rows without changing data (the default).
     #[arg(long, alias = "print-only", conflicts_with = "delete")]
     read_only: bool,
-    /// Delete selected rows.
+    /// Delete selected rows. Stop the relay, workflow engine and external writers first.
     #[arg(long)]
     delete: bool,
     /// Trusted relay signer for historical actor/p attribution.

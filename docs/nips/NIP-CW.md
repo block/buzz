@@ -101,7 +101,7 @@ For a valid window filter on an accessible channel (§Channel-mode Access Scopin
 1. **Select rows.** From the target channel, take events that are top-level (§Channel-mode Top-level Classification), not deleted, and matching `kinds` if present, in the total order `created_at DESC, id ASC` (`id` compared bytewise). With a cursor `(ts, id)`, retain only events where `created_at < ts OR (created_at = ts AND id > id)`.
 2. **Probe exhaustion.** Evaluate the query with an internal budget of `limit + 1` rows *after all predicates*. If `limit + 1` rows match, `has_more = true` and the sentinel row is discarded — it MUST NOT appear on the wire, in overlays, or in the aux closure. Otherwise `has_more = false`.
 3. **Derive the next cursor.** If `has_more`, `next_cursor` is the **scan position**: the composite cursor of the last retained candidate, captured *before* any serving-time reconstruction or filtering of individual events. Otherwise `next_cursor = null`. The invariant `next_cursor = null ⇔ has_more = false` MUST hold. Because it is a scan position, `next_cursor` MAY reference an event that does not appear in the response (e.g. one skipped by the relay as unreconstructable); it is authoritative regardless, and deriving it from delivered rows instead would stall pagination on every skipped event.
-4. **Append the aux closure** (if `include_aux` and at least one row): two hops of events referencing the rows by `e` tag. Hop 1: reactions (`kind:7`), deletions (`kind:5`, `kind:9005`), and edits (Buzz `kind:40003`) whose `e` tag is a row id. Hop 2: deletions whose `e` tag is a hop-1 event id (a delete-of-a-reaction). Each event appears at most once; access-scoped events the requester cannot read are omitted. Relays MAY cap each hop (Buzz: 1000 events per hop).
+4. **Append the aux closure** (if `include_aux` and at least one row): two hops of events referencing the rows by `e` tag. Hop 1: reactions (`kind:7`), deletions (`kind:5`, `kind:9005`), and edits (Buzz `kind:40003`) whose `e` tag is a row id. Hop 2: deletions whose `e` tag is a hop-1 event id (a delete-of-a-reaction). Each event appears at most once; access-scoped events the requester cannot read are omitted. Relays MAY cap each hop (Buzz: 1000 events per hop). Relays MAY also omit, from both hops, events whose `created_at` is more than a fixed margin before the oldest row's (Buzz: one day), so the lookups need not scan the channel's whole history; the margin MUST exceed twice the relay's accepted clock drift, since a target and its aux event may each be stamped up to that drift away from real time in opposite directions.
 5. **Append thread summaries** (if `include_summaries`): one `kind:39005` per row that has at least one reply. Rows without replies get none.
 6. **Append window bounds**: exactly one `kind:39006` per served window response, always — including empty and exhausted pages.
 
@@ -299,6 +299,8 @@ For an authorized request the relay MUST:
    original signatures, deduplicate by event ID, and apply access control to
    every event. A target reference requires an `e` tag with the target ID
    in its second position; containing both strings elsewhere is insufficient.
+   As in channel mode, relays MAY omit auxiliary events dated more than a fixed
+   margin before the oldest target, which always includes the root.
 5. Append one bounds event to each served page, including empty and exhausted
    pages. Refresh access for the **entire query batch** before releasing any
    events or bounds. If the reader's accessible-channel set changed while any

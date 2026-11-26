@@ -29,6 +29,7 @@ jobs:
       desktop-rust: ${{ steps.selection.outputs.desktop-rust }}
       web: ${{ steps.selection.outputs.web }}
       mobile: ${{ steps.selection.outputs.mobile }}
+      mobile-native: ${{ steps.selection.outputs.mobile-native }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -100,8 +101,17 @@ jobs:
               - 'pnpm-lock.yaml'
             mobile:
               - 'mobile/**'
+              - 'bin/flutter'
+              - 'bin/dart'
+              - 'bin/.flutter-*.pkg'
               - 'Justfile'
               - 'scripts/test-mobile-gateway-recipes.sh'
+              - 'scripts/test-mobile-pagination.sh'
+              - 'scripts/test-mobile-pagination-accessibility.sh'
+              - 'scripts/test-mobile-carousel.sh'
+              - 'scripts/test-mobile-member-picker.sh'
+              - 'scripts/test-mobile-setting-menu.sh'
+              - 'scripts/test-mobile-create-channel-accessibility.sh'
               - 'scripts/mobile-release.sh'
               - 'scripts/mobile-release-source.sh'
               - 'scripts/mobile-worktree-overrides.sh'
@@ -112,6 +122,29 @@ jobs:
               - 'scripts/ci-hermit-retry.sh'
               - '.github/workflows/ci.yml'
               - '.github/workflows/_ci-*.yml'
+            # What the Mobile Swift Native lane compiles and runs. Dart-only
+            # changes skip its simulator build; the Release lane still builds
+            # iOS for every mobile change.
+            mobile-native:
+              - 'mobile/ios/**'
+              - 'mobile/packages/**'
+              # Native code loads fonts and emoji data from the Flutter asset
+              # bundle, and the Xcode build runs a script from mobile/scripts.
+              - 'mobile/assets/**'
+              - 'mobile/scripts/**'
+              - 'mobile/pubspec.yaml'
+              - 'mobile/pubspec.lock'
+              - 'bin/flutter'
+              - 'bin/dart'
+              - 'bin/.flutter-*.pkg'
+              - 'scripts/test-mobile-pagination.sh'
+              - 'scripts/test-mobile-pagination-accessibility.sh'
+              - 'scripts/test-mobile-carousel.sh'
+              - 'scripts/test-mobile-member-picker.sh'
+              - 'scripts/test-mobile-setting-menu.sh'
+              - 'scripts/test-mobile-create-channel-accessibility.sh'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/_ci-clients.yml'
       - name: Select runtime suites conservatively at the PR file-list limit
         id: selection
         env:
@@ -267,6 +300,10 @@ jobs:
     with:
       web: ${{ needs.changes.outputs.web == 'true' }}
       mobile: ${{ needs.changes.outputs.mobile == 'true' }}
+      # Pull requests skip the Native lane for changes outside its paths. A
+      # push still runs it for every mobile change, so a Dart change that
+      # breaks a native test fails on its own commit.
+      mobile_native: ${{ github.event_name == 'push' || needs.changes.outputs.mobile-native == 'true' }}
       lane: mobile-swift
 
   # Advisory flake check: repeats the tests a pull request changes. Its lanes

@@ -4,7 +4,7 @@ import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart'
 import 'package:buzz/features/channels/channel_stars/channel_stars_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Tests for [ChannelStarStore] parsing and [mergeStores] last-writer-wins.
+/// Tests for [ChannelStarStore] parsing and legacy preference scopes.
 void main() {
   test(
     'identity-wide stars and mutes from before relay scoping are dropped',
@@ -71,67 +71,6 @@ void main() {
       final round = ChannelStarStore.fromJson(original.toJson());
       expect(round.channels['c']!.starred, isTrue);
       expect(round.channels['c']!.updatedAt, 42);
-    });
-  });
-
-  group('mergeStores (per-channel max-updatedAt)', () {
-    test('union of non-overlapping channels', () {
-      final merged = mergeStores(
-        const ChannelStarStore(
-          channels: {'a': ChannelStarEntry(starred: true, updatedAt: 100)},
-        ),
-        const ChannelStarStore(
-          channels: {'b': ChannelStarEntry(starred: false, updatedAt: 200)},
-        ),
-      );
-      expect(merged.channels.keys.toSet(), {'a', 'b'});
-    });
-
-    test('higher updatedAt wins (remote newer)', () {
-      final merged = mergeStores(
-        const ChannelStarStore(
-          channels: {'a': ChannelStarEntry(starred: false, updatedAt: 100)},
-        ),
-        const ChannelStarStore(
-          channels: {'a': ChannelStarEntry(starred: true, updatedAt: 200)},
-        ),
-      );
-      expect(merged.channels['a']!.starred, isTrue);
-      expect(merged.channels['a']!.updatedAt, 200);
-    });
-
-    test('higher updatedAt wins (local newer)', () {
-      final merged = mergeStores(
-        const ChannelStarStore(
-          channels: {'a': ChannelStarEntry(starred: true, updatedAt: 300)},
-        ),
-        const ChannelStarStore(
-          channels: {'a': ChannelStarEntry(starred: false, updatedAt: 100)},
-        ),
-      );
-      expect(merged.channels['a']!.starred, isTrue);
-      expect(merged.channels['a']!.updatedAt, 300);
-    });
-
-    test('unstar with higher updatedAt overrides star', () {
-      final merged = mergeStores(
-        const ChannelStarStore(
-          channels: {'a': ChannelStarEntry(starred: true, updatedAt: 100)},
-        ),
-        const ChannelStarStore(
-          channels: {'a': ChannelStarEntry(starred: false, updatedAt: 999)},
-        ),
-      );
-      expect(merged.channels['a']!.starred, isFalse);
-      expect(merged.channels['a']!.updatedAt, 999);
-    });
-
-    test('both empty yields empty', () {
-      final merged = mergeStores(
-        const ChannelStarStore(),
-        const ChannelStarStore(),
-      );
-      expect(merged.channels, isEmpty);
     });
   });
 }

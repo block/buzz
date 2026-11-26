@@ -73,39 +73,6 @@ class OpenChannelDirectoryStorage {
         ),
       );
 
-  /// Deletes every saved directory under [root] except each retained
-  /// community's file for its current signer (community id to signer), and
-  /// the pending copy a save of it may be writing. A
-  /// failed delete is retried on the next call. Removed communities lose their
-  /// whole directory to [MediaDiskCache.removeOrphans].
-  static Future<void> removeOrphans(
-    Directory root,
-    Map<String, String?> Function() retained,
-  ) async {
-    final communities = Directory(p.join(root.path, 'communities'));
-    if (!await communities.exists()) return;
-    Set<String> keep() => {
-      for (final MapEntry(key: id, value: signer) in retained().entries)
-        if (signer != null) ...{
-          fileFor(root, id, signer).path,
-          '${fileFor(root, id, signer).path}.pending',
-        },
-    };
-    await for (final community in communities.list(followLinks: false)) {
-      if (community is! Directory) continue;
-      final saved = Directory(p.join(community.path, 'channel-directory'));
-      if (!await saved.exists()) continue;
-      await for (final entry in saved.list(followLinks: false)) {
-        if (keep().contains(entry.path)) continue;
-        try {
-          await entry.delete(recursive: true);
-        } on FileSystemException catch (error) {
-          debugPrint('[OpenChannelDirectoryStorage] cleanup failed: $error');
-        }
-      }
-    }
-  }
-
   /// The saved directory, or null when there is none or it is unusable.
   Future<SavedOpenChannelDirectory?> read() async {
     final file = await _file;
@@ -164,7 +131,8 @@ class OpenChannelDirectoryStorage {
   }
 
   /// Stops every later read and write, as when the community or account is
-  /// retired. The file itself is deleted by [removeOrphans].
+  /// retired. The file is deleted with its community, by
+  /// [MediaDiskCache.removeOrphans].
   void close() => _closed = true;
 
   Future<void> _discard(File file) async {

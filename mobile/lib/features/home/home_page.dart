@@ -1,6 +1,10 @@
+import '../../shared/widgets/native_route_controls.dart';
+import 'dart:ui' as ui;
+
 import 'package:duo_kit/duo_kit.dart';
 
 import '../../shared/widgets/adaptive_conversation_pane.dart';
+import '../../shared/widgets/buzz_navigation_metrics.dart';
 import '../../shared/widgets/duo_workspace_scaffold.dart';
 import '../../shared/widgets/duo_toolbar.dart';
 import '../../shared/widgets/ios_navigation_metrics.dart';
@@ -27,7 +31,6 @@ import '../activity/inbox_unread_provider.dart';
 import '../channels/channels_page.dart';
 import '../search/search_page.dart';
 import 'home_screen_shortcut_host.dart';
-import 'messages_filters.dart';
 import 'messages_navigation_bar.dart';
 import '../../shared/widgets/covered_route_keyboard_insets.dart';
 
@@ -84,10 +87,9 @@ class HomePage extends HookConsumerWidget {
     final showWorkspaceNavigation = wide || conversations.selectedId == null;
 
     final communitySurfaceProgress = useState(0.0);
-    final filter = useState('All');
+    final recordingFocus = useState(false);
     final hasUnreadInbox = ref.watch(inboxHasUnreadProvider);
     final inboxLabel = hasUnreadInbox ? 'Activity, unread items' : 'Activity';
-    final reselect = useValueNotifier(0);
     final newChat = useValueNotifier<VoidCallback?>(null);
     final newWorkspace = useValueNotifier<VoidCallback?>(null);
     final newChannel = useValueNotifier<VoidCallback?>(null);
@@ -126,6 +128,7 @@ class HomePage extends HookConsumerWidget {
       BottomUpPageRoute<void>(
         builder: (_) => AdaptiveConversationDestination(
           preferredListWidth: sidebarWidth,
+          listToolbarSlots: 1,
           child: const ActivityPage(),
         ),
         reducedMotion: reducedMotion,
@@ -133,8 +136,6 @@ class HomePage extends HookConsumerWidget {
     );
     final messages = ChannelsPage(
       settingsPageBuilder: settingsPageBuilder,
-      messagesActionsWidth:
-          2 * (defaultTargetPlatform == TargetPlatform.iOS ? 44 : 48) + Grid.xs,
       messagesActionsBuilder: (openSwitcher, avatarKey) {
         final moreActions = [
           // An internal build reaches only its organization's community.
@@ -168,23 +169,25 @@ class HomePage extends HookConsumerWidget {
             builder: (_, nativeControlsVisible) =>
                 defaultTargetPlatform == TargetPlatform.iOS &&
                     !nativeControlsVisible
-                ? const SizedBox(width: 44, height: 44)
+                ? const SizedBox.square(dimension: buzzNavigationActionSize)
                 : Stack(
                     alignment: Alignment.center,
                     children: [
-                      defaultTargetPlatform == TargetPlatform.iOS
+                      defaultTargetPlatform == TargetPlatform.iOS &&
+                              !recordingFocus.value
                           ? IosGlassNavigationButton(
                               icon: IosGlassNavigationIcon.bell,
                               semanticLabel: inboxLabel,
-                              width: 44,
-                              height: 44,
-                              controlSize: 44,
+                              width: buzzNavigationActionSize,
+                              height: buzzNavigationActionSize,
+                              controlSize: buzzNavigationActionSize,
                               foregroundColor: context.colors.onSurface,
                               onPressed: openInbox,
                             )
                           : IconButton.filledTonal(
                               tooltip: inboxLabel,
                               style: IconButton.styleFrom(
+                                shape: const CircleBorder(),
                                 backgroundColor:
                                     context.colors.surfaceContainerHighest,
                                 foregroundColor: context.colors.onSurface,
@@ -246,7 +249,9 @@ class HomePage extends HookConsumerWidget {
           const SizedBox(width: Grid.xs),
           SizedBox(
             key: avatarKey,
-            child: defaultTargetPlatform == TargetPlatform.iOS
+            child:
+                defaultTargetPlatform == TargetPlatform.iOS &&
+                    !recordingFocus.value
                 ? IosMessageCreateButton(
                     actions: moreActions,
                     dividerBefore: OrganizationEnvironment.enabled
@@ -258,9 +263,29 @@ class HomePage extends HookConsumerWidget {
                         ? '?'
                         : communityName.characters.first.toUpperCase(),
                     accessibilityLabel: 'Community menu',
-                    width: 44,
-                    height: 44,
+                    width: buzzNavigationActionSize,
+                    height: buzzNavigationActionSize,
                     plain: false,
+                  )
+                : recordingFocus.value &&
+                      defaultTargetPlatform == TargetPlatform.iOS
+                ? SizedBox.square(
+                    dimension: buzzNavigationActionSize,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: context.colors.surfaceContainerHighest,
+                      ),
+                      child: Center(
+                        child: ClipOval(
+                          child: CommunityAvatar(
+                            name: communityName,
+                            relayUrl: community?.relayUrl,
+                            size: 36,
+                          ),
+                        ),
+                      ),
+                    ),
                   )
                 : AndroidExpandingMenuButton(
                     label: 'Community menu',
@@ -280,56 +305,60 @@ class HomePage extends HookConsumerWidget {
           ),
         ];
       },
-      messagesFilters: (isCollapsed) => MessagesFilters(
-        isCollapsed: isCollapsed,
-        selected: filter.value,
-        onSelected: (value) {
-          filter.value = value;
-          reselect.value++;
-        },
-      ),
-      soloSliver: solo == null
-          ? null
-          : SliverOffstage(
-              key: const ValueKey('messages-solo-inventory'),
-              offstage: filter.value == 'Team',
-              sliver: solo,
-            ),
-      showTeam: filter.value != 'Solo',
-      showTeamHeading: filter.value == 'All',
+      soloSliver: solo,
       newChannelAction: newChannel,
       newDmAction: newDm,
       communityInvitePageBuilder: communityInvitePageBuilder,
       communityAppearancePageBuilder: communityAppearancePageBuilder,
-      tabReselection: reselect,
       onSettingsTransitionProgress: (progress) {
         communitySurfaceProgress.value = progress;
       },
     );
+    final focusedMessages = Stack(
+      children: [
+        ImageFiltered(
+          key: const ValueKey('voice-recording-focus'),
+          enabled: recordingFocus.value,
+          imageFilter: ui.ImageFilter.blur(sigmaX: 6, sigmaY: 6),
+          child: ExcludeSemantics(
+            excluding: recordingFocus.value,
+            child: messages,
+          ),
+        ),
+        Positioned.fill(
+          child: IgnorePointer(
+            ignoring: !recordingFocus.value,
+            child: ColoredBox(
+              color: recordingFocus.value
+                  ? context.colors.surface.withValues(alpha: 0.18)
+                  : Colors.transparent,
+            ),
+          ),
+        ),
+      ],
+    );
     final bottom = mobileTabBarBottom(context);
     Widget navigationBar(Axis axis) => MessagesNavigationBar(
       axis: axis,
+      onRecordingChanged: (value) => recordingFocus.value = value,
       onSearch: openSearch,
       agent: ConversationPaneScope(
         controller: conversations,
         child: Builder(builder: defaultAgentBuilder),
       ),
       creationActions: [
-        (
-          label: 'New chat',
-          symbol: 'square.and.pencil',
-          onPressed: newChat.value,
-        ),
+        (label: 'New chat', symbol: 'message.circle', onPressed: newChat.value),
+        (label: 'New channel', symbol: 'number', onPressed: newChannel.value),
+        (label: 'New DM', symbol: 'person.circle', onPressed: newDm.value),
         (
           label: 'New workspace',
-          symbol: 'workspace',
+          symbol: 'folder',
           onPressed: newWorkspace.value,
         ),
-        (label: 'New DM', symbol: 'bubble.left', onPressed: newDm.value),
-        (label: 'New channel', symbol: 'number', onPressed: newChannel.value),
       ],
     );
     return DuoWorkspaceScaffold(
+      navigationOverflow: 100,
       navigationBuilder: (context, placement) => _NativeControlsGate(
         builder: (_, nativeControlsVisible) =>
             wide ||
@@ -343,7 +372,12 @@ class HomePage extends HookConsumerWidget {
                         MediaQuery.sizeOf(context),
                         strip!.rect.center.dx,
                       ) -
-                      strip.rect.center.dx,
+                      strip.rect.center.dx -
+                      (256 -
+                              (isCompactDuoWindow(context)
+                                  ? duoCoverRailActionSize
+                                  : 56)) /
+                          2,
                   0,
                 ),
                 child: SafeArea(
@@ -460,7 +494,7 @@ class HomePage extends HookConsumerWidget {
                                           mobileTabBarBottomGap,
                                     ),
                                   ),
-                                  child: messages,
+                                  child: focusedMessages,
                                 ),
                                 Positioned(
                                   left: 0,
@@ -495,7 +529,7 @@ class HomePage extends HookConsumerWidget {
                             );
                           },
                         )
-                      : messages,
+                      : focusedMessages,
                 ),
               ),
             ),
@@ -531,13 +565,6 @@ class _NativeControlsGate extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
-    final route = ModalRoute.of(context);
-    final coveringProgress = useAnimation(
-      route?.secondaryAnimation ?? kAlwaysDismissedAnimation,
-    );
-    return builder(
-      context,
-      (route?.isCurrent ?? true) && coveringProgress == 0,
-    );
+    return builder(context, useNativeRouteControlsVisible(context));
   }
 }
