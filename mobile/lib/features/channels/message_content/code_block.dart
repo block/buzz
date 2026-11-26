@@ -112,6 +112,9 @@ class _MessageCodeBlock extends HookWidget {
                 ),
                 child: RichText(
                   softWrap: false,
+                  // A standalone fence inherits the system text size; inside a
+                  // paragraph, the Markdown renderer has already turned it off.
+                  textScaler: MediaQuery.textScalerOf(context),
                   text: TextSpan(style: codeBaseStyle, children: codeSpans),
                 ),
               ),
