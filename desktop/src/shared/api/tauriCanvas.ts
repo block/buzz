@@ -52,6 +52,8 @@ export async function setCanvas(
     channelId: input.channelId,
     content: input.content,
     expectedRevision: input.expectedRevision ?? null,
+    expectedRelayUrl: input.expectedRelayUrl ?? null,
+    expectedSignerPubkey: input.expectedSignerPubkey ?? null,
   });
   return {
     ok: response.ok,

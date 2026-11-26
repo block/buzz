@@ -6,7 +6,7 @@ use crate::{
     models::{ChannelDetailInfo, ChannelInfo, ChannelMembersResponse, GetChannelsPayload},
     nostr_convert,
     relay::{
-        assert_expected_relay_scope, assert_expected_signer, query_relay,
+        assert_expected_relay_scope, assert_expected_signer, query_relay, query_relay_at_with_keys,
         relay_api_base_url_with_override, submit_event, submit_event_at_with_keys,
         submit_event_with_keys,
     },
@@ -345,6 +345,8 @@ pub async fn create_channel(
     visibility: String,
     description: Option<String>,
     ttl_seconds: Option<i32>,
+    expected_relay_url: Option<String>,
+    expected_signer_pubkey: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ChannelInfo, String> {
     let channel_uuid = uuid::Uuid::new_v4();
@@ -367,14 +369,14 @@ pub async fn create_channel(
         ttl_seconds,
     )?;
 
-    // Capture the signing identity before submission so the pending-owner
-    // mark below is bound to whoever actually signed this create — not
-    // whoever `state.keys` holds once the network round-trip completes. An
-    // in-process identity swap while the request is in flight must not be
-    // able to retarget the mark onto the new identity.
-    let creator_keys = state.signing_keys()?;
+    // Validate the initiating workspace against the same coherent snapshot
+    // used for both writes and reads. An IPC call can reach Rust after a
+    // workspace switch, even if the initiating callback was current.
+    let (creator_keys, relay_base) = state.signing_and_relay_scope()?;
     let creator_pubkey = creator_keys.public_key().to_hex();
-    submit_event_with_keys(builder, &state, &creator_keys, None).await?;
+    assert_expected_relay_scope(expected_relay_url.as_deref(), &relay_base)?;
+    assert_expected_signer(expected_signer_pubkey.as_deref(), &creator_pubkey)?;
+    submit_event_at_with_keys(builder, &state, &relay_base, &creator_keys).await?;
 
     // Mark this channel pending-owner: we just created it, so we know we're
     // the owner, but the relay's kind:39002 membership entry (#1761) is
@@ -385,8 +387,16 @@ pub async fn create_channel(
     let channel_uuid_string = channel_uuid.to_string();
     state.mark_pending_owned_channel(&creator_pubkey, &channel_uuid_string);
 
-    // Re-fetch the canonical metadata event to return ChannelInfo.
-    let events = query_relay(&state, &[channel_metadata_filter(&[&channel_uuid_string])]).await?;
+    // Use the pinned identity and relay for read-back, retaining the writer
+    // consistency required by canonical channel metadata queries.
+    let events = query_relay_at_with_keys(
+        &state,
+        &relay_base,
+        &[channel_metadata_filter(&[&channel_uuid_string])],
+        &creator_keys,
+        None,
+    )
+    .await?;
 
     events
         .first()

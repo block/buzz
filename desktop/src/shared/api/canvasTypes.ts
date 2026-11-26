@@ -9,6 +9,8 @@ export type SetCanvasInput = {
   channelId: string;
   content: string;
   expectedRevision?: string | null;
+  expectedRelayUrl?: string;
+  expectedSignerPubkey?: string;
 };
 
 export type SetCanvasResult = {
