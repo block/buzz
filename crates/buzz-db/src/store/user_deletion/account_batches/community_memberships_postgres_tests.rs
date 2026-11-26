@@ -125,3 +125,90 @@ async fn community_only_membership_refresh_is_atomic_and_preserves_other_communi
     );
     assert_eq!(rosters(&f.pool).await, after);
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn membership_delete_removes_acceptance_recorded_after_acceptance_batch() {
+    let f = Fixture::new().await;
+    let community = f.options.community;
+    // No foreign key cascades, so only the membership transaction can remove
+    // an acceptance that commits after the acceptance batch ran.
+
+    // An acceptance write in flight: the member row is key-share locked and
+    // the acceptance is not yet visible to the acceptance batch.
+    let mut holder = f.pool.begin().await.unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    crate::store::reference_check::require_relay_member(
+        &mut holder,
+        CommunityId::from_uuid(community),
+        TARGET,
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(community)
+    .bind(TARGET)
+    .bind("f".repeat(64))
+    .execute(&mut *holder)
+    .await
+    .unwrap();
+
+    let store = f.store();
+    let options = AccountBatchOptions {
+        community,
+        pubkey: TARGET.to_owned(),
+        batch_size: f.options.batch_size,
+        max_items: f.options.max_items,
+    };
+    let run = tokio::spawn(async move {
+        store
+            .run_account_batches(&options, ExecutionMode::Delete, &mut Vec::new(), None)
+            .await
+    });
+    // The membership delete waits on the member row lock.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                 WHERE $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(holder_pid)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+            if blocked {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("membership delete waits on the acceptance writer");
+    holder.commit().await.unwrap();
+    run.await.unwrap().unwrap();
+
+    let left: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM join_policy_acceptances WHERE community_id = $1 AND pubkey = $2",
+    )
+    .bind(community)
+    .bind(TARGET)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(left, 0, "acceptance left without its member");
+    let member: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM relay_members WHERE community_id = $1 AND pubkey = $2",
+    )
+    .bind(community)
+    .bind(TARGET)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(member, 0);
+}

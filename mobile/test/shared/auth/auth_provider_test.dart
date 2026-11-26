@@ -10,6 +10,7 @@ import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 
 import '../community/community_storage_test.dart';
@@ -56,6 +57,32 @@ void main() {
       (await storage.loadAll()).map((community) => community.id),
       contains(replacement.id),
     );
+  });
+
+  test('signing in names the new member at once', () async {
+    final storage = CommunityStorage(secure: FakeSecureStorage());
+    final reporter = _MemberRecorder();
+    final keys = nostr.Keys.generate();
+    final container = ProviderContainer(
+      overrides: [
+        communityStorageProvider.overrideWithValue(storage),
+        diagnosticReporterProvider.overrideWithValue(reporter),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(authProvider.future);
+
+    await container
+        .read(authProvider.notifier)
+        .authenticateWithCommunity(
+          Community.create(
+            name: 'One',
+            relayUrl: 'https://one.example',
+            nsec: keys.nsec,
+          ),
+        );
+
+    expect(reporter.member, keys.public);
   });
 
   test(
@@ -383,4 +410,12 @@ void main() {
     expect(auth.community?.id, valid.id);
     expect(await storage.loadActiveId(), valid.id);
   });
+}
+
+class _MemberRecorder extends NoopDiagnosticReporter {
+  @override
+  String? member;
+
+  @override
+  void setMember(String? pubkey) => member = pubkey;
 }

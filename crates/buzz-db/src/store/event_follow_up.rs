@@ -1,11 +1,14 @@
 //! App-owned follow-up work for a newly inserted `events` row.
 //!
-//! Two pieces of work follow every durable event insert:
+//! Three pieces of work follow every durable event insert:
 //!
 //! - **Push match enqueue.** Eligible event IDs and signed timestamps are staged
 //!   in memory. Commit submits them to a bounded best-effort worker using a
 //!   dedicated connection.
 //!   Push errors, delays, overload, and shutdown can drop wakes, never messages.
+//! - **Search outbox.** A searchable event queues a durable `search_outbox`
+//!   row in the same transaction when search indexing is enabled (see
+//!   [`crate::search_outbox`]).
 //! - **Channel TTL refresh.** A channel-scoped event pushes its ephemeral
 //!   channel's `ttl_deadline` forward. [`AdmittedTx`] records the channel and
 //!   runs the refresh as the last statement before COMMIT (see
@@ -40,8 +43,8 @@ const SQLSTATE_LOCK_NOT_AVAILABLE: &str = "55P03";
 ///
 /// Call only when the INSERT affected a row, after releasing any savepoint
 /// that may roll it back. `created_at` must be the signed timestamp bound by
-/// the INSERT, not receipt time. Stages push work for after commit and records
-/// TTL work.
+/// the INSERT, not receipt time. Stages push work for after commit, queues the
+/// search outbox row, and records TTL work.
 pub(crate) async fn after_admitted_insert(
     tx: &mut AdmittedTx,
     event_id: &[u8],
@@ -50,6 +53,7 @@ pub(crate) async fn after_admitted_insert(
     channel_id: Option<Uuid>,
 ) -> Result<()> {
     tx.record_push_event(event_id, created_at, kind);
+    crate::search_outbox::enqueue_in_transaction(tx, event_id, created_at, kind).await?;
     tx.record_channel_event(channel_id, kind);
     Ok(())
 }

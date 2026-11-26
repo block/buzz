@@ -61,7 +61,7 @@ void main() {
 
     Future<void> send(String text) async {
       if (find.byType(TextField).evaluate().isEmpty) {
-        await tester.tap(find.text('Message #general'));
+        await tester.tap(find.text('Message'));
         await tester.pumpAndSettle();
       }
       await tester.enterText(find.byType(TextField), text);

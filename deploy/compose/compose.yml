@@ -2,7 +2,7 @@ name: buzz-prod
 
 services:
   relay:
-    image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}
+    image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:0.3.0}
     env_file:
       - .env
     environment:

@@ -8,9 +8,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../shared/crypto/nip44.dart';
+import '../../../shared/relay/read_state_snapshot.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/read_state/read_state_time.dart';
 import 'channel_sections_storage.dart';
+import 'workspace_layout.dart';
 
 const _uuid = Uuid();
 
@@ -42,7 +44,17 @@ class ChannelSectionsManager {
   final VoidCallback _onChanged;
 
   late ChannelSectionStore _store;
+
+  /// The Team layout as last read from or accepted by the relay, without
+  /// unpublished edits: what desktop imports once it saves a unified layout.
+  late ChannelSectionStore _confirmed;
   ChannelSectionStore? _pendingBase;
+
+  /// Desktop's unified layout head. Once one exists, desktop no longer reads
+  /// `channel-sections` edits, so this manager stops making them.
+  WorkspaceRecord? _workspace;
+  int _workspaceCreatedAt = 0;
+  String _workspaceEventId = '';
   Timer? _publishDebounce;
   int _lastRemoteCreatedAt = 0;
   String? _lastRemoteEventId;
@@ -54,6 +66,8 @@ class ChannelSectionsManager {
   Timer? _startupRetryTimer;
   int _startupRetryAttempt = 0;
   bool _startupFetchSucceeded = false;
+  bool _caughtUpSinceSubscribe = false;
+  int _failedPreflights = 0;
   Future<void>? _syncInFlight;
   bool _syncAgain = false;
   int _subscriptionGeneration = 0;
@@ -79,12 +93,29 @@ class ChannelSectionsManager {
        _remoteEnabled = remoteEnabled,
        _onChanged = onChanged,
        _startupRetryBaseDelay = startupRetryBaseDelay {
-    final cached = _storage.readWithPending(pubkey, relayUrl);
-    _store = cached.store;
-    _pendingBase = cached.pendingBase;
+    final legacy = _storage.readWithPending(pubkey, relayUrl);
+    _store = legacy.store;
+    _pendingBase = legacy.pendingBase;
+    _confirmed = _pendingBase ?? _store;
+    final cached = _storage.readWorkspace(pubkey, relayUrl);
+    if (cached != null) {
+      try {
+        _workspace = WorkspaceRecord.decode(cached.plaintext);
+        _workspaceCreatedAt = cached.createdAt;
+        _workspaceEventId = cached.eventId;
+        _store = _confirmed;
+        _pendingBase = null;
+      } on FormatException {
+        // A record this build cannot read waits for the relay head.
+      }
+    }
   }
 
   ChannelSectionStore get store => _store;
+  WorkspaceRecord? get workspace => _workspace;
+
+  /// Legacy group edits reach desktop only until it saves a unified layout.
+  bool get _editable => !_disposed && _workspace == null;
 
   Future<void> initialize() async {
     if (_disposed) return;
@@ -100,21 +131,20 @@ class ChannelSectionsManager {
   }
 
   /// Re-reads the retained head once, e.g. on app foreground resume, to catch
-  /// an EVENT a healthy socket never delivered. Skipped while a local edit is
-  /// pending and discarded if one lands before the read returns.
+  /// an EVENT a healthy socket never delivered. A pending edit fences the
+  /// legacy head; a unified head is still applied immediately.
   void refreshFromRelay() {
     if (_disposed || !_remoteEnabled) return;
-    if (_pendingBase != null) {
-      if (!_publishing && _publishDebounce == null) {
-        _retriedOvertakenWrite = false;
-        _schedulePublish();
-      }
-      return;
+    if (_pendingBase != null && !_publishing && _publishDebounce == null) {
+      _retriedOvertakenWrite = false;
+      _schedulePublish();
     }
     final revision = _localRevision;
+    final legacyCurrent = _pendingBase == null;
     unawaited(
       _fetchAndMerge(
-        isCurrent: () => revision == _localRevision && _pendingBase == null,
+        isCurrent: () =>
+            legacyCurrent && revision == _localRevision && _pendingBase == null,
       ),
     );
   }
@@ -155,10 +185,18 @@ class ChannelSectionsManager {
       _startupFetchSucceeded = fetched;
     }
 
-    final subscribed = _unsubscribe != null || await _startLiveSubscription();
+    final wasSubscribed = _unsubscribe != null;
+    final subscribed = wasSubscribed || await _startLiveSubscription();
     if (_disposed) return;
+    // Read again only when the live replay did not complete: a head saved
+    // between the first read and the subscription would otherwise wait for
+    // the next resume.
+    if (subscribed && !_caughtUpSinceSubscribe && _startupFetchSucceeded) {
+      _caughtUpSinceSubscribe = await _fetchAndMerge();
+      if (_disposed) return;
+    }
 
-    if (!_startupFetchSucceeded || !subscribed) {
+    if (!_startupFetchSucceeded || !subscribed || !_caughtUpSinceSubscribe) {
       _scheduleStartupRetry();
     } else {
       // Fully recovered — later transient failures (e.g. a late relay
@@ -217,8 +255,9 @@ class ChannelSectionsManager {
     _unsubscribe = null;
   }
 
-  void createSection(String name) {
-    if (_disposed) return;
+  /// Files [channelId] in the new section in the same write, when given.
+  void createSection(String name, {String? channelId}) {
+    if (!_editable) return;
     final maxOrder = _store.sections.fold<int>(
       -1,
       (max, s) => s.order > max ? s.order : max,
@@ -231,13 +270,15 @@ class ChannelSectionsManager {
     _editSections(
       ChannelSectionStore(
         sections: [..._store.sections, section],
-        assignments: _store.assignments,
+        assignments: channelId == null
+            ? _store.assignments
+            : {..._store.assignments, channelId: section.id},
       ),
     );
   }
 
-  void renameSection(String sectionId, String newName) {
-    if (_disposed) return;
+  void renameSection(String sectionId, String? newName, {String? icon}) {
+    if (!_editable) return;
     _editSections(
       ChannelSectionStore(
         sections: [
@@ -245,8 +286,8 @@ class ChannelSectionsManager {
             if (s.id == sectionId)
               ChannelSection(
                 id: s.id,
-                name: newName.trim(),
-                icon: s.icon,
+                name: newName?.trim() ?? s.name,
+                icon: icon ?? s.icon,
                 order: s.order,
               )
             else
@@ -258,7 +299,7 @@ class ChannelSectionsManager {
   }
 
   void deleteSection(String sectionId) {
-    if (_disposed) return;
+    if (!_editable) return;
     final updatedAssignments = Map<String, String>.from(_store.assignments)
       ..removeWhere((_, sid) => sid == sectionId);
     _editSections(
@@ -273,7 +314,7 @@ class ChannelSectionsManager {
   }
 
   void moveSectionUp(String sectionId) {
-    if (_disposed) return;
+    if (!_editable) return;
     final sorted = _sortedSections();
     final idx = sorted.indexWhere((s) => s.id == sectionId);
     if (idx <= 0) return;
@@ -281,7 +322,7 @@ class ChannelSectionsManager {
   }
 
   void moveSectionDown(String sectionId) {
-    if (_disposed) return;
+    if (!_editable) return;
     final sorted = _sortedSections();
     final idx = sorted.indexWhere((s) => s.id == sectionId);
     if (idx < 0 || idx >= sorted.length - 1) return;
@@ -289,7 +330,7 @@ class ChannelSectionsManager {
   }
 
   void assignChannel(String channelId, String sectionId) {
-    if (_disposed) return;
+    if (!_editable) return;
     final updated = Map<String, String>.from(_store.assignments)
       ..[channelId] = sectionId;
     _editSections(
@@ -298,7 +339,7 @@ class ChannelSectionsManager {
   }
 
   void unassignChannel(String channelId) {
-    if (_disposed) return;
+    if (!_editable) return;
     final updated = Map<String, String>.from(_store.assignments)
       ..remove(channelId);
     _editSections(
@@ -316,7 +357,7 @@ class ChannelSectionsManager {
   }
 
   void _schedulePublish() {
-    if (!_remoteEnabled || _disposed || _pendingBase == null) return;
+    if (!_remoteEnabled || !_editable || _pendingBase == null) return;
     _publishDebounce?.cancel();
     _publishDebounce = Timer(const Duration(seconds: 5), () {
       _publishDebounce = null;
@@ -337,14 +378,14 @@ class ChannelSectionsManager {
           kinds: const [EventKind.readState],
           authors: [pubkey],
           tags: const {
-            '#d': ['channel-sections'],
+            '#d': ['channel-sections', workspaceCoordinate],
           },
-          limit: 1,
+          limit: 2,
         ),
       );
       if (_disposed && !allowDisposed) return false;
-      if (isCurrent != null && !isCurrent()) return false;
-      _mergeEvents(events);
+      // A pending local edit fences only the legacy head it would replace.
+      _mergeEvents(events, legacy: isCurrent == null || isCurrent());
       _persist();
       if (!_disposed) _onChanged();
       return true;
@@ -359,18 +400,28 @@ class ChannelSectionsManager {
   Future<bool> _startLiveSubscription() async {
     if (_relaySession == null || _disposed) return false;
     final generation = ++_subscriptionGeneration;
+    _caughtUpSinceSubscribe = false;
     try {
-      final unsubscribe = await _relaySession.subscribe(
+      final unsubscribe = await _relaySession.subscribeWithStatus(
         NostrFilter(
           kinds: const [EventKind.readState],
           authors: [pubkey],
           tags: const {
-            '#d': ['channel-sections'],
+            '#d': ['channel-sections', workspaceCoordinate],
           },
-          limit: 1,
+          limit: 2,
         ),
         _handleIncomingEvent,
         onClosed: (message) => _handleSubscriptionClosed(generation, message),
+        // Its EOSE has delivered both retained heads.
+        onStatusChanged: (status) {
+          if (status == RelaySubscriptionStatus.ready &&
+              generation == _subscriptionGeneration) {
+            _caughtUpSinceSubscribe = true;
+          }
+        },
+        // One coordinate's newer head must not bound the other's replay.
+        resumeSince: false,
       );
       if (_disposed || generation != _subscriptionGeneration) {
         unsubscribe();
@@ -401,19 +452,30 @@ class ChannelSectionsManager {
     _scheduleStartupRetry();
   }
 
-  void _mergeEvents(List<NostrEvent> events) {
+  void _mergeEvents(List<NostrEvent> events, {required bool legacy}) {
+    // Cached sections can hold edits that never reached a relay holding no
+    // Team record; a read that finds none confirms only an empty layout.
+    if (_lastRemoteEventId == null &&
+        !events.any(
+          (e) => e.pubkey == pubkey && e.getTagValue('d') == 'channel-sections',
+        )) {
+      _confirmed = const ChannelSectionStore();
+    }
     for (final event in events) {
       if (event.pubkey != pubkey) continue;
-      _mergeEvent(event);
+      _mergeEvent(event, legacy: legacy);
     }
+    // A lock adopted before this read confirmed the baseline still drops
+    // what desktop never saw.
+    if (_workspace != null) _store = _confirmed;
   }
 
-  void _mergeEvent(NostrEvent event) {
+  void _mergeEvent(NostrEvent event, {bool legacy = true}) {
     // Another community's groups must never reach this community's store.
     if (!_servesThisCommunity) return;
-    // Only process channel-sections d-tag events.
     final dTag = event.getTagValue('d');
-    if (dTag != 'channel-sections') return;
+    if (dTag == workspaceCoordinate) return _mergeWorkspace(event);
+    if (dTag != 'channel-sections' || !legacy) return;
 
     try {
       final plaintext = _crypto.decrypt(event.content);
@@ -432,10 +494,47 @@ class ChannelSectionsManager {
         if (base != null) {
           _pendingBase = _samePreferences(_store, incoming) ? null : incoming;
         }
+        _confirmed = incoming;
         _persist();
       }
     } catch (_) {
       // Decryption failure or parse error — keep existing state.
+    }
+  }
+
+  void _mergeWorkspace(NostrEvent event) {
+    // The cursor and lock trust this head's timestamp and ID, which only a
+    // checked signature vouches for.
+    if (!isAuthenticReadStateEvent(event, viewer: pubkey) ||
+        event.createdAt < _workspaceCreatedAt ||
+        (event.createdAt == _workspaceCreatedAt &&
+            event.id.compareTo(_workspaceEventId) >= 0)) {
+      return;
+    }
+    try {
+      final plaintext = _crypto.decrypt(event.content);
+      _workspace = WorkspaceRecord.decode(plaintext);
+      _workspaceCreatedAt = event.createdAt;
+      _workspaceEventId = event.id;
+      // Desktop never saw an unpublished Team edit, so its layout omits it.
+      _publishDebounce?.cancel();
+      _publishDebounce = null;
+      final hadPending = _pendingBase != null;
+      _pendingBase = null;
+      if (hadPending || !identical(_store, _confirmed)) {
+        _store = _confirmed;
+        _persist();
+      }
+      if (!_disposed) {
+        _storage.writeWorkspace(pubkey, relayUrl, (
+          plaintext: plaintext,
+          createdAt: event.createdAt,
+          eventId: event.id,
+        ));
+      }
+    } catch (error) {
+      // Desktop rejects the same record, so keep the last readable head.
+      debugPrint('[ChannelSectionsManager] unreadable workspace head: $error');
     }
   }
 
@@ -463,6 +562,7 @@ class ChannelSectionsManager {
     if ((!allowDisposed && _disposed) ||
         _publishing ||
         _pendingBase == null ||
+        _workspace != null ||
         !_remoteEnabled ||
         _signedEventRelay == null ||
         !_servesThisCommunity) {
@@ -473,9 +573,23 @@ class ChannelSectionsManager {
     var revision = _localRevision;
     var headOvertookWrite = false;
     try {
-      // Reconcile pending fields against the retained head before signing.
-      if (!await _fetchAndMerge(allowDisposed: allowDisposed)) return;
-      if ((!allowDisposed && _disposed) || !_servesThisCommunity) return;
+      // Reconcile against the retained head and check for a unified head
+      // before signing any legacy changes.
+      var read = await _fetchAndMerge(allowDisposed: allowDisposed);
+      // A retired manager cannot schedule a retry, so re-read during its flush.
+      for (var i = 0; !read && allowDisposed && i < 2; i++) {
+        read = await _fetchAndMerge(allowDisposed: true);
+      }
+      if (!read) {
+        _retryPublishLater();
+        return;
+      }
+      _failedPreflights = 0;
+      if ((!allowDisposed && _disposed) ||
+          !_servesThisCommunity ||
+          _workspace != null) {
+        return;
+      }
       final base = _pendingBase;
       if (base == null) return;
       final submitted = _store;
@@ -499,7 +613,18 @@ class ChannelSectionsManager {
         ],
         createdAt: createdAt,
         onSigned: (event) => signedId = event.id,
+        // A unified head can arrive during the relay's rate-limit wait.
+        mayPublish: () async =>
+            (allowDisposed || !_disposed) &&
+            _workspace == null &&
+            _servesThisCommunity,
       );
+
+      if ((!allowDisposed && _disposed) ||
+          !_servesThisCommunity ||
+          _workspace != null) {
+        return;
+      }
 
       // Keep the cursor a coherent (created_at, id) pair so an OK that beats
       // its own echo cannot make later same-second heads compare against a
@@ -511,6 +636,7 @@ class ChannelSectionsManager {
       if (signedId != null &&
           createdAt == _lastRemoteCreatedAt &&
           signedId == _lastRemoteEventId) {
+        _confirmed = submitted;
         final previous = _store;
         final pending = _pendingBase;
         // The acknowledged snapshot is the new base. Carry forward only edits
@@ -536,6 +662,16 @@ class ChannelSectionsManager {
         _schedulePublish();
       }
     }
+  }
+
+  /// Retries a publish whose preflight read failed, backing off to 40s.
+  void _retryPublishLater() {
+    if (!_editable || _pendingBase == null || _publishDebounce != null) return;
+    final delay = Duration(seconds: 5 << min(_failedPreflights++, 3));
+    _publishDebounce = Timer(delay, () {
+      _publishDebounce = null;
+      unawaited(_publish());
+    });
   }
 
   /// Switching community rebuilds the session in place before this manager

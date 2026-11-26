@@ -1,3 +1,5 @@
+import 'adaptive_conversation_pane.dart';
+import 'bottom_up_page_route.dart';
 import 'package:duo_kit/duo_kit.dart';
 
 import 'duo_toolbar.dart';
@@ -5,6 +7,7 @@ import 'duo_toolbar.dart';
 import 'dart:math' show max;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart' show CupertinoTheme;
 import 'package:flutter/foundation.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
@@ -17,6 +20,19 @@ import 'ios_glass_navigation_action.dart';
 import 'ios_navigation_bar.dart';
 import 'navigation_backdrop.dart';
 export 'ios_navigation_bar.dart' show IosNavigationAction;
+
+/// Space below the Android conversation toolbar controls.
+double conversationNavigationBottomPadding(BuildContext context) =>
+    Theme.of(context).platform == TargetPlatform.android ? Grid.xxs : 0;
+
+/// Round Material action containers shared by Android navigation headers.
+ButtonStyle androidNavigationButtonStyle(BuildContext context) =>
+    IconButton.styleFrom(
+      backgroundColor: context.colors.surfaceContainerHighest,
+      foregroundColor: context.colors.onSurface,
+      shape: const CircleBorder(),
+      minimumSize: const Size.square(48),
+    );
 
 /// Minimum height of the frosted app bar content area below the safe area.
 const _kBarContentMinHeight = buzzNavigationRowHeight;
@@ -78,7 +94,8 @@ double _nativeCompactHeight(BuildContext context, [double titleHeight = 0]) {
   final height = IosNavigationMetrics.of(context).compactHeight;
   return strip == null
       ? max(height, titleHeight)
-      : max(height.clamp(44.0, double.infinity), titleHeight) + 24;
+      : max(height.clamp(44.0, double.infinity), titleHeight) +
+            duoHeaderTopClearance;
 }
 
 /// Returns the total height of the [FrostedAppBar] including safe area padding.
@@ -93,7 +110,23 @@ double frostedAppBarHeight(
   double titleContentHeight = 0,
   bool nativeLargeTitle = false,
   bool useNativeNavigation = true,
+  bool alignWithStatusRegion = false,
 }) {
+  final portraitHeader =
+      alignWithStatusRegion && defaultTargetPlatform == TargetPlatform.iOS
+      ? IosNavigationMetrics.of(context).portraitHeaderFor(
+          View.of(context).physicalSize / View.of(context).devicePixelRatio,
+        )
+      : null;
+  if (portraitHeader != null && useNativeNavigation && !nativeLargeTitle) {
+    return max(MediaQuery.paddingOf(context).top, portraitHeader.bottom) +
+        bottomHeight;
+  }
+  if (portraitHeader != null) {
+    return portraitHeader.top +
+        _barContentHeight(context, titleStyle, titleContentHeight) +
+        bottomHeight;
+  }
   if (useNativeNavigation && defaultTargetPlatform == TargetPlatform.iOS) {
     return MediaQuery.paddingOf(context).top +
         _nativeCompactHeight(context, titleContentHeight) +
@@ -135,16 +168,14 @@ class FrostedAppBar extends StatelessWidget {
   /// Pass the same value to [frostedAppBarHeight] when spacing body content.
   final double titleContentHeight;
 
+  /// Scroll-driven title drawn over the toolbar and its bottom extension.
+  final Widget Function(double toolbarHeight)? titleOverlay;
+
   /// Optional content displayed below the title row in the same surface.
   final Widget? bottom;
 
   /// Height reserved for [bottom].
   final double bottomHeight;
-
-  /// Extends [bottom] upward into the title row without moving the app bar's
-  /// outer bounds. This keeps overlapping controls inside the app bar's hit
-  /// test region as well as its paint region.
-  final double bottomOverlap;
 
   /// Widgets displayed on the trailing (right) side.
   final List<Widget> actions;
@@ -189,12 +220,22 @@ class FrostedAppBar extends StatelessWidget {
   /// Whether UIKit should expand the title at the top of the page.
   final bool nativeLargeTitle;
 
+  /// Keeps custom Home controls beside the system navigation title.
+  final bool nativeLargeTitleWithActions;
+  final bool alignLargeTitleWithActions;
+  final bool centerLargeTitleBelowActions;
+  final bool nativePaneSoftEdge;
+  final bool leadingInlineTitleOnDuo;
+
   /// Aligns a full-width native backdrop title with the inset page content.
   final EdgeInsets nativeTitleInsets;
 
   /// Whether UIKit owns the title and actions. Custom Flutter layouts still
   /// use the native soft backdrop on iOS.
   final bool useNativeNavigation;
+
+  /// Places the header beside the unfolded portrait status cluster.
+  final bool alignWithStatusRegion;
 
   /// Duration for coordinated native header and overlapping control movement.
   final Duration nativeLayoutDuration;
@@ -226,8 +267,14 @@ class FrostedAppBar extends StatelessWidget {
     this.nativeTitleRefreshing = false,
     this.onNativeTitlePressed,
     this.nativeLargeTitle = false,
+    this.nativeLargeTitleWithActions = false,
+    this.alignLargeTitleWithActions = false,
+    this.centerLargeTitleBelowActions = false,
+    this.nativePaneSoftEdge = false,
+    this.leadingInlineTitleOnDuo = false,
     this.nativeTitleInsets = EdgeInsets.zero,
     this.useNativeNavigation = true,
+    this.alignWithStatusRegion = false,
     this.nativeLayoutDuration = Duration.zero,
     this.nativeLeading,
     this.nativeActions,
@@ -240,17 +287,15 @@ class FrostedAppBar extends StatelessWidget {
     this.centerTitle = false,
     this.titleStyle,
     this.titleContentHeight = 0,
+    this.titleOverlay,
     this.bottom,
     this.bottomHeight = 0,
-    this.bottomOverlap = 0,
     this.actions = const [],
     this.horizontalInset = Grid.xxs,
     this.iconColor,
     this.frosted = true,
     this.alwaysFrosted = false,
-  }) : assert(bottom == null || bottomHeight + bottomOverlap > 0),
-       assert(bottomOverlap >= 0),
-       assert(bottom != null || bottomOverlap == 0);
+  }) : assert(bottom == null || bottomHeight > 0);
 
   @override
   Widget build(BuildContext context) {
@@ -269,6 +314,9 @@ class FrostedAppBar extends StatelessWidget {
     if (useNativeNavigation &&
         defaultTargetPlatform == TargetPlatform.iOS &&
         !nativeSuppressed) {
+      if (ConversationPaneScope.isReplacedBaseRouteOf(context)) {
+        return const SizedBox.shrink();
+      }
       final toolbarScope = DuoToolbarScope.maybeOf(context);
       final strip = toolbarScope == null
           ? FoldGeometry.of(context).strip
@@ -298,7 +346,8 @@ class FrostedAppBar extends StatelessWidget {
       ];
       final toolbarActive =
           (toolbarScope?.active ?? true) &&
-          (ModalRoute.isCurrentOf(context) ?? true);
+          ((ModalRoute.isCurrentOf(context) ?? true) ||
+              BottomUpPageRoute.hasRetainedControls(ModalRoute.of(context)));
       if (railOnly && strip != null) {
         return Positioned(
           top: 0,
@@ -317,12 +366,46 @@ class FrostedAppBar extends StatelessWidget {
       final offset = IosNavigationScrollScope.maybeOf(context);
       // The bar reads the scroll offset itself, so scrolling rebuilds only
       // the frame around it, not its native payload.
+      final centerExpandedTitle = centerLargeTitleBelowActions && strip == null;
+      var actionsTop =
+          MediaQuery.paddingOf(context).top +
+          (_barContentHeight(context, titleStyle, titleContentHeight) - 44) / 2;
+      final window = View.of(context);
+      if (nativeLargeTitleWithActions &&
+          strip != null &&
+          isCompactDuoWindow(context) &&
+          window.physicalSize.height > window.physicalSize.width) {
+        // duo_kit's portrait cover camera is 37pt wide, inset 29.3pt.
+        // Some OS versions report only the status strip, without its camera.
+        final camera = FoldGeometry.of(context).occlusions
+            .where(
+              (rect) =>
+                  strip.rect.overlaps(rect) &&
+                  rect.width > 0 &&
+                  (rect.width - rect.height).abs() < 1 &&
+                  rect.center.dy < 100,
+            )
+            .firstOrNull;
+        actionsTop = (camera?.center.dy ?? 47.8) - 22;
+      }
       final nativeBar = IosNavigationBar(
+        externalExpandedTitle: centerExpandedTitle,
+        key: ConversationPaneScope.nativeHeaderKeyOf(context),
         centerTitleInPane: strip != null && !nativeLargeTitle,
         titleInsets: nativeTitleInsets == EdgeInsets.zero
             ? railInsets
             : nativeTitleInsets,
-        alignCollapsedTitleToLeading: strip != null && nativeLargeTitle,
+        alignCollapsedTitleToLeading:
+            strip != null &&
+            (leadingInlineTitleOnDuo ||
+                (nativeLargeTitle &&
+                    (!nativeLargeTitleWithActions ||
+                        alignLargeTitleWithActions))),
+        prefersSoftTopEdge:
+            nativeLargeTitleWithActions ||
+            (nativePaneSoftEdge && strip != null),
+        leadingTitleRowTop: nativeLargeTitleWithActions ? actionsTop : null,
+        leadingTitleTopPadding: strip == null ? 0 : 24,
         horizontalControls:
             strip != null &&
             ((leadingAction?.keepInHeaderOnDuo ?? false) ||
@@ -356,14 +439,23 @@ class FrostedAppBar extends StatelessWidget {
         final layoutDuration = nativeLargeTitle && scrollOffset > 0
             ? Duration.zero
             : nativeLayoutDuration;
+        final largeTitleHeight = IosNavigationMetrics.of(
+          context,
+        ).largeTitleHeight;
         final extra = nativeLargeTitle
-            ? (IosNavigationMetrics.of(context).largeTitleHeight - scrollOffset)
-                  .clamp(0.0, IosNavigationMetrics.of(context).largeTitleHeight)
+            ? (largeTitleHeight - scrollOffset).clamp(0.0, largeTitleHeight)
             : 0.0;
-        final barHeight =
-            MediaQuery.paddingOf(context).top +
-            _nativeCompactHeight(context, titleContentHeight) +
-            extra;
+        final portraitHeader = alignWithStatusRegion && !nativeLargeTitle
+            ? IosNavigationMetrics.of(context).portraitHeaderFor(
+                View.of(context).physicalSize /
+                    View.of(context).devicePixelRatio,
+              )
+            : null;
+        final barHeight = portraitHeader == null
+            ? MediaQuery.paddingOf(context).top +
+                  _nativeCompactHeight(context, titleContentHeight) +
+                  extra
+            : max(MediaQuery.paddingOf(context).top, portraitHeader.bottom);
         return AnimatedPositioned(
           duration: layoutDuration,
           curve: Curves.easeInOutCubic,
@@ -379,23 +471,86 @@ class FrostedAppBar extends StatelessWidget {
               clipBehavior: Clip.none,
               children: [
                 Positioned(
-                  top: 0,
-                  left: 0,
-                  right: 0,
+                  top:
+                      nativeLargeTitleWithActions &&
+                          !centerExpandedTitle &&
+                          extra > 0
+                      ? (centerLargeTitleBelowActions
+                                ? Grid.quarter
+                                : alignLargeTitleWithActions
+                                ? Grid.xxs - buzzNavigationActionSize
+                                : Grid.xxs) *
+                            (extra / largeTitleHeight)
+                      : 0,
+                  left: nativeLargeTitleWithActions ? railInsets.left : 0,
+                  right: nativeLargeTitleWithActions ? railInsets.right : 0,
                   height: barHeight,
                   child: nativeBar,
                 ),
+                if (centerExpandedTitle && extra > 0)
+                  PositionedDirectional(
+                    start: Grid.xs,
+                    end: Grid.xs,
+                    top: actionsTop + buzzNavigationActionSize,
+                    bottom: 0,
+                    child: IgnorePointer(
+                      child: Align(
+                        alignment: AlignmentDirectional.centerStart,
+                        child: Opacity(
+                          opacity: (extra / (largeTitleHeight * .65)).clamp(
+                            0.0,
+                            1.0,
+                          ),
+                          child: Semantics(
+                            header: true,
+                            child: Text(
+                              nativeTitle ?? '',
+                              key: const ValueKey('expanded-navigation-title'),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: CupertinoTheme.of(context)
+                                  .textTheme
+                                  .navLargeTitleTextStyle
+                                  .copyWith(
+                                    color:
+                                        iconColor ?? context.colors.onSurface,
+                                    leadingDistribution:
+                                        TextLeadingDistribution.even,
+                                  ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                if (nativeLargeTitleWithActions && leading != null)
+                  PositionedDirectional(
+                    top: actionsTop,
+                    start: horizontalInset + railInsets.left,
+                    height: 44,
+                    child: leading!,
+                  ),
+                if (nativeLargeTitleWithActions)
+                  PositionedDirectional(
+                    top: actionsTop,
+                    end: horizontalInset + railInsets.right,
+                    height: 44,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: actions,
+                    ),
+                  ),
                 if (bottom != null)
                   AnimatedPositioned(
                     duration: layoutDuration,
                     curve: Curves.easeInOutCubic,
-                    top: barHeight - bottomOverlap,
+                    top: barHeight,
                     left: 0,
                     right: 0,
-                    height: bottomHeight + bottomOverlap,
+                    height: bottomHeight,
                     child: Padding(
                       padding: railInsets,
-                      child: bottomOverlap > 0 || bottom is SizedBox
+                      child: bottom is SizedBox
                           ? bottom!
                           : ColoredBox(
                               color: context.colors.surface,
@@ -416,7 +571,13 @@ class FrostedAppBar extends StatelessWidget {
               builder: (context, value, child) => buildNative(value),
             );
     }
-    final topPadding = MediaQuery.paddingOf(context).top;
+    final portraitHeader =
+        alignWithStatusRegion && defaultTargetPlatform == TargetPlatform.iOS
+        ? IosNavigationMetrics.of(context).portraitHeaderFor(
+            View.of(context).physicalSize / View.of(context).devicePixelRatio,
+          )
+        : null;
+    final topPadding = portraitHeader?.top ?? MediaQuery.paddingOf(context).top;
     final scrollUnder = FrostedScrollUnderScope.maybeOf(context);
     final isScrolledUnder =
         alwaysFrosted || (scrollUnder?.isScrolledUnder ?? false);
@@ -453,7 +614,12 @@ class FrostedAppBar extends StatelessWidget {
                       height: 48,
                       child: IconButton(
                         onPressed: () => Navigator.of(context).pop(),
-                        color: effectiveIconColor,
+                        color: defaultTargetPlatform == TargetPlatform.android
+                            ? context.colors.onSurface
+                            : effectiveIconColor,
+                        style: defaultTargetPlatform == TargetPlatform.android
+                            ? androidNavigationButtonStyle(context)
+                            : null,
                         icon: const Icon(BuzzIcons.chevronLeft),
                         tooltip: 'Back',
                       ),
@@ -463,7 +629,17 @@ class FrostedAppBar extends StatelessWidget {
     final titleRow = SizedBox(
       height: barContentHeight,
       child: Padding(
-        padding: EdgeInsets.symmetric(horizontal: horizontalInset),
+        padding: EdgeInsets.only(
+          left: horizontalInset,
+          right:
+              horizontalInset +
+              (portraitHeader == null
+                  ? 0
+                  : max(
+                      0.0,
+                      MediaQuery.sizeOf(context).width - portraitHeader.right,
+                    )),
+        ),
         child: IconTheme.merge(
           data: IconThemeData(color: effectiveIconColor),
           child: _CenteredNavigationLayout(
@@ -508,19 +684,21 @@ class FrostedAppBar extends StatelessWidget {
         ),
       ),
     );
-    final contentBody = bottom != null
+    final contentBody = bottomHeight > 0
         ? SizedBox(
             height: barContentHeight + bottomHeight,
             child: Stack(
               children: [
                 Positioned(top: 0, left: 0, right: 0, child: titleRow),
-                Positioned(
-                  top: barContentHeight - bottomOverlap,
-                  left: 0,
-                  right: 0,
-                  height: bottomHeight + bottomOverlap,
-                  child: bottom!,
-                ),
+                if (bottom != null)
+                  Positioned(
+                    top: barContentHeight,
+                    left: 0,
+                    right: 0,
+                    height: bottomHeight,
+                    child: bottom!,
+                  ),
+                if (titleOverlay != null) titleOverlay!(barContentHeight),
               ],
             ),
           )
@@ -531,7 +709,14 @@ class FrostedAppBar extends StatelessWidget {
         'frosted-app-bar-content-transition-transform',
       ),
       opacityKey: const ValueKey('frosted-app-bar-content-transition-opacity'),
-      child: contentBody,
+      child: defaultTargetPlatform == TargetPlatform.android
+          ? IconButtonTheme(
+              data: IconButtonThemeData(
+                style: androidNavigationButtonStyle(context),
+              ),
+              child: contentBody,
+            )
+          : contentBody,
     );
 
     final background = Container(
@@ -553,7 +738,7 @@ class FrostedAppBar extends StatelessWidget {
               top: 0,
               left: 0,
               right: 0,
-              height: topPadding + _barContentHeight(context, titleStyle, 0),
+              height: topPadding + barContentHeight + bottomHeight,
               child: IgnorePointer(
                 child: NavigationBackdrop(
                   active: paintsFrost,
@@ -692,6 +877,9 @@ IosNavigationAction? _nativeAction(Widget? widget) {
   }
   if (widget is IosGlassNavigationButton) {
     final symbol = switch (widget.icon) {
+      IosGlassNavigationIcon.plus => 'plus',
+      IosGlassNavigationIcon.send => 'arrow.up',
+      IosGlassNavigationIcon.microphone => 'mic',
       IosGlassNavigationIcon.more => 'ellipsis',
       IosGlassNavigationIcon.bell => 'bell',
       IosGlassNavigationIcon.trash => 'trash',

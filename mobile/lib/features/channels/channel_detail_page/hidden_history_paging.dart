@@ -14,13 +14,17 @@ const _maxAutoOlderPages = 5;
 Widget? _useHiddenHistoryPaging({
   required BuildContext context,
   required bool noRows,
+  required bool relayHistoryReady,
   required List<TimelineMessage> loaded,
   required ChannelMessagesNotifier notifier,
   required ValueNotifier<bool> isLoadingOlder,
   required ObjectRef<bool> olderFetchPaused,
 }) {
   final active =
-      noRows && !notifier.reachedOldest && loaded.any(isHiddenMembershipNotice);
+      relayHistoryReady &&
+      noRows &&
+      !notifier.reachedOldest &&
+      loaded.any(isHiddenMembershipNotice);
   final autoPages = useRef(0);
   final resume = useState(0);
   if (!active) autoPages.value = 0;

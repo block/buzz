@@ -1,6 +1,101 @@
 part of 'channels_provider_test.dart';
 
 void _unreadDeletionCases() {
+  for (final source in ['live deletion', 'catch-up deletion', 'live edit']) {
+    test('closed saved channel reconciles a $source', () async {
+      const scope = (communityId: 'community', pubkey: 'me');
+      const page = (channelId: _channelA, rootId: '');
+      final directory = await Directory.systemTemp.createTemp(
+        'buzz-closed-chat',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      var rootReads = 0;
+      ProviderContainer open(_FakeRelaySession session) => _buildContainer(
+        session: session,
+        overrides: [
+          savedMessageScopeProvider.overrideWithValue(scope),
+          savedMessageStoreProvider.overrideWith(
+            (ref) => SavedMessageStore(
+              root: () async {
+                rootReads++;
+                return directory;
+              },
+              diagnostics: const NoopDiagnosticReporter(),
+            ),
+          ),
+        ],
+      );
+      NostrEvent signed(
+        int kind,
+        String content, {
+        String? target,
+      }) => NostrEvent.fromJson(
+        signNostrEvent(
+          secretKey:
+              '0000000000000000000000000000000000000000000000000000000000000001',
+          kind: kind,
+          content: content,
+          tags: [
+            ['h', _channelA],
+            if (target != null) ['e', target],
+          ],
+        ).toMap(),
+      );
+      final original = signed(EventKind.streamMessage, 'Original text');
+      final neighbor = signed(EventKind.streamMessage, 'Neighbor');
+      final edit = source == 'live edit';
+      final mutation = signed(
+        edit ? EventKind.streamMessageEdit : EventKind.deletion,
+        edit ? 'Updated text' : '',
+        target: original.id,
+      );
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, 'me')],
+        metadata: [_meta(id: _channelA, name: 'general')],
+      );
+      final online = open(session);
+      addTearDown(online.dispose);
+      final store = online.read(savedMessageStoreProvider);
+      await store.save(store.capture(scope, page), [
+        original,
+        neighbor,
+      ], relayAuthor: null);
+      await online.read(channelsProvider.future);
+      final notifier = online.read(channelsProvider.notifier);
+      await notifier.waitForUnreadCatchUp();
+      rootReads = 0;
+
+      if (source == 'catch-up deletion') {
+        session.recentMessages = [mutation];
+        await notifier.refresh();
+        await notifier.waitForUnreadCatchUp();
+      } else {
+        session.emit(mutation);
+        if (!edit) {
+          for (var i = 0; i < 32; i++) {
+            session.emit(signed(EventKind.deletion, '', target: 'missing-$i'));
+          }
+        }
+      }
+      await store.touch(store.capture(scope, page));
+      final queuedOperations = rootReads;
+
+      final offlineSession = _FakeRelaySession(memberships: [], metadata: []);
+      final offline = open(offlineSession);
+      addTearDown(offline.dispose);
+      offline.read(relaySessionProvider);
+      offlineSession.setStatus(SessionStatus.disconnected);
+      final preview = savedChannelPreviewProvider(_channelA);
+      offline.listen(preview, (_, _) {});
+      expect((await offline.read(preview.future))?.events, [neighbor]);
+      expect(
+        queuedOperations,
+        2,
+        reason: 'one removal batch and one queue barrier',
+      );
+    });
+  }
+
   for (final format in [(5, true), (5, false), (9005, true)]) {
     test(
       'deleted mentions stop unread (kind ${format.$1}, h ${format.$2})',

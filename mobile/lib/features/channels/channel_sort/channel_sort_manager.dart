@@ -7,6 +7,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../shared/crypto/nip44.dart';
+import '../../../shared/relay/read_state_snapshot.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/read_state/read_state_time.dart';
 import 'channel_sort_storage.dart';
@@ -47,6 +48,12 @@ class ChannelSortManager {
 
   ChannelSortStore _store;
   ChannelSortSyncState _syncState;
+
+  /// Desktop's unified sort head; when present it replaces [_store] for
+  /// display and legacy edits stop.
+  ChannelSortStore? _workspace;
+  int _workspaceCreatedAt = 0;
+  String _workspaceEventId = '';
   Timer? _publishDebounce;
   Timer? _startupRetryTimer;
   int _startupRetryAttempt = 0;
@@ -80,11 +87,22 @@ class ChannelSortManager {
        _syncState = ChannelSortStorage(prefs).readSyncState(pubkey, relayUrl) {
     _lastRemoteCreatedAt = _syncState.updatedAt;
     _lastRemoteEventId = _syncState.eventId;
+    final cached = _storage.readWorkspace(pubkey, relayUrl);
+    if (cached != null) {
+      _workspace = cached.store;
+      _workspaceCreatedAt = cached.createdAt;
+      _workspaceEventId = cached.eventId;
+    }
   }
 
-  ChannelSortStore get store => _store;
+  /// The sort choices desktop renders with.
+  ChannelSortStore get store => _workspace ?? _store;
+
+  /// Whether a legacy `channel-sort` edit still reaches desktop.
+  bool get editable => _workspace == null;
+
   ChannelSortMode sortModeFor(String groupKey) =>
-      _store.groups[groupKey] ?? kDefaultSortMode;
+      store.groups[groupKey] ?? defaultSortModeFor(groupKey);
 
   Future<void> initialize() async {
     if (_disposed || !_remoteEnabled || _relaySession == null) {
@@ -113,17 +131,17 @@ class ChannelSortManager {
     }
   }
 
-  /// Re-reads the retained head once, e.g. on app foreground resume, to catch
-  /// an EVENT a healthy socket never delivered. Skipped while a local edit is
-  /// pending and discarded if a mutation lands before the read returns.
+  /// Re-reads the retained heads once, e.g. on app foreground resume, to catch
+  /// an EVENT a healthy socket never delivered. A pending or newer local edit
+  /// fences only the legacy head it would replace; the unified head always
+  /// applies, since it ends legacy editing.
   void refreshFromRelay() {
-    if (_disposed || !_remoteEnabled || _syncState.hasPendingLocalChanges) {
-      return;
-    }
+    if (_disposed || !_remoteEnabled) return;
     final generation = _generation;
+    final pending = _syncState.hasPendingLocalChanges;
     unawaited(
       _fetchAndApply(
-        isCurrent: () => !_disposed && generation == _generation,
+        legacyIsCurrent: () => !pending && generation == _generation,
       ).then((_) {
         if (!_disposed && generation != _generation) _onChanged();
       }),
@@ -153,7 +171,7 @@ class ChannelSortManager {
     ChannelSortMode mode, {
     Iterable<String>? liveSectionIds,
   }) {
-    if (_disposed || _store.groups[groupKey] == mode) return;
+    if (_disposed || !editable || _store.groups[groupKey] == mode) return;
     final updated = ChannelSortStore(
       groups: {..._store.groups, groupKey: mode},
     );
@@ -186,16 +204,23 @@ class ChannelSortManager {
     });
   }
 
-  Future<bool?> _fetchAndApply({bool Function()? isCurrent}) async {
+  Future<bool?> _fetchAndApply({bool Function()? legacyIsCurrent}) async {
     if (_relaySession == null) return null;
     try {
       final events = await _relaySession.fetchHistory(_filter());
-      if (isCurrent != null && !isCurrent()) return null;
+      if (_disposed) return null;
+      final legacy = legacyIsCurrent?.call() ?? true;
+      // The result reports only the legacy head: it drives legacy republish.
       var found = false;
       for (final event in events) {
-        if (event.pubkey != pubkey || event.getTagValue('d') != _dTag) continue;
-        found = true;
-        _applyRemote(event);
+        if (event.pubkey != pubkey) continue;
+        final dTag = event.getTagValue('d');
+        if (dTag == workspaceSortCoordinate) {
+          _applyWorkspace(event);
+        } else if (dTag == _dTag && legacy) {
+          found = true;
+          _applyRemote(event);
+        }
       }
       return found;
     } catch (error) {
@@ -207,15 +232,18 @@ class ChannelSortManager {
   Future<bool> _startLiveSubscription() async {
     if (_relaySession == null) return false;
     try {
-      _unsubscribe = await _relaySession.subscribe(
+      _unsubscribe = await _relaySession.subscribeWithStatus(
         _filter(),
         _handleIncomingEvent,
+        onStatusChanged: (_) {},
         onClosed: (_) {
           if (_disposed) return;
           _unsubscribe?.call();
           _unsubscribe = null;
           _scheduleStartupRetry();
         },
+        // One coordinate's newer head must not bound the other's replay.
+        resumeSince: false,
       );
       return true;
     } catch (error) {
@@ -228,10 +256,44 @@ class ChannelSortManager {
     kinds: const [EventKind.readState],
     authors: [pubkey],
     tags: const {
-      '#d': [_dTag],
+      '#d': [_dTag, workspaceSortCoordinate],
     },
-    limit: 1,
+    limit: 2,
   );
+
+  void _applyWorkspace(NostrEvent event) {
+    // The cursor and lock trust this head's timestamp and ID, which only a
+    // checked signature vouches for.
+    if (!isAuthenticReadStateEvent(event, viewer: pubkey) ||
+        event.createdAt > currentUnixSeconds() + _maxClockDriftSeconds ||
+        event.createdAt < _workspaceCreatedAt ||
+        (event.createdAt == _workspaceCreatedAt &&
+            event.id.compareTo(_workspaceEventId) >= 0)) {
+      return;
+    }
+    try {
+      final parsed = jsonDecode(_crypto.decrypt(event.content));
+      if (parsed is! Map<String, dynamic> || parsed['version'] != 1) return;
+      _workspace = ChannelSortStore.fromWorkspaceJson(parsed);
+      _workspaceCreatedAt = event.createdAt;
+      _workspaceEventId = event.id;
+      // Legacy edits no longer reach desktop; drop any still queued.
+      _publishDebounce?.cancel();
+      _publishDebounce = null;
+      _generation++;
+      if (!_disposed) {
+        _storage.writeWorkspace(
+          pubkey,
+          relayUrl,
+          _workspace!,
+          event.createdAt,
+          event.id,
+        );
+      }
+    } catch (_) {
+      // Keep the last readable head without advancing the cursor.
+    }
+  }
 
   void _applyRemote(NostrEvent event) {
     if (event.createdAt > currentUnixSeconds() + _maxClockDriftSeconds) return;
@@ -265,23 +327,34 @@ class ChannelSortManager {
   }
 
   void _handleIncomingEvent(NostrEvent event) {
-    if (_disposed ||
-        event.pubkey != pubkey ||
-        event.getTagValue('d') != _dTag) {
-      return;
-    }
+    if (_disposed || event.pubkey != pubkey) return;
+    final dTag = event.getTagValue('d');
     final before = _generation;
-    _applyRemote(event);
+    if (dTag == workspaceSortCoordinate) {
+      _applyWorkspace(event);
+    } else if (dTag == _dTag) {
+      _applyRemote(event);
+    }
     if (_generation != before && !_disposed) _onChanged();
   }
 
   Future<void> _publish() async {
-    if (_disposed || !_remoteEnabled || _signedEventRelay == null) return;
+    if (_disposed ||
+        !editable ||
+        !_remoteEnabled ||
+        _signedEventRelay == null) {
+      return;
+    }
     final generationAtStart = _generation;
     // A newer remote blob wins. If one arrives during this read, _generation
     // changes and we abort rather than overwriting it.
     final preflight = await _fetchAndApply();
-    if (_disposed || _generation != generationAtStart) return;
+    if (_disposed) return;
+    if (_generation != generationAtStart) {
+      // The preflight may be the first read to find the unified head.
+      _onChanged();
+      return;
+    }
     if (preflight == null) {
       _schedulePublish();
       return;
@@ -308,6 +381,9 @@ class ChannelSortManager {
         ],
         createdAt: createdAt,
         onSigned: (event) => submittedEventId = event.id,
+        // A unified head can arrive during the relay's rate-limit wait.
+        mayPublish: () async =>
+            !_disposed && editable && _generation == generationAtStart,
       );
       if (_disposed || _generation != generationAtStart) return;
       // Keep local publications strictly ordered for this manager lifetime, as

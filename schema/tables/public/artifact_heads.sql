@@ -1,6 +1,6 @@
 -- NIP-AR current heads and acceptance ledger are independent of event retention.
 CREATE TABLE artifact_heads (
-    community_id UUID NOT NULL REFERENCES communities(id),
+    community_id UUID NOT NULL,
     artifact_id UUID NOT NULL,
     event_id BYTEA NOT NULL CHECK (length(event_id) = 32),
     channel_id UUID NOT NULL,

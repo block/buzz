@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 
+import '../relay/nostr_models.dart';
 import '../utils/string_utils.dart';
 
 @immutable
@@ -14,6 +15,13 @@ class UserProfile {
   /// means this identity is an agent (mirrors desktop's `ownerPubkey`).
   final String? ownerPubkey;
 
+  /// The signed kind:0 this profile was read from, kept only when it carries
+  /// an owner attestation. [ownerPubkey] can come from copies whose signature
+  /// was never checked, so permission to act for this identity re-verifies
+  /// this event instead (`verifiedProfileOwnerProvider`). Null means no
+  /// attestation, or one not yet fetched.
+  final NostrEvent? ownerEvidence;
+
   bool get isAgent => ownerPubkey != null;
 
   const UserProfile({
@@ -23,6 +31,7 @@ class UserProfile {
     this.about,
     this.nip05Handle,
     this.ownerPubkey,
+    this.ownerEvidence,
   });
 
   factory UserProfile.fromJson(Map<String, dynamic> json) => UserProfile(

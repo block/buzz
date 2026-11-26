@@ -32,7 +32,11 @@ class _NativeChannelActions extends HookConsumerWidget {
     this.heroAvatarUrl,
     this.heroIsAgent = false,
     this.memberLabel,
+    this.solo = false,
+    this.settings,
   });
+  final bool solo;
+  final MeChatSettings? settings;
   final Channel? detailsChannel;
   final String? heroAvatarUrl;
   final bool heroIsAgent;
@@ -44,9 +48,12 @@ class _NativeChannelActions extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final session = useMemoized(() => '${_channelActionsSession++}');
     final presentationEnded = useRef(false);
+    final openingHuddle = useState(false);
     final avatarCancellation = useRef<ValueNotifier<bool>?>(null);
     final resolvedImages = useState(<String, String>{});
     final imageSources = <String, bool>{
+      if (settings?.agentAvatarUrl?.isNotEmpty == true)
+        settings!.agentAvatarUrl!: true,
       if (heroAvatarUrl?.isNotEmpty == true) heroAvatarUrl!: heroIsAgent,
       for (final group in groups.whereType<SheetActionSection>())
         for (final row in group.children.whereType<_ChannelMemberPreviewRow>())
@@ -131,11 +138,6 @@ class _NativeChannelActions extends HookConsumerWidget {
       if (group is _ChannelQuickActionsRow) {
         sections.add([
           entry(
-            group.isStarred ? 'Unstar' : 'Star',
-            group.onToggleStar,
-            icon: BuzzIcons.star,
-          ),
-          entry(
             group.isUnread ? 'Mark Read' : 'Mark Unread',
             group.onToggleRead,
             icon: BuzzIcons.checkCheck,
@@ -160,6 +162,34 @@ class _NativeChannelActions extends HookConsumerWidget {
                 'avatarUrl': imageSource(row.avatarUrl),
                 'archived': row.isArchived,
               },
+            });
+          } else if (row is AppListRow) {
+            final isWorkspace = row.icon == BuzzIcons.folder;
+            rows.add({
+              ...entry(
+                row.title,
+                row.onTap,
+                icon: row.icon,
+                id: isWorkspace
+                    ? 'workspace'
+                    : row.icon == BuzzIcons.headphones
+                    ? 'huddle'
+                    : row.title,
+                destructive: row.titleColor == colors.error,
+              ),
+              if (row.subtitle != null) 'subtitle': row.subtitle!,
+              if (row.subtitle != null && settings != null)
+                'agent': {
+                  'avatarUrl': imageSource(settings!.agentAvatarUrl),
+                  'initial': settings!.agentInitial,
+                  'selected': settings!.hasAgent,
+                },
+            });
+          } else if (row is AppListRowRaw && row.title is Text) {
+            final label = (row.title as Text).data!;
+            rows.add({
+              ...entry(label, row.onTap, icon: BuzzIcons.plus),
+              'memberAction': true,
             });
           } else if (row is _ChannelSheetRow) {
             rows.add(
@@ -186,6 +216,7 @@ class _NativeChannelActions extends HookConsumerWidget {
     final latest = useRef(callbacks)..value = callbacks;
     final payload = {
       'session': session,
+      'solo': solo,
       'title': title ?? '',
       if (detailsChannel != null) 'details': detailsChannel!.toJson(),
       'heroAvatarUrl': imageSource(heroAvatarUrl),
@@ -199,6 +230,7 @@ class _NativeChannelActions extends HookConsumerWidget {
           'surface': context.colors.surface,
           'container': context.colors.surfaceContainerHighest,
           'control': context.colors.surfaceContainer,
+          'high': context.colors.surfaceContainerHigh,
           'onSurface': context.colors.onSurface,
           'onSurfaceVariant': context.colors.onSurfaceVariant,
           'primary': context.colors.primary,
@@ -224,6 +256,7 @@ class _NativeChannelActions extends HookConsumerWidget {
           if (disposed || !context.mounted) return;
           presentationEnded.value = true;
           avatarCancellation.value?.value = true;
+          if (selected == 'huddle') openingHuddle.value = true;
           final action = latest.value[selected];
           if (action != null) await action();
         } on PlatformException catch (error) {
@@ -238,7 +271,9 @@ class _NativeChannelActions extends HookConsumerWidget {
             );
           }
         } on MissingPluginException {
-          if (context.mounted) {
+          if (route is _NativeChannelSheetRoute && route.hasFallback) {
+            route.unavailable = true;
+          } else if (context.mounted) {
             ScaffoldMessenger.of(context).showFeedbackSnackBar(
               const SnackBar(
                 content: Text('Channel actions are unavailable in this build.'),
@@ -247,8 +282,8 @@ class _NativeChannelActions extends HookConsumerWidget {
             );
           }
         } finally {
-          if (!disposed && context.mounted && (route?.isCurrent ?? false)) {
-            Navigator.of(context).pop();
+          if (!disposed && context.mounted && route != null && route.isActive) {
+            route.navigator!.removeRoute(route);
           }
         }
       });
@@ -269,7 +304,11 @@ class _NativeChannelActions extends HookConsumerWidget {
       );
       return null;
     }, [payload.toString()]);
-    return const SizedBox.shrink();
+    return openingHuddle.value
+        ? const Center(
+            child: BuzzLoadingIndicator(semanticLabel: 'Opening Huddle'),
+          )
+        : const SizedBox.shrink();
   }
 }
 
@@ -280,8 +319,13 @@ String _channelActionSymbol(IconData? icon) => switch (icon) {
   BuzzIcons.pencil => 'pencil',
   BuzzIcons.plus => 'plus',
   BuzzIcons.users => 'person.2',
-  BuzzIcons.star => 'star',
+  BuzzIcons.pinned => 'pin',
+  BuzzIcons.pinnedOff => 'pin.slash',
   BuzzIcons.checkCheck => 'checkmark',
+  BuzzIcons.mail => 'envelope',
+  BuzzIcons.folder => 'workspaceFolder',
+  BuzzIcons.headphones => 'headphones',
+  BuzzIcons.starOff => 'star',
   BuzzIcons.folderInput => 'folder',
   BuzzIcons.bell => 'bell',
   BuzzIcons.bellOff => 'bell.slash',

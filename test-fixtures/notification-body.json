@@ -201,6 +201,46 @@
       "name": "extended grapheme is never partially kept",
       "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx👩‍💻ab",
       "expected": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…"
+    },
+    {
+      "name": "a vertical tab beside a marker is whitespace, so the marker stays",
+      "input": "**\u000Bx**",
+      "expected": "**\u000Bx**"
+    },
+    {
+      "name": "a next line beside a marker is whitespace, so the marker stays",
+      "input": "**x\u0085**",
+      "expected": "**x\u0085**"
+    },
+    {
+      "name": "a form feed ends a bold run's line",
+      "input": "**x\u000Cy**",
+      "expected": "**x\u000Cy**"
+    },
+    {
+      "name": "a vertical tab ends a strikethrough run's line",
+      "input": "~~x\u000By~~",
+      "expected": "~~x\u000By~~"
+    },
+    {
+      "name": "zero-width spaces at the edges are trimmed",
+      "input": "\u200Bx\u200B",
+      "expected": "x"
+    },
+    {
+      "name": "a message of only zero-width spaces has an empty body",
+      "input": "\u200B\u200B",
+      "expected": ""
+    },
+    {
+      "name": "a leading zero-width space doesn't count toward the limit",
+      "input": "\u200Bxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expected": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "name": "byte order marks at the edges stay",
+      "input": "\uFEFFx\uFEFF",
+      "expected": "\uFEFFx\uFEFF"
     }
   ]
 }

@@ -189,6 +189,25 @@ void main() {
       expect(result.highPriorityCount, 1);
     });
 
+    test(
+      'seen: quiets ordinary backlog at the cut, not newer or attention',
+      () async {
+        final quiet = await badge(stream, event('m'), {'seen:ch-a': t20});
+        expect(quiet.generalUnreadCount, 0);
+        expect(quiet.highPriorityCount, 0);
+        final newer = await badge(stream, event('m'), {'seen:ch-a': t10});
+        expect(newer.generalUnreadCount, 1);
+        final mention = await badge(stream, event('m', highPriority: true), {
+          'seen:ch-a': t30,
+        });
+        expect(mention.highPriorityCount, 1);
+        final reply = await badge(stream, event('m', rootId: threadIdRoot), {
+          'seen:ch-a': t30,
+        });
+        expect(reply.generalUnreadCount, 1);
+      },
+    );
+
     test('thread-activity: reads replies in its thread only', () async {
       final read = await badge(stream, event('m', rootId: threadIdRoot), {
         'thread-activity:$threadIdRoot': t20,

@@ -1,3 +1,5 @@
+import '../../shared/widgets/tabler_star_icon.dart';
+import '../../shared/widgets/native_conversation_menu.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'dart:async';
@@ -11,6 +13,7 @@ import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
+import '../../shared/diagnostics/diagnostic_navigation_observer.dart';
 import '../../shared/clipboard_utils.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/identity_archives/identity_archives.dart';
@@ -20,6 +23,7 @@ import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/app_list.dart';
+import '../../shared/widgets/text_editor.dart';
 import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_action_tile.dart';
@@ -27,10 +31,15 @@ import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
-import '../../shared/widgets/tabler_star_icon.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/duo_toolbar.dart';
+import '../profile/user_profile_sheet.dart';
+import 'channel_member_profile_actions.dart';
 import 'channel.dart';
+import 'me/me_chat_settings.dart';
+import 'me/me_workspace_picker.dart';
+import '../../shared/widgets/anchored_popover_menu.dart';
+import 'channel_detail_page.dart';
 import 'add_members_sheet.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
@@ -40,12 +49,20 @@ import 'channel_stars/channel_stars_provider.dart';
 import 'channels_provider.dart';
 import 'manage_channel_sheet.dart';
 import 'members_sheet.dart';
+import 'unread_badge/observed_unread_event.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/read_state/read_state_provider.dart';
+import '../activity/inbox_local_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
+import '../../shared/community/community_provider.dart';
+import '../../shared/relay/relay_author_provider.dart';
 import '../../shared/widgets/covered_route_keyboard_insets.dart';
 
+import '../../shared/widgets/bottom_up_page_route.dart';
+
+part 'conversation_popover.dart';
 part 'channel_details_page.dart';
+part 'channel_details_rows.dart';
 part 'native_channel_actions.dart';
 part 'native_channel_sheet_app.dart';
 
@@ -55,19 +72,44 @@ Future<bool?> showChannelActionsSheet({
   required BuildContext context,
   required Channel channel,
   required bool isUnread,
-  VoidCallback? onMarkRead,
   String? sectionId,
 }) {
-  final native = _usesNativeChannelSheet(context);
-  Widget content(BuildContext context) => ChannelActionsSheet(
-    channel: channel,
-    isUnread: isUnread,
-    onMarkRead: onMarkRead,
-    sectionId: sectionId,
-    nativePresentation: native,
+  Widget content(BuildContext context, {bool nativePresentation = false}) =>
+      ChannelActionsSheet(
+        channel: channel,
+        isUnread: isUnread,
+        sectionId: sectionId,
+        nativePresentation: nativePresentation,
+      );
+  return _presentChannelListSheet(context, content);
+}
+
+Future<bool?> _presentChannelListSheet(
+  BuildContext context,
+  Widget Function(BuildContext, {bool nativePresentation}) content,
+) {
+  final native =
+      _usesNativeChannelSheet(context) ||
+      (defaultTargetPlatform == TargetPlatform.iOS &&
+          (DuoToolbarScope.maybeOf(context)?.strip ??
+                  FoldGeometry.of(context).strip) ==
+              null);
+  if (native) {
+    return _showNativeChannelSheet(
+      context,
+      (context) => content(context, nativePresentation: true),
+      fallback: () => _showChannelLongPressSheet(
+        context: context,
+        builder: content,
+        fullHeight: true,
+      ),
+    );
+  }
+  return _showChannelLongPressSheet(
+    context: context,
+    builder: content,
+    fullHeight: true,
   );
-  if (native) return _showNativeChannelSheet(context, content);
-  return _showChannelLongPressSheet(context: context, builder: content);
 }
 
 bool _usesNativeChannelSheet(BuildContext context) {
@@ -82,7 +124,8 @@ bool _usesNativeChannelSheet(BuildContext context) {
 }
 
 // Keep the result alive after retiring the invisible route for relay work.
-class _NativeChannelSheetRoute extends PageRouteBuilder<bool> {
+class _NativeChannelSheetRoute extends PageRouteBuilder<bool>
+    with DiagnosticSheetRoute<bool> {
   _NativeChannelSheetRoute(WidgetBuilder builder)
     : super(
         opaque: false,
@@ -92,15 +135,31 @@ class _NativeChannelSheetRoute extends PageRouteBuilder<bool> {
         pageBuilder: (context, _, _) => builder(context),
       );
 
+  bool hasFallback = false;
+  bool unavailable = false;
   Future<bool?>? lifecycleResult;
 }
 
 Future<bool?> _showNativeChannelSheet(
   BuildContext context,
-  WidgetBuilder builder,
-) async {
-  final route = _NativeChannelSheetRoute(builder);
-  final result = await Navigator.of(context, rootNavigator: true).push(route);
+  WidgetBuilder builder, {
+  Future<bool?> Function()? fallback,
+}) async {
+  final route = _NativeChannelSheetRoute(builder)
+    ..hasFallback = fallback != null;
+  final covered = ModalRoute.of(context);
+  final release = covered == null
+      ? null
+      : BottomUpPageRoute.retainControlsForSheet(covered);
+  bool? result;
+  try {
+    result = await Navigator.of(context, rootNavigator: true).push(route);
+  } finally {
+    release?.call();
+  }
+  if (route.unavailable && fallback != null && context.mounted) {
+    return fallback();
+  }
   return route.lifecycleResult == null ? result : await route.lifecycleResult;
 }
 
@@ -108,17 +167,51 @@ Future<bool?> _showNativeChannelSheet(
 Future<bool?> _showChannelLongPressSheet({
   required BuildContext context,
   required WidgetBuilder builder,
+  bool fullHeight = false,
 }) {
   return showBuzzModalBottomSheet<bool>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
+    useSafeArea: fullHeight,
     constraints: BoxConstraints(
       maxWidth: 640,
-      maxHeight: MediaQuery.sizeOf(context).height * 0.7,
+      maxHeight: fullHeight
+          ? double.infinity
+          : MediaQuery.sizeOf(context).height * 0.7,
     ),
-    builder: builder,
+    builder: fullHeight
+        ? (context) =>
+              SizedBox(height: double.infinity, child: builder(context))
+        : builder,
   );
+}
+
+/// Marks [channelId] read through the newest message known at the moment of
+/// the call, its listed last message or a newer observed unread event, so a
+/// message that arrived while a menu was open is covered and
+/// one that arrives later stays unread. With no known message time it only
+/// releases forced-unread flags.
+void _markChannelReadNow(WidgetRef ref, String channelId) {
+  final channels = ref.read(channelsProvider.notifier);
+  var timestamp = dateTimeToUnixSeconds(
+    channels.channelById(channelId)?.lastMessageAt,
+  );
+  for (final event
+      in channels.observedUnreadEventsByChannel[channelId]?.values ??
+          const <ObservedUnreadEvent>[]) {
+    if (timestamp == null || event.createdAt > timestamp) {
+      timestamp = event.createdAt;
+    }
+  }
+  // Time 0 never advances a read marker, so it only releases the flags.
+  ref
+      .read(readStateProvider.notifier)
+      .markContextRead(channelId, timestamp ?? 0, clearForcedMessages: true);
+  if (timestamp != null) {
+    ref.read(inboxLocalStateProvider.notifier).clearScope(channelId);
+    channels.clearObservedUnreadCoveredByRead(channelId, timestamp);
+  }
 }
 
 /// Mobile action sheet for channel-level read, organization, and lifecycle
@@ -128,7 +221,6 @@ class ChannelActionsSheet extends HookConsumerWidget {
     super.key,
     required this.channel,
     required this.isUnread,
-    this.onMarkRead,
     this.sectionId,
     this.nativePresentation = false,
   });
@@ -136,7 +228,6 @@ class ChannelActionsSheet extends HookConsumerWidget {
   final Channel channel;
   final bool isUnread;
   final bool nativePresentation;
-  final VoidCallback? onMarkRead;
   final String? sectionId;
 
   @override
@@ -146,10 +237,16 @@ class ChannelActionsSheet extends HookConsumerWidget {
     final isMuted =
         ref.watch(channelMutesProvider).store.channels[channel.id]?.muted ==
         true;
+    // Desktop's unified workspaces are read-only here.
+    final canFile = ref.watch(
+      channelSectionsProvider.select((state) => state.editable),
+    );
+    final isPinned =
+        ref.watch(channelPinsProvider).store.channels[channel.id]?.enabled ==
+        true;
     final isStarred =
-        !channel.isDm &&
         ref.watch(channelStarsProvider).store.channels[channel.id]?.starred ==
-            true;
+        true;
     final membersAsync = channel.isDm
         ? const AsyncValue<List<ChannelMember>>.data([])
         : ref.watch(channelMembersProvider(channel.id));
@@ -178,6 +275,14 @@ class ChannelActionsSheet extends HookConsumerWidget {
     final canDelete =
         !channel.isArchived &&
         (currentMember?.isOwner == true || ownsOwnerAgent);
+    final canLeave =
+        channel.isMember &&
+        !channel.isArchived &&
+        (!channel.isSolo ||
+            (currentMember != null &&
+                !currentMember.isOwner &&
+                !ownsOwnerAgent &&
+                agentOwnersAsync.hasValue));
     final lifecycleCapabilitiesLoading =
         membersAsync.isLoading || agentOwnersAsync.isLoading;
     final lifecycleCapabilitiesUnavailable =
@@ -188,36 +293,25 @@ class ChannelActionsSheet extends HookConsumerWidget {
     final groups = <Widget>[
       if (!channel.isDm) ...[
         _ChannelQuickActionsRow(
-          isStarred: isStarred,
           isUnread: isUnread,
-          onToggleStar: () {
-            close();
-            final notifier = ref.read(channelStarsProvider.notifier);
-            isStarred
-                ? notifier.unstarChannel(channel.id)
-                : notifier.starChannel(channel.id);
-          },
           onToggleRead: () {
             close();
-            final timestamp = dateTimeToUnixSeconds(channel.lastMessageAt);
             if (isUnread) {
-              onMarkRead?.call();
-              if (timestamp != null) {
-                ref
-                    .read(readStateProvider.notifier)
-                    .markContextRead(
-                      channel.id,
-                      timestamp,
-                      clearForcedMessages: true,
-                    );
-                ref
-                    .read(channelsProvider.notifier)
-                    .clearObservedUnreadCoveredByRead(channel.id, timestamp);
-              }
+              _markChannelReadNow(ref, channel.id);
             } else {
-              ref
+              final marked = ref
                   .read(readStateProvider.notifier)
                   .markContextUnread(channel.id, channelId: channel.id);
+              if (!marked) {
+                ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+                  const SnackBar(
+                    content: Text(
+                      'Couldn’t mark this channel unread. Try again.',
+                    ),
+                  ),
+                  kind: ToastKind.error,
+                );
+              }
             }
           },
         ),
@@ -225,7 +319,7 @@ class ChannelActionsSheet extends HookConsumerWidget {
       ],
       SheetActionSection(
         children: [
-          if (!channel.isDm)
+          if (!channel.isDm && canFile)
             _ChannelSheetRow(
               leading: const Icon(BuzzIcons.folderInput),
               title: const Text('Move to section…'),
@@ -237,7 +331,6 @@ class ChannelActionsSheet extends HookConsumerWidget {
                 close();
                 await _showMoveSectionSheet(
                   pageContext,
-                  ref,
                   channel: channel,
                   sectionId: sectionId,
                 );
@@ -277,6 +370,24 @@ class ChannelActionsSheet extends HookConsumerWidget {
       SheetActionSection(
         children: [
           _ChannelSheetRow(
+            leading: Icon(isPinned ? BuzzIcons.pinnedOff : BuzzIcons.pinned),
+            title: Text(isPinned ? 'Unpin' : 'Pin'),
+            onTap: () {
+              close();
+              final notifier = ref.read(channelPinsProvider.notifier);
+              notifier.setEnabled(channel.id, !isPinned);
+            },
+          ),
+          _ChannelSheetRow(
+            leading: Icon(isStarred ? BuzzIcons.starOff : BuzzIcons.star),
+            title: Text(isStarred ? 'Unstar' : 'Star'),
+            onTap: () {
+              close();
+              final notifier = ref.read(channelStarsProvider.notifier);
+              notifier.setEnabled(channel.id, !isStarred);
+            },
+          ),
+          _ChannelSheetRow(
             leading: const Icon(BuzzIcons.copy),
             title: const Text('Copy channel name'),
             onTap: () {
@@ -305,10 +416,10 @@ class ChannelActionsSheet extends HookConsumerWidget {
       if (!channel.isDm)
         SheetActionSection(
           children: [
-            if (channel.isMember && !channel.isArchived)
+            if (canLeave)
               _ActionTile(
                 icon: BuzzIcons.logOut,
-                label: 'Leave channel',
+                label: channel.isSolo ? 'Leave Solo' : 'Leave channel',
                 destructive: true,
                 onTap: () => _confirmAndRun(
                   context,
@@ -320,7 +431,7 @@ class ChannelActionsSheet extends HookConsumerWidget {
                       ref.read(channelActionsProvider).leaveChannel(channel.id),
                 ),
               ),
-            if (lifecycleCapabilitiesLoading)
+            if (lifecycleCapabilitiesLoading && !nativePresentation)
               const _ChannelSheetRow(
                 enabled: false,
                 leading: BuzzLoadingIndicator(
@@ -329,13 +440,14 @@ class ChannelActionsSheet extends HookConsumerWidget {
                 ),
                 title: Text('Loading channel actions…'),
               )
-            else if (lifecycleCapabilitiesUnavailable)
+            else if (!lifecycleCapabilitiesLoading &&
+                lifecycleCapabilitiesUnavailable)
               const _ChannelSheetRow(
                 enabled: false,
                 leading: Icon(BuzzIcons.triangleAlert),
                 title: Text('Channel actions unavailable'),
               )
-            else ...[
+            else if (!lifecycleCapabilitiesLoading) ...[
               if (canArchive)
                 _ActionTile(
                   icon: BuzzIcons.archive,
@@ -408,32 +520,16 @@ class ChannelActionsSheet extends HookConsumerWidget {
 
 class _ChannelQuickActionsRow extends StatelessWidget {
   const _ChannelQuickActionsRow({
-    required this.isStarred,
     required this.isUnread,
-    required this.onToggleStar,
     required this.onToggleRead,
   });
 
-  final bool isStarred;
   final bool isUnread;
-  final VoidCallback onToggleStar;
   final VoidCallback onToggleRead;
 
   @override
   Widget build(BuildContext context) => Row(
     children: [
-      Expanded(
-        child: _ChannelQuickAction(
-          icon: BuzzIcons.star,
-          iconWidget: TablerStarIcon(
-            color: context.colors.onSurface,
-            filled: isStarred,
-          ),
-          label: isStarred ? 'Unstar' : 'Star',
-          onTap: onToggleStar,
-        ),
-      ),
-      const SizedBox(width: Grid.twelve),
       Expanded(
         child: _ChannelQuickAction(
           icon: isUnread ? BuzzIcons.checkCheck : BuzzIcons.circleDot,
@@ -448,13 +544,11 @@ class _ChannelQuickActionsRow extends StatelessWidget {
 class _ChannelQuickAction extends StatelessWidget {
   const _ChannelQuickAction({
     required this.icon,
-    this.iconWidget,
     required this.label,
     required this.onTap,
   });
 
   final IconData icon;
-  final Widget? iconWidget;
   final String label;
   final VoidCallback onTap;
 
@@ -478,8 +572,7 @@ class _ChannelQuickAction extends StatelessWidget {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              iconWidget ??
-                  Icon(icon, size: 22, color: context.colors.onSurface),
+              Icon(icon, size: 22, color: context.colors.onSurface),
               const SizedBox(height: Grid.xxs),
               Text(
                 label,
@@ -590,104 +683,176 @@ Future<void> _confirmAndRun(
 }
 
 Future<void> _showMoveSectionSheet(
-  BuildContext context,
-  WidgetRef ref, {
+  BuildContext context, {
   required Channel channel,
   required String? sectionId,
 }) async {
-  final sections = [...ref.read(channelSectionsProvider).store.sections]
+  // The actions sheet that opened this picker is already closing, and its
+  // WidgetRef is disposed with it. Use the page's container throughout.
+  final container = ProviderScope.containerOf(context, listen: false);
+  // A notification can switch communities while the picker or name dialog is
+  // open. Both close then, and only the community that opened them is edited.
+  final config = container.read(relayConfigProvider);
+  bool inScope() {
+    final current = container.read(relayConfigProvider);
+    return current.storedOrigin == config.storedOrigin &&
+        current.nsec == config.nsec;
+  }
+
+  void edit(void Function(ChannelSectionsNotifier sections) change) {
+    if (inScope()) change(container.read(channelSectionsProvider.notifier));
+  }
+
+  final sections = [...container.read(channelSectionsProvider).store.sections]
     ..sort((a, b) => a.order.compareTo(b.order));
+  BuildContext? sheet;
+  void close() {
+    final open = sheet;
+    if (open != null) _closeOwnRoute(open);
+  }
+
+  // Desktop's unified layout can lock legacy filing while this is open.
+  final lock = container.listen(
+    channelSectionsProvider.select((state) => state.editable),
+    (_, editable) {
+      if (!editable) close();
+    },
+  );
+  final scope = container.listen(relayConfigProvider, (_, _) {
+    if (!inScope()) close();
+  });
   await showBuzzModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
-    builder: (sheetContext) => SafeArea(
-      child: IconTheme.merge(
-        data: const IconThemeData(size: 22),
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(
-            Grid.gutter,
-            0,
-            Grid.gutter,
-            Grid.xs,
-          ),
-          child: SheetActionSection(
-            children: [
-              for (final section in sections)
+    builder: (sheetContext) {
+      // A lock or switch that landed before this first frame found no sheet
+      // to close.
+      if (sheet == null &&
+          (!container.read(channelSectionsProvider).editable || !inScope())) {
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _closeOwnRoute(sheetContext),
+        );
+      }
+      sheet = sheetContext;
+      return SafeArea(
+        child: IconTheme.merge(
+          data: const IconThemeData(size: 22),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(
+              Grid.gutter,
+              0,
+              Grid.gutter,
+              Grid.xs,
+            ),
+            child: SheetActionSection(
+              children: [
+                for (final section in sections)
+                  ListTile(
+                    leading: const Icon(BuzzIcons.folder),
+                    title: Text(section.name),
+                    trailing: sectionId == section.id
+                        ? Icon(
+                            BuzzIcons.check,
+                            color: sheetContext.colors.primary,
+                          )
+                        : null,
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      edit((s) => s.assignChannel(channel.id, section.id));
+                    },
+                  ),
                 ListTile(
-                  leading: const Icon(BuzzIcons.folder),
-                  title: Text(section.name),
-                  trailing: sectionId == section.id
-                      ? Icon(
-                          BuzzIcons.check,
-                          color: sheetContext.colors.primary,
-                        )
-                      : null,
-                  onTap: () {
+                  leading: const Icon(BuzzIcons.folderPlus),
+                  title: const Text('New section…'),
+                  onTap: () async {
                     Navigator.of(sheetContext).pop();
-                    ref
-                        .read(channelSectionsProvider.notifier)
-                        .assignChannel(channel.id, section.id);
+                    final name = await _showSectionNameDialog(
+                      context,
+                      inScope: inScope,
+                    );
+                    if (name == null || name.isEmpty) return;
+                    edit((s) => s.createSection(name, channelId: channel.id));
                   },
                 ),
-              ListTile(
-                leading: const Icon(BuzzIcons.folderPlus),
-                title: const Text('New section…'),
-                onTap: () async {
-                  Navigator.of(sheetContext).pop();
-                  final name = await _showSectionNameDialog(context);
-                  if (name == null || name.isEmpty) return;
-                  final notifier = ref.read(channelSectionsProvider.notifier);
-                  notifier.createSection(name);
-                  final created = ref
-                      .read(channelSectionsProvider)
-                      .store
-                      .sections
-                      .where((section) => section.name == name.trim())
-                      .lastOrNull;
-                  if (created != null) {
-                    notifier.assignChannel(channel.id, created.id);
-                  }
-                },
-              ),
-              if (sectionId != null)
-                ListTile(
-                  leading: const Icon(BuzzIcons.folderMinus),
-                  title: const Text('Remove from section'),
-                  onTap: () {
-                    Navigator.of(sheetContext).pop();
-                    ref
-                        .read(channelSectionsProvider.notifier)
-                        .unassignChannel(channel.id);
-                  },
-                ),
-            ],
+                if (sectionId != null)
+                  ListTile(
+                    leading: const Icon(BuzzIcons.folderMinus),
+                    title: const Text('Remove from section'),
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      edit((s) => s.unassignChannel(channel.id));
+                    },
+                  ),
+              ],
+            ),
           ),
         ),
-      ),
-    ),
-  );
+      );
+    },
+  ).whenComplete(() {
+    lock.close();
+    scope.close();
+  });
 }
 
-Future<String?> _showSectionNameDialog(BuildContext context) async {
-  final controller = TextEditingController();
-  final result = await showBuzzDialog<String>(
-    context: context,
-    builder: (dialogContext) => AlertDialog(
+/// Closes the route that [context] belongs to, once. Later calls, such as a
+/// second community switch, find it already leaving and never pop the page
+/// underneath.
+void _closeOwnRoute(BuildContext context) {
+  if (!context.mounted) return;
+  final route = ModalRoute.of(context);
+  if (route == null || !route.isActive) return;
+  final navigator = Navigator.of(context);
+  if (route.isCurrent) {
+    navigator.pop();
+  } else {
+    navigator.removeRoute(route);
+  }
+}
+
+Future<String?> _showSectionNameDialog(
+  BuildContext context, {
+  required bool Function() inScope,
+}) => showBuzzDialog<String>(
+  context: context,
+  builder: (_) => _SectionNameDialog(inScope: inScope),
+);
+
+/// Owns its controller so the field outlives the dialog's exit animation.
+class _SectionNameDialog extends HookConsumerWidget {
+  const _SectionNameDialog({required this.inScope});
+
+  /// False once the community that opened the dialog is no longer active.
+  final bool Function() inScope;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final controller = useTextEditingController();
+    ref.listen(relayConfigProvider, (_, _) {
+      if (!inScope()) _closeOwnRoute(context);
+    });
+    // A switch that landed before this first frame found no dialog to close.
+    useEffect(() {
+      if (!inScope()) {
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _closeOwnRoute(context),
+        );
+      }
+      return null;
+    }, const []);
+    return AlertDialog(
       title: const Text('New Section'),
       content: TextField(controller: controller, autofocus: true),
       actions: [
         TextButton(
-          onPressed: () => Navigator.of(dialogContext).pop(),
+          onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
         FilledButton(
-          onPressed: () =>
-              Navigator.of(dialogContext).pop(controller.text.trim()),
+          onPressed: () => Navigator.of(context).pop(controller.text.trim()),
           child: const Text('Create'),
         ),
       ],
-    ),
-  );
-  controller.dispose();
-  return result;
+    );
+  }
 }

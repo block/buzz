@@ -6,10 +6,15 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/auth/auth.dart';
+import '../../shared/channels/saved_message_store.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/crypto/nip_oa.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
+import '../../shared/me/me_sync.dart';
+import '../../shared/me/me_groups.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
+import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/verified_profiles/verified_profile.dart';
@@ -17,15 +22,80 @@ import '../../shared/verified_profiles/verified_profile_directory.dart';
 import '../profile/profile_provider.dart';
 import 'channel.dart';
 import 'channel_metadata_updates.dart';
+import 'channel_sections/channel_sections_provider.dart';
 import 'channels_provider.dart';
+import 'saved_channel_page.dart';
 
 export 'channel_metadata_updates.dart';
 
 part 'channel_huddle_actions.dart';
 part 'channel_management_actions.dart';
 
-String _relayErrorMessage(Object error) =>
-    error.toString().replaceFirst('Exception: ', '');
+/// Why adding to a DM failed when the relay says it would be too full.
+const dmAdditionFailedMessage =
+    'Couldn’t add them. A DM holds up to 9 people, not counting agents.';
+
+/// Whether the people added to a DM see its history.
+enum DmHistory {
+  /// Let the relay decide: agents join this DM, and a person joining a DM of
+  /// two or more people raises [DmNeedsHistoryChoice].
+  ask,
+
+  /// Join this DM and read its earlier messages.
+  include,
+
+  /// Start a new DM of its people and them.
+  startNew,
+}
+
+/// The relay needs the person adding to choose whether the people they add
+/// see this DM's history.
+class DmNeedsHistoryChoice implements Exception {
+  const DmNeedsHistoryChoice();
+}
+
+/// An agent's add policy refused it a DM open or add. [message] names the
+/// agent, so the person knows whose owner to ask.
+class DmAgentRefused implements Exception {
+  const DmAgentRefused(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
+/// The relay names the agent whose add policy refused a DM open or add,
+/// after its policy code.
+final _agentPolicyRefusal = RegExp(
+  r'^(?:forbidden: )?policy:(owner_only|nobody)\b.*\(agent ([0-9a-f]{64})\)$',
+);
+
+/// The policy and agent of an agent's add-policy refusal of a DM, from the
+/// relay's [reason], as desktop's `agentPolicyRefusal` reads it.
+({bool ownerOnly, String agent})? dmAgentPolicyRefusal(String reason) {
+  final match = _agentPolicyRefusal.firstMatch(reason);
+  return match == null
+      ? null
+      : (ownerOnly: match.group(1) == 'owner_only', agent: match.group(2)!);
+}
+
+/// What to show for an agent's add-policy refusal of a DM. [agent] is the
+/// agent's contextual identity label and [owner] its verified owner's, each
+/// null while unknown, so the person knows exactly whose owner to ask.
+String dmAgentRefusedMessage({
+  required bool adding,
+  required bool ownerOnly,
+  String? agent,
+  String? owner,
+}) {
+  final refused = !ownerOnly
+      ? '${agent ?? 'This agent'} can’t be added to a DM.'
+      : owner != null
+      ? 'Only $owner can add ${agent ?? 'this agent'} to a DM.'
+      : 'Only the owner of ${agent ?? 'this agent'} can add it to a DM.';
+  return '${adding ? 'Couldn’t add them. ' : ''}$refused';
+}
 
 /// Raised when one or more kind:9000 adds were rejected, keyed by pubkey.
 ///

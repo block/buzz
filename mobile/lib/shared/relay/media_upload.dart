@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math' as math;
 
 import 'package:file_selector/file_selector.dart' as file_selector;
@@ -250,6 +251,7 @@ class MediaUploadService {
   final DateTime Function() _now;
   final http.Client _http;
   final bool _ownsHttpClient;
+  final HashChunkObserver? _onHashChunk;
 
   MediaUploadService({
     required String baseUrl,
@@ -266,7 +268,9 @@ class MediaUploadService {
     ReadClipboardImage? readClipboardImage,
     DateTime Function()? now,
     http.Client? httpClient,
+    @visibleForTesting HashChunkObserver? onHashChunk,
   }) : _baseUrl = baseUrl,
+       _onHashChunk = onHashChunk,
        _nsec = nsec,
        _pickGalleryImage = pickGalleryImage,
        _pickGalleryImages =
@@ -559,7 +563,7 @@ class MediaUploadService {
       throw Exception('unsupported file type: $mimeType');
     }
 
-    final sha256 = _sha256Hex(bytes);
+    final sha256 = await sha256HexInWorker(bytes, onChunk: _onHashChunk);
     var response = await _sendUploadRequest(
       bytes: bytes,
       mimeType: mimeType,
@@ -800,7 +804,86 @@ Stream<List<int>> _uploadByteStream(
   }
 }
 
-String _sha256Hex(Uint8List bytes) => crypto.sha256.convert(bytes).toString();
+const _hashChunkSize = 1024 * 1024;
+
+/// A step in the chunked hash handoff: a chunk was sent to the worker, or the
+/// worker acknowledged it.
+enum HashChunkEvent { sent, acked }
+
+/// Observes the chunked hash handoff in order. [bytes] is the total sent so
+/// far for [HashChunkEvent.sent], and the total the worker reports having
+/// received for [HashChunkEvent.acked].
+typedef HashChunkObserver = void Function(HashChunkEvent event, int bytes);
+
+/// Hashes [bytes] on a worker isolate, one bounded chunk at a time, so the
+/// payload is never copied into the worker in full.
+@visibleForTesting
+Future<String> sha256HexInWorker(
+  Uint8List bytes, {
+  HashChunkObserver? onChunk,
+}) async {
+  final port = ReceivePort();
+  final messages = StreamIterator<Object?>(port);
+  Isolate? worker;
+  Future<Object> next() async {
+    if (!await messages.moveNext()) throw StateError('hash port closed');
+    final message = messages.current;
+    if (message == null) throw StateError('hash worker exited early');
+    if (message is List) throw RemoteError('${message[0]}', '${message[1]}');
+    return message;
+  }
+
+  try {
+    worker = await Isolate.spawn(
+      _hashChunks,
+      port.sendPort,
+      onError: port.sendPort,
+      onExit: port.sendPort,
+    );
+    final chunks = await next() as SendPort;
+    for (var start = 0; start < bytes.length; start += _hashChunkSize) {
+      final end = math.min(start + _hashChunkSize, bytes.length);
+      // fromList copies only this slice; sending the view itself would copy
+      // the whole backing buffer.
+      chunks.send(
+        TransferableTypedData.fromList([
+          Uint8List.sublistView(bytes, start, end),
+        ]),
+      );
+      onChunk?.call(HashChunkEvent.sent, end);
+      // ack: one chunk in flight at a time
+      final received = await next() as int;
+      onChunk?.call(HashChunkEvent.acked, received);
+    }
+    chunks.send(null);
+    return await next() as String;
+  } finally {
+    await messages.cancel();
+    port.close();
+    worker?.kill();
+  }
+}
+
+Future<void> _hashChunks(SendPort main) async {
+  final chunks = ReceivePort();
+  late crypto.Digest digest;
+  final input = crypto.sha256.startChunkedConversion(
+    ChunkedConversionSink<crypto.Digest>.withCallback(
+      (digests) => digest = digests.single,
+    ),
+  );
+  main.send(chunks.sendPort);
+  var received = 0;
+  await for (final chunk in chunks) {
+    if (chunk == null) break;
+    final bytes = (chunk as TransferableTypedData).materialize().asUint8List();
+    input.add(bytes);
+    received += bytes.length;
+    main.send(received);
+  }
+  input.close();
+  main.send(digest.toString());
+}
 
 String? _tryDetectImageMimeType(Uint8List bytes) {
   try {

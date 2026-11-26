@@ -34,7 +34,7 @@ Future<bool?> showManageChannelSheet({
       context.mounted && (ModalRoute.of(context)?.isCurrent ?? true);
 
   if (defaultTargetPlatform == TargetPlatform.iOS) {
-    final theme = utilitySurfaceThemeData(Theme.of(context));
+    final theme = utilitySheetThemeData(Theme.of(context));
     const bridge = MethodChannel('buzz/profile_text_editor');
     // Start the provider without delaying metadata editing on relay I/O.
     // A cold or failed canvas can be loaded/retried from its row.

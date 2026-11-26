@@ -1,6 +1,6 @@
 //! Stateful installation, delegation, delivery, and health APIs.
 use crate::{
-    android_attestation::{self, AndroidAttestationVerifier},
+    android_attestation::{self, AndroidAttestationError, AndroidAttestationVerifier},
     apns::{DeliveryAttempt, DeliveryOutcome, PushTransport},
     app_attest::AppAttestVerifier,
     authority::{
@@ -13,6 +13,7 @@ use crate::{
     },
     grant::GrantKeyring,
     model::*,
+    signed_call_limiter::SignedCallLimiter,
     token::TokenKeyring,
 };
 use axum::{
@@ -66,6 +67,8 @@ pub struct AppState {
     pub max_installation_lifetime_seconds: i64,
     pub endpoint_quota_window_seconds: i64,
     pub endpoint_quota_max_deliveries: i64,
+    /// Limits signed installation calls per attested key.
+    pub signed_calls: Arc<SignedCallLimiter>,
     pub now: fn() -> i64,
     pub accepting: Arc<AtomicBool>,
 }
@@ -145,7 +148,7 @@ fn authority_error(e: AuthorityError) -> Response {
         AuthorityError::Rejected => error(StatusCode::NOT_FOUND, "not_authorized"),
         AuthorityError::Conflict => installation_conflict(),
         AuthorityError::RateLimited => error(StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
-        AuthorityError::Unavailable => {
+        AuthorityError::Unavailable | AuthorityError::InFlight => {
             error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable")
         }
     }
@@ -245,6 +248,11 @@ struct EnrollTranscript<'a> {
 /// Domain of the Android enrollment transcript, which the attestation
 /// challenge binds.
 const ANDROID_ENROLL_DOMAIN: &str = "buzz.push.enroll.android.v1";
+/// How long a relay should wait before retrying a request whose earlier
+/// attempt is still in flight. Long enough for a send that is minting or
+/// waiting on the push service to finish, short enough to keep wakes prompt.
+/// The relay backs off from this value; its schedule lives in the relay.
+const IN_FLIGHT_RETRY_AFTER_SECONDS: i64 = 5;
 
 /// The Android enrollment transcript: the iOS one without `key_id`, since the
 /// key is generated after (and from) this transcript's digest.
@@ -322,8 +330,8 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
     let verified = match verify_enrollment_attestation(&s, &r, signed.as_bytes()) {
-        Some(value) => value,
-        None => return error(StatusCode::UNAUTHORIZED, "invalid_attestation"),
+        Ok(value) => value,
+        Err(response) => return response,
     };
     let fingerprint = endpoint_fingerprint(platform, &token);
     match s
@@ -352,23 +360,15 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         Ok(None) => {}
         Err(e) => return authority_error(e),
     }
-    if let Err(e) = s
-        .authority
-        .consume_challenge(r.challenge_id, challenge, now)
-        .await
-    {
-        return authority_error(e);
-    }
     let ciphertext = match s.token_keyring.seal(&token) {
         Ok(v) => v,
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
     };
-    let id = uuid::Uuid::new_v4();
     let n = NewInstallation {
-        id,
+        id: uuid::Uuid::new_v4(),
         platform,
         app_attest_key_id: verified.key_id,
-        app_attest_public_key: verified.public_key,
+        app_attest_public_key: verified.public_key.clone(),
         assertion_counter: 0,
 
         token_ciphertext: ciphertext,
@@ -376,18 +376,26 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         endpoint_epoch: 1,
         expires_at: r.expires_at,
     };
-    if let Err(e) = s.authority.create_installation(n, now).await {
-        return authority_error(e);
+    // One atomic step, so a replay racing this request either waits for its
+    // installation or finds the challenge unspent, never a spent challenge
+    // with nothing behind it.
+    match s
+        .authority
+        .enroll_installation(r.challenge_id, challenge, n, now)
+        .await
+    {
+        Ok(installation) if installation.app_attest_public_key == verified.public_key => (
+            StatusCode::CREATED,
+            Json(InstallationEnrollResponse {
+                installation_handle: installation.id,
+                endpoint_epoch: installation.endpoint_epoch,
+                expires_at: installation.expires_at,
+            }),
+        )
+            .into_response(),
+        Ok(_) => installation_conflict(),
+        Err(e) => authority_error(e),
     }
-    (
-        StatusCode::CREATED,
-        Json(InstallationEnrollResponse {
-            installation_handle: id,
-            endpoint_epoch: 1,
-            expires_at: r.expires_at,
-        }),
-    )
-        .into_response()
 }
 
 /// The attested key an enrollment proved, on either platform.
@@ -397,26 +405,44 @@ struct VerifiedKey {
 }
 
 /// Verify the enrollment's one attestation against the exact transcript.
-/// `None` rejects it; the response never says why (rejections are logged).
+/// A rejection answers 401 and never says why (rejections are logged). When
+/// the gateway cannot judge an Android chain yet (no fresh revocation list,
+/// as right after a restart), it answers a retryable 503 instead, so the
+/// client keeps its key and replays the same request later.
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 fn verify_enrollment_attestation(
     s: &AppState,
     r: &InstallationEnrollRequest,
     transcript: &[u8],
-) -> Option<VerifiedKey> {
+) -> Result<VerifiedKey, Response> {
+    let rejected = || error(StatusCode::UNAUTHORIZED, "invalid_attestation");
     if let Some(attestation) = &r.attestation {
+        let key_id = r.key_id.as_deref().ok_or_else(rejected)?;
         let verified = s
             .application
             .app_attest
-            .verify_attestation(attestation, r.key_id.as_deref()?, transcript)
-            .ok()?;
-        return Some(VerifiedKey {
+            .verify_attestation(attestation, key_id, transcript)
+            .map_err(|_| rejected())?;
+        return Ok(VerifiedKey {
             key_id: verified.key_id,
             public_key: verified.public_key,
         });
     }
-    let android = s.application.android.as_ref()?;
-    let chain = decode_android_chain(r.android_attestation.as_deref()?)?;
-    let proven = android.attestation.verify(&chain, transcript).ok()?;
+    let android = s.application.android.as_ref().ok_or_else(rejected)?;
+    let chain = r
+        .android_attestation
+        .as_deref()
+        .and_then(decode_android_chain)
+        .ok_or_else(rejected)?;
+    let proven = android
+        .attestation
+        .verify(&chain, transcript)
+        .map_err(|e| match e {
+            AndroidAttestationError::Unavailable => {
+                error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable")
+            }
+            AndroidAttestationError::Invalid => rejected(),
+        })?;
     use sha2::{Digest, Sha256};
     // The key must be a P-256 point. Its id is its digest; the attestation
     // challenge binds the key to this transcript.
@@ -426,6 +452,7 @@ fn verify_enrollment_attestation(
         key_id: Sha256::digest(&proven.public_key).to_vec(),
         public_key: proven.public_key,
     })
+    .ok_or_else(rejected)
 }
 
 /// Decode a bounded Key Attestation chain of base64 DER certificates.
@@ -513,6 +540,11 @@ async fn verify_installation_assertion<T: serde::Serialize>(
             None
         }
     };
+    // Counted only for authentic calls, so nobody can spend another
+    // installation's allowance with forged requests.
+    if !s.signed_calls.admit(&installation.app_attest_key_id, now) {
+        return Err(error(StatusCode::TOO_MANY_REQUESTS, "rate_limited"));
+    }
     s.authority
         .consume_challenge(challenge.id, challenge_bytes, now)
         .await
@@ -895,6 +927,19 @@ async fn deliver(
             crate::metrics::record_delivery_error("temporarily_unavailable");
             return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
         }
+        // The relay gave up waiting on an earlier attempt of this request and
+        // retried while that attempt is still sending. A 404 here would tell
+        // the relay the wake was delivered; ask it to retry instead, after the
+        // first attempt has had time to finish.
+        Err(AuthorityError::InFlight) => {
+            crate::metrics::record_admission(crate::metrics::Admission::InFlight);
+            return delivery_outcome_response(
+                DeliveryOutcome::Retry {
+                    retry_after_seconds: Some(IN_FLIGHT_RETRY_AFTER_SECONDS),
+                },
+                grant.generation,
+            );
+        }
     };
     let platform = permit.authority.platform;
     // An Android installation can exist only on a gateway configured for
@@ -948,13 +993,19 @@ async fn deliver(
             | DeliveryOutcome::InvalidEndpoint { .. }
             | DeliveryOutcome::PermanentRequestFault => DeliveryDisposition::Terminal,
         };
-        authority_store
-            .finish_delivery(permit, disposition)
-            .await
-            .map(|()| outcome)
+        let finished = authority_store.finish_delivery(permit, disposition).await;
+        (outcome, disposition, finished)
     });
     let outcome = match delivery.await {
-        Ok(Ok(outcome)) => outcome,
+        Ok((outcome, _, Ok(()))) => outcome,
+        // The provider has answered for good, so report that answer. The id
+        // stays in flight until its request expires, which only makes a
+        // replay retry later; it can never cause a second send.
+        Ok((outcome, DeliveryDisposition::Terminal, Err(err))) => {
+            crate::metrics::record_delivery_error("finish_failed");
+            tracing::warn!(error = %err, "failed to mark a terminal delivery finished");
+            outcome
+        }
         _ => {
             crate::metrics::record_delivery_error("finish_failed");
             return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
@@ -1109,6 +1160,9 @@ mod request_limit_tests {
             max_installation_lifetime_seconds: 86_400,
             endpoint_quota_window_seconds: 60,
             endpoint_quota_max_deliveries: 10,
+            signed_calls: Arc::new(crate::signed_call_limiter::SignedCallLimiter::new(
+                60, 1_000,
+            )),
             now: fixed_now,
             accepting: Arc::new(AtomicBool::new(true)),
         }
@@ -1260,6 +1314,23 @@ mod transcript_vector_tests {
             expires_at: 1_752_624_000,
         };
         assert_vector("enroll", &transcript("buzz.push.enroll.v1", &t).unwrap());
+    }
+
+    #[test]
+    fn android_enroll_transcript_vector() {
+        let t = AndroidEnrollTranscript {
+            v: 1,
+            audience: "https://push.buzz.xyz/v1/installations",
+            challenge_id: CHALLENGE_ID,
+            challenge: CHALLENGE,
+            endpoint: ENDPOINT,
+            endpoint_epoch: 1,
+            expires_at: 1_752_624_000,
+        };
+        assert_vector(
+            "enroll_android",
+            &transcript(ANDROID_ENROLL_DOMAIN, &t).unwrap(),
+        );
     }
 
     #[test]

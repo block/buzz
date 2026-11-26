@@ -2,12 +2,14 @@ import 'huddle_timeline.dart';
 import 'dart:async';
 
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
+import '../activity/inbox_local_state_provider.dart';
 import 'timeline_message.dart';
 import 'unread_badge/is_high_priority_event.dart';
 
@@ -18,26 +20,26 @@ const readingDwell = Duration(milliseconds: 300);
 /// The read marks to write after a reading dwell, following `buzz-app`'s
 /// rules (its `docs/unread.md`):
 ///
-/// - When the newest message is at the bottom, a channel writes
-///   `activity:<channel>` and a thread writes `thread-activity:<root>`. These
-///   catch-up marks read ordinary messages and that thread's replies. They do
-///   not read mentions, broadcasts or DMs.
+/// - When the newest message is at the bottom (a catch-up), a channel
+///   advances its own frontier to the newest top-level message reached, and
+///   a thread advances `thread:<root>` to the newest reply. Everything at or
+///   below the frontier is read, mentions, broadcasts and DMs included.
 /// - Unlike `buzz-app`, the newest message itself is read at the live bottom,
 ///   in a thread too, so one taller than the screen is read at its end.
-///   Mentions above it are read only on their own, never by reaching the
-///   bottom.
 /// - Each readable message (see [isReadableRow]) gets its own `msg:` mark
 ///   unless its own mark, the channel mark, or (for an ordinary top-level
-///   message) `activity:` already reads it. A thread mark never counts here: a reply finds its
-///   thread only while the root is loaded, so `buzz-app` keeps reply marks.
+///   message) the legacy `activity:` mark already reads it. A thread mark
+///   never counts here: a reply finds its thread only while the root is
+///   loaded, so `buzz-app` keeps reply marks.
 ///   Unlike `buzz-app`, the message a link opened is readable once any part
 ///   of it shows, since a phone often cannot fit a long one.
-/// - Automatic reading never writes the channel mark. Only an explicit
-///   Mark read does that.
+/// - Apart from a catch-up, automatic reading never writes the channel
+///   mark. `msg:` marks stay on this device.
 ///
 /// [loaded] is every message loaded for the channel or thread, including
 /// replies. [visible] is the messages readable for the whole dwell; see
-/// [isReadableRow].
+/// [isReadableRow]. [onCatchUp] gets the catch-up scope (the channel id or
+/// `thread:<root>`) whenever the view reaches it, even when already read.
 /// [bottom] is the newest message when its bottom edge is visible at the
 /// bottom of the list; otherwise null. Set [threadRootId] when reading a
 /// thread, and [isRootThread] when its head is the thread root rather than a
@@ -56,6 +58,7 @@ Map<String, int> readingMarks({
   bool isRootThread = true,
   bool flat = false,
   int? now,
+  void Function(String scope)? onCatchUp,
 }) {
   final marks = <String, int>{};
   int? markerOf(String contextId) =>
@@ -69,7 +72,7 @@ Map<String, int> readingMarks({
     if (readState.isForcedUnread(contextId)) return false;
     final ordinary = readByChannelCatchUp(
       isDm: isDm,
-      isReply: message.parentId != null && !_isBroadcast(message),
+      isReply: message.parentId != null || _isBroadcast(message),
       highPriority: self == null || isHighPriorityEvent(message.tags, self),
     );
     final readAt = maxReadAt([
@@ -102,9 +105,11 @@ Map<String, int> readingMarks({
     final catchUp = _catchUpMark(
       channelId: channelId,
       bottom: liveBottom,
+      loaded: loaded,
       threadRootId: threadRootId,
       markerOf: markerOf,
       now: now ?? DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      onCatchUp: onCatchUp,
     );
     if (catchUp != null) marks[catchUp.key] = catchUp.value;
   }
@@ -114,6 +119,33 @@ Map<String, int> readingMarks({
 
   visible.forEach(markMessage);
   return marks;
+}
+
+/// Ends the device-local unreads a dwell covers (NIP-RS Clearing). Call
+/// the result with each dwell's readable rows before reading them: rows
+/// newly displayed lose their marks, Inbox marks included, and it returns
+/// the `onCatchUp` for [readingMarks], which ends every mark the catch-up
+/// scope covers even when no frontier moves. A row already shown at the
+/// previous dwell, as when it was marked unread in place, keeps its mark;
+/// that guard resets whenever the page stops being [active].
+void Function(String scope) Function(Iterable<TimelineMessage> visible)
+useClearsCoveredUnread(WidgetRef ref, {required bool active}) {
+  final previous = useRef<Set<String>>(const {});
+  if (!active) previous.value = const {};
+  return (visible) {
+    final notifier = ref.read(readStateProvider.notifier);
+    final ids = {for (final message in visible) message.id};
+    final onScreen = ids.intersection(previous.value);
+    final shown = ids.difference(onScreen);
+    previous.value = ids;
+    notifier.clearCovered(displayed: shown);
+    final inbox = ref.read(inboxLocalStateProvider.notifier)
+      ..clearUnread(shown);
+    return (scope) {
+      notifier.clearCovered(scope: scope, onScreen: onScreen);
+      inbox.clearScope(scope);
+    };
+  };
 }
 
 /// Whether a row at [position] counts as read: it lies inside the reading
@@ -154,24 +186,39 @@ bool _showsNewest({
 MapEntry<String, int>? _catchUpMark({
   required String channelId,
   required TimelineMessage bottom,
+  required Iterable<TimelineMessage> loaded,
   required String? threadRootId,
   required int? Function(String contextId) markerOf,
   required int now,
+  void Function(String scope)? onCatchUp,
 }) {
+  // The channel frontier covers top-level messages only (NIP-RS Write
+  // Discipline), so a flat timeline whose bottom is a reply reads up to the
+  // newest top-level message at or before it.
+  var reached = bottom.createdAt;
+  if (threadRootId == null && _isThreadReply(bottom)) {
+    int? topLevel;
+    for (final message in loaded) {
+      if (_isThreadReply(message) || message.createdAt > reached) continue;
+      if (topLevel == null || message.createdAt > topLevel) {
+        topLevel = message.createdAt;
+      }
+    }
+    if (topLevel == null) return null;
+    reached = topLevel;
+  }
   // Never read beyond the last rendered message: a message between that
   // row and a hidden lifecycle event may still arrive out of order.
-  final cut = bottom.createdAt < now ? bottom.createdAt : now;
-  final key = threadRootId != null
-      ? threadActivityContextKey(threadRootId)
-      : activityContextKey(channelId);
-  final covered = maxReadAt([
-    markerOf(key),
-    markerOf(channelId),
-    if (threadRootId != null) markerOf(threadContextKey(threadRootId)),
-  ]);
+  final cut = reached < now ? reached : now;
+  final key = threadRootId != null ? threadContextKey(threadRootId) : channelId;
+  onCatchUp?.call(key);
+  final covered = markerOf(key);
   if (covered != null && covered >= cut) return null;
   return MapEntry(key, cut);
 }
+
+bool _isThreadReply(TimelineMessage message) =>
+    message.parentId != null && !_isBroadcast(message);
 
 String? _threadRootOf(TimelineMessage message) =>
     message.parentId == null ? null : message.rootId ?? message.parentId;

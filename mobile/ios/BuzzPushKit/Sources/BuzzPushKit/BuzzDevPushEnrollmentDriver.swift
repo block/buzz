@@ -95,6 +95,10 @@ public enum BuzzDevPushEnrollmentError: Error, LocalizedError, Equatable {
   case invalidRelayURL
   case invalidRelayDescriptor
   case invalidResponse(route: String)
+  /// A gateway reply whose body does not decode, or whose fields fail
+  /// validation. Unlike `invalidResponse`, which also covers unreadable local
+  /// enrollment state, this one means the gateway's contract drifted.
+  case invalidGatewayResponse(route: String)
   case unexpectedStatus(route: String, expected: Int, actual: Int, body: String)
   case randomGenerationFailed(Int32)
   case appAttestUnsupported
@@ -109,7 +113,7 @@ public enum BuzzDevPushEnrollmentError: Error, LocalizedError, Equatable {
       return "The relay URL must be a ws or wss origin."
     case .invalidRelayDescriptor:
       return "NIP-11 must contain exactly one valid current push key."
-    case .invalidResponse(let route):
+    case .invalidResponse(let route), .invalidGatewayResponse(let route):
       return "The response from \(route) did not match the closed push protocol."
     case .unexpectedStatus(let route, let expected, let actual, let body):
       return "The response from \(route) was HTTP \(actual), expected \(expected): \(body)"
@@ -342,6 +346,8 @@ public final class BuzzDevPushEnrollmentDriver {
   /// starts this far in the past, so a fast clock neither signs a `not_before` the gateway
   /// has not reached nor an `expires_at` beyond its maximum lifetime.
   static let clockSkewAllowanceSeconds: Int64 = 120
+  /// 2025-01-01T00:00:00Z. No challenge the gateway issues can expire before this.
+  static let earliestPlausibleChallengeExpiry: Int64 = 1_735_689_600
   private let installationIdBytes: () throws -> Data
 
   /// Creates a driver backed by Apple's App Attest service and persists the
@@ -863,9 +869,19 @@ public final class BuzzDevPushEnrollmentDriver {
     )
     guard let id = UUID(uuidString: response.challengeId),
       response.challengeId == id.uuidString.lowercased(),
-      Self.isBase64URLChallenge(response.challenge),
-      response.expiresAt > Int64(now().timeIntervalSince1970)
+      Self.isBase64URLChallenge(response.challenge)
     else {
+      throw BuzzDevPushEnrollmentError.invalidGatewayResponse(route: "v1/installations/challenges")
+    }
+    // The gateway issues an absolute Unix time, so a value below any real date
+    // (zero, negative, a relative TTL) is contract drift whatever this phone's
+    // clock says.
+    guard response.expiresAt >= Self.earliestPlausibleChallengeExpiry else {
+      throw BuzzDevPushEnrollmentError.invalidGatewayResponse(route: "v1/installations/challenges")
+    }
+    // A plausible expiry that already looks expired usually means the phone's
+    // clock runs fast, not that the gateway broke its contract.
+    guard response.expiresAt > Int64(now().timeIntervalSince1970) else {
       throw BuzzDevPushEnrollmentError.invalidResponse(route: "v1/installations/challenges")
     }
     return Challenge(id: id, value: response.challenge)
@@ -896,7 +912,7 @@ public final class BuzzDevPushEnrollmentDriver {
       response.endpointEpoch == Self.endpointEpoch,
       response.expiresAt == expiresAt
     else {
-      throw BuzzDevPushEnrollmentError.invalidResponse(route: "v1/installations")
+      throw BuzzDevPushEnrollmentError.invalidGatewayResponse(route: "v1/installations")
     }
     return installation
   }
@@ -927,7 +943,7 @@ public final class BuzzDevPushEnrollmentDriver {
       )
     )
     guard !response.endpointGrant.isEmpty, response.endpointGrant.utf8.count <= 4_096 else {
-      throw BuzzDevPushEnrollmentError.invalidResponse(route: "v1/delegations")
+      throw BuzzDevPushEnrollmentError.invalidGatewayResponse(route: "v1/delegations")
     }
     return response.endpointGrant
   }
@@ -972,11 +988,18 @@ public final class BuzzDevPushEnrollmentDriver {
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = try JSONEncoder().encode(body)
     let (data, response) = try await session.data(for: request)
+    // The gateway answers each route with exactly one success status, so any
+    // other 2xx means its contract drifted rather than a routine refusal.
+    if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+      http.statusCode != expectedStatus
+    {
+      throw BuzzDevPushEnrollmentError.invalidGatewayResponse(route: route)
+    }
     try Self.expectStatus(response, data: data, route: route, expected: expectedStatus)
     do {
       return try JSONDecoder().decode(Response.self, from: data)
     } catch {
-      throw BuzzDevPushEnrollmentError.invalidResponse(route: route)
+      throw BuzzDevPushEnrollmentError.invalidGatewayResponse(route: route)
     }
   }
 

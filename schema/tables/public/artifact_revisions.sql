@@ -1,7 +1,7 @@
 -- Every accepted revision ID, so replays stay idempotent after redaction or
 -- retention.
 CREATE TABLE artifact_revisions (
-    community_id UUID NOT NULL REFERENCES communities(id),
+    community_id UUID NOT NULL,
     event_id BYTEA NOT NULL CHECK (length(event_id) = 32),
     artifact_id UUID NOT NULL,
     source_channel_id UUID,

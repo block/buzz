@@ -390,6 +390,40 @@ void main() {
       submitted!['content'] as String,
     );
     expect(jsonDecode(plaintext), jsonDecode(publication.plaintext));
+
+    // The member can read back what the relay holds for its lease, and only
+    // its own lease.
+    NostrEvent stored({required String pubkey, int kind = buzzPushLeaseKind}) =>
+        NostrEvent(
+          id: 'e' * 64,
+          pubkey: pubkey,
+          createdAt: 0,
+          kind: kind,
+          tags: const [],
+          content: submitted!['content'] as String,
+          sig: '',
+        );
+    expect(
+      decryptBuzzPushLease(
+        event: stored(pubkey: signer.public),
+        descriptor: descriptor,
+        nsec: signer.nsec,
+      ),
+      (active: false, generation: 3),
+    );
+    for (final forged in [
+      stored(pubkey: relay.public),
+      stored(pubkey: signer.public, kind: 1),
+    ]) {
+      expect(
+        () => decryptBuzzPushLease(
+          event: forged,
+          descriptor: descriptor,
+          nsec: signer.nsec,
+        ),
+        throwsFormatException,
+      );
+    }
   });
 
   group('NIP-11 forward compatibility', () {
@@ -478,22 +512,45 @@ void main() {
       }
     }
 
-    for (final extensions in [
-      null,
-      false,
-      <String>[],
-      ['nip-er'],
+    // NIP-11 makes the list optional, so leaving push out of it, or sending
+    // none, is a relay without push. Only a list of the wrong shape is
+    // malformed.
+    for (final (extensions, advertisedNone) in <(Object?, bool)>[
+      (null, true),
+      (<String>[], true),
+      (['nip-er'], true),
+      (false, false),
+      ([''], false),
     ]) {
-      test('invalid extension advertisement $extensions fails', () {
+      test('extension advertisement $extensions '
+          '${advertisedNone ? 'is no push' : 'is malformed'}', () {
         final information = _descriptorJson(relay.public)
           ..addAll(metadata)
           ..['supported_extensions'] = extensions;
         expect(
           () => BuzzPushLeaseDescriptor.fromRelayInformation(information),
-          throwsA(isA<FormatException>()),
+          throwsA(
+            advertisedNone
+                ? isA<BuzzPushNotAdvertised>()
+                : isA<FormatException>().having(
+                    (error) => error is BuzzPushNotAdvertised,
+                    'is not advertised',
+                    isFalse,
+                  ),
+          ),
         );
       });
     }
+
+    test('an absent extension list is no push', () {
+      final information = _descriptorJson(relay.public)
+        ..addAll(metadata)
+        ..remove('supported_extensions');
+      expect(
+        () => BuzzPushLeaseDescriptor.fromRelayInformation(information),
+        throwsA(isA<BuzzPushNotAdvertised>()),
+      );
+    });
   });
 
   test('descriptor rejects canonical origin with a trailing slash', () {

@@ -1,5 +1,6 @@
 import 'package:buzz/features/channels/message_content/preview_text.dart';
 import 'package:buzz/features/channels/message_media.dart';
+import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 const _alice =
@@ -13,6 +14,7 @@ List<PreviewPiece> _pieces(
   int maxLines = 2,
   Map<String, Set<String>> mentionBindings = const {},
   Map<String, String> mentionNames = const {},
+  Map<String, String> mentionLabels = const {},
   Map<String, String> customEmoji = const {},
   Map<String, String> channelNames = const {},
 }) => messagePreviewPieces(
@@ -20,6 +22,7 @@ List<PreviewPiece> _pieces(
   maxLines: maxLines,
   mentionBindings: mentionBindings,
   mentionNames: mentionNames,
+  mentionLabels: mentionLabels,
   customEmoji: customEmoji,
   channelNames: channelNames,
 );
@@ -73,6 +76,22 @@ void main() {
 
     test('a fence closes only at a bare fence line', () {
       expect(_text('```\n```not a close\n```\nafter'), '```not a close\nafter');
+    });
+
+    test('tilde and quoted fences keep their code literal too', () {
+      expect(_text('~~~\n**x**\n~~~\nafter'), '**x**\nafter');
+      expect(_text('> ```\n> **x**\n> ```\nafter'), '**x**\nafter');
+      expect(_text('```\n> **x**\n```'), '> **x**');
+      // A quoted closer doesn't end an unquoted fence.
+      expect(_text('```\n> ```\n**x**\n```'), '> ```\n**x**');
+      // A quoted fence ends with its blockquote, at a blank line.
+      expect(_text('> ```\n> code\n**after**'), 'code\n**after**');
+      expect(_text('> ```\n> code\n\n**after**'), 'code\nafter');
+      // A quoted fence closes at a closer with or without the marker.
+      expect(_text('> ```\ncode\n```\n**after**'), 'code\nafter');
+      expect(_text('> ```\nx\n> ```\n> **y**'), 'x\ny');
+      // A fence opened inside a blockquote is quoted without its own marker.
+      expect(_text('> x\n~~~\n\n**after**'), 'x\nafter');
     });
   });
 
@@ -136,6 +155,26 @@ void main() {
             semanticsLabel: 'Alice Smith',
           ),
           const PreviewText('!'),
+        ],
+      );
+    });
+
+    test('a bound mention keeps its chip before a suffix', () {
+      expect(
+        _pieces(
+          "@alice's idea",
+          mentionBindings: {
+            'alice': {_alice},
+          },
+          mentionNames: {_alice: 'Alice'},
+        ),
+        [
+          const PreviewMention(
+            pubkey: _alice,
+            label: 'Alice',
+            semanticsLabel: 'Alice',
+          ),
+          const PreviewText("'s idea"),
         ],
       );
     });
@@ -295,5 +334,71 @@ void main() {
         const PreviewMedia(MessageMediaKind.video),
       ]);
     });
+  });
+
+  test('an identity link previews the name its key resolves to', () {
+    final link = '[@Prev\\.ious](nostr:${fullNpub(_alice)})';
+    expect(_pieces('hi $link', mentionLabels: const {_alice: 'Current'}), [
+      const PreviewText('hi '),
+      const PreviewMention(
+        pubkey: _alice,
+        label: 'Current',
+        semanticsLabel: 'Current',
+      ),
+    ]);
+    // Unknown here (a nameless agent's compact npub is no name): the label
+    // written into the link, escapes removed.
+    expect(
+      _pieces('hi $link'),
+      _pieces('hi $link', mentionNames: {_alice: shortPubkey(_alice)}),
+    );
+    expect(_pieces('hi $link'), [
+      const PreviewText('hi '),
+      const PreviewMention(
+        pubkey: _alice,
+        label: 'Prev.ious',
+        semanticsLabel: 'Prev.ious',
+      ),
+    ]);
+  });
+
+  test('a preview loads only the identity links it draws', () {
+    final link = '[@Alice](nostr:${fullNpub(_alice)})';
+    expect(messagePreviewIdentityKeys('hi $link', maxLines: 2), {_alice});
+    // The last drawn line loads; the overflow line read past it doesn't.
+    expect(messagePreviewIdentityKeys('one\n$link', maxLines: 2), {_alice});
+    expect(messagePreviewIdentityKeys('one\ntwo\n$link', maxLines: 2), isEmpty);
+    // A label with brackets draws a pill once normalized, so it loads too.
+    expect(
+      messagePreviewIdentityKeys(
+        'hi [@Pat [QA]](nostr:${fullNpub(_alice)})',
+        maxLines: 2,
+      ),
+      {_alice},
+    );
+    for (final content in [
+      'hi `$link`',
+      '```\n$link\n```',
+      '~~~\n$link\n~~~',
+      '> ```\n> $link\n> ```',
+      '```\n> ```\n$link\n```',
+      'one\ntwo\nthree\nfour\n$link',
+      'plain',
+    ]) {
+      expect(
+        messagePreviewIdentityKeys(content, maxLines: 2),
+        isEmpty,
+        reason: content,
+      );
+    }
+  });
+
+  test('a real name equal to a compact npub still names the link', () {
+    final link = '[@Prev](nostr:${fullNpub(_alice)})';
+    final name = shortPubkey(_alice);
+    expect(
+      _pieces('hi $link', mentionLabels: {_alice: name}).last,
+      PreviewMention(pubkey: _alice, label: name, semanticsLabel: name),
+    );
   });
 }

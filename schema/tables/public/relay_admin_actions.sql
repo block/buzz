@@ -59,9 +59,7 @@ CREATE TABLE relay_admin_actions (
         OR (action = 'delete' AND enforcement_target_event_id IS NOT NULL
             AND enforcement_target_pubkey IS NOT NULL
             AND timeout_secs IS NULL AND timeout_until IS NULL)
-    ),
-    FOREIGN KEY (report_community_id, report_id)
-        REFERENCES moderation_reports (community_id, id)
+    )
 );
 
 CREATE INDEX idx_relay_admin_actions_report

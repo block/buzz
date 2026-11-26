@@ -48,12 +48,13 @@ fn unavailable(error: buzz_db::DbError) -> Error {
     )
 }
 
-fn mode_fields(state: &AppState, required: Option<bool>) -> Value {
+fn mode_fields(state: &AppState, id: uuid::Uuid, required: Option<bool>) -> Value {
     let mode = state.config.nip_fi.mode;
     let name = crate::nip_fi_config::mode_name(mode);
     serde_json::json!({
         "mode": name,
-        "effective_required": required.map(|r| mode.with_requirement(r).restricts()),
+        "effective_required": required
+            .map(|r| state.config.nip_fi.effective_mode(id, r).restricts()),
     })
 }
 
@@ -69,7 +70,11 @@ fn response(state: &AppState, mut record: PolicyRecord) -> Json<Value> {
     {
         record.acceptance.state = "unavailable".into();
     }
-    let fields = mode_fields(state, record.current_requires_nip_fi);
+    let fields = mode_fields(
+        state,
+        record.acceptance.community_id,
+        record.current_requires_nip_fi,
+    );
     Json(serde_json::json!({
         "receipt": record,
         "mode": fields["mode"],
@@ -196,7 +201,7 @@ pub async fn community_nip_fi_policy_status(
                         "community not found",
                     )
                 })?;
-            let fields = mode_fields(&state, Some(policy.requires_nip_fi));
+            let fields = mode_fields(&state, id, Some(policy.requires_nip_fi));
             Ok(Json(serde_json::json!({
                 "community_id": id, "expected_host": host,
                 "expected_policy_generation": policy.policy_generation,

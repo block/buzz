@@ -2,7 +2,7 @@
 -- Conformance: thread lookups filter by community before event matching.
 
 CREATE TABLE thread_metadata (
-    community_id            UUID NOT NULL REFERENCES communities(id),
+    community_id            UUID NOT NULL,
     event_created_at        TIMESTAMPTZ NOT NULL,
     event_id                BYTEA NOT NULL,
     channel_id              UUID NOT NULL,
@@ -15,8 +15,7 @@ CREATE TABLE thread_metadata (
     descendant_count        INT NOT NULL DEFAULT 0,
     last_reply_at           TIMESTAMPTZ,
     broadcast               BOOLEAN NOT NULL DEFAULT FALSE,
-    PRIMARY KEY (community_id, event_created_at, event_id),
-    FOREIGN KEY (community_id, channel_id) REFERENCES channels (community_id, id)
+    PRIMARY KEY (community_id, event_created_at, event_id)
 );
 
 CREATE INDEX idx_thread_metadata_parent ON thread_metadata (community_id, parent_event_id);

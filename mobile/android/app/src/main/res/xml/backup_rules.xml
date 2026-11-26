@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Android 11 and lower. Same exclusions as data_extraction_rules.xml. -->
 <full-backup-content>
+    <exclude domain="file" path="bestie-transcripts/"/>
+    <exclude domain="file" path="composer-transcripts/"/>
     <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
     <exclude domain="sharedpref" path="FlutterSecureKeyStorage.xml"/>
     <exclude domain="sharedpref" path="FlutterSecureStorageConfiguration.xml"/>
+    <exclude domain="file" path="diagnostics_install_id"/>
+    <exclude domain="sharedpref" path="buzz_push.xml"/>
 </full-backup-content>

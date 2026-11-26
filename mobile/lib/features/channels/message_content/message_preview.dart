@@ -91,6 +91,7 @@ class MessagePreview extends HookConsumerWidget {
                   baseline: TextBaseline.alphabetic,
                   child: MessageMentionPill(
                     label: label,
+                    pubkey: pubkey,
                     semanticsLabel: semanticsLabel,
                     isAgent: agents.contains(pubkey),
                     textStyle: style,

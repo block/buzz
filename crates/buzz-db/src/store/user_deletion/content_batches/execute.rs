@@ -103,8 +103,10 @@ pub(super) fn selection(item: &Value) -> Result<(&'static str, &'static str)> {
         Some("push_match_queue") => ("push_match_queue", "event_id=decode($2->>'event_id','hex')"),
         Some("push_wake_outbox") => ("push_wake_outbox", "id=($2->>'id')::uuid"),
         Some("operator_listener_outbox") => ("operator_listener_outbox", "id=($2->>'id')::uuid"),
-        Some("delivery_log") => ("delivery_log", "id=($2->>'id')::bigint AND delivered_at=($2->>'delivered_at')::timestamptz"),
-        Some("subscriptions") => ("subscriptions", "id=$2->>'id'"),
+        Some("workflows") => ("workflows", "id=($2->>'id')::uuid"),
+        Some("workflow_runs") => ("workflow_runs", "id=($2->>'id')::uuid"),
+        Some("workflow_approvals") => ("workflow_approvals", "token=decode($2->>'token','hex')"),
+        Some("scheduled_workflow_fires") => ("scheduled_workflow_fires", "workflow_id=($2->>'workflow_id')::uuid AND scheduled_for=($2->>'scheduled_for')::timestamptz"),
         Some("push_leases") => ("push_leases", "author=decode($2->>'author','hex') AND installation_id=$2->>'installation_id'"),
         _ => return Err(invalid("unknown internal batch table")),
     })
@@ -144,6 +146,11 @@ pub(super) async fn execute_owned_batch(
         .await?;
     crate::deletion::guard_community_write(&mut tx, crate::CommunityId::from_uuid(community))
         .await?;
+    // This runs outside the relay (`buzz-admin user-deletions`), where nothing
+    // else turns the outbox on. An indexer marks the database before it reads
+    // any message, and its reads wait for this lock, so checking here, per
+    // batch, also covers an indexer that starts mid-job.
+    crate::search_outbox::enable_if_indexed(&mut tx).await?;
     ownership::recheck(&mut tx, options, start).await?;
     if let Some((lease, stage_id)) = stage {
         let request = crate::store::entity_deletion::lock_owned(&mut tx, lease).await?;
