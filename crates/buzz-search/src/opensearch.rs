@@ -48,7 +48,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bound on a bulk write, which is slower than a search: the first writes
 /// into a new Serverless index took 20 seconds. A write that times out is
 /// sent again while the first may still be applied late.
-const BULK_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const BULK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The status OpenSearch throttles with, notably Serverless while it scales.
 const THROTTLED: u16 = 429;
@@ -323,6 +323,22 @@ impl SearchIndex {
         removed: &[[u8; 32]],
         version: i64,
     ) -> Result<BulkOutcome, SearchError> {
+        self.write_within(community, documents, removed, version, BULK_TIMEOUT)
+            .await
+    }
+
+    /// [`SearchIndex::write`] that ends within `budget`, however many
+    /// requests the batch takes: each request may use what is left of it, and
+    /// one that runs out fails like any other.
+    pub async fn write_within(
+        &self,
+        community: CommunityId,
+        documents: &[SearchDocument],
+        removed: &[[u8; 32]],
+        version: i64,
+        budget: Duration,
+    ) -> Result<BulkOutcome, SearchError> {
+        let deadline = std::time::Instant::now() + budget;
         let sizes = documents
             .iter()
             .map(|document| document_bytes(community, document))
@@ -331,8 +347,16 @@ impl SearchIndex {
         let mut stopped = false;
         for range in request_ranges(sizes, MAX_BULK_BYTES) {
             let (documents, removed) = split_items(documents, removed, &range);
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if range.start > 0 && left.is_zero() && !stopped {
+                stopped = true;
+                outcome
+                    .reason
+                    .get_or_insert_with(|| "bulk write ran out of time".into());
+            }
             if outcome.throttled || stopped {
-                // Not sent: the cluster asked for less, or is failing.
+                // Not sent: the cluster asked for less, is failing, or the
+                // batch is out of time.
                 outcome
                     .failed
                     .extend(documents.iter().map(|document| document.event_id));
@@ -340,7 +364,7 @@ impl SearchIndex {
                 continue;
             }
             let part = match self
-                .write_request(community, documents, removed, version)
+                .write_request(community, documents, removed, version, left)
                 .await
             {
                 Ok(part) => part,
@@ -381,6 +405,7 @@ impl SearchIndex {
         documents: &[SearchDocument],
         removed: &[[u8; 32]],
         version: i64,
+        timeout: Duration,
     ) -> Result<BulkOutcome, SearchError> {
         if documents.is_empty() && removed.is_empty() {
             return Ok(BulkOutcome::default());
@@ -417,7 +442,7 @@ impl SearchIndex {
             .client
             .bulk(BulkParts::None)
             .require_alias(true)
-            .request_timeout(BULK_TIMEOUT)
+            .request_timeout(timeout.min(BULK_TIMEOUT))
             .body(operations)
             .send()
             .await

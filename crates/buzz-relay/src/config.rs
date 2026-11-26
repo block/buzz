@@ -1057,6 +1057,10 @@ impl Config {
         let search_indexer_workers =
             parse_search_indexer_workers(optional_utf8_env("BUZZ_SEARCH_INDEXER_WORKERS")?)
                 .map_err(ConfigError::InvalidValue)?;
+        if opensearch.is_some() {
+            check_indexer_workers_fit_pool(search_indexer_workers, db_pool_size)
+                .map_err(ConfigError::InvalidValue)?;
+        }
         if !operator_listener_delivery_urls.is_empty() && relay_operator_api_origin.is_none() {
             error!(
                 "BUZZ_OPERATOR_LISTENERS is set but RELAY_OPERATOR_API_ORIGIN is not — operator-listener registration requests will reject every request until RELAY_OPERATOR_API_ORIGIN is set"
@@ -1697,6 +1701,19 @@ fn parse_search_indexer_workers(value: Option<String>) -> Result<usize, String> 
         .ok_or_else(|| "BUZZ_SEARCH_INDEXER_WORKERS must be a whole number from 1 to 32".into())
 }
 
+/// Each indexer worker holds a database connection for the length of a bulk
+/// request, so more workers than half the pool can leave the relay's own
+/// requests waiting for a connection whenever the cluster is slow.
+fn check_indexer_workers_fit_pool(workers: usize, pool_size: u32) -> Result<(), String> {
+    if workers.saturating_mul(2) <= pool_size as usize {
+        return Ok(());
+    }
+    Err(format!(
+        "BUZZ_SEARCH_INDEXER_WORKERS ({workers}) must be at most half of BUZZ_DB_POOL_SIZE \
+         ({pool_size}): each worker holds a database connection while it writes to OpenSearch"
+    ))
+}
+
 /// Parse the OpenSearch settings: an HTTP(S) URL without credentials, query,
 /// or fragment, and basic credentials given both or neither. Empty values
 /// count as unset.
@@ -1811,6 +1828,8 @@ mod tests {
                 "{invalid}"
             );
         }
+        assert!(check_indexer_workers_fit_pool(8, 16).is_ok());
+        assert!(check_indexer_workers_fit_pool(8, 15).is_err());
     }
 
     #[test]

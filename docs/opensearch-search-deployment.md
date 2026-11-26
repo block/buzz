@@ -10,7 +10,7 @@ messages stored before it was set. Searches still run on Postgres.
 | `BUZZ_OPENSEARCH_USERNAME`, `BUZZ_OPENSEARCH_PASSWORD` | Optional basic auth. Set both or neither. |
 | `BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE` | Optional AWS SigV4 request signing, for Amazon OpenSearch Service: `es` for a managed domain, `aoss` for a Serverless collection. Unset turns signing off. Not combined with basic auth. |
 | `BUZZ_OPENSEARCH_AWS_REGION` | Region to sign for. Defaults to `AWS_REGION`, then `AWS_DEFAULT_REGION`. Signing needs one of them. |
-| `BUZZ_SEARCH_INDEXER_WORKERS` | Indexer workers on the relay that holds the lease: 1 to 32, default 1. Each holds one connection from `BUZZ_DB_POOL_SIZE` for the length of a bulk request, so leave the pool room for them. |
+| `BUZZ_SEARCH_INDEXER_WORKERS` | Indexer workers on the relay that holds the lease: 1 to 32, default 1. Each holds one connection from `BUZZ_DB_POOL_SIZE`, in an open transaction, for the length of a bulk request, so the relay refuses to start with more workers than half the pool. |
 | `BUZZ_OPENSEARCH_PREVIEW` | Required with the URL for now, because deleting a community leaves its messages in the index. Use it only on relays without real data. |
 
 ## AWS request signing
@@ -64,6 +64,13 @@ While OpenSearch is down the queue grows without bound. Check it with:
 ```sh
 psql -c 'SELECT count(*), min(created_at) FROM search_outbox'
 ```
+
+A batch's index write ends within 60 seconds, or within three quarters of
+the database's `idle_in_transaction_session_timeout` (`BUZZ_DB_IDLE_TXN_TIMEOUT_MS`,
+60 seconds by default) when that is shorter: 45 seconds by default. Postgres
+ends a transaction that idles longer, which would lose the batch while its
+request is still in flight. A lower timeout than a slow cluster needs for
+one bulk request stops indexing; the queue keeps its rows.
 
 The index holds the words of every indexed message, DMs included, so anyone
 who can query the cluster can search them. Limit cluster access to the relays.

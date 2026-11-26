@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use buzz_db::{search_backfill, search_outbox, Db, DbError};
 use tracing::{debug, error, info, warn};
 
-use crate::opensearch::SearchIndex;
+use crate::opensearch::{SearchIndex, BULK_TIMEOUT};
 use crate::SearchError;
 use buzz_core::CommunityId;
 
@@ -265,7 +265,13 @@ impl Indexer {
             let community = batch.community();
             let outcome = match self
                 .index
-                .write(community, &batch.documents, &batch.removed, batch.version)
+                .write_within(
+                    community,
+                    &batch.documents,
+                    &batch.removed,
+                    batch.version,
+                    write_budget(batch.idle_limit),
+                )
                 .await
             {
                 Ok(outcome) => outcome,
@@ -465,6 +471,14 @@ impl Indexer {
             tokio::time::sleep(backoff(failures.max(throttled))).await;
         }
     }
+}
+
+/// How long a batch's index write may take in all. The batch's transaction
+/// is idle meanwhile, so the write must end well before Postgres would end
+/// an idle transaction (`idle_limit`): past that the batch is lost with its
+/// request still in flight, and every retry is lost the same way.
+fn write_budget(idle_limit: Option<Duration>) -> Duration {
+    idle_limit.map_or(BULK_TIMEOUT, |limit| BULK_TIMEOUT.min(limit.mul_f64(0.75)))
 }
 
 /// The wait before the next attempt: the poll interval, doubled per

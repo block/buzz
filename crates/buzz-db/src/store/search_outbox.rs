@@ -254,6 +254,12 @@ pub struct SearchOutboxBatch {
     /// larger version: the index keeps the newest write by this external
     /// version, even when an older batch's request lands after it.
     pub version: i64,
+    /// How long Postgres lets this batch's transaction sit idle before it
+    /// ends the session (`idle_in_transaction_session_timeout`), if it does.
+    /// The transaction is idle for the whole index write, so a write that
+    /// outlasts this loses the batch: its rows stay queued and its
+    /// partitions are free while the request may still be applied.
+    pub idle_limit: Option<std::time::Duration>,
 }
 
 impl SearchOutboxBatch {
@@ -414,9 +420,17 @@ pub async fn claim_batch_share(
             queued.insert(event, row.try_get("event_created_at")?);
         }
         let documents = read_documents(&mut tx, &queued).await?;
-        let version: i64 = sqlx::query_scalar("SELECT nextval('search_index_version')")
-            .fetch_one(tx.conn())
-            .await?;
+        let (version, idle_limit_ms): (i64, i64) = sqlx::query_as(
+            "SELECT nextval('search_index_version'), \
+                    (EXTRACT(EPOCH FROM current_setting('idle_in_transaction_session_timeout')::interval) \
+                     * 1000)::bigint",
+        )
+        .fetch_one(tx.conn())
+        .await?;
+        let idle_limit = u64::try_from(idle_limit_ms)
+            .ok()
+            .filter(|limit| *limit > 0)
+            .map(std::time::Duration::from_millis);
         for document in &documents {
             queued.remove(&document.event_id);
         }
@@ -427,6 +441,7 @@ pub async fn claim_batch_share(
             documents,
             removed,
             version,
+            idle_limit,
         }));
     }
     Ok(None)
