@@ -153,4 +153,59 @@ pub(crate) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: None,
         auth_probe_args: None,
     },
+    // dsh (DeepSeek Harness) speaks ACP over stdio but is not spawn-compatible
+    // the way the harnesses above are: it consumes stdin eagerly and exits on
+    // EOF (its `exitOnStdinEnd`), so it cannot take a null stdin, and its CLI
+    // refuses to boot without an explicit `--profile <name>`. dsh therefore
+    // lives in the BUILTIN tier — only builtins produce the `known_acp_runtime`
+    // match that `runtime.rs` keys both special-cases on (piped stdin + profile
+    // injection); a tier-2 preset cannot drive either. The `dsh-acp` alias
+    // keeps installs that route through a launcher binary resolving to the
+    // same builtin.
+    KnownAcpRuntime {
+        id: "dsh",
+        label: "DeepSeek Harness",
+        commands: &["dsh"],
+        aliases: &["dsh-acp"],
+        avatar_url: "",
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: Some("dsh"),
+        // Pinned to the first release whose ACP profile matches the wire
+        // contract exercised by the buzz-acp fake-dsh e2e tests; relax once
+        // the ACP profile ships in a stable dist-tag.
+        cli_install_commands: &["npm install -g @deepseek-ai/dsh@0.1.7-alpha.2"],
+        cli_install_commands_windows: &[],
+        adapter_install_commands: &[],
+        cli_install_instructions_url: "https://github.com/deepseek-ai/deepseek-harness",
+        adapter_install_instructions_url: "https://github.com/deepseek-ai/deepseek-harness",
+        cli_install_hint: "Requires Node.js 22.19 or newer: npm install -g @deepseek-ai/dsh@0.1.7-alpha.2. Set DEEPSEEK_API_KEY in your environment or the agent's env vars (or point DSH at your own provider); model selection comes from DSH's live catalog.",
+        adapter_install_hint: "",
+        skill_dir: None,
+        supports_acp_model_switching: true,
+        // dsh selects its model/provider through the ACP `session/set_config_option`
+        // protocol and its own live catalog, not through Buzz's env-var transport.
+        // Leave these `None` so no bogus `*_MODEL`/`*_PROVIDER` env is injected.
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: false,
+        default_env: &[],
+        config_file_path: None,
+        config_file_format: None,
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        effort_normalization: None,
+        effort_accepted_values: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        max_rounds_env_var: None,
+        // Unlike claude/buzz-agent, dsh has no Buzz model/provider env seam:
+        // the model and provider come from DSH's own live catalog over ACP
+        // configOptions. Marking the Buzz-side model field `required` would
+        // nag out-of-the-box users about a value dsh ignores (and would show a
+        // stale persona value dsh never reads), so no field is required here.
+        required_normalized_fields: &[],
+        login_hint: None,
+        auth_probe_args: None,
+    },
 ];

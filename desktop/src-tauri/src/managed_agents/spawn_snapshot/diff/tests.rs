@@ -462,6 +462,7 @@ fn no_sentinel_reaches_the_owning_process_debug_output() {
         .expect("spawn placeholder child");
     let process = crate::managed_agents::ManagedAgentProcess {
         child,
+        harness_stdin: None,
         log_path: std::path::PathBuf::new(),
         spawn_config: seeded_with_sentinels(),
         setup_mode: false,

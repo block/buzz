@@ -181,6 +181,7 @@ pub fn taskkill_tree(pid: u32) -> Result<(), String> {
 /// which kills only the harness (a degraded teardown beats a failed spawn).
 pub fn finish_spawn(
     child: std::process::Child,
+    harness_stdin: Option<std::process::ChildStdin>,
     log_path: std::path::PathBuf,
     spawn_config: super::spawn_snapshot::SpawnConfigSnapshot,
     setup_mode: bool,
@@ -197,6 +198,7 @@ pub fn finish_spawn(
     }
     super::ManagedAgentProcess {
         child,
+        harness_stdin,
         log_path,
         spawn_config,
         setup_mode,
