@@ -57,9 +57,10 @@ fn thread_nest_pin_is_removed_with_its_temp_dir() {
 #[test]
 fn nest_skill_contains_safe_mention_workflow() {
     assert!(BUZZ_CLI_SKILL_MD.contains("--mention <hex-or-npub>"));
-    assert!(BUZZ_CLI_SKILL_MD.contains("every presentation-only name that should notify"));
-    assert!(BUZZ_CLI_SKILL_MD
-        .contains("permits unresolved or ambiguous `@Name` text as presentation-only"));
+    assert!(BUZZ_CLI_SKILL_MD.contains(
+        "refuses an `@name` that would notify someone the message tags but show as plain text"
+    ));
+    assert!(BUZZ_CLI_SKILL_MD.contains("`@text` that names no one you tag stays plain text"));
     assert!(BUZZ_CLI_SKILL_MD.contains("signed event's `mention_pubkeys`"));
     assert!(BUZZ_CLI_SKILL_MD.contains("no follow-up verification command is needed"));
     assert!(BUZZ_CLI_SKILL_MD.contains("Add membership separately only when authorized"));

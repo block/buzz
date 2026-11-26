@@ -11,6 +11,7 @@ mod huddle_tracker;
 pub mod huddles;
 pub mod issues;
 pub mod mem;
+pub(crate) mod mention_tags;
 pub mod message_report;
 pub mod messages;
 pub mod moderation;
