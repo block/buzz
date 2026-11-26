@@ -1,6 +1,6 @@
 use super::managed_agent_definition::validate_create_definition;
 use nostr::{Keys, ToBech32};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager as _, State};
 
 use crate::{
     app_state::AppState,
@@ -9,11 +9,12 @@ use crate::{
         build_managed_agent_summary, current_instance_id, ensure_persona_is_active,
         find_managed_agent_mut, load_managed_agents, load_personas, load_teams,
         managed_agents_base_dir, normalize_agent_args, resolve_provider_binary,
-        save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
-        stop_managed_agent_workspace_pair, sync_managed_agent_processes, try_regenerate_nest,
-        validate_provider_config, BackendKind, CreateManagedAgentRequest,
-        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
-        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        retain_active_community, save_managed_agents, start_managed_agent_process,
+        stop_managed_agent_process, stop_managed_agent_workspace_pair,
+        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
+        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
+        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
+        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::relay_ws_url_with_override,
     util::now_iso,
@@ -348,6 +349,10 @@ pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSumma
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
+        // Sync and save the FULL roster: a save rewrites every community's
+        // store file and clears the ones left without records, so saving a
+        // community-filtered list here would wipe the other communities.
+        // Visibility (#7184) is applied to the summaries only, below.
         let mut records = load_managed_agents(&app)?;
         let mut runtimes = state
             .managed_agent_processes
@@ -362,6 +367,8 @@ pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSumma
         for pubkey in &exited_pubkeys {
             state.clear_agent_session_caches(pubkey);
         }
+
+        retain_active_community(&app, &mut records);
 
         let personas = load_personas(&app).unwrap_or_default();
         // One disk read for the whole list — build_managed_agent_summary takes
@@ -471,12 +478,28 @@ async fn create_managed_agent_in<R: tauri::Runtime>(
         // Store the relay override exactly as supplied (trimmed). An explicit
         // value pins the agent; empty stays empty and resolves to the active
         // workspace relay at read-time. Uniform for Local and Provider.
-        let resolved_relay_url = input
-            .relay_url
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or("")
-            .to_string();
+        //
+        // #7184 tenant isolation: an unpinned record is visible in EVERY
+        // community (fail-open visibility rule in storage). To scope new
+        // agents to the community they were created in, an empty request
+        // relay is stamped with the ACTIVE workspace relay at mint time. The
+        // spawn path still ignores the pin (#2122 agents-everywhere), so this
+        // only scopes roster visibility/storage — never where an agent may
+        // run.
+        let active_workspace_relay = relay_ws_url_with_override(&app.state::<AppState>());
+        let resolved_relay_url = {
+            let supplied = input
+                .relay_url
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            if supplied.is_empty() && !active_workspace_relay.is_empty() {
+                active_workspace_relay
+            } else {
+                supplied
+            }
+        };
 
         (keys, private_key_nsec, pubkey, resolved_relay_url, input)
     };
