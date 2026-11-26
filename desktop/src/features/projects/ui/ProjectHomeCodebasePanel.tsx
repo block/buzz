@@ -20,7 +20,9 @@ import { useRepositoryFileContentSource } from "./useRepositoryFileContentSource
 
 export function ProjectHomeCodebasePanel({
   identityPubkey,
+  initialPath,
   onFilesContextChange,
+  onPathChange,
   onOpenCommit,
   onRepositoryAdded,
   onSelectRepository,
@@ -29,11 +31,13 @@ export function ProjectHomeCodebasePanel({
   repository,
 }: {
   identityPubkey?: string;
+  initialPath?: string;
   onFilesContextChange?: (context: {
     kind: "file" | "folder";
     onBack?: () => void;
     path: string;
   }) => void;
+  onPathChange?: (path: string | null) => void;
   onOpenCommit?: (commitHash: string) => void;
   onRepositoryAdded: (repositoryId: string) => void;
   onSelectRepository: (repositoryId: string) => void;
@@ -122,8 +126,10 @@ export function ProjectHomeCodebasePanel({
           fallbackAuthorPubkey={repository.owner}
           fileContentSource={fileContentSource}
           files={files}
+          initialPath={initialPath}
           isLoading={snapshotQuery.isPending}
           onContextChange={onFilesContextChange}
+          onPathChange={onPathChange}
           onOpenCommit={onOpenCommit}
           snapshot={snapshot}
         />

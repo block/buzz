@@ -8,6 +8,7 @@ import {
 
 test("parseProjectDetailSearch keeps forge params and channel panel params", () => {
   const search = parseProjectDetailSearch({
+    homeTab: "files",
     repositoryId: "30617:owner:buzz",
     tab: "files",
     filePath: "src/main.ts",
@@ -17,6 +18,7 @@ test("parseProjectDetailSearch keeps forge params and channel panel params", () 
     extra: "dropped",
   });
 
+  assert.equal(search.homeTab, "files");
   assert.equal(search.repositoryId, "30617:owner:buzz");
   assert.equal(search.tab, "files");
   assert.equal(search.filePath, "src/main.ts");
@@ -31,17 +33,31 @@ test("parseProjectDetailSearch drops empty channel panel params", () => {
     thread: "",
     messageId: "",
     tab: "not-a-tab",
+    homeTab: "not-a-home-tab",
   });
 
   assert.equal(search.thread, undefined);
   assert.equal(search.messageId, undefined);
   assert.equal(search.tab, undefined);
+  assert.equal(search.homeTab, undefined);
 });
 
 test("wantsProjectRepositorySurface is false for channel-first project home", () => {
   assert.equal(
     wantsProjectRepositorySurface({
       projectId: "30621:owner:platform",
+    }),
+    false,
+  );
+});
+
+test("home workspace params do not request the repository surface", () => {
+  assert.equal(
+    wantsProjectRepositorySurface({
+      filePath: "src/main.ts",
+      homeTab: "files",
+      projectId: "30621:owner:platform",
+      repositoryId: "30617:owner:buzz",
     }),
     false,
   );

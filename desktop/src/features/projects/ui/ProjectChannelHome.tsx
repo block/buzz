@@ -18,6 +18,7 @@ import { useHealProjectHomeRepositories } from "@/features/projects/useHealProje
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { RelayEvent } from "@/shared/api/types";
 import type { EntityLinkTab } from "@/shared/lib/entityLink";
+import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { SIDEBAR_WIDTH_MIN } from "@/shared/layout/sidebarLayout";
 import { cn } from "@/shared/lib/cn";
@@ -26,6 +27,7 @@ import { DrawerPanelIcon } from "@/shared/ui/DrawerPanelIcon";
 import { useOptionalSidebar } from "@/shared/ui/sidebar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
+import { PROJECT_REPOSITORY_SEARCH_KEYS } from "./projectDetailHelpers";
 import { ProjectContextRail } from "./ProjectContextRail";
 import { ProjectDetailChrome } from "./ProjectDetailChrome";
 import { ProjectHomeColumn } from "./ProjectHomeColumn";
@@ -87,15 +89,27 @@ function ProjectHomeHeaderToggle({
 export function ProjectChannelHome({
   allowRepositoryHealing,
   autoSendDraftKey,
+  commitHash,
+  filePath,
+  homeTab,
+  issueId,
   project,
   projects,
+  pullRequestId,
+  repositoryId,
   targetMessageEvents = EMPTY_TARGET_MESSAGE_EVENTS,
   targetMessageId,
 }: {
   allowRepositoryHealing: boolean;
   autoSendDraftKey?: string | null;
+  commitHash?: string;
+  filePath?: string;
+  homeTab?: ProjectHomeWorkspaceSheetTab;
+  issueId?: string;
   project: Project;
   projects: Project[];
+  pullRequestId?: string;
+  repositoryId?: string;
   targetMessageEvents?: RelayEvent[];
   targetMessageId?: string | null;
 }) {
@@ -110,11 +124,11 @@ export function ProjectChannelHome({
   };
   const [summaryOpen, setSummaryOpen] = React.useState(true);
   const [addRepositoryOpen, setAddRepositoryOpen] = React.useState(false);
-  const [workspaceSheetTab, setWorkspaceSheetTab] =
-    React.useState<ProjectHomeWorkspaceSheetTab | null>(null);
-  const [workspaceRepositoryId, setWorkspaceRepositoryId] = React.useState<
-    string | null
-  >(null);
+  const { applyPatch: applyWorkspaceSearch } = useHistorySearchState(
+    PROJECT_REPOSITORY_SEARCH_KEYS,
+  );
+  const workspaceSheetTab = homeTab ?? null;
+  const workspaceRepositoryId = repositoryId ?? null;
   const [workspaceCreateAction, setWorkspaceCreateAction] =
     React.useState<ProjectHomeWorkspaceCreateAction | null>(null);
   const [workspaceDetail, setWorkspaceDetail] =
@@ -145,21 +159,37 @@ export function ProjectChannelHome({
   const summaryVisible = summaryOpen && !workspaceSheetOpen;
 
   const openWorkspaceSheet = React.useCallback(
-    (tab: ProjectHomeWorkspaceSheetTab, repositoryId?: string) => {
-      if (repositoryId) {
-        setWorkspaceRepositoryId(repositoryId);
-      }
+    (nextTab: ProjectHomeWorkspaceSheetTab, nextRepositoryId?: string) => {
       setWorkspaceCreateAction(null);
       setWorkspaceDetail(null);
-      setWorkspaceSheetTab((current) => (current === tab ? null : tab));
+      applyWorkspaceSearch({
+        commitHash: null,
+        filePath: null,
+        homeTab: workspaceSheetTab === nextTab ? null : nextTab,
+        issueId: null,
+        pullRequestId: null,
+        repositoryId:
+          workspaceSheetTab === nextTab
+            ? null
+            : (nextRepositoryId ?? workspaceRepository?.id ?? null),
+        tab: null,
+      });
     },
-    [],
+    [applyWorkspaceSearch, workspaceRepository?.id, workspaceSheetTab],
   );
   const closeWorkspaceSheet = React.useCallback(() => {
     setWorkspaceCreateAction(null);
     setWorkspaceDetail(null);
-    setWorkspaceSheetTab(null);
-  }, []);
+    applyWorkspaceSearch({
+      commitHash: null,
+      filePath: null,
+      homeTab: null,
+      issueId: null,
+      pullRequestId: null,
+      repositoryId: null,
+      tab: null,
+    });
+  }, [applyWorkspaceSearch]);
   const handleOpenWorkspace = React.useCallback(
     (repositoryId: string, tab?: EntityLinkTab) => {
       if (!isProjectHomeWorkspaceSheetTab(tab)) {
@@ -182,19 +212,35 @@ export function ProjectChannelHome({
   const handleAddFiles = React.useCallback(() => {
     setAddRepositoryOpen(true);
   }, []);
-  const handleFilesAdded = React.useCallback((repositoryId: string) => {
-    setWorkspaceCreateAction(null);
-    setWorkspaceDetail(null);
-    setWorkspaceRepositoryId(repositoryId);
-    setWorkspaceSheetTab("files");
-  }, []);
-  const handleWorkspaceRepositoryChange = React.useCallback(
-    (repositoryId: string) => {
+  const handleFilesAdded = React.useCallback(
+    (nextRepositoryId: string) => {
       setWorkspaceCreateAction(null);
       setWorkspaceDetail(null);
-      setWorkspaceRepositoryId(repositoryId);
+      applyWorkspaceSearch({
+        commitHash: null,
+        filePath: null,
+        homeTab: "files",
+        issueId: null,
+        pullRequestId: null,
+        repositoryId: nextRepositoryId,
+        tab: null,
+      });
     },
-    [],
+    [applyWorkspaceSearch],
+  );
+  const handleWorkspaceRepositoryChange = React.useCallback(
+    (nextRepositoryId: string) => {
+      setWorkspaceCreateAction(null);
+      setWorkspaceDetail(null);
+      applyWorkspaceSearch({
+        commitHash: null,
+        filePath: null,
+        issueId: null,
+        pullRequestId: null,
+        repositoryId: nextRepositoryId,
+      });
+    },
+    [applyWorkspaceSearch],
   );
   useHealProjectHomeRepositories(
     project,
@@ -234,6 +280,10 @@ export function ProjectChannelHome({
       <ProjectHomeWorkspaceSheet
         key={`${workspaceSheetTab}:${workspaceRepository.id}`}
         identityPubkey={identityQuery.data?.pubkey}
+        initialCommitHash={commitHash}
+        initialFilePath={filePath}
+        initialIssueId={issueId}
+        initialPullRequestId={pullRequestId}
         onCreateActionChange={setWorkspaceCreateAction}
         onDetailChange={setWorkspaceDetail}
         onOpenCommit={handleOpenCommit}
