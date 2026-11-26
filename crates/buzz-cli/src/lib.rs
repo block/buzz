@@ -152,7 +152,7 @@ Errors are JSON on stderr: {\"error\": \"<category>\", \"message\": \"<detail>\"
 struct Cli {
     /// Relay URL; a bare host means https://. Overrides BUZZ_RELAY_URL env
     /// var. Without either, the relay an agent's inherited Buzz desktop
-    /// credential acts on; else, with no private key, the one relay a running
+    /// credential acts on; else, with no local key, the one relay a running
     /// Buzz desktop accepts this CLI's pairing for; otherwise
     /// http://localhost:3000. Pairing given none uses the desktop's active
     /// community.
@@ -162,6 +162,11 @@ struct Cli {
     /// Nostr private key (hex or nsec). This is the CLI's identity.
     #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     private_key: Option<String>,
+
+    /// Retrieve a Nostr key from an explicitly selected credential command.
+    /// An explicit private key still takes precedence.
+    #[arg(long, num_args = 3, value_names = ["ABSOLUTE_PATH", "SERVICE", "ACCOUNT"], action = clap::ArgAction::Set)]
+    credential_command: Option<Vec<String>>,
 
     /// NIP-OA auth tag JSON (owner attestation). Injected into every signed event.
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
@@ -2733,6 +2738,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     // Credential chain: the first link that applies to this relay is the
     // identity (see `credentials`).
     let settings = credentials::Settings {
+        credential_command: cli
+            .credential_command
+            .map(credentials::CredentialCommand::from_args)
+            .transpose()?,
         private_key: cli.private_key,
         auth_tag: cli.auth_tag,
         ..Default::default()
@@ -2742,10 +2751,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     if let Cmd::Auth(AuthCmd::Desktop(DesktopAuthCmd::List)) = cli.command {
         return list_pairings(&cli.format).await;
     }
-    let explicit_key = settings.private_key.is_some();
+    let local_key = settings.private_key.is_some() || settings.credential_command.is_some();
     let relay = match cli.relay {
         Some(relay) => Some(relay_url(&relay)),
-        None => default_relay(&cli.command, explicit_key).await?,
+        None => default_relay(&cli.command, local_key).await?,
     };
     let Some((command, client)) = connect(relay.as_deref(), cli.command, run_auth, async |relay| {
         credentials::resolve(settings, relay).await

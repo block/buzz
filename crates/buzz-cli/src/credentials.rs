@@ -23,11 +23,16 @@ pub use crate::federated_identity::{
     AdapterSession, FEDERATED_IDENTITY_ADAPTER_ENV, FEDERATED_IDENTITY_TOKEN_ENV,
 };
 
+mod credential_command;
+pub use credential_command::CredentialCommand;
+
 /// Raw credential settings, from flags and the environment.
 #[derive(Default)]
 pub struct Settings {
     /// `--private-key` / `BUZZ_PRIVATE_KEY`.
     pub private_key: Option<String>,
+    /// `--credential-command`, absent unless explicitly selected.
+    pub credential_command: Option<CredentialCommand>,
     /// `--auth-tag` / `BUZZ_AUTH_TAG` (NIP-OA owner attestation).
     pub auth_tag: Option<String>,
     /// `BUZZ_FEDERATED_IDENTITY_TOKEN` (NIP-FA adapter session token).
@@ -68,11 +73,16 @@ pub struct Credentials {
 }
 
 /// Walk the credential chain for `relay_url` and return the first link that
-/// applies: the explicit key, then (on Unix) the Buzz desktop through an
-/// inherited or paired token.
+/// applies: the explicit key, an opt-in credential command, then (on Unix) the
+/// Buzz desktop through an inherited or paired token.
 pub async fn resolve(settings: Settings, relay_url: &str) -> Result<Credentials, CliError> {
     if let Some(credentials) = resolve_explicit(&settings, relay_url)? {
         return Ok(credentials);
+    }
+    if let Some(source) = &settings.credential_command {
+        let evidence = evidence_source(&settings, relay_url)?;
+        let keys = source.load().await?;
+        return local_credentials(&settings, keys, evidence);
     }
     #[cfg(unix)]
     if let Some(provider) = crate::desktop_provider::discover(relay_url).await? {
@@ -159,17 +169,25 @@ fn explicit_key(
     };
     let keys =
         Keys::parse(raw).map_err(|e| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {e}")))?;
+    local_credentials(settings, keys, evidence).map(Some)
+}
+
+fn local_credentials(
+    settings: &Settings,
+    keys: Keys,
+    evidence: Option<AdapterSession>,
+) -> Result<Credentials, CliError> {
     let auth_tag = settings
         .auth_tag
         .as_deref()
         .filter(|input| !input.is_empty())
         .map(|input| parse_auth_tag(input, &keys.public_key()))
         .transpose()?;
-    Ok(Some(Credentials {
+    Ok(Credentials {
         auth_tag,
         evidence,
         ..Credentials::from_keys(keys)
-    }))
+    })
 }
 
 /// The headless NIP-FI evidence source: a NIP-FA adapter session. Both
@@ -629,16 +647,32 @@ mod tests {
             auth_tag: None,
             federated_identity_token: token.map(str::to_owned),
             federated_identity_adapter: adapter.map(str::to_owned),
+            ..Default::default()
         }
     }
 
-    #[test]
-    fn explicit_key_is_the_first_link() {
+    #[tokio::test]
+    async fn explicit_key_wins_but_an_opted_in_source_fails_closed() {
         let keys = Keys::generate();
         let nsec = keys.secret_key().to_secret_hex();
-        let credentials = explicit(settings(Some(&nsec), None, None)).unwrap();
-        assert_eq!(credentials.public_key(), keys.public_key());
-        assert!(!credentials.has_evidence_source());
+        let relay = "https://relay.example";
+        for explicit_key in [Some(nsec.as_str()), None] {
+            let mut input = settings(explicit_key, None, None);
+            input.credential_command = Some(CredentialCommand {
+                executable: "relative-executable".into(),
+                service: "example-app".into(),
+                account: "identity".into(),
+            });
+            let result = resolve(input, relay).await;
+            if explicit_key.is_some() {
+                let credentials = result.unwrap();
+                assert_eq!(credentials.public_key(), keys.public_key());
+                assert!(!credentials.has_evidence_source());
+            } else {
+                assert!(matches!(result, Err(CliError::Auth(message))
+                    if message.contains("absolute executable path")));
+            }
+        }
     }
 
     #[test]
