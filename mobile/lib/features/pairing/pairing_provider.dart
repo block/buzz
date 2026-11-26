@@ -41,6 +41,25 @@ final identityExportClockProvider = Provider<DateTime Function()>((ref) {
   return DateTime.now;
 });
 
+String pairingEndpointNotFoundMessage(String relayUrl) {
+  final sanitized = relayUrl.trim();
+  if (sanitized.isEmpty) {
+    return 'Pairing endpoint not found (404). The relay advertises NIP-43 without '
+        'a working /pair route. Ask the operator to set BUZZ_PAIRING_RELAY_URL or '
+        'route /pair to buzz-pair-relay, then create a new QR code on desktop.';
+  }
+  return 'Pairing endpoint $sanitized not found (404). The relay advertises NIP-43 '
+      'without a working /pair route. Ask the operator to set BUZZ_PAIRING_RELAY_URL '
+      'or route /pair to buzz-pair-relay, then create a new QR code on desktop.';
+}
+
+bool pairingLooksLikeMissingLegacyEndpoint(Object error, {String? relayUrl}) {
+  final message = error.toString().toLowerCase();
+  final mentions404 = message.contains('404') || message.contains('not found');
+  final legacyPath = relayUrl?.contains('/pair') == true || message.contains('/pair');
+  return mentions404 && legacyPath;
+}
+
 class PairingNotifier extends Notifier<PairingState> {
   final PairingSocketFactory _socketFactory;
   final PairingCredentialValidator? _credentialValidator;
@@ -360,6 +379,7 @@ class PairingNotifier extends Notifier<PairingState> {
   Future<void> _pairNipAb(String uri) async {
     final generation = _pairingGeneration;
     state = const PairingState(status: PairingStatus.connecting);
+    String? pairingRelayUrl;
 
     try {
       // 1. Parse the nostrpair:// URI.
@@ -369,7 +389,8 @@ class PairingNotifier extends Notifier<PairingState> {
       _sendIdentityToSource =
           Uri.parse(uri).queryParameters['mode'] == 'recover';
 
-      final relayWsUrl = qr.relays.first;
+      pairingRelayUrl = qr.relays.first;
+      final relayWsUrl = pairingRelayUrl!;
 
       // 2. Generate ephemeral keypair.
       final keychain = nostr.Keys.generate();
@@ -463,9 +484,43 @@ class PairingNotifier extends Notifier<PairingState> {
       _cleanup();
       state = PairingState(
         status: PairingStatus.error,
-        errorMessage: _friendlyErrorMessage(e),
+        errorMessage: _friendlyErrorMessage(e, relayUrl: pairingRelayUrl),
       );
     }
+  }
+
+  static String _friendlyErrorMessage(Object error, {String? relayUrl}) {
+    final message = error.toString();
+    if (pairingLooksLikeMissingLegacyEndpoint(error, relayUrl: relayUrl)) {
+      return pairingEndpointNotFoundMessage(relayUrl ?? '');
+    }
+    if (message.contains('SocketException') ||
+        message.contains('Connection refused') ||
+        message.contains('Network is unreachable') ||
+        message.contains('No route to host') ||
+        message.contains('Failed to connect')) {
+      return 'Could not reach the pairing relay. Check your internet '
+          'connection and VPN, then try again.';
+    }
+    if (error is PairingAuthException) {
+      return 'The pairing relay rejected authentication. Try creating a new '
+          'pairing code.';
+    }
+    if (error is StateError ||
+        message.contains('Null check operator used on a null value')) {
+      return 'Pairing stopped because of an internal error. Please try again.';
+    }
+    if (message.contains('HandshakeException') ||
+        message.contains('CERTIFICATE_VERIFY_FAILED')) {
+      return 'Secure connection failed. Check your network settings '
+          'and try again.';
+    }
+    if (message.contains('TimeoutException') || message.contains('timed out')) {
+      return 'Connection timed out. Check your internet connection and '
+          'try again.';
+    }
+    return 'Connection failed. Please check your internet connection '
+        'and try again.';
   }
 
   void _handleRelayMessage(List<dynamic> data) {
