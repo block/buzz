@@ -729,7 +729,7 @@ impl BuzzClient {
 
     /// The WebSocket upgrade headers: the CLI's `User-Agent`, and the NIP-FI
     /// assertion when there is an evidence source.
-    async fn upgrade_headers(&self) -> Result<buzz_ws_client::HeaderMap, CliError> {
+    pub(crate) async fn upgrade_headers(&self) -> Result<buzz_ws_client::HeaderMap, CliError> {
         let mut headers = buzz_ws_client::HeaderMap::new();
         headers.insert(
             "user-agent",

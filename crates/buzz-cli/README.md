@@ -97,9 +97,11 @@ buzz channels topic --channel <uuid> --topic "New topic"
 buzz reactions add --event <event-id> --emoji "👍"
 buzz reactions get --event <event-id>
 
-# Huddles (read-only)
+# Huddles
 buzz huddles list --channel <uuid> --active   # huddles with state and start/end times
 buzz huddles participants --channel <uuid> --huddle <huddle-id>
+buzz huddles connect --channel <uuid>         # start a huddle; its audio is JSON lines on stdin/stdout
+buzz huddles connect --channel <uuid> --huddle <huddle-id>   # join one
 
 # GIFs (requires relay to advertise buzz-gif / KLIPY)
 buzz gifs search                              # trending GIFs
@@ -279,6 +281,7 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `get` | List reactions |
 | `huddles` | `list` | List a channel's huddles (read-only) |
 | | `participants` | Show who is in a huddle (read-only) |
+| | `connect` | Join or start a huddle and carry its audio over stdin/stdout |
 | `gifs` | `search` | Search or browse trending GIFs (requires relay buzz-gif support) |
 | | `share` | Report a selected GIF to the provider's Recents |
 | `dms` | `list` | List DM conversations |
@@ -357,6 +360,15 @@ a huddle. Each scans at most 5000 newest events of the channel. If older events 
 snapshots are not served over HTTP, so `liveness_checked` is always `false`.
 Rosters come from the relay's join and leave events only. Desktop's roster view also lists the
 creator from the start event; the CLI lists the creator once the relay records their join.
+
+`huddles connect` joins a huddle, or starts one when `--huddle` is left out, the way desktop
+does (a private ephemeral stream, then kind 48100 on the channel). It authenticates the audio
+WebSocket through `buzz-audio-client` with the CLI's own credentials and passes media through
+untouched, so another program encodes and decodes Opus. Each line is one JSON object. Out:
+`joined` (huddle, started, peer_index, peers), `audio` (base64 of peer index, v2 header and Opus),
+`control` (a relay control message) and `closed` (reason, ended). In: `audio` (base64 of v2 header
+and Opus) and `control`. Closing stdin leaves. A huddle the command started is ended and archived
+when it leaves as the last one present; when the roster is not certain, it is left running.
 
 ## Architecture
 

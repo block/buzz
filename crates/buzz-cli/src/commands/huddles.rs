@@ -1,4 +1,5 @@
-//! Read-only huddle inspection: `buzz huddles list` and `buzz huddles participants`.
+//! Huddle inspection: `buzz huddles list` and `buzz huddles participants`;
+//! `buzz huddles connect` lives in [`super::huddle_connect`].
 //!
 //! State is derived exactly as desktop derives it (see [`super::huddle_tracker`]).
 //! A huddle with no valid end event is `active` until its start is older than
@@ -19,7 +20,7 @@ use crate::error::CliError;
 use crate::validate::parse_uuid;
 
 /// Lifecycle events scanned per command. Reaching it is reported in the output.
-const MAX_LIFECYCLE_EVENTS: u32 = 5_000;
+pub(super) const MAX_LIFECYCLE_EVENTS: u32 = 5_000;
 
 /// Matches desktop's `HUDDLE_JOINABLE_WINDOW_SECONDS`.
 const JOINABLE_WINDOW_SECONDS: u64 = 60 * 60;
@@ -210,7 +211,7 @@ fn build_participants(
     Ok(out)
 }
 
-fn now_seconds() -> Result<u64, CliError> {
+pub(super) fn now_seconds() -> Result<u64, CliError> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
@@ -239,7 +240,7 @@ async fn run_list(
     ))
 }
 
-async fn run_participants(
+pub(super) async fn run_participants(
     client: &BuzzClient,
     channel: &str,
     huddle: &str,
@@ -299,6 +300,9 @@ pub async fn dispatch(cmd: crate::HuddlesCmd, client: &BuzzClient) -> Result<(),
         } => cmd_list(client, &channel, active, limit).await,
         HuddlesCmd::Participants { channel, huddle } => {
             cmd_participants(client, &channel, &huddle).await
+        }
+        HuddlesCmd::Connect { channel, huddle } => {
+            super::huddle_connect::cmd_connect(client, &channel, huddle.as_deref()).await
         }
     }
 }
