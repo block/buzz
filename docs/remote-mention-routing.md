@@ -85,3 +85,17 @@ authored deletion has already removed the durable value. Final membership/policy
 and cancellation cannot retract an already dispatched publication. Standalone
 forum transport-failure binding recovery and native compatibility remain separate
 review/follow-up boundaries.
+
+
+## Channel roster discovery
+
+Relay-signed current membership discovers candidates regardless of owner, member,
+or bot role. Discovery then requires a valid signed agent directory or managed
+policy record; membership alone does not turn a person into an agent. The same
+membership and response-policy checks apply to targeted publication revalidation.
+Private channels do not need to be advertised in a public kind:10100 profile.
+
+The initial empty `@` menu in a stream/forum shows current channel participants.
+Typing a name retains the existing explicit search and invitation workflow.
+No channel roles, managed runtime configuration, ownership, keys, or relay policy
+are changed by this client compatibility patch.

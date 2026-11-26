@@ -57,7 +57,10 @@ import {
   type MentionPickerMode,
   useMentionSelection,
 } from "./useMentionSelection";
-import { rankMentionCandidates } from "./mentionRanking";
+import {
+  channelMentionCandidates,
+  rankMentionCandidates,
+} from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import { getMentionMemberPubkeys } from "./mentionMemberPubkeys";
 import {
@@ -377,7 +380,11 @@ export function useMentions(
       return [];
     }
     return rankMentionCandidates(
-      mentionCandidatesWithTeams,
+      channelMentionCandidates(
+        mentionCandidatesWithTeams,
+        mentionQuery,
+        mentionChannelId,
+      ),
       mentionQuery,
       activePersonaIds,
     )
@@ -399,6 +406,7 @@ export function useMentions(
     currentPubkey,
     mentionCandidatesWithTeams,
     mentionQuery,
+    mentionChannelId,
     options?.channelType,
     ownerProfilesQuery.data?.profiles,
     profiles,
@@ -425,6 +433,8 @@ export function useMentions(
     if (matchingSuggestions.length > 0) {
       return matchingSuggestions;
     }
+    // A cleared search must not revive cached nonmembers while the roster loads.
+    if (mentionChannelId && mentionQuery.trim() === "") return [];
     if (userSearchQuery.isFetching) {
       return filterCachedAgentSuggestions(
         previousSuggestionsRef.current,
@@ -435,6 +445,7 @@ export function useMentions(
   }, [
     matchingSuggestions,
     mentionCandidatesWithTeams,
+    mentionChannelId,
     mentionQuery,
     userSearchQuery.isFetching,
   ]);
