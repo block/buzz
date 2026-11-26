@@ -77,6 +77,8 @@ import {
   type RelayAuthRequest,
 } from "@/shared/api/relayAuthPolicy";
 import { createRelayInboundBuffer } from "@/shared/api/relayInboundBuffer";
+import { noteFrameTooLargeLimit } from "@/shared/api/relayClientTransport";
+import { isOversizedFrameError } from "@/shared/api/relayFrameLimit";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
 import { RelayEntryRequirements } from "./relayEntryRequirements";
 type UserStatusInput = { text: string; emoji: string; expiresAt?: number };
@@ -106,6 +108,8 @@ export class RelayClient {
   private liveSessionAbort = new AbortController();
   private visibleChannelId: string | null = null;
   private authOkTracker = new AuthOkTracker();
+  /** Server-advertised maximum frame size in bytes; null until first NOTICE. */
+  private maxFrameBytes: number | null = null;
   private terminal = false;
 
   private connectionStateEmitter = new RelayConnectionStateEmitter("idle");
@@ -141,6 +145,7 @@ export class RelayClient {
     this.terminal = false;
     this.visibleChannelId = null;
     this.authOkTracker.reset();
+    this.maxFrameBytes = null;
     this.connectionStateEmitter.set("idle");
 
     if (this.wsId !== null) {
@@ -703,17 +708,7 @@ export class RelayClient {
   }
 
   private async sendRaw(payload: unknown[]) {
-    if (this.wsId === null) {
-      throw new Error("Relay socket is not connected.");
-    }
-
-    await invoke("plugin:websocket|send", {
-      id: this.wsId,
-      message: {
-        type: "Text",
-        data: JSON.stringify(payload),
-      },
-    });
+    await sendRelayTextFrame(this.wsId, payload, this.maxFrameBytes);
   }
 
   private async sendRawForGeneration(payload: unknown[], generation: number) {
@@ -736,6 +731,11 @@ export class RelayClient {
     fallbackMessage: string,
   ): Error {
     const normalizedError = this.normalizeRelayError(error, fallbackMessage);
+    // Oversized frames are a permanent client-side error — resetting the
+    // connection would just trigger the same rejection on reconnect.
+    if (isOversizedFrameError(normalizedError)) {
+      return normalizedError;
+    }
     this.resetConnection(normalizedError);
     return normalizedError;
   }
@@ -808,6 +808,7 @@ export class RelayClient {
         error,
         fallbackMessage,
       );
+      if (isOversizedFrameError(normalizedError)) throw normalizedError;
       let retryGeneration: number | null = null;
       try {
         await this.ensureConnected();
@@ -944,8 +945,13 @@ export class RelayClient {
     }
 
     if (type === "NOTICE" && typeof rest[0] === "string") {
-      // Connection-scoped back-pressure — arm the gate until it expires.
-      activateRateLimitIfSignalled(rest[0]);
+      const notice: string = rest[0];
+      activateRateLimitIfSignalled(notice);
+      const newMax = noteFrameTooLargeLimit(notice, this.maxFrameBytes);
+      if (newMax !== null) {
+        this.maxFrameBytes = newMax;
+        console.warn(`[relay] Frame size limit updated to ${newMax} bytes`);
+      }
     }
   }
 
