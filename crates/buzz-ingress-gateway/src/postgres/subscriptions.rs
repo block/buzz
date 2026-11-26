@@ -313,7 +313,7 @@ impl SubscriptionStore for PostgresStore {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use crate::config::RelayScheme;
     use crate::fanout::Fanout;
@@ -372,10 +372,10 @@ mod tests {
     /// Runs against a dedicated, disposable database: it applies the gateway
     /// migrations and claims every due row in it.
     #[tokio::test]
-    #[ignore = "requires Postgres: set BUZZ_INGRESS_TEST_DATABASE_URL to a scratch database"]
+    #[ignore = "requires Postgres: set BUZZ_TEST_DATABASE_URL to a scratch database"]
     async fn postgres_store_fans_out_sends_and_cancels_messages() {
-        let url = std::env::var("BUZZ_INGRESS_TEST_DATABASE_URL")
-            .expect("BUZZ_INGRESS_TEST_DATABASE_URL names a scratch database");
+        let url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .expect("BUZZ_TEST_DATABASE_URL names a scratch database");
         let pool = sqlx::PgPool::connect(&url).await.unwrap();
         PostgresStore::migrate_scratch(&pool).await.unwrap();
         let store = Arc::new(PostgresStore::new(pool));
