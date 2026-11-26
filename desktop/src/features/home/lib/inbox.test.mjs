@@ -68,6 +68,29 @@ test("mention rows use the channel list when feed channelName is blank", () => {
   });
 });
 
+test("inbox rows carry the previewed event's NIP-30 custom emoji", () => {
+  const [inboxItem] = buildInboxItems({
+    channels,
+    feed: feedWith({
+      mentions: [
+        item({
+          content: ":octopus: GitHub: #665 closed",
+          tags: [
+            ["h", CHANNEL_ID],
+            ["emoji", "octopus", "https://relay.example/media/octopus.webp"],
+            ["emoji", "octopus", "https://relay.example/media/duplicate.webp"],
+            ["emoji", "missing-url"],
+          ],
+        }),
+      ],
+    }),
+  });
+
+  assert.deepEqual(inboxItem.customEmoji, [
+    { shortcode: "octopus", url: "https://relay.example/media/octopus.webp" },
+  ]);
+});
+
 test("thread activity rows use the channel list when feed channelName is blank", () => {
   const [inboxItem] = buildInboxItems({
     channels,
