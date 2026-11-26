@@ -136,7 +136,8 @@ pub struct SearchHit {
     pub channel_id: Option<Uuid>,
     /// Unix seconds.
     pub created_at: i64,
-    /// `ts_rank_cd` relevance score (higher = better).
+    /// Relevance score (higher = better): `ts_rank_cd` on Postgres. Zero
+    /// for an OpenSearch hit sorted by time, which is not scored.
     pub rank: f32,
 }
 

@@ -532,9 +532,9 @@ impl SearchIndex {
                 page,
             })
         };
-        let Some(text) = normalized_search_text(&query.q)
-            .and_then(|text| relevance::text_query(&text, query.mode))
-        else {
+        let Some(text) = normalized_search_text(&query.q).and_then(|text| {
+            relevance::text_query(&text, query.mode, query.sort == SearchSort::Relevance)
+        }) else {
             return empty();
         };
         if offset + i64::from(per_page) > MAX_RESULT_WINDOW {
@@ -735,9 +735,10 @@ fn search_body(
         // A rescore cannot follow a sort, so ties keep the engine's order;
         // the age factor already puts the newer of two equal matches first.
         SearchSort::Relevance => body["rescore"] = relevance::rescore(&text, now),
+        // No scores: computing them made a common word's search six times
+        // slower on a million messages, and time alone orders the hits.
         SearchSort::Newest => {
             body["sort"] = json!([{ "created_at": "desc" }, { "event_id": "asc" }]);
-            body["track_scores"] = json!(true);
         }
     }
     body

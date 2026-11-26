@@ -6,7 +6,15 @@
 //!
 //! - **Letters and digits stay together.** `word_delimiter_graph` splits at
 //!   `.`, `_`, `-`, `:` and case changes but not between letters and digits,
-//!   so a hex id stays one token instead of dozens of fragments.
+//!   so a hex id stays one token instead of dozens of fragments. The query
+//!   is split the same way, so part of an identifier (`snake_case` of
+//!   `snake_case_name`, `OutboxBatch` of `SearchOutboxBatch`) finds it; the
+//!   cost is that `foo_bar` also finds a message holding `foo` and `bar`
+//!   apart.
+//! - **Typos only rank.** A word matched only with a typo scores a third
+//!   of an exact match, so relevance order keeps it below. Newest order has
+//!   no such defence: for a short word most matches are other words one
+//!   letter away (`log` and `lag`), so it matches no typos.
 //! - **Long tokens get no prefixes.** Tokens over [`LONG_TOKEN`] characters
 //!   (`nostr:` URIs, keys, hashes) are not typed a letter at a time, and
 //!   each would add dozens of prefixes.
@@ -50,7 +58,8 @@ const STEM_WEIGHT: f64 = 0.4;
 const TYPO_WEIGHT: f64 = 0.3;
 /// Weight of a partial last word matched as a prefix.
 const PREFIX_WEIGHT: f64 = 0.5;
-/// Bonus weight of the query found as an exact phrase.
+/// Bonus weight of the query found as an exact phrase. An exact phrase is
+/// also within [`PROXIMITY_SLOP`], so it earns both bonuses.
 const PHRASE_WEIGHT: f64 = 2.0;
 /// Bonus weight of the query words found within [`PROXIMITY_SLOP`] moves of
 /// each other.
@@ -87,13 +96,17 @@ pub(super) fn analysis() -> Value {
         },
         "analyzer": {
             "message": analyzer(&["word_parts", "lowercase", "asciifolding"]),
-            "message_search": analyzer(&["lowercase", "asciifolding"]),
+            "message_search": analyzer(&["word_parts", "lowercase", "asciifolding"]),
             "message_stem": analyzer(&["word_parts", "lowercase", "asciifolding", "light_stem"]),
-            "message_stem_search": analyzer(&["lowercase", "asciifolding", "light_stem"]),
+            "message_stem_search": analyzer(&[
+                "word_parts", "lowercase", "asciifolding", "light_stem"
+            ]),
             "message_prefix": analyzer(&[
                 "word_parts", "lowercase", "asciifolding", "short_tokens", "prefixes"
             ]),
-            "message_prefix_search": analyzer(&["lowercase", "asciifolding", "longest_prefix"])
+            "message_prefix_search": analyzer(&[
+                "word_parts", "lowercase", "asciifolding", "longest_prefix"
+            ])
         }
     })
 }
@@ -159,7 +172,8 @@ pub(super) struct TextQuery {
 }
 
 /// The text query for `text` in `mode`, or `None` if it has no words.
-pub(super) fn text_query(text: &str, mode: SearchMode) -> Option<TextQuery> {
+/// `typos` says whether a word may match with a typo.
+pub(super) fn text_query(text: &str, mode: SearchMode, typos: bool) -> Option<TextQuery> {
     // A punctuation-only word analyzes to nothing and would count against
     // the minimum without ever matching.
     let words: Vec<&str> = text
@@ -168,9 +182,12 @@ pub(super) fn text_query(text: &str, mode: SearchMode) -> Option<TextQuery> {
         .take(MAX_WORDS)
         .collect();
     let (last, completed) = words.split_last()?;
-    let mut clauses: Vec<Value> = completed.iter().map(|word| word_clause(word)).collect();
+    let mut clauses: Vec<Value> = completed
+        .iter()
+        .map(|word| word_clause(word, typos))
+        .collect();
     clauses.push(match mode {
-        SearchMode::FullText => word_clause(last),
+        SearchMode::FullText => word_clause(last, typos),
         SearchMode::Prefix => json!({ "dis_max": { "queries": [
             exact_clause(last),
             stem_clause(last),
@@ -201,14 +218,14 @@ pub(super) fn text_query(text: &str, mode: SearchMode) -> Option<TextQuery> {
     })
 }
 
-/// One query word, matched exactly, by stem or with a typo, scored by the
-/// best of the three.
-fn word_clause(word: &str) -> Value {
-    json!({ "dis_max": { "queries": [
-        exact_clause(word),
-        stem_clause(word),
-        typo_clause(word),
-    ] } })
+/// One query word, matched exactly, by stem or (with `typos`) with a typo,
+/// scored by the best of them.
+fn word_clause(word: &str, typos: bool) -> Value {
+    let mut queries = vec![exact_clause(word), stem_clause(word)];
+    if typos {
+        queries.push(typo_clause(word));
+    }
+    json!({ "dis_max": { "queries": queries } })
 }
 
 fn exact_clause(word: &str) -> Value {
@@ -290,7 +307,7 @@ mod tests {
 
     #[test]
     fn punctuation_only_queries_have_no_words() {
-        assert!(text_query(" ' : & | ", SearchMode::FullText).is_none());
-        assert!(text_query("alpha ' bet", SearchMode::Prefix).is_some());
+        assert!(text_query(" ' : & | ", SearchMode::FullText, true).is_none());
+        assert!(text_query("alpha ' bet", SearchMode::Prefix, true).is_some());
     }
 }

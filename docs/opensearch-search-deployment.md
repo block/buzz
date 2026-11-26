@@ -127,7 +127,7 @@ kinds stay on Postgres at every value.
 
 The backends differ on edited messages: Postgres matches the text a message
 was stored with, and the index holds its latest edit. OpenSearch
-also matches words one or two typos away. So shadow overlap drops for
+also matches words one or two typos away, when sorted by relevance. So shadow overlap drops for
 searches that touch edited messages or misspell a word, and moving to `2`
 changes their results.
 

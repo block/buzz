@@ -274,6 +274,7 @@ async fn urls_names_and_markdown_match_whole_and_by_part() {
         ("widget", package),
         ("getUserName", identifier),
         ("user", identifier),
+        ("UserName", identifier),
         ("buzz_search", identifier),
         ("search", identifier),
         ("\"Ingrid\"", quoted),
@@ -363,6 +364,18 @@ async fn prefix_mode_completes_the_last_word_but_not_long_tokens() {
         "a partial word longer than the longest prefix matches by its start"
     );
     assert_eq!(prefix("roadm").await, vec![machine]);
+    let variable = post(
+        &pool,
+        c,
+        "set BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE to aoss",
+        DAY,
+    )
+    .await;
+    assert_eq!(
+        prefix("set BUZZ_OPENSEARCH_AW").await,
+        vec![variable],
+        "part of an identifier too long for its own prefixes"
+    );
     assert!(prefix("npub1qqq").await.is_empty(), "no prefixes of a key");
     assert!(
         prefix("a3f9b2c4a3").await.is_empty(),
@@ -438,7 +451,8 @@ async fn recency_breaks_close_calls_only() {
     fx.teardown(pool).await;
 }
 
-/// Newest sort orders by time alone, whatever the match quality.
+/// Newest sort orders by time alone, whatever the match quality, so it
+/// matches no typos: they would crowd out the word that was typed.
 #[tokio::test]
 #[ignore = "requires Postgres and OpenSearch"]
 async fn newest_sort_ignores_relevance() {
@@ -453,12 +467,7 @@ async fn newest_sort_ignores_relevance() {
     )
     .await;
 
-    // A partial last word is completed, not corrected, so prefix mode does
-    // not find the typo.
-    for (mode, expected) in [
-        (SearchMode::FullText, vec![typo, weak, strong]),
-        (SearchMode::Prefix, vec![weak, strong]),
-    ] {
+    for mode in [SearchMode::FullText, SearchMode::Prefix] {
         let hits: Vec<_> = fx
             .service()
             .search(&query(c, "migration", mode, SearchSort::Newest))
@@ -468,7 +477,8 @@ async fn newest_sort_ignores_relevance() {
             .iter()
             .map(|hit| hit.event_id)
             .collect();
-        assert_eq!(hits, expected, "{mode:?}");
+        assert_eq!(hits, vec![weak, strong], "{mode:?}");
+        assert!(!hits.contains(&typo));
     }
     fx.teardown(pool).await;
 }
