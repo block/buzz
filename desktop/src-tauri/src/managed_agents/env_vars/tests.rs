@@ -189,6 +189,7 @@ fn reserved_keys_include_code_execution_surface() {
     for key in [
         "BUZZ_ACP_AGENT_COMMAND",
         "BUZZ_ACP_AGENT_ARGS",
+        "BUZZ_ACP_AGENT_ARGS_JSON",
         "BUZZ_ACP_MCP_COMMAND",
         "BUZZ_ACP_LAUNCH_PREFIX",
     ] {
@@ -572,4 +573,59 @@ fn launch_prefix_cannot_be_saved_or_merged_from_user_environment() {
         assert!(merged_user_env(&env, &BTreeMap::new()).is_empty());
         assert!(merged_user_env(&BTreeMap::new(), &env).is_empty());
     }
+}
+
+// ── set_agent_args_env: JSON transport for comma-containing args ────
+
+#[test]
+fn agent_args_env_comma_safe_args_use_legacy_transport() {
+    let (legacy, json) = super::agent_args_env(&[
+        "-m".into(),
+        "my-model".into(),
+        "--reasoning".into(),
+        "low".into(),
+    ]);
+    assert_eq!(legacy, "-m,my-model,--reasoning,low");
+    assert_eq!(json, None);
+}
+
+#[test]
+fn agent_args_env_empty_args_use_legacy_transport() {
+    let (legacy, json) = super::agent_args_env(&[]);
+    assert_eq!(legacy, "");
+    assert_eq!(json, None);
+}
+
+#[test]
+fn agent_args_env_comma_in_arg_switches_to_json_transport() {
+    let (legacy, json) =
+        super::agent_args_env(&["--config=a,b".into(), "--safe".into(), "on".into()]);
+    assert_eq!(legacy, "acp");
+    let json = json.expect("JSON transport should be used when an arg contains a comma");
+    assert_eq!(json, r#"["--config=a,b","--safe","on"]"#);
+}
+
+#[test]
+fn agent_args_env_multiple_commas_in_one_arg() {
+    for args in [
+        vec!["a,b,c".into()],
+        vec!["--label".into(), "".into()],
+        vec![" padded ".into()],
+    ] {
+        let (legacy, json) = super::agent_args_env(&args);
+        assert_eq!(legacy, "acp");
+        let parsed: Vec<String> = serde_json::from_str(&json.expect("JSON transport")).unwrap();
+        assert_eq!(parsed, args);
+    }
+}
+
+#[test]
+fn agent_args_env_clears_inherited_json_for_legacy_transport() {
+    let mut command = std::process::Command::new("unused");
+    command.env("BUZZ_ACP_AGENT_ARGS_JSON", r#"["stale"]"#);
+    super::set_agent_args_env(&mut command, &["acp".into()]);
+    let entry = command
+        .get_envs()
+        .find(|(key, _)| *key == "BUZZ_ACP_AGENT_ARGS_JSON");
+    assert_eq!(entry.map(|(_, value)| value), Some(None));
 }

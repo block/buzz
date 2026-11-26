@@ -81,6 +81,7 @@ pub(crate) use definition_validation::{
     validate_managed_agent_definition_text, validate_visible_text,
 };
 pub use discovery::*;
+pub(crate) use env_vars::set_agent_args_env;
 pub use env_vars::*;
 #[cfg(windows)]
 pub(crate) use git_bash::git_bash_available;
