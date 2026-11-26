@@ -17,6 +17,42 @@ if [[ -f ".env" ]]; then
   set +o allexport
 fi
 
+# Prefer DATABASE_URL when set so PGHOST/PGPORT/… can't drift from the URL
+# migrations already use (#2479). Explicit PG* still win only when DATABASE_URL
+# is unset.
+if [[ -n "${DATABASE_URL:-}" ]]; then
+  seed_pg_exports=$(python3 - <<'PY'
+import os
+from shlex import quote
+from urllib.parse import unquote, urlparse
+
+url = os.environ["DATABASE_URL"]
+parsed = urlparse(url)
+if parsed.scheme not in {"postgres", "postgresql"}:
+    raise SystemExit(f"DATABASE_URL must be postgres://…, got {parsed.scheme!r}")
+
+def sh_export(name: str, value: str) -> None:
+    if "\0" in value:
+        raise SystemExit(f"DATABASE_URL contains a NUL byte in {name}")
+    print(f"export {name}={quote(value)}")
+
+if parsed.hostname:
+    sh_export("PGHOST", parsed.hostname)
+port = parsed.port
+sh_export("PGPORT", str(port if port is not None else 5432))
+if parsed.username:
+    sh_export("PGUSER", unquote(parsed.username))
+if parsed.password is not None:
+    sh_export("PGPASSWORD", unquote(parsed.password))
+db = (parsed.path or "").lstrip("/")
+if db:
+    sh_export("PGDATABASE", unquote(db))
+PY
+)
+  eval "$seed_pg_exports"
+  unset seed_pg_exports
+fi
+
 export PGHOST="${PGHOST:-localhost}"
 export PGPORT="${PGPORT:-5432}"
 export PGUSER="${PGUSER:-buzz}"
