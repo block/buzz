@@ -65,5 +65,5 @@ git ──stdin──▶ git-credential-nostr ──stdout──▶ git
 | `insecure permissions` | Key file is readable by group/others | `chmod 600 ~/.nostr/key` |
 | `method hint` | Server's `WWW-Authenticate` header is missing `method="..."` | Upgrade the Buzz server |
 | `useHttpPath` | `credential.useHttpPath` is not set | `git config --global credential.useHttpPath true` |
-| Empty output / no auth | git version is older than 2.46 | Upgrade git |
+| Empty output / no auth | git version is older than 2.46 | Upgrade git (against a Nostr challenge the helper prints `did not announce the authtype capability` on stderr) |
 | `clock skew` / auth rejected | System clock is off by more than 60 s | Sync your system clock (`ntpdate`, `timedatectl`) |
