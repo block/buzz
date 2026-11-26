@@ -240,6 +240,9 @@ async fn apply(state: &AppState, operation: Operation) -> Response {
         )
             .into_response(),
         Ok(ApplyOutcome::NotFound) => error(StatusCode::NOT_FOUND, "not_found"),
+        Ok(ApplyOutcome::CommunityChanged) => {
+            error(StatusCode::CONFLICT, "community_host_immutable")
+        }
         Err(e) => store_error(e),
     }
 }
@@ -624,9 +627,16 @@ mod tests {
             serde_json::json!({ "error": "stale_revision", "current": 1 })
         );
 
+        let mut moved = put_body(Uuid::new_v4(), 2);
+        moved["community_host"] = serde_json::json!("other.communities.example.org");
+        let (status, refused) = call(&fx, &fx.relay, "PUT", &path, &path, Some(moved)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "queued messages stay bound");
+        assert_eq!(refused["error"], "community_host_immutable");
+
         let (status, read) = call(&fx, &fx.relay, "GET", &path, &path, None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(read["community_host"], "acme.communities.example.org");
+        assert_eq!(read["revision"], 1);
 
         let op_path = format!("/v1/operations/{op}");
         let (status, recorded) = call(&fx, &fx.relay, "GET", &op_path, &op_path, None).await;
@@ -784,6 +794,10 @@ mod tests {
             .collect();
         assert_eq!(ids, ["d4", "d3"]);
         assert_eq!(body["deliveries"][0]["state"], "queued");
+        assert_eq!(
+            body["deliveries"][0]["messages"],
+            serde_json::json!({ "queued": 0, "accepted": 0, "failed": 0 })
+        );
         assert!(body["deliveries"][0].get("body").is_none());
         assert!(!body.to_string().contains("payload"));
         let next = body["next"].as_str().unwrap().to_owned();

@@ -2,9 +2,9 @@
 //! fan-out, and the message outbox.
 use super::PostgresStore;
 use crate::store::{
-    initial_message_state, write_transition, ClaimedMessage, DeliveryState, FanoutOutcome,
-    ForwardOutcome, MessageKey, StoreError, Subscription, SubscriptionChange, SubscriptionStore,
-    SubscriptionWrite, WriteOutcome,
+    initial_message_state, storable, write_transition, ClaimedMessage, DeliveryState, Evaluated,
+    FanoutCommit, FanoutOutcome, ForwardOutcome, MessageKey, StoreError, Subscription,
+    SubscriptionChange, SubscriptionStore, SubscriptionWrite, WriteOutcome,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -161,19 +161,67 @@ impl SubscriptionStore for PostgresStore {
         &self,
         integration_id: Uuid,
         delivery_id: &str,
+        attempts: i32,
         outcome: FanoutOutcome,
         now: DateTime<Utc>,
-    ) -> Result<(), StoreError> {
+    ) -> Result<FanoutCommit, StoreError> {
         let mut tx = self.pool.begin().await?;
         let (state, error, messages) = match outcome {
-            FanoutOutcome::Fanned(messages) => (DeliveryState::Accepted, None, messages),
-            FanoutOutcome::Failed(error) => (DeliveryState::Failed, Some(error), Vec::new()),
+            FanoutOutcome::Fanned {
+                messages,
+                evaluated,
+            } => {
+                // A share lock on the integration row holds off subscription
+                // writes, which take it for update, until this commits.
+                sqlx::query("SELECT 1 FROM ingress_gateway_integrations WHERE id = $1 FOR SHARE")
+                    .bind(integration_id)
+                    .execute(&mut *tx)
+                    .await?;
+                let live: Vec<(Uuid, i64)> = sqlx::query_as(
+                    "SELECT id, revision FROM ingress_gateway_subscriptions
+                     WHERE integration_id = $1 AND deleted_at IS NULL
+",
+                )
+                .bind(integration_id)
+                .fetch_all(&mut *tx)
+                .await?;
+                let mut live: Vec<_> = live
+                    .into_iter()
+                    .map(|(id, revision)| Evaluated { id, revision })
+                    .collect();
+                live.sort();
+                if live != evaluated {
+                    let due = sqlx::query(
+                        "UPDATE ingress_gateway_deliveries SET next_attempt_at = $4
+                         WHERE integration_id = $1 AND delivery_id = $2
+                           AND state = 'queued' AND attempts = $3",
+                    )
+                    .bind(integration_id)
+                    .bind(delivery_id)
+                    .bind(attempts)
+                    .bind(now)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+                    tx.commit().await?;
+                    return Ok(if due == 0 {
+                        FanoutCommit::Lost
+                    } else {
+                        FanoutCommit::Stale
+                    });
+                }
+                (DeliveryState::Accepted, None, messages)
+            }
+            FanoutOutcome::Failed(error) => {
+                (DeliveryState::Failed, Some(storable(&error)), Vec::new())
+            }
         };
         let received_at: Option<DateTime<Utc>> = sqlx::query_scalar(
             "UPDATE ingress_gateway_deliveries
              SET state = $3, completed_at = $4, next_attempt_at = NULL, last_error = $5,
                  body = CASE WHEN $3 = 'accepted' THEN ''::bytea ELSE body END
-             WHERE integration_id = $1 AND delivery_id = $2 AND state = 'queued'
+             WHERE integration_id = $1 AND delivery_id = $2
+               AND state = 'queued' AND attempts = $6
              RETURNING received_at",
         )
         .bind(integration_id)
@@ -181,11 +229,12 @@ impl SubscriptionStore for PostgresStore {
         .bind(state.as_str())
         .bind(now)
         .bind(error)
+        .bind(attempts)
         .fetch_optional(&mut *tx)
         .await?;
         let Some(received_at) = received_at else {
             tx.rollback().await?;
-            return Ok(());
+            return Ok(FanoutCommit::Lost);
         };
         for message in &messages {
             let (state, content, error) = initial_message_state(message);
@@ -211,7 +260,7 @@ impl SubscriptionStore for PostgresStore {
             .await?;
         }
         tx.commit().await?;
-        Ok(())
+        Ok(FanoutCommit::Settled)
     }
 
     async fn claim_due_messages(
@@ -231,13 +280,14 @@ impl SubscriptionStore for PostgresStore {
                  FOR UPDATE SKIP LOCKED
              ), claimed AS (
                  UPDATE ingress_gateway_messages m
-                 SET attempts = m.attempts + 1, next_attempt_at = $2
+                 SET attempts = m.attempts + 1, next_attempt_at = $2,
+                     signed_at = COALESCE(m.signed_at, $1)
                  FROM due
                  WHERE m.integration_id = due.integration_id
                    AND m.delivery_id = due.delivery_id
                    AND m.subscription_id = due.subscription_id
                  RETURNING m.integration_id, m.delivery_id, m.subscription_id, m.channel_id,
-                           m.content, m.received_at, m.attempts
+                           m.content, m.received_at, m.attempts, m.signed_at, m.event_id
              )
              SELECT c.*, i.community_host
              FROM claimed c
@@ -261,6 +311,8 @@ impl SubscriptionStore for PostgresStore {
                 content: row.try_get("content")?,
                 received_at: row.try_get("received_at")?,
                 attempts: row.try_get("attempts")?,
+                signed_at: row.try_get("signed_at")?,
+                event_id: row.try_get("event_id")?,
             })
         })
         .collect()
@@ -268,16 +320,16 @@ impl SubscriptionStore for PostgresStore {
 
     async fn complete_message(
         &self,
-        key: &MessageKey,
+        message: &ClaimedMessage,
         outcome: ForwardOutcome,
         now: DateTime<Utc>,
     ) -> Result<(), StoreError> {
-        let (state, event_id, error, next_attempt_at) = match outcome {
+        let (state, event_id, error, next_attempt_at, restamp) = match outcome {
             ForwardOutcome::Accepted { event_id } => {
-                (DeliveryState::Accepted, Some(event_id), None, None)
+                (DeliveryState::Accepted, Some(event_id), None, None, false)
             }
             ForwardOutcome::Failed { event_id, error } => {
-                (DeliveryState::Failed, event_id, Some(error), None)
+                (DeliveryState::Failed, event_id, Some(error), None, false)
             }
             ForwardOutcome::Retry {
                 event_id,
@@ -288,24 +340,32 @@ impl SubscriptionStore for PostgresStore {
                 event_id,
                 Some(error),
                 Some(next_attempt_at),
+                false,
             ),
+            ForwardOutcome::Restamp { error } => {
+                (DeliveryState::Queued, None, Some(error), Some(now), true)
+            }
         };
         let terminal = state != DeliveryState::Queued;
         sqlx::query(
             "UPDATE ingress_gateway_messages
-             SET state = $4, event_id = COALESCE($5, event_id), last_error = $6,
-                 next_attempt_at = $7, completed_at = $8
+             SET state = $5,
+                 event_id = CASE WHEN $10 THEN NULL ELSE COALESCE($6, event_id) END,
+                 signed_at = CASE WHEN $10 THEN NULL ELSE signed_at END,
+                 last_error = $7, next_attempt_at = $8, completed_at = $9
              WHERE integration_id = $1 AND delivery_id = $2 AND subscription_id = $3
-               AND state = 'queued'",
+               AND state = 'queued' AND attempts = $4",
         )
-        .bind(key.integration_id)
-        .bind(&key.delivery_id)
-        .bind(key.subscription_id)
+        .bind(message.key.integration_id)
+        .bind(&message.key.delivery_id)
+        .bind(message.key.subscription_id)
+        .bind(message.attempts)
         .bind(state.as_str())
         .bind(event_id)
-        .bind(error)
+        .bind(error.as_deref().map(storable))
         .bind(next_attempt_at)
         .bind(terminal.then_some(now))
+        .bind(restamp)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -318,9 +378,9 @@ mod postgres_tests {
     use crate::config::RelayScheme;
     use crate::fanout::Fanout;
     use crate::forwarder::Forwarder;
-    use crate::relay_client::{RelayClient, SubmitResult};
+    use crate::relay_client::{LookupResult, RelayClient, SubmitResult};
     use crate::signer::GatewayKeySigner;
-    use crate::store::{Mutation, NewDelivery, Operation, Provider, Store};
+    use crate::store::{DeliveryPage, Mutation, NewDelivery, Operation, Provider, Store};
     use nostr::{Event, Keys, NostrSigner, Url};
     use std::sync::{Arc, Mutex};
 
@@ -331,6 +391,16 @@ mod postgres_tests {
         async fn submit(&self, url: &Url, event: &Event, _: &Arc<dyn NostrSigner>) -> SubmitResult {
             self.0.lock().unwrap().push((url.clone(), event.clone()));
             SubmitResult::Accepted
+        }
+
+        async fn find(
+            &self,
+            _: &Url,
+            _: &[String],
+            _: Uuid,
+            _: &Arc<dyn NostrSigner>,
+        ) -> LookupResult {
+            LookupResult::Missing
         }
     }
 
@@ -513,6 +583,80 @@ mod postgres_tests {
         let (state, event_id, _, _) = message_row(&store, &key("d-1", all)).await;
         assert_eq!(state, "accepted");
         assert_eq!(event_id, Some(event.id.to_hex()));
+        let timeline = store
+            .list_deliveries(
+                integration_id,
+                DeliveryPage {
+                    limit: 10,
+                    ..DeliveryPage::default()
+                },
+            )
+            .await
+            .unwrap();
+        let counts: Vec<_> = timeline
+            .iter()
+            .map(|d| {
+                (
+                    d.delivery_id.as_str(),
+                    d.messages.queued,
+                    d.messages.accepted,
+                )
+            })
+            .collect();
+        assert_eq!(counts, [("d-2", 1, 0), ("d-1", 0, 1)]);
+
+        // A fan-out that evaluated a set of subscriptions that has changed
+        // since, or whose claim was taken over, stores nothing.
+        let late = NewDelivery {
+            integration_id,
+            delivery_id: "d-3".to_owned(),
+            event_type: "pull_request.opened".to_owned(),
+            provider_timestamp: None,
+            headers: serde_json::json!({}),
+            body: br#"{"action":"opened"}"#.to_vec(),
+            received_at: now,
+        };
+        store.insert_delivery(late).await.unwrap();
+        let claim = store
+            .claim_due(Utc::now(), Duration::seconds(60), 1)
+            .await
+            .unwrap()
+            .remove(0);
+        let live = Evaluated::of(&store.live_subscriptions(integration_id).await.unwrap());
+        let fanned = |evaluated: Vec<Evaluated>| FanoutOutcome::Fanned {
+            messages: vec![crate::store::NewMessage {
+                subscription_id: all,
+                channel_id: channel,
+                content: Ok("late".to_owned()),
+            }],
+            evaluated,
+        };
+        for (evaluated, attempts, commit) in [
+            (live[..1].to_vec(), claim.attempts, FanoutCommit::Stale),
+            (live.clone(), claim.attempts - 1, FanoutCommit::Lost),
+        ] {
+            assert_eq!(
+                store
+                    .complete_fanout(integration_id, "d-3", attempts, fanned(evaluated), now)
+                    .await
+                    .unwrap(),
+                commit
+            );
+        }
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM ingress_gateway_messages WHERE delivery_id = 'd-3'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(stored, 0);
+        assert_eq!(
+            store
+                .complete_fanout(integration_id, "d-3", claim.attempts, fanned(live), now)
+                .await
+                .unwrap(),
+            FanoutCommit::Settled
+        );
 
         let delete = SubscriptionWrite {
             id: all,

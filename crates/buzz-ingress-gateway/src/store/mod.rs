@@ -6,9 +6,9 @@ mod subscriptions;
 pub use memory::{MemoryStore, StoredDelivery, StoredMessage};
 pub(crate) use subscriptions::initial_state as initial_message_state;
 pub use subscriptions::{
-    write_transition, ClaimedMessage, FanoutOutcome, MessageKey, NewMessage, Subscription,
-    SubscriptionChange, SubscriptionStore, SubscriptionView, SubscriptionWrite, WriteOutcome,
-    MAX_SUBSCRIPTIONS_PER_INTEGRATION,
+    storable, write_transition, ClaimedMessage, Evaluated, FanoutCommit, FanoutOutcome, MessageKey,
+    NewMessage, Subscription, SubscriptionChange, SubscriptionStore, SubscriptionView,
+    SubscriptionWrite, WriteOutcome, MAX_SUBSCRIPTIONS_PER_INTEGRATION,
 };
 
 use crate::config::RelayScheme;
@@ -178,6 +178,9 @@ pub enum ApplyOutcome {
     StaleRevision { current: i64 },
     /// The mutation needs an integration that does not exist.
     NotFound,
+    /// An integration stays bound to the community it was created for:
+    /// queued messages are signed for and sent to that community.
+    CommunityChanged,
 }
 
 /// Lifecycle of a stored delivery, and of each message fanned out from it.
@@ -243,6 +246,17 @@ pub struct DeliverySummary {
     pub received_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
     pub last_error: Option<String>,
+    /// Where the delivery's messages stand, so the timeline shows what
+    /// reached a channel without returning any payload.
+    pub messages: MessageCounts,
+}
+
+/// How many of a delivery's messages are in each state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct MessageCounts {
+    pub queued: i64,
+    pub accepted: i64,
+    pub failed: i64,
 }
 
 /// Keyset position in the newest-first delivery timeline. Encoded as
@@ -426,6 +440,13 @@ pub fn transition(
             });
         }
     }
+    if let (Mutation::PutIntegration { community_host, .. }, Some(current)) =
+        (&operation.mutation, &integration)
+    {
+        if *community_host != current.community_host {
+            return Err(ApplyOutcome::CommunityChanged);
+        }
+    }
     let mut next = match (&operation.mutation, integration) {
         (
             Mutation::PutIntegration {
@@ -515,4 +536,8 @@ pub enum ForwardOutcome {
         error: String,
         next_attempt_at: DateTime<Utc>,
     },
+    /// The relay would now refuse `signed_at` as too old, and holds no event
+    /// an earlier attempt sent. The row stays queued, due now, and its next
+    /// claim signs with a fresh timestamp.
+    Restamp { error: String },
 }

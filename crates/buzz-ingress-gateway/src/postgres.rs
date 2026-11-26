@@ -4,8 +4,8 @@ mod subscriptions;
 
 use crate::store::{
     transition, AppliedOperation, ApplyOutcome, ClaimedDelivery, DeliveryPage, DeliveryState,
-    DeliverySummary, InsertOutcome, Integration, IntegrationSecret, IntegrationView, Mutation,
-    NewDelivery, Operation, Provider, Store, StoreError,
+    DeliverySummary, InsertOutcome, Integration, IntegrationSecret, IntegrationView, MessageCounts,
+    Mutation, NewDelivery, Operation, Provider, Store, StoreError,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -459,14 +459,21 @@ impl Store for PostgresStore {
     ) -> Result<Vec<DeliverySummary>, StoreError> {
         let limit = i64::try_from(page.limit).unwrap_or(i64::MAX);
         sqlx::query(
-            "SELECT delivery_id, event_type, state, attempts, event_id, received_at,
-                    completed_at, last_error
-             FROM ingress_gateway_deliveries
-             WHERE integration_id = $1
-               AND ($2::timestamptz IS NULL OR received_at > $2)
-               AND ($3::timestamptz IS NULL OR (received_at, delivery_id) < ($3, $4::text))
-               AND ($5::text IS NULL OR state = $5)
-             ORDER BY received_at DESC, delivery_id DESC
+            "SELECT d.delivery_id, d.event_type, d.state, d.attempts, d.event_id, d.received_at,
+                    d.completed_at, d.last_error, m.queued, m.accepted, m.failed
+             FROM ingress_gateway_deliveries d
+             CROSS JOIN LATERAL (
+                 SELECT count(*) FILTER (WHERE state = 'queued') AS queued,
+                        count(*) FILTER (WHERE state = 'accepted') AS accepted,
+                        count(*) FILTER (WHERE state = 'failed') AS failed
+                 FROM ingress_gateway_messages
+                 WHERE integration_id = d.integration_id AND delivery_id = d.delivery_id
+             ) m
+             WHERE d.integration_id = $1
+               AND ($2::timestamptz IS NULL OR d.received_at > $2)
+               AND ($3::timestamptz IS NULL OR (d.received_at, d.delivery_id) < ($3, $4::text))
+               AND ($5::text IS NULL OR d.state = $5)
+             ORDER BY d.received_at DESC, d.delivery_id DESC
              LIMIT $6",
         )
         .bind(integration_id)
@@ -490,6 +497,11 @@ impl Store for PostgresStore {
                 received_at: row.try_get("received_at")?,
                 completed_at: row.try_get("completed_at")?,
                 last_error: row.try_get("last_error")?,
+                messages: MessageCounts {
+                    queued: row.try_get("queued")?,
+                    accepted: row.try_get("accepted")?,
+                    failed: row.try_get("failed")?,
+                },
             })
         })
         .collect()

@@ -2,7 +2,8 @@
 //!
 //! ```text
 //!   delivery (queued) ── fan-out: evaluate each live subscription's filter
-//!        │                and render its message, in one transaction:
+//!        │                and render its message, then in one transaction,
+//!        │                if those are still the live subscriptions:
 //!        ▼
 //!   delivery → accepted, payload dropped
 //!   one message row per matching subscription (queued, or failed when the
@@ -11,6 +12,9 @@
 //!        ▼
 //!   sender: kind-9 event to the subscription's channel on the community relay
 //! ```
+//!
+//! Every settlement names the attempt it claimed, so a worker whose lease
+//! ended cannot overwrite the claim of the worker that took the row over.
 //!
 //! Subscriptions are written by revision alone: a write carries the revision
 //! it produces, a retry of the applied write returns the stored subscription,
@@ -204,10 +208,50 @@ pub struct NewMessage {
 /// Result of fanning out one claimed delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FanoutOutcome {
-    /// Store these messages and mark the delivery accepted, atomically.
-    Fanned(Vec<NewMessage>),
+    /// Store these messages and mark the delivery accepted, atomically, if
+    /// the integration's live subscriptions are still exactly `evaluated`.
+    Fanned {
+        messages: Vec<NewMessage>,
+        evaluated: Vec<Evaluated>,
+    },
     /// The delivery can never be fanned out.
     Failed(String),
+}
+
+/// A subscription as a fan-out evaluated it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Evaluated {
+    pub id: Uuid,
+    pub revision: i64,
+}
+
+impl Evaluated {
+    /// The sorted identity of a set of subscriptions, for comparing the set a
+    /// fan-out evaluated with the live set when it commits.
+    pub fn of(subscriptions: &[Subscription]) -> Vec<Self> {
+        let mut evaluated: Vec<_> = subscriptions
+            .iter()
+            .map(|s| Self {
+                id: s.id,
+                revision: s.revision,
+            })
+            .collect();
+        evaluated.sort();
+        evaluated
+    }
+}
+
+/// What [`SubscriptionStore::complete_fanout`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanoutCommit {
+    /// The messages are stored and the delivery is settled.
+    Settled,
+    /// A subscription was created, edited or deleted while the fan-out
+    /// evaluated; nothing was stored and the delivery is due again now.
+    Stale,
+    /// The claim was no longer this worker's: its lease ended and another
+    /// worker claimed the delivery, or the delivery is already settled.
+    Lost,
 }
 
 /// Identity of a message: one delivery's share for one subscription.
@@ -219,7 +263,7 @@ pub struct MessageKey {
 }
 
 /// A queued message the sender has leased, joined with its community host.
-/// `attempts` already counts this attempt.
+/// `attempts` already counts this attempt and fences its settlement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimedMessage {
     pub key: MessageKey,
@@ -228,6 +272,11 @@ pub struct ClaimedMessage {
     pub content: String,
     pub received_at: DateTime<Utc>,
     pub attempts: i32,
+    /// The `created_at` every attempt signs with, set by the first claim and
+    /// kept until [`ForwardOutcome::Restamp`] clears it.
+    pub signed_at: DateTime<Utc>,
+    /// The event an earlier attempt sent, if one reported back.
+    pub event_id: Option<String>,
 }
 
 /// Subscription configuration and the message outbox it feeds.
@@ -252,37 +301,49 @@ pub trait SubscriptionStore: Send + Sync {
         integration_id: Uuid,
     ) -> Result<Vec<Subscription>, StoreError>;
     /// Store a claimed delivery's messages and settle the delivery in one
-    /// transaction. A delivery no longer queued is left alone.
+    /// transaction, holding off subscription writes while it checks that the
+    /// subscriptions it evaluated are still the live ones. Only the claim
+    /// that `attempts` names can settle the delivery.
     async fn complete_fanout(
         &self,
         integration_id: Uuid,
         delivery_id: &str,
+        attempts: i32,
         outcome: FanoutOutcome,
         now: DateTime<Utc>,
-    ) -> Result<(), StoreError>;
+    ) -> Result<FanoutCommit, StoreError>;
     /// Lease up to `limit` queued messages due at `now`, as
-    /// [`Store::claim_due`](super::Store::claim_due) does for deliveries.
+    /// [`Store::claim_due`](super::Store::claim_due) does for deliveries, and
+    /// stamp `signed_at` with `now` on rows that have none.
     async fn claim_due_messages(
         &self,
         now: DateTime<Utc>,
         lease: Duration,
         limit: usize,
     ) -> Result<Vec<ClaimedMessage>, StoreError>;
-    /// Record the result of a send attempt for a claimed message.
+    /// Record the result of a send attempt. A claim whose lease ended and
+    /// was taken over, or a message cancelled meanwhile, is left alone.
     async fn complete_message(
         &self,
-        key: &MessageKey,
+        message: &ClaimedMessage,
         outcome: ForwardOutcome,
         now: DateTime<Utc>,
     ) -> Result<(), StoreError>;
 }
 
 /// The stored state of a new message.
-pub(crate) fn initial_state(message: &NewMessage) -> (DeliveryState, &str, Option<&str>) {
+pub(crate) fn initial_state(message: &NewMessage) -> (DeliveryState, &str, Option<String>) {
     match &message.content {
         Ok(content) => (DeliveryState::Queued, content.as_str(), None),
-        Err(error) => (DeliveryState::Failed, "", Some(error.as_str())),
+        Err(error) => (DeliveryState::Failed, "", Some(storable(error))),
     }
+}
+
+/// `text` as PostgreSQL `TEXT` can hold it: NUL, which provider strings and
+/// relay answers may carry, becomes U+FFFD. For error text only; a message
+/// whose content holds NUL fails instead of being altered.
+pub fn storable(text: &str) -> String {
+    text.replace('\0', "\u{FFFD}")
 }
 
 #[cfg(test)]

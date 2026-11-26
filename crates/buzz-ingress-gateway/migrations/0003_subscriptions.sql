@@ -29,6 +29,7 @@ CREATE TABLE ingress_gateway_messages (
     last_error TEXT,
     received_at TIMESTAMPTZ NOT NULL,
     completed_at TIMESTAMPTZ,
+    signed_at TIMESTAMPTZ,
     PRIMARY KEY (integration_id, delivery_id, subscription_id)
 );
 CREATE INDEX ingress_gateway_messages_due ON ingress_gateway_messages (next_attempt_at) WHERE state = 'queued';

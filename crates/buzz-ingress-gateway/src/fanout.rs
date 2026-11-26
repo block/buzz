@@ -9,14 +9,20 @@
 //!        │                           ── true  → render message template
 //!        │                           ── error → failed message (visible)
 //!        ▼
-//!   complete_fanout: messages + delivery → accepted, in one transaction
+//!   complete_fanout: messages + delivery → accepted, in one transaction,
+//!   only if those are still the live subscriptions (else due again now)
 //! ```
 //!
 //! CEL runs on a blocking thread: each program is parsed and evaluated on a
 //! scoped thread with a large stack, and that must not stall the runtime.
-use crate::filter::{compile_filter, compile_message_template, Budget, Delivery, EvalError};
+use crate::filter::{
+    compile_filter, compile_message_template, Budget, CompileError, Delivery, EvalError,
+};
 use crate::metrics::{record_fanout, record_forwarder_failure, FanoutResult};
-use crate::store::{ClaimedDelivery, FanoutOutcome, NewMessage, Store, StoreError, Subscription};
+use crate::store::{
+    storable, ClaimedDelivery, Evaluated, FanoutCommit, FanoutOutcome, NewMessage, Store,
+    StoreError, Subscription,
+};
 use chrono::{DateTime, Duration, Utc};
 use std::sync::Arc;
 use tokio::task::JoinSet;
@@ -34,7 +40,7 @@ pub const BUDGET: Budget = Budget {
 
 /// What evaluating one delivery against its subscriptions produced.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Evaluated {
+pub enum Evaluation {
     Settled(FanoutOutcome),
     /// The evaluator itself was unavailable; the lease returns the delivery.
     Retry(String),
@@ -46,9 +52,9 @@ pub fn default_message(delivery: &ClaimedDelivery) -> String {
 }
 
 /// Evaluate every subscription's programs against one delivery.
-pub fn evaluate(delivery: &ClaimedDelivery, subscriptions: &[Subscription]) -> Evaluated {
+pub fn evaluate(delivery: &ClaimedDelivery, subscriptions: &[Subscription]) -> Evaluation {
     let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&delivery.body) else {
-        return Evaluated::Settled(FanoutOutcome::Failed(
+        return Evaluation::Settled(FanoutOutcome::Failed(
             "stored payload is not JSON".to_owned(),
         ));
     };
@@ -57,9 +63,12 @@ pub fn evaluate(delivery: &ClaimedDelivery, subscriptions: &[Subscription]) -> E
     for subscription in subscriptions {
         let content = match render(delivery, &input, subscription) {
             Ok(None) => continue,
+            Ok(Some(text)) if text.contains('\0') => {
+                Err("message contains a NUL character".to_owned())
+            }
             Ok(Some(text)) => Ok(text),
-            Err(EvalError::Unavailable(error)) => return Evaluated::Retry(error),
-            Err(error) => Err(error.to_string()),
+            Err(EvalError::Unavailable(error)) => return Evaluation::Retry(error),
+            Err(error) => Err(storable(&error.to_string())),
         };
         messages.push(NewMessage {
             subscription_id: subscription.id,
@@ -67,7 +76,19 @@ pub fn evaluate(delivery: &ClaimedDelivery, subscriptions: &[Subscription]) -> E
             content,
         });
     }
-    Evaluated::Settled(FanoutOutcome::Fanned(messages))
+    Evaluation::Settled(FanoutOutcome::Fanned {
+        messages,
+        evaluated: Evaluated::of(subscriptions),
+    })
+}
+
+/// A program that compiled when its subscription was written can still fail
+/// to compile now; only a parser that could not start is worth a retry.
+fn compile_failure(error: CompileError) -> EvalError {
+    match error {
+        CompileError::Unavailable(error) => EvalError::Unavailable(error),
+        error => EvalError::Failed(error.to_string()),
+    }
 }
 
 /// `None` when the filter does not match. Programs were checked when the
@@ -78,10 +99,9 @@ fn render(
     input: &Delivery,
     subscription: &Subscription,
 ) -> Result<Option<String>, EvalError> {
-    let compile = |e: crate::filter::CompileError| EvalError::Failed(e.to_string());
     if let Some(source) = &subscription.filter {
         if !compile_filter(source)
-            .map_err(compile)?
+            .map_err(compile_failure)?
             .matches(input, &BUDGET)?
         {
             return Ok(None);
@@ -89,7 +109,7 @@ fn render(
     }
     match &subscription.message_template {
         Some(source) => compile_message_template(source)
-            .map_err(compile)?
+            .map_err(compile_failure)?
             .render(input, &BUDGET)
             .map(Some),
         None => Ok(Some(default_message(delivery))),
@@ -155,35 +175,43 @@ async fn fan_out(
     now: fn() -> DateTime<Utc>,
 ) -> Result<(), StoreError> {
     let subscriptions = store.live_subscriptions(delivery.integration_id).await?;
-    let (integration_id, delivery_id, received_at) = (
+    let (integration_id, delivery_id, received_at, attempts) = (
         delivery.integration_id,
         delivery.delivery_id.clone(),
         delivery.received_at,
+        delivery.attempts,
     );
-    let evaluated = tokio::task::spawn_blocking(move || evaluate(&delivery, &subscriptions))
+    let evaluation = tokio::task::spawn_blocking(move || evaluate(&delivery, &subscriptions))
         .await
-        .unwrap_or_else(|e| Evaluated::Retry(format!("evaluator task failed: {e}")));
-    let outcome = match evaluated {
-        Evaluated::Settled(outcome) => outcome,
-        Evaluated::Retry(error) if received_at + retry_max_age <= now() => {
+        .unwrap_or_else(|e| Evaluation::Retry(format!("evaluator task failed: {e}")));
+    let outcome = match evaluation {
+        Evaluation::Settled(outcome) => outcome,
+        Evaluation::Retry(error) if received_at + retry_max_age <= now() => {
             FanoutOutcome::Failed(format!("retry budget exhausted: {error}"))
         }
-        Evaluated::Retry(error) => {
+        Evaluation::Retry(error) => {
             // Leave the row leased; it returns when the lease ends.
             record_fanout(FanoutResult::Retry);
             tracing::warn!(%error, "ingress gateway fan-out deferred");
             return Ok(());
         }
     };
-    record_fanout(match &outcome {
-        FanoutOutcome::Fanned(messages) => {
+    let result = match &outcome {
+        FanoutOutcome::Fanned { messages, .. } => {
             FanoutResult::Fanned(u64::try_from(messages.len()).unwrap_or(u64::MAX))
         }
         FanoutOutcome::Failed(_) => FanoutResult::Failed,
-    });
-    store
-        .complete_fanout(integration_id, &delivery_id, outcome, now())
-        .await
+    };
+    match store
+        .complete_fanout(integration_id, &delivery_id, attempts, outcome, now())
+        .await?
+    {
+        FanoutCommit::Settled => record_fanout(result),
+        // The subscriptions changed under the evaluation; it runs again now.
+        FanoutCommit::Stale => record_fanout(FanoutResult::Retry),
+        FanoutCommit::Lost => {}
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -245,6 +273,18 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn only_a_parser_that_could_not_start_is_retried() {
+        assert!(matches!(
+            compile_failure(CompileError::Unavailable("no threads".to_owned())),
+            EvalError::Unavailable(_)
+        ));
+        assert!(matches!(
+            compile_failure(CompileError::Empty),
+            EvalError::Failed(_)
+        ));
+    }
+
     #[tokio::test]
     async fn deliveries_fan_out_to_matching_subscriptions_only() {
         let store = Arc::new(MemoryStore::default());
@@ -280,11 +320,13 @@ mod tests {
         )
         .await;
         let broken = subscribe(&store, integration_id, Some("payload.missing == 1"), None).await;
+        let unstorable =
+            subscribe(&store, integration_id, None, Some(r#""x" + payload.nul"#)).await;
         deliver(
             &store,
             integration_id,
             "d-1",
-            br#"{"action":"opened","number":7,"title":"Fix it"}"#,
+            br#"{"action":"opened","number":7,"title":"Fix it","nul":"\u0000"}"#,
         )
         .await;
         deliver(&store, integration_id, "d-2", b"not json").await;
@@ -318,6 +360,16 @@ mod tests {
         let failed = store.message(&key(broken)).unwrap();
         assert_eq!(failed.state, DeliveryState::Failed);
         assert!(failed.last_error.unwrap().contains("missing"));
+        let nul = store.message(&key(unstorable)).unwrap();
+        assert_eq!(
+            nul.state,
+            DeliveryState::Failed,
+            "only this subscription fails"
+        );
+        assert_eq!(
+            nul.last_error.as_deref(),
+            Some("message contains a NUL character")
+        );
 
         let bad = store.delivery(integration_id, "d-2").unwrap();
         assert_eq!(bad.state, DeliveryState::Failed);
