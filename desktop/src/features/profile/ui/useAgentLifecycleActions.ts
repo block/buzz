@@ -93,7 +93,11 @@ export function useAgentLifecycleActions({
         stopManagedAgent,
         onStopped: () => clearActiveTurnsForAgentOnStop(managedAgent.pubkey),
       });
-      toast.success(`Restarted ${managedAgent.name}.`);
+      toast.success(
+        managedAgent.backend.type === "provider"
+          ? `Deployment requested for ${managedAgent.name}.`
+          : `Restarted ${managedAgent.name}.`,
+      );
     } catch (error) {
       if (isRelayRemovedError(error)) return;
       toast.error(
