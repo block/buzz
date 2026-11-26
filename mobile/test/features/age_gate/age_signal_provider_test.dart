@@ -12,10 +12,16 @@ void main() {
         .setMockMethodCallHandler(ageSignalChannel, null);
   });
 
+  var purges = 0;
+  setUp(() => purges = 0);
+
   ProviderContainer enabledContainer({AgeSignalNotifier Function()? create}) {
     final container = ProviderContainer(
       overrides: [
         ageSignalProvider.overrideWith(create ?? AgeSignalNotifier.new),
+        ageRestrictedNotificationPurgerProvider.overrideWithValue(() async {
+          purges += 1;
+        }),
       ],
     );
     addTearDown(container.dispose);
@@ -52,12 +58,14 @@ void main() {
       final container = enabledContainer();
       expect(container.read(ageSignalProvider), AgeSignalState.allowed);
       await container.read(ageSignalProvider.notifier).request();
+      final restricted = upper >= 0 && upper < 18;
       expect(
         container.read(ageSignalProvider),
-        upper >= 0 && upper < 18
-            ? AgeSignalState.restricted
-            : AgeSignalState.allowed,
+        restricted ? AgeSignalState.restricted : AgeSignalState.allowed,
       );
+      // With no widget or frame at all: an answer that arrives in the
+      // background must stop wakes from posting at once.
+      expect(purges, restricted ? 1 : 0);
     });
   }
 

@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 import 'package:duo_kit/duo_kit.dart';
 
 import '../../shared/widgets/adaptive_conversation_pane.dart';
+import '../../shared/widgets/buzz_navigation_metrics.dart';
 import '../../shared/widgets/duo_workspace_scaffold.dart';
 import '../../shared/widgets/duo_toolbar.dart';
 import '../../shared/widgets/ios_navigation_metrics.dart';
@@ -168,7 +169,7 @@ class HomePage extends HookConsumerWidget {
             builder: (_, nativeControlsVisible) =>
                 defaultTargetPlatform == TargetPlatform.iOS &&
                     !nativeControlsVisible
-                ? const SizedBox(width: 44, height: 44)
+                ? const SizedBox.square(dimension: buzzNavigationActionSize)
                 : Stack(
                     alignment: Alignment.center,
                     children: [
@@ -177,9 +178,9 @@ class HomePage extends HookConsumerWidget {
                           ? IosGlassNavigationButton(
                               icon: IosGlassNavigationIcon.bell,
                               semanticLabel: inboxLabel,
-                              width: 44,
-                              height: 44,
-                              controlSize: 44,
+                              width: buzzNavigationActionSize,
+                              height: buzzNavigationActionSize,
+                              controlSize: buzzNavigationActionSize,
                               foregroundColor: context.colors.onSurface,
                               onPressed: openInbox,
                             )
@@ -262,14 +263,14 @@ class HomePage extends HookConsumerWidget {
                         ? '?'
                         : communityName.characters.first.toUpperCase(),
                     accessibilityLabel: 'Community menu',
-                    width: 44,
-                    height: 44,
+                    width: buzzNavigationActionSize,
+                    height: buzzNavigationActionSize,
                     plain: false,
                   )
                 : recordingFocus.value &&
                       defaultTargetPlatform == TargetPlatform.iOS
                 ? SizedBox.square(
-                    dimension: 44,
+                    dimension: buzzNavigationActionSize,
                     child: DecoratedBox(
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
@@ -346,18 +347,14 @@ class HomePage extends HookConsumerWidget {
         child: Builder(builder: defaultAgentBuilder),
       ),
       creationActions: [
-        (
-          label: 'New chat',
-          symbol: 'square.and.pencil',
-          onPressed: newChat.value,
-        ),
+        (label: 'New chat', symbol: 'message.circle', onPressed: newChat.value),
+        (label: 'New channel', symbol: 'number', onPressed: newChannel.value),
+        (label: 'New DM', symbol: 'person.circle', onPressed: newDm.value),
         (
           label: 'New workspace',
-          symbol: 'workspace',
+          symbol: 'folder',
           onPressed: newWorkspace.value,
         ),
-        (label: 'New DM', symbol: 'bubble.left', onPressed: newDm.value),
-        (label: 'New channel', symbol: 'number', onPressed: newChannel.value),
       ],
     );
     return DuoWorkspaceScaffold(
@@ -376,7 +373,11 @@ class HomePage extends HookConsumerWidget {
                         strip!.rect.center.dx,
                       ) -
                       strip.rect.center.dx -
-                      100,
+                      (256 -
+                              (isCompactDuoWindow(context)
+                                  ? duoCoverRailActionSize
+                                  : 56)) /
+                          2,
                   0,
                 ),
                 child: SafeArea(

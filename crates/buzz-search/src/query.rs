@@ -225,7 +225,33 @@ fn push_tsquery(
         }
     }
 }
-fn normalized_search_text(q: &str) -> Option<String> {
+/// The page a [`SearchQuery`] asks for, clamped the same way by every
+/// backend.
+pub(crate) struct PageBounds {
+    /// 1-indexed page, at most [`PAGE_MAX`].
+    pub(crate) page: u32,
+    /// Hits per page: `per_page` clamped to `1..=PER_PAGE_MAX`, or the
+    /// default when it is 0.
+    pub(crate) per_page: u32,
+    /// Hits before this page.
+    pub(crate) offset: i64,
+}
+
+pub(crate) fn page_bounds(query: &SearchQuery) -> PageBounds {
+    let per_page = if query.per_page == 0 {
+        PER_PAGE_DEFAULT
+    } else {
+        query.per_page.clamp(1, PER_PAGE_MAX)
+    };
+    let page = query.page.clamp(1, PAGE_MAX);
+    PageBounds {
+        page,
+        per_page,
+        offset: i64::from(page - 1) * i64::from(per_page),
+    }
+}
+
+pub(crate) fn normalized_search_text(q: &str) -> Option<String> {
     let trimmed = q.trim();
     if trimmed.is_empty() {
         return None;
@@ -275,14 +301,11 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
         });
     };
 
-    let per_page = query.per_page.clamp(1, PER_PAGE_MAX);
-    let per_page_actual = if query.per_page == 0 {
-        PER_PAGE_DEFAULT
-    } else {
-        per_page
-    };
-    let page = query.page.clamp(1, PAGE_MAX);
-    let offset = ((page - 1) as i64) * (per_page_actual as i64);
+    let PageBounds {
+        page,
+        per_page: per_page_actual,
+        offset,
+    } = page_bounds(query);
     // Profile typeahead uses broad prefix matching. For one- and two-character
     // queries, a busy community can have enough newer prefix matches to push a
     // short exact display name off the bounded first page. Keep the same result

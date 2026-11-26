@@ -34,6 +34,19 @@ void main() {
     return container;
   }
 
+  test('late delivery clears only the submitted draft', () async {
+    SharedPreferences.setMockInitialValues({});
+    final container = await containerWithPrefs();
+    final drafts = container.read(composeDraftsProvider.notifier);
+    void save(String text) => drafts.save(key: 'c', channelId: 'c', text: text);
+    save('submitted');
+    final firstDelivery = drafts.cleanupAfterSend('c');
+    save('next draft');
+    firstDelivery();
+    expect(drafts.textFor('c'), 'next draft');
+    drafts.cleanupAfterSend('c')();
+    expect(drafts.textFor('c'), isNull);
+  });
   test(
     'an invite-joined community keeps its drafts after origin canonicalization',
     () async {

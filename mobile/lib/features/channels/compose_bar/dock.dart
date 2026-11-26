@@ -6,11 +6,13 @@ const _keyboardUpBackdropHeight = 100.0;
 class _ComposerDockFrame extends HookWidget {
   final Animation<double> expansionAnimation;
   final bool forceFullWidth;
+  final bool hasDraft;
   final Widget child;
 
   const _ComposerDockFrame({
     required this.expansionAnimation,
     required this.forceFullWidth,
+    required this.hasDraft,
     required this.child,
   });
 
@@ -124,9 +126,11 @@ class _ComposerDockFrame extends HookWidget {
                     ),
                     child: FractionallySizedBox(
                       key: const ValueKey('composer-width-transition'),
-                      widthFactor:
-                          collapsedComposerWidthFactor +
-                          (1 - collapsedComposerWidthFactor) * widthProgress,
+                      widthFactor: hasDraft
+                          ? 1
+                          : collapsedComposerWidthFactor +
+                                (1 - collapsedComposerWidthFactor) *
+                                    widthProgress,
                       child: child,
                     ),
                   ),

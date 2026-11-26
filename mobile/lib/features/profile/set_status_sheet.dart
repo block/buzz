@@ -84,7 +84,7 @@ Future<void> _showNativeStatusEditor(
   const channel = MethodChannel('buzz/profile_text_editor');
   final container = ProviderScope.containerOf(context, listen: false);
   final notifier = container.read(userStatusProvider.notifier);
-  final sheetTheme = utilitySurfaceThemeData(Theme.of(context));
+  final sheetTheme = utilitySheetThemeData(Theme.of(context));
   final currentExpiration = currentStatus?.expirationDateTime;
   var draft = <String, dynamic>{
     'text': currentStatus?.text ?? '',

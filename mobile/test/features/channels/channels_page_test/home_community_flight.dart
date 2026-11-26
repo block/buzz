@@ -5,6 +5,7 @@ void _homeCommunityFlightTests(
     required List<Override> overrides,
     bool realHome,
     bool disableAnimations,
+    SharedPreferences? prefs,
   })
   buildTestable,
 ) {
@@ -35,10 +36,10 @@ void _homeCommunityFlightTests(
           final prefs = await SharedPreferences.getInstance();
           await tester.pumpWidget(
             buildTestable(
+              prefs: prefs,
               realHome: true,
               disableAnimations: reduced,
               overrides: [
-                savedPrefsProvider.overrideWithValue(prefs),
                 channelsProvider.overrideWith(
                   () => _FakeNotifier(
                     [],

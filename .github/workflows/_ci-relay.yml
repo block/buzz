@@ -206,7 +206,18 @@ jobs:
       PGSCHEMA_PLAN_PORT: "5432"
       PGSCHEMA_PLAN_USER: buzz
       PGSCHEMA_PLAN_PASSWORD: buzz_dev
+      BUZZ_TEST_OPENSEARCH_URL: http://localhost:9200
     steps:
+      # Started without waiting, so its boot overlaps the setup steps below.
+      # Not a service container: those block the job until they are healthy.
+      - name: Start OpenSearch
+        run: |
+          docker run --detach --name opensearch --publish 9200:9200 \
+            --env discovery.type=single-node \
+            --env DISABLE_SECURITY_PLUGIN=true \
+            --env DISABLE_INSTALL_DEMO_CONFIG=true \
+            --env OPENSEARCH_JAVA_OPTS="-Xms512m -Xmx512m" \
+            opensearchproject/opensearch:2.19.3@sha256:e96cc6ae1500a073d973c0906f30f7cf4d9c461f32f855f9242a2da933660cdd
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       # pgschema has no --version; --help exits 0 once Hermit has fetched it.
@@ -239,6 +250,16 @@ jobs:
           path: target/ci
       - name: Restore relay executable permission
         run: chmod +x ./target/ci/buzz-relay
+      - name: Wait for OpenSearch
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -fsS "$BUZZ_TEST_OPENSEARCH_URL/_cluster/health?wait_for_status=yellow&timeout=1s" >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs opensearch | tail -50
+          exit 1
       - name: PostgreSQL-backed tests
         env:
           BUZZ_POSTGRES_ADMIN_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/postgres

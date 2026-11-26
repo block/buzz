@@ -8,7 +8,7 @@ import 'package:buzz/shared/diagnostics/diagnostic_member_binding.dart';
 import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/diagnostics/diagnostic_startup.dart';
 import 'package:buzz/shared/diagnostics/sentry_diagnostic_reporter.dart';
-import 'package:buzz/shared/relay/relay_provider.dart';
+import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -16,6 +16,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 // ignore: depend_on_referenced_packages, implementation_imports
 import 'package:sentry/src/deduplication/deduplication_event_processor.dart';
+// ignore: depend_on_referenced_packages, implementation_imports
+import 'package:sentry/src/exception/dart_exception_type_identifier.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 // The SDK's own processors and integrations, so tests see what it really
 // sends rather than hand-built events.
@@ -195,10 +197,12 @@ void main() {
       transport = _MemoryTransport();
       options = SentryFlutterOptions();
       configureDiagnostics(options, 'https://key@example.org/1');
-      // The processors Sentry.init and SentryFlutter.init install.
+      // The processors and type identifier Sentry.init and SentryFlutter.init
+      // install.
       options
         ..transport = transport
         ..sendClientReports = false
+        ..prependExceptionTypeIdentifier(DartExceptionTypeIdentifier())
         ..addEventProcessor(DeduplicationEventProcessor(options))
         ..addEventProcessor(FlutterExceptionEventProcessor())
         ..addEventProcessor(FlutterEnricherEventProcessor(options))
@@ -212,7 +216,12 @@ void main() {
     final rows = <(String, Object, String)>[
       ('a parse failure', const FormatException('private-marker'), 'Format'),
       ('a bad argument', ArgumentError.value('private-marker'), 'Argument'),
-      ('a server response', StateError('body: private-marker'), 'StateError'),
+      (
+        'a Flutter framework error',
+        FlutterError('private-marker'),
+        'AssertionError',
+      ),
+      ('an ordinary exception', Exception('private-marker'), 'Exception'),
       (
         'a platform failure',
         PlatformException(
@@ -232,6 +241,152 @@ void main() {
         expect(exception['type'], contains(type));
         expect(exception['value'], DiagnosticFilter.removedText);
         expect(exception['stacktrace'], isNotNull);
+      });
+    }
+
+    final kept = <(String, Object, String, String)>[
+      (
+        'a bad state',
+        StateError('ref used after dispose\nprivate-marker'),
+        'StateError',
+        'Bad state: ref used after dispose',
+      ),
+      (
+        'a bad state split by a carriage return',
+        StateError('ref used after dispose\rprivate-marker'),
+        'StateError',
+        'Bad state: ref used after dispose',
+      ),
+      (
+        'a failed assertion',
+        AssertionError('list is sorted'),
+        'AssertionError',
+        'list is sorted',
+      ),
+      (
+        'an unsupported call',
+        UnsupportedError('no resize'),
+        'Unsupported',
+        'no resize',
+      ),
+      (
+        'an unimplemented call',
+        UnimplementedError('no export'),
+        'Unimpl',
+        'no export',
+      ),
+      (
+        'a bad state naming nullable types',
+        StateError("wanted List<String?> or (int?, String?), got 'int?'"),
+        'StateError',
+        "wanted List<String?> or (int?, String?), got 'int?'",
+      ),
+      (
+        'a bad state naming providers',
+        StateError(
+          'The provider `NotifierProvider<Foo, Bar>#1a2b3` depends on '
+          '`Provider<Baz?>#c0ffe`, which may be scoped.',
+        ),
+        'StateError',
+        'The provider `NotifierProvider<Foo, Bar>` depends on '
+            '`Provider<Baz?>`, which may be scoped.',
+      ),
+      (
+        'a render box that was not laid out',
+        StateError('RenderBox was not laid out: RenderFlex#1a2b3'),
+        'StateError',
+        'RenderBox was not laid out: RenderFlex',
+      ),
+      (
+        'a bad state quoting a null-aware condition',
+        StateError("'(link ?? false) || linkUrl == null': is it null? no."),
+        'StateError',
+        "'(link ?? false) || linkUrl == null': is it null? no.",
+      ),
+      (
+        'a bad state naming a long identifier',
+        StateError('_RecordingPublishRelaySessionNotifier was disposed'),
+        'StateError',
+        '_RecordingPublishRelaySessionNotifier was disposed',
+      ),
+      ('a failed cast', _failedCast(), 'TypeError', 'is not a subtype of'),
+      // The accepted risk (ADR 0007): a short value any code interpolates is
+      // sent as written when no pattern recognizes it.
+      (
+        'a bad state holding a short value',
+        StateError('no session for hunter2'),
+        'StateError',
+        'no session for hunter2',
+      ),
+    ];
+    for (final (name, error, type, text) in kept) {
+      test('keeps the first line of the text of $name', () async {
+        await hub.captureException(error, stackTrace: StackTrace.current);
+        final sent = transport.events.single;
+
+        final exception = (sent['exception']['values'] as List).last as Map;
+        expect(exception['type'], contains(type));
+        expect(exception['value'], contains(text));
+        expect(exception['value'], isNot(contains('\n')));
+        expect(exception['value'], isNot(contains('\r')));
+        expect(jsonEncode(sent), isNot(contains('private-marker')));
+      });
+    }
+
+    final replaced = <(String, String)>[
+      ('a URL', 'open https://e.org/f?token=private-marker'),
+      ('a URL with a quote', "open https://e.org/O'Brien?private-marker#x"),
+      ('a URL inside a word', 'open id_https://e.org/f?private-marker'),
+      ('a mail link', 'open mailto:a@e.org?subject=private-marker'),
+      ('a fragment', 'open page#private-marker'),
+      (
+        'a mail link whose query starts with a quote',
+        "open mailto:a@e.org?'subject=private-marker",
+      ),
+      (
+        'a mail link whose query starts with a comma',
+        'open mailto:a@e.org?,tag=private-marker',
+      ),
+      (
+        'a phone link whose query starts with a bracket',
+        'open tel:+1555?>private-marker',
+      ),
+      (
+        'a path whose fragment starts with a quote',
+        "open /settings#'private-marker",
+      ),
+      ('a word whose query starts with a quote', "open page?'private-marker"),
+      (
+        'a fragment that starts like an identity hash',
+        'open /settings#abcde-private-marker',
+      ),
+      (
+        'a provider with an argument',
+        'The provider FutureProvider<int>#1a2b3(private-marker) was disposed',
+      ),
+      (
+        'a private key',
+        'Unexpected sign-in failure: nsec1${'q' * 52}7x private-marker',
+      ),
+      ('a hex key', 'no member ${'ab12' * 16} private-marker'),
+      (
+        'a token',
+        'bad token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0 private-marker',
+      ),
+      ('a long line', 'state ${'x' * 200} private-marker'),
+      ('a very long line', 'state ${'x' * 500} private-marker'),
+    ];
+    for (final (name, text) in replaced) {
+      test('replaces kept text that has $name', () async {
+        await hub.captureException(
+          StateError(text),
+          stackTrace: StackTrace.current,
+        );
+        final sent = transport.events.single;
+
+        final exception = (sent['exception']['values'] as List).last as Map;
+        expect(exception['value'], DiagnosticFilter.removedText);
+        expect(jsonEncode(sent), isNot(contains('private-marker')));
       });
     }
 
@@ -316,6 +471,89 @@ void main() {
       await transport.count(2);
 
       expect(transport.events, hasLength(2));
+    });
+
+    group('an error that escapes from a relay call', () {
+      Future<Map<String, dynamic>> escaped(Object error) async {
+        // As an uncaught asynchronous error reaches the SDK: straight to the
+        // hub, not through the app's reporter.
+        await hub.captureException(error, stackTrace: StackTrace.current);
+        return transport.events.single;
+      }
+
+      test(
+        'is tagged with the call and the reason class, not the text',
+        () async {
+          final sent = await escaped(
+            const RelayEventRejectedException('rate-limited: private-marker'),
+          );
+
+          expect(sent['tags']['relay.call'], 'publish');
+          expect(sent['tags']['relay.reason'], 'rate-limited');
+          expect(jsonEncode(sent), isNot(contains('private-marker')));
+          final exception = (sent['exception']['values'] as List).last as Map;
+          expect(exception['type'], 'RelayEventRejectedException');
+          expect(exception['value'], DiagnosticFilter.removedText);
+        },
+      );
+
+      test('is grouped by call and reason on top of its stack', () async {
+        final sent = await escaped(
+          RelayClosedException(RelayCall.history, 'error: private-marker'),
+        );
+
+        expect(sent['tags']['relay.call'], 'history');
+        expect(sent['tags']['relay.reason'], 'error');
+        expect(sent['fingerprint'], [
+          '{{ default }}',
+          'relay.call:history',
+          'relay.reason:error',
+        ]);
+      });
+
+      test('names a timeout as one', () async {
+        final sent = await escaped(
+          RelayTimeoutException(RelayCall.query, 'private-marker'),
+        );
+
+        expect(sent['tags']['relay.call'], 'query');
+        expect(sent['tags']['relay.reason'], 'timeout');
+        expect(jsonEncode(sent), isNot(contains('private-marker')));
+      });
+
+      test('with an unknown prefix has the reason other', () async {
+        final sent = await escaped(
+          const RelayEventRejectedException('teapot: private-marker'),
+        );
+
+        expect(sent['tags']['relay.reason'], 'other');
+        expect(jsonEncode(sent), isNot(contains('private-marker')));
+      });
+
+      test('is tagged when reported through the reporter too', () async {
+        SentryDiagnosticReporter(hub: hub).reportError(
+          const RelayEventRejectedException('invalid: private-marker'),
+          StackTrace.current,
+          operation: DiagnosticOperation.relayRejection,
+        );
+        await transport.first();
+
+        final sent = transport.events.single;
+        expect(sent['tags']['operation'], 'relayRejection');
+        expect(sent['tags']['relay.call'], 'publish');
+        expect(sent['tags']['relay.reason'], 'invalid');
+      });
+
+      test(
+        'is the only kind of error that gets the tags or the grouping',
+        () async {
+          final sent = await escaped(StateError('private-marker'));
+
+          expect(sent['tags'], isNot(contains('relay.call')));
+          expect(sent['tags'], isNot(contains('relay.reason')));
+          expect(sent, isNot(contains('fingerprint')));
+        },
+      );
     });
 
     testWidgets('sends only the allowed contexts', (tester) async {
@@ -554,6 +792,15 @@ class _ReleaseChecker extends RuntimeChecker {
   bool isReleaseMode() => true;
   @override
   bool isProfileMode() => false;
+}
+
+Object _failedCast() {
+  try {
+    // ignore: unnecessary_cast
+    return <Object>[1] as List<String>;
+  } on TypeError catch (error) {
+    return error;
+  }
 }
 
 class _MemoryTransport implements Transport {

@@ -23,7 +23,7 @@ Future<void> showTextEditor({
   bool Function(Object error)? shouldRetryOnError,
 }) async {
   if (defaultTargetPlatform == TargetPlatform.iOS) {
-    final sheetTheme = utilitySurfaceThemeData(Theme.of(context));
+    final sheetTheme = utilitySheetThemeData(Theme.of(context));
     try {
       await IosTextEditor.presentUntilSaved(
         title: title,

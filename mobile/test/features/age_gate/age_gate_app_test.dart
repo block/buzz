@@ -290,15 +290,21 @@ void main() {
       await tester.pump();
       expect(snapshotRestorations, 2);
     },
+    // iOS restores from the push bootstrap, retrying a failure.
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
   );
 
   for (final outcome in ['minor', 'adult', 'error', 'malformed', 'timeout']) {
     testWidgets('normal app and push start before native $outcome result', (
       tester,
     ) async {
+      // On Android only a check that finishes allowed releases the native
+      // restriction, which a live process may still hold from an earlier
+      // engine; the first, still-pending build releases nothing.
       final response = Completer<Object?>();
       var requests = 0;
       var restrictions = 0;
+      var restores = 0;
       final relaySession = _CountingRelaySessionNotifier();
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(ageSignalChannel, (_) {
@@ -317,7 +323,7 @@ void main() {
                   AgeSignalNotifier(requestTimeout: const Duration(seconds: 1)),
             ),
             ageAllowedNotificationRestorerProvider.overrideWithValue(
-              () async {},
+              () async => restores++,
             ),
             ageRestrictedNotificationPurgerProvider.overrideWithValue(() async {
               restrictions++;
@@ -332,6 +338,7 @@ void main() {
       expect(find.byType(BuzzPushBootstrap), findsOneWidget);
       expect(relaySession.builds, 1);
       expect(requests, 1);
+      expect(restores, 0);
 
       if (outcome == 'timeout') {
         await tester.pump(const Duration(seconds: 2));
@@ -350,6 +357,7 @@ void main() {
       await tester.pump();
       final restricted = outcome == 'minor';
       expect(restrictions, restricted ? 1 : 0);
+      expect(restores, restricted ? 0 : 1);
       expect(
         find.byType(AgeRestrictionPage),
         restricted ? findsOneWidget : findsNothing,
@@ -361,7 +369,7 @@ void main() {
       );
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
-    });
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
   }
 
   testWidgets(
@@ -392,31 +400,68 @@ void main() {
 
   testWidgets('retries a failed restricted notification purge', (tester) async {
     var purges = 0;
+    final firstPurge = Completer<void>();
+    final container = ProviderContainer(
+      overrides: [
+        ageSignalProvider.overrideWith(
+          () => AgeSignalNotifier(
+            requestSignal: () async => {'status': 'signal', 'ageUpper': 17},
+          ),
+        ),
+        communityListProvider.overrideWith(
+          () => _UnavailableCommunityListNotifier(),
+        ),
+        ageAllowedNotificationRestorerProvider.overrideWithValue(() async {}),
+        ageRestrictedNotificationPurgerProvider.overrideWithValue(() {
+          purges += 1;
+          return switch (purges) {
+            1 => firstPurge.future,
+            2 => Future.error(
+              StateError('injected notification purge failure'),
+            ),
+            _ => Future.value(),
+          };
+        }),
+        ageRestrictedNotificationMaintenanceScheduleProvider.overrideWithValue(
+          (_) => () {},
+        ),
+        ageSignalPushSnapshotRetryWaitProvider.overrideWithValue((_) async {}),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(ageSignalProvider.notifier).request();
+    expect(container.read(ageSignalProvider), AgeSignalState.restricted);
 
     await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          ageSignalProvider.overrideWith(() => _BlockingAgeSignalNotifier()),
-          communityListProvider.overrideWith(
-            () => _UnavailableCommunityListNotifier(),
-          ),
-          ageRestrictedNotificationPurgerProvider.overrideWithValue(() async {
-            purges += 1;
-            if (purges == 1) {
-              throw StateError('injected notification purge failure');
-            }
-          }),
-          ageSignalPushSnapshotRetryWaitProvider.overrideWithValue(
-            (_) async {},
-          ),
-        ],
+      UncontrolledProviderScope(
+        container: container,
         child: const AgeSignalPushBootstrap(child: SizedBox()),
       ),
     );
     await tester.pump();
+    expect(purges, 1);
+
+    // A resume while the confirmed purge is still running retires the effect
+    // waiting on it. The new effect purges, fails once and retries.
+    for (final state in [
+      AppLifecycleState.inactive,
+      AppLifecycleState.hidden,
+      AppLifecycleState.paused,
+      AppLifecycleState.hidden,
+      AppLifecycleState.inactive,
+      AppLifecycleState.resumed,
+    ]) {
+      tester.binding.handleAppLifecycleStateChanged(state);
+    }
+    await tester.pump();
+    await tester.pump();
+    expect(purges, 3);
+
+    firstPurge.completeError(StateError('injected notification purge failure'));
+    await tester.pump();
     await tester.pump();
 
-    expect(purges, 2);
+    expect(purges, 3);
   });
 
   testWidgets(

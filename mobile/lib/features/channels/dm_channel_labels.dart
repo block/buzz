@@ -36,7 +36,9 @@ IdentityNames dmParticipantNames(Channel channel, IdentityNameSources names) =>
     );
 
 /// The DM's display label. With [names], participant labels follow the
-/// contextual identity-name policy, so namesakes stay distinguishable.
+/// contextual identity-name policy, so namesakes stay distinguishable, and
+/// agents are left out unless no other person is in the DM. "+N more"
+/// counts people only; member counts and lists still include agents.
 String resolveDmChannelDisplayLabel(
   Channel channel, {
   String? currentPubkey,
@@ -62,11 +64,21 @@ String resolveDmChannelDisplayLabel(
       ),
   ];
 
-  final displayParticipants = normalizedCurrent == null
+  final others = normalizedCurrent == null
       ? participants
       : participants
             .where((participant) => participant.pubkey != normalizedCurrent)
             .toList();
+  // The name lists people, never agents, unless no other person is in it.
+  // A profile not loaded yet counts as a person until it says otherwise.
+  final people = others
+      .where(
+        (participant) =>
+            participant.pubkey == null ||
+            participantNames?.isAgent(participant.pubkey!) != true,
+      )
+      .toList();
+  final displayParticipants = people.isNotEmpty ? people : others;
   final labels = <String>{
     for (final participant
         in displayParticipants.isNotEmpty ? displayParticipants : participants)

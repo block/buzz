@@ -1,8 +1,12 @@
+export 'messages_display.dart';
+import 'messages_display.dart';
 import '../channel_sort/channel_sort_provider.dart';
 import '../channel_sections/section_reorder_sheet.dart';
 import '../../../shared/widgets/app_list.dart';
 import '../channel_sections/channel_sections_provider.dart';
 import 'package:flutter/material.dart';
+import 'package:duo_kit/duo_kit.dart';
+import '../../../shared/widgets/duo_toolbar.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../../shared/theme/theme.dart';
@@ -20,12 +24,55 @@ import '../channel_filter/channel_filter_provider.dart';
 import '../channel_filter/channel_filter_store.dart';
 import '../channel_sort/channel_sort_storage.dart';
 
+Future<void> showMessagesDisplayOptions(BuildContext context) async {
+  await showSectionViewSheet(context, title: 'Display Options');
+}
+
+class MessagesSectionOptions extends InheritedWidget {
+  const MessagesSectionOptions({super.key, required super.child});
+
+  static double messagesGutter(BuildContext context) {
+    if (defaultTargetPlatform != TargetPlatform.iOS) return Grid.xs;
+    final hasStrip =
+        DuoToolbarScope.maybeStripOf(context) != null ||
+        FoldGeometry.of(context).strip != null;
+    return !hasStrip && isCompactDuoWindow(context) ? Grid.gutter : Grid.xs;
+  }
+
+  static double leadingInset(BuildContext context) =>
+      active(context) ? messagesGutter(context) : Grid.gutter;
+
+  static bool active(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<MessagesSectionOptions>() !=
+      null;
+  @override
+  bool updateShouldNotify(MessagesSectionOptions oldWidget) => false;
+}
+
+const showMessagesLayoutBounds = bool.fromEnvironment(
+  'BUZZ_MESSAGES_LAYOUT_BOUNDS',
+);
+
+Widget markMessagesRow(BuildContext context, Widget child) {
+  if (!showMessagesLayoutBounds || !MessagesSectionOptions.active(context)) {
+    return child;
+  }
+  return DecoratedBox(
+    position: DecorationPosition.foreground,
+    decoration: BoxDecoration(
+      color: const Color(0x0FFF0000),
+      border: Border.all(color: const Color(0xFFD74A4A)),
+    ),
+    child: child,
+  );
+}
+
 Future<String?> showSectionViewSheet(
   BuildContext context, {
   required String title,
-  required String group,
-  required ChannelSortMode sortMode,
-  required ValueChanged<ChannelSortMode> onSort,
+  String? group,
+  ChannelSortMode? sortMode,
+  ValueChanged<ChannelSortMode>? onSort,
   bool custom = false,
 }) async {
   final orderScope = context
@@ -37,8 +84,9 @@ Future<String?> showSectionViewSheet(
       ? null
       : BottomUpPageRoute.retainControlsForSheet(presentingRoute);
   ModalRoute<dynamic>? sheetRoute;
+  String? action;
   try {
-    return await showBuzzModalBottomSheet<String>(
+    action = await showBuzzModalBottomSheet<String>(
       context: context,
       nativeIosBarrier: presentingRoute != null,
       showCloseButton: false,
@@ -47,14 +95,11 @@ Future<String?> showSectionViewSheet(
       isDismissible: true,
       enableDrag: false,
       builder: (sheetContext) {
-        if (release != null) sheetRoute = ModalRoute.of(sheetContext);
+        sheetRoute = ModalRoute.of(sheetContext);
         return _SectionViewSheet(
-          onReorder: orderScope != null
-              ? () {
-                  if (!orderScope.mounted) return;
-                  (orderScope.widget as SectionOrderScope).show(sheetContext);
-                }
-              : null,
+          centralized:
+              group == null || context.widget is MessagesSectionOptions,
+          canReorder: orderScope != null,
           title: title,
           group: group,
           initialSort: sortMode,
@@ -63,25 +108,36 @@ Future<String?> showSectionViewSheet(
         );
       },
     );
-  } finally {
-    // A pop resolves before the scrim finishes fading.
-    if (release != null) {
-      await sheetRoute?.completed;
-      release();
+    // Keep the same Home header mounted through both reverse transitions.
+    final opensEditor = action == 'reorder' || action == 'editSections';
+    if (release != null || opensEditor) await sheetRoute?.completed;
+    if (opensEditor) {
+      if (orderScope != null && orderScope.mounted) {
+        await (orderScope.widget as SectionOrderScope).show(
+          orderScope,
+          editSections: action == 'editSections',
+        );
+      }
+      return null;
     }
+    return action;
+  } finally {
+    release?.call();
   }
 }
 
 class _SectionViewSheet extends HookConsumerWidget {
-  final VoidCallback? onReorder;
+  final bool centralized;
+  final bool canReorder;
   final String title;
-  final String group;
-  final ChannelSortMode initialSort;
-  final ValueChanged<ChannelSortMode> onSort;
+  final String? group;
+  final ChannelSortMode? initialSort;
+  final ValueChanged<ChannelSortMode>? onSort;
   final bool custom;
 
   const _SectionViewSheet({
-    required this.onReorder,
+    required this.centralized,
+    required this.canReorder,
     required this.title,
     required this.group,
     required this.initialSort,
@@ -91,9 +147,20 @@ class _SectionViewSheet extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final manager = ref.watch(
-      group.startsWith('solo:') ? soloFilterProvider : channelFilterProvider,
-    );
+    final group = this.group;
+    final global = group == null;
+    final display = global
+        ? ref.watch(messagesDisplayProvider)
+        : const MessagesDisplay();
+    final scope = global ? ref.watch(mobileSectionOrderKeyProvider) : null;
+    final initialScope = useRef(scope);
+    final manager = global
+        ? null
+        : ref.watch(
+            group.startsWith('solo:')
+                ? soloFilterProvider
+                : channelFilterProvider,
+          );
     useListenable(manager);
     // Watched, not captured: a sheet opened before desktop's unified records
     // arrive turns read-only when they do.
@@ -104,19 +171,30 @@ class _SectionViewSheet extends HookConsumerWidget {
       channelSectionsProvider.select((state) => state.editable),
     );
     final originalManager = useRef(manager);
-    final sort = useState(initialSort);
+    final sort = useState(global ? display.sort : initialSort);
     final mode = useState(
-      manager?.store.modeFor(group) ?? ChannelFilterMode.all,
+      global
+          ? display.mode
+          : manager?.store.modeFor(group) ?? ChannelFilterMode.all,
+    );
+    final count = useState(
+      global
+          ? display.count
+          : manager?.store.countFor(group) ?? sectionCounts.first,
     );
     final days = useState(
-      (manager?.store.windowFor(group) ?? defaultActiveWindowSeconds) ~/ 86400,
+      global
+          ? display.days
+          : (manager?.store.windowFor(group) ?? defaultActiveWindowSeconds) ~/
+                86400,
     );
     final filterDirty = useState(false);
     final saving = useState(false);
     final failed = useState(false);
     // A confirmed initial load may arrive while the sheet is open. Preserve edits.
     useEffect(() {
-      if (!filterDirty.value && !saving.value) {
+      if (!global && !filterDirty.value && !saving.value) {
+        count.value = manager?.store.countFor(group) ?? sectionCounts.first;
         mode.value = manager?.store.modeFor(group) ?? ChannelFilterMode.all;
         days.value =
             (manager?.store.windowFor(group) ?? defaultActiveWindowSeconds) ~/
@@ -124,7 +202,8 @@ class _SectionViewSheet extends HookConsumerWidget {
       }
       return null;
     }, [manager, manager?.ready, manager?.store]);
-    if (!identical(originalManager.value, manager)) {
+    if (scope != initialScope.value ||
+        !identical(originalManager.value, manager)) {
       return SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(Grid.xs),
@@ -144,37 +223,59 @@ class _SectionViewSheet extends HookConsumerWidget {
       );
     }
     final writable =
-        manager?.ready == true && manager?.busy == false && !saving.value;
+        global ||
+        (manager?.ready == true && manager?.busy == false && !saving.value);
     void close([String? action]) {
       if (!saving.value) Navigator.of(context).pop(action);
     }
 
     bool filterChanged() =>
+        !global &&
         filterDirty.value &&
         (mode.value !=
                 (manager?.store.modeFor(group) ?? ChannelFilterMode.all) ||
+            (mode.value != ChannelFilterMode.active &&
+                count.value != manager?.store.countFor(group)) ||
             (mode.value == ChannelFilterMode.active &&
-                days.value * 86400 != manager?.store.windowFor(group)));
+                days.value! * 86400 != manager?.store.windowFor(group)));
 
-    Future<void> apply() async {
+    Future<void> apply([String? nextAction]) async {
       saving.value = true;
       failed.value = false;
       try {
-        if (filterChanged()) {
+        if (global) {
+          await ref
+              .read(messagesDisplayProvider.notifier)
+              .update(
+                MessagesDisplay(
+                  sort: sort.value,
+                  mode: mode.value,
+                  count: count.value,
+                  days: days.value,
+                ),
+              );
+        } else if (filterChanged()) {
           if (manager == null || !manager.ready || manager.busy) {
             throw StateError('Preferences are read-only');
           }
           await manager.save(
             group,
-            mode.value,
+            mode.value!,
+            previewCount:
+                mode.value != ChannelFilterMode.active &&
+                    count.value != manager.store.countFor(group)
+                ? count.value
+                : null,
             windowSeconds: mode.value == ChannelFilterMode.active
-                ? days.value * 86400
+                ? days.value! * 86400
                 : null,
           );
         }
         if (!context.mounted) return;
-        if (sortEditable && sort.value != initialSort) onSort(sort.value);
-        Navigator.of(context).pop();
+        if (!global && sortEditable && sort.value != initialSort) {
+          onSort?.call(sort.value!);
+        }
+        Navigator.of(context).pop(nextAction);
       } catch (_) {
         if (context.mounted) failed.value = true;
       } finally {
@@ -185,16 +286,18 @@ class _SectionViewSheet extends HookConsumerWidget {
     Widget choices<T>(
       String label,
       Map<T, String> values,
-      T selected,
-      ValueChanged<T>? change,
-    ) => BuzzSettingMenu<T>(
-      controlKey: ValueKey('section-menu-$label'),
+      T? selected,
+      ValueChanged<T?>? change,
+    ) => BuzzSettingMenu<T?>(
+      controlKey: ValueKey(
+        global ? 'messages-display-$label' : 'section-menu-$label',
+      ),
       grouped: true,
       trailingIcon: Icons.unfold_more,
       enabled: change != null,
       label: label,
       value: selected,
-      valueLabel: values[selected]!,
+      valueLabel: values[selected] ?? 'Section settings',
       onSelected: (value) => change?.call(value),
       options: [
         for (final entry in values.entries)
@@ -270,14 +373,14 @@ class _SectionViewSheet extends HookConsumerWidget {
                                   ChannelSortMode.recent: 'Recent',
                                 },
                                 sort.value,
-                                saving.value || !sortEditable
+                                saving.value || (!global && !sortEditable)
                                     ? null
                                     : (value) => sort.value = value,
                               ),
                               choices<ChannelFilterMode>(
-                                'Show',
+                                'View',
                                 {
-                                  ChannelFilterMode.all: 'All',
+                                  ChannelFilterMode.all: 'All chats',
                                   ChannelFilterMode.unreads: 'Unreads',
                                   ChannelFilterMode.active: 'Active',
                                 },
@@ -289,6 +392,21 @@ class _SectionViewSheet extends HookConsumerWidget {
                                       }
                                     : null,
                               ),
+                              if (mode.value != ChannelFilterMode.active)
+                                choices<int>(
+                                  'Show',
+                                  {
+                                    for (final n in sectionCounts)
+                                      n: n == 0 ? 'All' : '$n',
+                                  },
+                                  count.value,
+                                  writable
+                                      ? (value) {
+                                          filterDirty.value = true;
+                                          count.value = value;
+                                        }
+                                      : null,
+                                ),
                               if (mode.value == ChannelFilterMode.active)
                                 choices<int>(
                                   'Active in the past',
@@ -298,7 +416,7 @@ class _SectionViewSheet extends HookConsumerWidget {
                                       7,
                                       30,
                                       90,
-                                      days.value,
+                                      if (days.value != null) days.value!,
                                     })
                                       day: '$day ${day == 1 ? 'day' : 'days'}',
                                   },
@@ -313,11 +431,25 @@ class _SectionViewSheet extends HookConsumerWidget {
                             ],
                           ),
                         ),
-                        if (manager?.ready != true)
+                        if (global && canReorder)
+                          AppListCard(
+                            children: [
+                              AppListRow(
+                                title: 'Edit Sections',
+                                icon: BuzzIcons.pencil,
+                                onTap: saving.value
+                                    ? null
+                                    : () => apply('editSections'),
+                              ),
+                            ],
+                          ),
+                        if (!global && manager?.ready != true)
                           const Text(
                             'Filters are read-only until preferences load from the community.',
                           ),
-                        if (manager?.ready != true && manager?.error != null)
+                        if (!global &&
+                            manager?.ready != true &&
+                            manager?.error != null)
                           TextButton(
                             onPressed: manager?.busy == true
                                 ? null
@@ -327,7 +459,8 @@ class _SectionViewSheet extends HookConsumerWidget {
                                   },
                             child: const Text('Retry loading preferences'),
                           ),
-                        if (custom && layoutEditable || onReorder != null)
+                        if (!centralized &&
+                            (custom && layoutEditable || canReorder))
                           AppListCard(
                             children: [
                               if (custom && layoutEditable)
@@ -338,11 +471,13 @@ class _SectionViewSheet extends HookConsumerWidget {
                                       ? null
                                       : () => close('rename'),
                                 ),
-                              if (onReorder != null)
+                              if (canReorder)
                                 AppListRow(
                                   title: 'Reorder sections',
                                   icon: BuzzIcons.arrowUpDown,
-                                  onTap: saving.value ? null : onReorder,
+                                  onTap: saving.value
+                                      ? null
+                                      : () => close('reorder'),
                                 ),
                               if (custom && layoutEditable)
                                 AppListRow(

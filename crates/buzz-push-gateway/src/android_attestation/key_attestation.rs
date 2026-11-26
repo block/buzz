@@ -61,6 +61,11 @@ pub struct KeyAttestationPolicy {
 #[error("invalid Android attestation roots")]
 pub struct RootsError;
 
+/// Rejection reasons that say the gateway's revocation list, not the chain,
+/// is the problem.
+const LIST_UNAVAILABLE: &str = "revocation_list_unavailable";
+const LIST_STALE: &str = "revocation_list_stale";
+
 /// Verifies Android Key Attestation chains offline against pinned roots and
 /// the in-memory revocation list.
 pub struct KeyAttestationVerifier {
@@ -146,8 +151,8 @@ impl KeyAttestationVerifier {
         self.revocations
             .check(&serials, now)
             .map_err(|failure| match failure {
-                super::revocation::RevocationFailure::Unavailable => "revocation_list_unavailable",
-                super::revocation::RevocationFailure::Stale => "revocation_list_stale",
+                super::revocation::RevocationFailure::Unavailable => LIST_UNAVAILABLE,
+                super::revocation::RevocationFailure::Stale => LIST_STALE,
                 super::revocation::RevocationFailure::Listed => "certificate_revoked",
             })?;
         let description = attestation_extension(&certs)?;
@@ -330,7 +335,12 @@ impl AndroidAttestationVerifier for KeyAttestationVerifier {
                 reason,
                 "Android Key Attestation rejected"
             );
-            AndroidAttestationError::Invalid
+            match reason {
+                // The gateway's own list is missing or stale: a verdict on
+                // this chain must wait for the next refresh.
+                LIST_UNAVAILABLE | LIST_STALE => AndroidAttestationError::Unavailable,
+                _ => AndroidAttestationError::Invalid,
+            }
         })
     }
 }

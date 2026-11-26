@@ -25,8 +25,8 @@
 //! | Series | Labels | One increment per |
 //! |---|---|---|
 //! | `buzz_nip_fi_shadow_total` | `route` (`http`, `ws`, `audio`), `stage`, `outcome`, `community` | NIP-FI decision enforce would make: one per HTTP request that reaches admission, one per WebSocket upgrade enforce would refuse, and one per observed session: at the AUTH where enforce would admit or deny it, or `deadline` when its deadline passes first. A request or upgrade whose community binding goes stale before enforce's final re-check also records `deadline`. An agent assertion enforce would refuse for its token owner, banned or not the agent's stored owner, records `owner` |
-//! | `buzz_nip_fi_enforce_total` | as `buzz_nip_fi_shadow_total` | NIP-FI decision enforce made, the same unit: one per HTTP request admitted or denied (an agent token's at its owner step), one per refused upgrade, and one verdict per session: its admission, its NIP-FI refusal (pairing, deny set, `owner`, `deadline`), or none when refused for a non-NIP-FI reason. A denial's line is `nip-fi enforce deny`, written at once; an admit writes none |
-//! | `buzz_nip_fi_enforce_session_end_total` | as `buzz_nip_fi_shadow_session_end_total` | admitted enforce session ended once, `expired` by its deadline or `revoked` by a disconnect (local or cross-pod, however often delivered). Its line is `nip-fi enforce session end`, with the admitted key |
+//! | `buzz_nip_fi_enforce_total` | as `buzz_nip_fi_shadow_total` | NIP-FI decision enforce made, the same unit: one per HTTP request admitted or denied (an agent token's at its owner step), one per refused upgrade, and one verdict per session: its admission, its NIP-FI refusal (pairing, deny set, `owner`, `deadline`), or none when refused for a non-NIP-FI reason. A denial's line is `nip-fi enforce deny` on target `buzz_relay::nip_fi_enforce`, written at once; an admit writes none |
+//! | `buzz_nip_fi_enforce_session_end_total` | as `buzz_nip_fi_shadow_session_end_total` | admitted enforce session ended once, `expired` by its deadline or `revoked` by a disconnect (local or cross-pod, however often delivered). Its line is `nip-fi enforce session end` on target `buzz_relay::nip_fi_enforce`, with the admitted key |
 //! | `buzz_nip_fi_enforce_strict_proof_total` | as `buzz_nip_fi_shadow_strict_proof_total` | strict NIP-98 proof enforce checked on a bridge or Blossom route, recorded from the deciding check; a rejection is the route's 403, or 401 when the proof is missing |
 //! | `buzz_nip_fi_shadow_strict_proof_total` | `route` (`bridge`, `blossom`), `outcome` (`pass`, `rejected`), `community` | strict NIP-98 side check on a route whose proof is stricter in enforce (payload tag, Blossom proof); not every request runs one |
 //! | `buzz_nip_fi_shadow_session_end_total` | `route` (`ws`, `audio`), `reason` (`expired`, `revoked`), `community` | admitted shadow session enforce would have ended; a session never admitted records none |
@@ -127,6 +127,13 @@ pub(crate) const UNRESOLVED: &str = "community_unresolved";
 /// The deny-set step's would-deny, before attribution.
 pub(crate) const DENY_SET: WouldDeny =
     WouldDeny::new(Stage::DenySet, DenialClass::AuthorizationDenied, "deny_set");
+/// The deny-set step while the deny map is still restoring: the deny set is
+/// unknown, so authorization is unavailable rather than revoked.
+pub(crate) const DENY_SET_RESTORING: WouldDeny = WouldDeny::new(
+    Stage::DenySet,
+    DenialClass::AuthorizationUnavailable,
+    "deny_set_restoring",
+);
 /// The reason for a community binding that went stale before admission.
 pub(crate) const STALE: &str = "community_stale";
 
@@ -334,6 +341,7 @@ impl EnforceSession {
                 )
                 .increment(1);
                 tracing::info!(
+                    target: "buzz_relay::nip_fi_enforce",
                     mode = "enforce",
                     route = self.route,
                     reason,
@@ -413,8 +421,9 @@ impl PendingLine {
         if self.written.swap(true, std::sync::atomic::Ordering::AcqRel) {
             return;
         }
-        // Both lines stay in this module: production's log filter admits
-        // `buzz_relay::nip_fi_shadow` at info.
+        // The shadow line stays on this module's target; the enforce line has
+        // its own, `buzz_relay::nip_fi_enforce`, so a filter can keep real
+        // denials while suppressing would-deny volume.
         match self.mode {
             Mode::Shadow => tracing::info!(
                 mode = "shadow",
@@ -427,6 +436,7 @@ impl PendingLine {
                 "nip-fi shadow would-deny"
             ),
             Mode::Enforce => tracing::info!(
+                target: "buzz_relay::nip_fi_enforce",
                 mode = "enforce",
                 route = self.route,
                 stage = self.stage,
@@ -811,11 +821,16 @@ pub(crate) mod tests {
 
     impl WouldDenyLog {
         pub(crate) fn capture() -> Self {
+            Self::capture_filtered("info")
+        }
+
+        /// As [`Self::capture`], with an `EnvFilter` of `directives`.
+        pub(crate) fn capture_filtered(directives: &str) -> Self {
             let _tracing = crate::test_support::tracing_dispatch_lock();
             let out = Captured::default();
             let writer = out.clone();
             let subscriber = tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::INFO)
+                .with_env_filter(tracing_subscriber::EnvFilter::new(directives))
                 .with_writer(move || writer.clone())
                 .with_ansi(false)
                 .finish();
@@ -838,9 +853,13 @@ pub(crate) mod tests {
             self.lines_of("nip-fi shadow would-deny")
         }
 
-        /// The enforce denial lines logged so far.
+        /// The enforce denial lines logged so far, each on its own target.
         pub(crate) fn enforce_lines(&self) -> Vec<String> {
-            self.lines_of("nip-fi enforce deny")
+            let lines = self.lines_of("nip-fi enforce deny");
+            for line in &lines {
+                assert!(line.contains(" buzz_relay::nip_fi_enforce: "), "{line}");
+            }
+            lines
         }
 
         fn lines_of(&self, message: &str) -> Vec<String> {
@@ -1151,6 +1170,20 @@ pub(crate) mod tests {
         assert!(lines
             .iter()
             .any(|l| l.contains("reason=\"revoked\"") && l.contains(&admitted.to_hex())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn enforce_session_end_survives_silenced_shadow_target() {
+        let log = WouldDenyLog::capture_filtered("info,buzz_relay::nip_fi_shadow=off");
+        let session = super::EnforceSession::new("ws", "c".into(), None);
+        session.admit(nostr::Keys::generate().public_key());
+        session.expire();
+        let ends = log.lines_of("nip-fi enforce session end");
+        assert_eq!(ends.len(), 1, "{ends:?}");
+        assert!(
+            ends[0].contains(" buzz_relay::nip_fi_enforce: "),
+            "{ends:?}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

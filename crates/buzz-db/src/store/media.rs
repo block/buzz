@@ -23,7 +23,9 @@ fn edit_governed_kinds_sql() -> String {
         .join(",")
 }
 
-fn edit_target(alias: &str) -> String {
+/// The id the message edit aliased `alias` targets, in the exact spelling
+/// `idx_events_media_edit_target` indexes.
+pub(crate) fn edit_target(alias: &str) -> String {
     MEDIA_EDIT_TARGET_SQL.replacen("(tags,", &format!("({alias}.tags,"), 1)
 }
 

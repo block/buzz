@@ -2,8 +2,14 @@ class Grid {
   /// Space beneath the header actions reserved for row accessories.
   static const double inventoryAccessoryWidth = 92;
 
+  /// Leading column shared by inventory rows and custom section headings.
+  static const double inventoryIconSize = 20.0;
+
   /// Gap from inventory icons to labels.
-  static const double inventoryLabelGap = 10.0;
+  static const double inventoryLabelGap = 8.0;
+
+  /// Space above each Messages section label.
+  static const double inventorySectionTopInset = 18.0;
 
   /// Vertical inset for a 44-point inventory row with a 22-point label.
   static const double inventoryRowInset = 11.0;

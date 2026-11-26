@@ -340,6 +340,7 @@ async fn thread_aux_tombstone_ids_and_raw_cursor_survive_damaged_payload() {
         kinds: &[40003],
         accessible: &accessible,
         cursor: None,
+        since: None,
     };
     let mut session = ReadSession {
         inner: ReadSessionInner::Writer(db.pool.clone()),
@@ -379,6 +380,7 @@ async fn thread_aux_query_budget_fails_on_65th_real_scan() {
         kinds: &[7],
         accessible: &[channel],
         cursor: None,
+        since: None,
     };
     let mut session = ReadSession {
         inner: ReadSessionInner::Writer(db.pool.clone()),
@@ -427,6 +429,7 @@ async fn thread_aux_byte_budget_stops_consumption_and_survives_retry() {
         kinds: &[40003],
         accessible: &[channel],
         cursor: None,
+        since: None,
     };
     let mut session = ReadSession {
         inner: ReadSessionInner::Writer(db.pool.clone()),
@@ -538,6 +541,7 @@ async fn thread_reply_byte_budget_stops_before_collecting_page() {
                 kinds: &[7],
                 accessible: &[channel],
                 cursor: None,
+                since: None,
             },
             &mut budget,
         )

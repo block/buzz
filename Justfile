@@ -408,9 +408,10 @@ test-unit:
         cargo nextest run -p buzz-audit --lib
         # Cross-pod disconnect payload tests (NIP-FI and community archive
         # fence), the shared Redis connection's timeout bounds (loopback
-        # fake peers), and the full-queue retain (no Redis dialed); all
-        # infra-free. Keep the Cargo fallback in step.
-        cargo nextest run -p buzz-pubsub --lib -E 'test(/^conn_control::tests::/) + test(/^connection::tests::/) + test(=tests::queue_full_retain_does_not_wait_and_schedules_reconciliation)'
+        # fake peers), pub/sub keepalive against a scripted fake Redis, the
+        # full-queue retain (no Redis dialed), and the NIP-FI deny-store key
+        # and rounding tests; all infra-free. Keep the Cargo fallback in step.
+        cargo nextest run -p buzz-pubsub --lib -E 'test(/^conn_control::tests::/) + test(/^connection::tests::/) + test(/^keepalive::tests::/) + test(/^subscriber::tests::keepalive::/) + test(=cache_invalidation::tests::subscriber_drops_socket_when_pong_withheld) + test(=tests::queue_full_retain_does_not_wait_and_schedules_reconciliation) + test(/^nip_fi_command_replay::tests::/)'
         # buzz-auth NIP-FI verifier doctests. The sealed-authority
         # `compile_fail` doctests prove the default-feature public API alone
         # cannot forge the issuer→JWKS authority; nextest does not run

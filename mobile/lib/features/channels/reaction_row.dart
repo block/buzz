@@ -1042,7 +1042,7 @@ Future<bool> _showNativeReactionDetails(
       updateReactions();
     }());
     try {
-      final sheetColors = utilitySurfaceThemeData(theme).colorScheme;
+      final sheetColors = utilitySheetThemeData(theme).colorScheme;
       final pending = NativeMessagePresentation.present('reactions', {
         'requestId': requestId,
         'sheetColor': sheetColors.surface.toARGB32(),
