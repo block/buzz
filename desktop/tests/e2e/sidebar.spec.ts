@@ -572,15 +572,17 @@ test("keeps only search pinned while primary navigation scrolls", async ({
   expect(scrolledMenuBox?.y ?? 0).toBeLessThan(initialMenuBox?.y ?? 0);
 });
 
-test("scales the sidebar backward while its chrome closes", async ({
+test("fades the sidebar without spatial movement while its chrome closes", async ({
   page,
 }) => {
   await page.goto("/");
 
   const sidebar = page.getByTestId("app-sidebar");
   const sidebarSurface = sidebar.locator("[data-sidebar-transition-content]");
+  const sidebarGap = sidebar.locator("..").locator(":scope > div").first();
   await expect(sidebarSurface).toHaveCSS("opacity", "1");
   await expect(sidebarSurface).toHaveCSS("scale", "none");
+  await expect(sidebarSurface).toHaveCSS("translate", "none");
 
   await page.getByRole("button", { name: "Toggle Sidebar" }).click();
 
@@ -595,25 +597,23 @@ test("scales the sidebar backward while its chrome closes", async ({
       return getComputedStyle(sidebarElement).backgroundColor;
     }),
   );
-  await expect(sidebarSurface).toHaveCSS("scale", "0.95");
-  await expect(sidebarSurface).toHaveCSS("translate", "24px");
-  const transformOrigin = await sidebarSurface.evaluate(
-    (element) => getComputedStyle(element).transformOrigin,
-  );
-  const [originX, originY] = transformOrigin.split(" ").map(Number.parseFloat);
-  const surfaceWidth = await sidebarSurface.evaluate(
-    (element) => element.clientWidth,
-  );
-  expect(Math.abs(originX - surfaceWidth / 2)).toBeLessThan(0.5);
-  expect(originY).toBe(0);
-  await expect(sidebarSurface).toHaveCSS(
-    "transition-property",
-    "opacity, scale, translate",
-  );
-  await expect(sidebarSurface).toHaveCSS("transition-duration", "0.2s");
+  await expect(sidebarSurface).toHaveCSS("scale", "none");
+  await expect(sidebarSurface).toHaveCSS("translate", "none");
+  await expect(sidebarSurface).toHaveCSS("transition-property", "opacity");
+  await expect(sidebarSurface).toHaveCSS("transition-duration", "0.24s");
   await expect(sidebarSurface).toHaveCSS(
     "transition-timing-function",
-    "linear",
+    "cubic-bezier(0.25, 1, 0.5, 1)",
+  );
+  await expect(sidebarGap).toHaveCSS("transition-duration", "0.24s");
+  await expect(sidebarGap).toHaveCSS(
+    "transition-timing-function",
+    "cubic-bezier(0.25, 1, 0.5, 1)",
+  );
+  await expect(sidebar).toHaveCSS("transition-duration", "0.24s");
+  await expect(sidebar).toHaveCSS(
+    "transition-timing-function",
+    "cubic-bezier(0.25, 1, 0.5, 1)",
   );
 
   await page.getByRole("button", { name: "Toggle Sidebar" }).click();
@@ -636,8 +636,8 @@ test("disables the sidebar collapse transition for reduced motion", async ({
   await page.getByRole("button", { name: "Toggle Sidebar" }).click();
 
   await expect(sidebarSurface).toHaveCSS("opacity", "0");
-  await expect(sidebarSurface).toHaveCSS("scale", "0.95");
-  await expect(sidebarSurface).toHaveCSS("translate", "24px");
+  await expect(sidebarSurface).toHaveCSS("scale", "none");
+  await expect(sidebarSurface).toHaveCSS("translate", "none");
   await expect(sidebarSurface).toHaveCSS("transition-duration", "0s");
 });
 
