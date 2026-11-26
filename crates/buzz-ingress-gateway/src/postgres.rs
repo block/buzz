@@ -1,9 +1,11 @@
 //! Postgres-backed store: migrations, runtime-role grants, readiness, and
 //! retention for the gateway's own tables.
+mod subscriptions;
+
 use crate::store::{
     transition, AppliedOperation, ApplyOutcome, ClaimedDelivery, DeliveryPage, DeliveryState,
-    DeliverySummary, ForwardOutcome, InsertOutcome, Integration, IntegrationSecret,
-    IntegrationView, Mutation, NewDelivery, Operation, Provider, Store, StoreError,
+    DeliverySummary, InsertOutcome, Integration, IntegrationSecret, IntegrationView, Mutation,
+    NewDelivery, Operation, Provider, Store, StoreError,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -12,11 +14,13 @@ use uuid::Uuid;
 
 static GATEWAY_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-const GATEWAY_TABLES: [&str; 4] = [
+const GATEWAY_TABLES: [&str; 6] = [
     "ingress_gateway_integrations",
     "ingress_gateway_integration_secrets",
     "ingress_gateway_applied_operations",
     "ingress_gateway_deliveries",
+    "ingress_gateway_subscriptions",
+    "ingress_gateway_messages",
 ];
 
 pub struct PostgresStore {
@@ -66,8 +70,18 @@ impl PostgresStore {
         Ok(())
     }
 
-    /// Delete terminal deliveries, applied operations, and retired secrets
-    /// older than the retention window. Queued deliveries are never reaped here.
+    /// Apply pending migrations without the bootstrap guard or grants, for
+    /// tests against a scratch database. Kept here so the gateway runs its
+    /// migrator from one file only.
+    #[cfg(test)]
+    pub(crate) async fn migrate_scratch(pool: &PgPool) -> Result<(), StoreError> {
+        GATEWAY_MIGRATOR.run(pool).await?;
+        Ok(())
+    }
+
+    /// Delete terminal deliveries and messages, applied operations, retired
+    /// secrets, and subscription tombstones older than the retention window.
+    /// Queued deliveries and messages are never reaped here.
     pub async fn reap_expired(
         &self,
         now: DateTime<Utc>,
@@ -77,6 +91,22 @@ impl PostgresStore {
         let deliveries = sqlx::query(
             "DELETE FROM ingress_gateway_deliveries
              WHERE state <> 'queued' AND completed_at < $1",
+        )
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        let messages = sqlx::query(
+            "DELETE FROM ingress_gateway_messages
+             WHERE state <> 'queued' AND completed_at < $1",
+        )
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        let tombstones = sqlx::query(
+            "DELETE FROM ingress_gateway_subscriptions
+             WHERE deleted_at IS NOT NULL AND deleted_at < $1",
         )
         .bind(cutoff)
         .execute(&self.pool)
@@ -96,7 +126,7 @@ impl PostgresStore {
         .execute(&self.pool)
         .await?
         .rows_affected();
-        Ok(deliveries + operations + secrets)
+        Ok(deliveries + messages + tombstones + operations + secrets)
     }
 }
 
@@ -487,10 +517,10 @@ impl Store for PostgresStore {
                  WHERE d.integration_id = due.integration_id
                    AND d.delivery_id = due.delivery_id
                  RETURNING d.integration_id, d.delivery_id, d.event_type, d.body,
-                           d.received_at, d.attempts, d.event_id
+                           d.received_at, d.attempts
              )
              SELECT c.integration_id, c.delivery_id, c.event_type, c.body, c.received_at,
-                    c.attempts, c.event_id, i.community_host, i.provider
+                    c.attempts, i.provider
              FROM claimed c
              JOIN ingress_gateway_integrations i ON i.id = c.integration_id",
         )
@@ -505,76 +535,15 @@ impl Store for PostgresStore {
             Ok(ClaimedDelivery {
                 integration_id: row.try_get("integration_id")?,
                 delivery_id: row.try_get("delivery_id")?,
-                community_host: row.try_get("community_host")?,
                 provider: Provider::parse(&provider)
                     .ok_or(StoreError::Invalid("unknown provider stored"))?,
                 event_type: row.try_get("event_type")?,
                 body: row.try_get("body")?,
                 received_at: row.try_get("received_at")?,
                 attempts: row.try_get("attempts")?,
-                event_id: row.try_get("event_id")?,
             })
         })
         .collect()
-    }
-
-    async fn complete_forward(
-        &self,
-        integration_id: Uuid,
-        delivery_id: &str,
-        outcome: ForwardOutcome,
-        now: DateTime<Utc>,
-    ) -> Result<(), StoreError> {
-        match outcome {
-            ForwardOutcome::Accepted { event_id } => {
-                sqlx::query(
-                    "UPDATE ingress_gateway_deliveries
-                     SET state = 'accepted', event_id = $3, completed_at = $4,
-                         next_attempt_at = NULL, last_error = NULL, body = ''::bytea
-                     WHERE integration_id = $1 AND delivery_id = $2 AND state = 'queued'",
-                )
-                .bind(integration_id)
-                .bind(delivery_id)
-                .bind(event_id)
-                .bind(now)
-                .execute(&self.pool)
-                .await?;
-            }
-            ForwardOutcome::Failed { event_id, error } => {
-                sqlx::query(
-                    "UPDATE ingress_gateway_deliveries
-                     SET state = 'failed', event_id = COALESCE($3, event_id), completed_at = $4,
-                         next_attempt_at = NULL, last_error = $5
-                     WHERE integration_id = $1 AND delivery_id = $2 AND state = 'queued'",
-                )
-                .bind(integration_id)
-                .bind(delivery_id)
-                .bind(event_id)
-                .bind(now)
-                .bind(error)
-                .execute(&self.pool)
-                .await?;
-            }
-            ForwardOutcome::Retry {
-                event_id,
-                error,
-                next_attempt_at,
-            } => {
-                sqlx::query(
-                    "UPDATE ingress_gateway_deliveries
-                     SET event_id = COALESCE($3, event_id), next_attempt_at = $4, last_error = $5
-                     WHERE integration_id = $1 AND delivery_id = $2 AND state = 'queued'",
-                )
-                .bind(integration_id)
-                .bind(delivery_id)
-                .bind(event_id)
-                .bind(next_attempt_at)
-                .bind(error)
-                .execute(&self.pool)
-                .await?;
-            }
-        }
-        Ok(())
     }
 }
 

@@ -15,6 +15,8 @@
 //! Every mutation carries a caller-chosen `operation_id` and the integration
 //! `revision` it produces, so a relay can retry blindly: a replay returns the
 //! original response and an out-of-date relay learns the current revision.
+mod subscriptions;
+
 use crate::http::{error, AppState};
 use crate::secrets::MAX_SECRET_BYTES;
 use crate::store::{
@@ -58,6 +60,7 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/integrations/{id}/enable", post(enable))
         .route("/v1/integrations/{id}/deliveries", get(list_deliveries))
         .route("/v1/operations/{operation_id}", get(get_operation))
+        .merge(subscriptions::routes())
 }
 
 /// Verify a NIP-98 header against the request method, path, and body, and
@@ -490,14 +493,14 @@ mod tests {
     use std::sync::{atomic::AtomicBool, Arc};
     use tower::ServiceExt;
 
-    struct Fixture {
-        private: Router,
-        relay: Keys,
-        store: Arc<MemoryStore>,
+    pub(super) struct Fixture {
+        pub(super) private: Router,
+        pub(super) relay: Keys,
+        pub(super) store: Arc<MemoryStore>,
         secrets: Arc<SecretKeyring>,
     }
 
-    fn fixture() -> Fixture {
+    pub(super) fn fixture() -> Fixture {
         let relay = Keys::generate();
         let store = Arc::new(MemoryStore::default());
         let secrets =
@@ -540,7 +543,7 @@ mod tests {
         format!("Nostr {}", STANDARD.encode(event.as_json()))
     }
 
-    async fn call(
+    pub(super) async fn call(
         fx: &Fixture,
         keys: &Keys,
         method: &str,
@@ -574,7 +577,7 @@ mod tests {
         (status, json)
     }
 
-    fn put_body(operation_id: Uuid, revision: i64) -> serde_json::Value {
+    pub(super) fn put_body(operation_id: Uuid, revision: i64) -> serde_json::Value {
         serde_json::json!({
             "operation_id": operation_id,
             "revision": revision,

@@ -45,7 +45,29 @@ pub fn record_forward(result: ForwardResult, seconds: Option<f64>) {
     }
 }
 
-/// Record a forwarder poll that could not reach the store.
+/// How fanning out one delivery ended.
+#[derive(Debug, Clone, Copy)]
+pub enum FanoutResult {
+    /// Settled into this many messages (failed ones included).
+    Fanned(u64),
+    Failed,
+    Retry,
+}
+
+/// Record one delivery fan-out.
+pub fn record_fanout(result: FanoutResult) {
+    let label = match result {
+        FanoutResult::Fanned(messages) => {
+            metrics::counter!("ingress_gateway_fanout_messages_total").increment(messages);
+            "fanned"
+        }
+        FanoutResult::Failed => "failed",
+        FanoutResult::Retry => "retry",
+    };
+    metrics::counter!("ingress_gateway_fanout_total", "outcome" => label).increment(1);
+}
+
+/// Record a forwarder or fan-out poll that could not reach the store.
 pub fn record_forwarder_failure() {
     metrics::counter!("ingress_gateway_forwarder_failures_total").increment(1);
 }
@@ -121,6 +143,8 @@ mod tests {
         record_forward(ForwardResult::Retry, Some(2.0));
         record_forward(ForwardResult::Failed, None);
         record_forwarder_failure();
+        record_fanout(FanoutResult::Fanned(2));
+        record_fanout(FanoutResult::Retry);
         let rendered = handle.render();
         for needle in [
             "ingress_gateway_readiness_failures_total",
@@ -129,6 +153,9 @@ mod tests {
             "ingress_gateway_forward_total",
             "ingress_gateway_forward_seconds",
             "ingress_gateway_forwarder_failures_total",
+            "ingress_gateway_fanout_total",
+            "ingress_gateway_fanout_messages_total",
+            "outcome=\"fanned\"",
             "outcome=\"accepted\"",
             "outcome=\"retry\"",
             "cause=\"not_accepting\"",

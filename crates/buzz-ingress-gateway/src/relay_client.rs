@@ -2,8 +2,8 @@
 //!
 //! ```text
 //! forwarder ──POST {scheme}://{community_host}/events──▶ relay
-//!            Authorization: Nostr <NIP-98 event signed by the gateway key>
-//!            body: the kind-20701 webhook-call event
+//!            Authorization: Nostr <NIP-98 event signed by the message author>
+//!            body: the kind-9 channel message
 //! ```
 //!
 //! Every HTTP status the relay can return maps onto one of three outcomes the
@@ -12,16 +12,19 @@ use async_trait::async_trait;
 use nostr::hashes::{sha256::Hash as Sha256Hash, Hash};
 use nostr::nips::nip98::HttpData;
 use nostr::nips::nip98::HttpMethod;
-use nostr::{Event, JsonUtil, Keys, Url};
+use nostr::{Event, JsonUtil, NostrSigner, Url};
 use reqwest::StatusCode;
 use serde::Deserialize;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Seam between the forwarder and the relay transport.
 #[async_trait]
 pub trait RelayClient: Send + Sync {
-    /// Submit one signed event to `url` and classify the relay's answer.
-    async fn submit(&self, url: &Url, event: &Event) -> SubmitResult;
+    /// Submit one signed event to `url`, authorizing the request with
+    /// `signer` (the event's author), and classify the relay's answer.
+    async fn submit(&self, url: &Url, event: &Event, signer: &Arc<dyn NostrSigner>)
+        -> SubmitResult;
 }
 
 /// How the relay answered a submission.
@@ -41,30 +44,38 @@ const SUBMIT_TIMEOUT: Duration = Duration::from_secs(10);
 /// [`RelayClient`] over HTTPS with NIP-98 request signing.
 pub struct HttpRelayClient {
     client: reqwest::Client,
-    keys: Keys,
 }
 
 impl HttpRelayClient {
-    /// Build a client signing requests with the gateway's `keys`.
-    pub fn new(keys: Keys) -> Result<Self, reqwest::Error> {
+    /// Build a client; each submission brings its own signer.
+    pub fn new() -> Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder().timeout(SUBMIT_TIMEOUT).build()?;
-        Ok(Self { client, keys })
+        Ok(Self { client })
     }
+}
 
-    async fn authorization(&self, url: &Url, body: &[u8]) -> Result<String, String> {
-        HttpData::new(url.clone(), HttpMethod::POST)
-            .payload(Sha256Hash::hash(body))
-            .to_authorization(&self.keys)
-            .await
-            .map_err(|e| format!("sign request: {e}"))
-    }
+async fn authorization(
+    url: &Url,
+    body: &[u8],
+    signer: &Arc<dyn NostrSigner>,
+) -> Result<String, String> {
+    HttpData::new(url.clone(), HttpMethod::POST)
+        .payload(Sha256Hash::hash(body))
+        .to_authorization(signer)
+        .await
+        .map_err(|e| format!("sign request: {e}"))
 }
 
 #[async_trait]
 impl RelayClient for HttpRelayClient {
-    async fn submit(&self, url: &Url, event: &Event) -> SubmitResult {
+    async fn submit(
+        &self,
+        url: &Url,
+        event: &Event,
+        signer: &Arc<dyn NostrSigner>,
+    ) -> SubmitResult {
         let body = event.as_json().into_bytes();
-        let authorization = match self.authorization(url, &body).await {
+        let authorization = match authorization(url, &body, signer).await {
             Ok(h) => h,
             Err(e) => return SubmitResult::Rejected(e),
         };
@@ -151,8 +162,8 @@ mod tests {
     use super::*;
     use axum::{extract::State, http::HeaderMap, routing::post, Json, Router};
     use nostr::nips::nip98::verify_auth_header;
-    use nostr::{EventBuilder, Kind, Timestamp};
-    use std::sync::{Arc, Mutex};
+    use nostr::{EventBuilder, Keys, Kind, Timestamp};
+    use std::sync::Mutex;
 
     #[test]
     fn classify_maps_relay_statuses() {
@@ -221,12 +232,16 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
 
-        let event = EventBuilder::new(Kind::Custom(20701), "{}")
+        let event = EventBuilder::new(Kind::Custom(9), "hi")
             .sign_with_keys(&gateway)
             .unwrap();
         let url = Url::parse(&format!("http://{addr}/events")).unwrap();
-        let client = HttpRelayClient::new(gateway.clone()).unwrap();
-        assert_eq!(client.submit(&url, &event).await, SubmitResult::Accepted);
+        let client = HttpRelayClient::new().unwrap();
+        let signer: Arc<dyn NostrSigner> = Arc::new(gateway.clone());
+        assert_eq!(
+            client.submit(&url, &event, &signer).await,
+            SubmitResult::Accepted
+        );
         server.abort();
 
         let requests = seen.requests.lock().unwrap();
@@ -253,13 +268,14 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         drop(listener);
         let keys = Keys::generate();
-        let event = EventBuilder::new(Kind::Custom(20701), "{}")
+        let event = EventBuilder::new(Kind::Custom(9), "hi")
             .sign_with_keys(&keys)
             .unwrap();
         let url = Url::parse(&format!("http://{addr}/events")).unwrap();
-        let client = HttpRelayClient::new(keys).unwrap();
+        let client = HttpRelayClient::new().unwrap();
+        let signer: Arc<dyn NostrSigner> = Arc::new(keys);
         assert!(matches!(
-            client.submit(&url, &event).await,
+            client.submit(&url, &event, &signer).await,
             SubmitResult::Retry(_)
         ));
     }

@@ -10,3 +10,5 @@
 \i tables/public/ingress_gateway_integration_secrets.sql
 \i tables/public/ingress_gateway_applied_operations.sql
 \i tables/public/ingress_gateway_deliveries.sql
+\i tables/public/ingress_gateway_subscriptions.sql
+\i tables/public/ingress_gateway_messages.sql

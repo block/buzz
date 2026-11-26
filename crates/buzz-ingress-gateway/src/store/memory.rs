@@ -1,517 +1,16 @@
-//! Durable gateway state behind a trait, so the HTTP surface is tested against
-//! an in-memory reference store and production runs on Postgres.
-use crate::config::RelayScheme;
+//! In-memory reference store: the semantics the Postgres store must match.
+use super::{
+    initial_message_state, transition, write_transition, AppliedOperation, ApplyOutcome,
+    ClaimedDelivery, ClaimedMessage, DeliveryPage, DeliveryState, DeliverySummary, FanoutOutcome,
+    ForwardOutcome, InsertOutcome, Integration, IntegrationSecret, IntegrationView, MessageKey,
+    NewDelivery, Operation, Store, StoreError, Subscription, SubscriptionChange, SubscriptionStore,
+    SubscriptionWrite, WriteOutcome,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Mutex;
-use thiserror::Error;
 use uuid::Uuid;
-
-/// Webhook providers the gateway can verify. Stored as the wire name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Provider {
-    Github,
-    Pagerduty,
-    Sentry,
-    IncidentIo,
-}
-
-impl Provider {
-    /// Stable storage and wire name.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Provider::Github => "github",
-            Provider::Pagerduty => "pagerduty",
-            Provider::Sentry => "sentry",
-            Provider::IncidentIo => "incident_io",
-        }
-    }
-
-    /// Inverse of [`Provider::as_str`].
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "github" => Some(Provider::Github),
-            "pagerduty" => Some(Provider::Pagerduty),
-            "sentry" => Some(Provider::Sentry),
-            "incident_io" => Some(Provider::IncidentIo),
-            _ => None,
-        }
-    }
-}
-
-/// A provider integration owned by one community.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Integration {
-    pub id: Uuid,
-    pub community_host: String,
-    pub provider: Provider,
-    pub revision: i64,
-    pub enabled: bool,
-    pub disabled_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-/// A sealed provider secret. A retired secret keeps verifying deliveries until
-/// `grace_until`, so a provider-side rotation never drops in-flight deliveries.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IntegrationSecret {
-    pub id: Uuid,
-    pub integration_id: Uuid,
-    pub key_id: String,
-    pub ciphertext: Vec<u8>,
-    pub created_at: DateTime<Utc>,
-    pub retired_at: Option<DateTime<Utc>>,
-    pub grace_until: Option<DateTime<Utc>>,
-}
-
-impl IntegrationSecret {
-    /// Whether deliveries signed with this secret are still accepted at `now`.
-    pub fn verifies_at(&self, now: DateTime<Utc>) -> bool {
-        match (self.retired_at, self.grace_until) {
-            (None, _) => true,
-            (Some(_), Some(grace_until)) => now < grace_until,
-            (Some(_), None) => false,
-        }
-    }
-}
-
-/// A management mutation. Every mutation carries the caller's `operation_id`
-/// and the integration revision it produces; the store applies it at most once.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Mutation {
-    PutIntegration {
-        community_host: String,
-        provider: Provider,
-    },
-    PutSecret {
-        key_id: String,
-        ciphertext: Vec<u8>,
-        grace: Duration,
-    },
-    Disable,
-    Enable,
-}
-
-/// One idempotent management mutation addressed to an integration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Operation {
-    pub operation_id: Uuid,
-    pub integration_id: Uuid,
-    pub revision: i64,
-    pub mutation: Mutation,
-}
-
-impl Operation {
-    /// Hex SHA-256 of everything that identifies this request except secret
-    /// material. A replayed `operation_id` must carry the same fingerprint to
-    /// receive the stored response. The sealed secret is excluded because
-    /// sealing is randomized, and the plaintext is excluded so the idempotency
-    /// table never holds anything derived from a provider secret.
-    pub fn fingerprint(&self) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(self.integration_id.as_bytes());
-        hasher.update(self.revision.to_be_bytes());
-        match &self.mutation {
-            Mutation::PutIntegration {
-                community_host,
-                provider,
-            } => {
-                hasher.update(b"put_integration\0");
-                hasher.update(community_host.as_bytes());
-                hasher.update(b"\0");
-                hasher.update(provider.as_str().as_bytes());
-            }
-            Mutation::PutSecret { grace, .. } => {
-                hasher.update(b"put_secret\0");
-                hasher.update(grace.num_seconds().to_be_bytes());
-            }
-            Mutation::Disable => hasher.update(b"disable\0"),
-            Mutation::Enable => hasher.update(b"enable\0"),
-        }
-        hex::encode(hasher.finalize())
-    }
-}
-
-/// Durable record of an applied operation and the response it produced.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppliedOperation {
-    pub operation_id: Uuid,
-    pub integration_id: Uuid,
-    pub revision: i64,
-    pub fingerprint: String,
-    pub response: serde_json::Value,
-    pub applied_at: DateTime<Utc>,
-}
-
-impl AppliedOperation {
-    /// Whether `operation` is a retry of this applied operation rather than a
-    /// different request reusing its `operation_id`.
-    pub fn matches(&self, operation: &Operation) -> bool {
-        self.integration_id == operation.integration_id
-            && self.fingerprint == operation.fingerprint()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApplyOutcome {
-    /// Applied now; `response` is the integration view after the change.
-    Applied(AppliedOperation),
-    /// The same request was applied before; the stored response is returned.
-    Replayed(AppliedOperation),
-    /// `operation_id` was already used by a different request.
-    Conflict,
-    /// `revision` is not newer than the current integration revision.
-    StaleRevision { current: i64 },
-    /// The mutation needs an integration that does not exist.
-    NotFound,
-}
-
-/// Lifecycle of a stored delivery.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeliveryState {
-    Queued,
-    Accepted,
-    Failed,
-}
-
-impl DeliveryState {
-    /// Stable storage and wire name.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            DeliveryState::Queued => "queued",
-            DeliveryState::Accepted => "accepted",
-            DeliveryState::Failed => "failed",
-        }
-    }
-
-    /// Inverse of [`DeliveryState::as_str`].
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "queued" => Some(DeliveryState::Queued),
-            "accepted" => Some(DeliveryState::Accepted),
-            "failed" => Some(DeliveryState::Failed),
-            _ => None,
-        }
-    }
-}
-
-/// A verified delivery about to be stored. The provider is acknowledged only
-/// once this row is committed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewDelivery {
-    pub integration_id: Uuid,
-    pub delivery_id: String,
-    pub event_type: String,
-    pub provider_timestamp: Option<DateTime<Utc>>,
-    pub headers: serde_json::Value,
-    pub body: Vec<u8>,
-    pub received_at: DateTime<Utc>,
-}
-
-/// Result of storing a delivery keyed by `(integration_id, delivery_id)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InsertOutcome {
-    Inserted,
-    Duplicate,
-}
-
-/// A stored delivery without its payload, for the admin timeline.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DeliverySummary {
-    pub delivery_id: String,
-    pub event_type: String,
-    pub state: DeliveryState,
-    pub attempts: i32,
-    pub event_id: Option<String>,
-    pub received_at: DateTime<Utc>,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub last_error: Option<String>,
-}
-
-/// Keyset position in the newest-first delivery timeline. Encoded as
-/// `{received_at_micros}.{delivery_id}` so a client can hand it back opaquely.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeliveryCursor {
-    pub received_at: DateTime<Utc>,
-    pub delivery_id: String,
-}
-
-impl DeliveryCursor {
-    /// Inverse of [`DeliveryCursor::encode`]; `None` for anything malformed.
-    pub fn parse(value: &str) -> Option<Self> {
-        let (micros, delivery_id) = value.split_once('.')?;
-        if delivery_id.is_empty() || delivery_id.len() > MAX_DELIVERY_ID_CURSOR_BYTES {
-            return None;
-        }
-        Some(Self {
-            received_at: DateTime::from_timestamp_micros(micros.parse().ok()?)?,
-            delivery_id: delivery_id.to_owned(),
-        })
-    }
-
-    /// Opaque cursor string for the admin client.
-    pub fn encode(&self) -> String {
-        format!(
-            "{}.{}",
-            self.received_at.timestamp_micros(),
-            self.delivery_id
-        )
-    }
-
-    fn position(&self) -> (DateTime<Utc>, &str) {
-        (self.received_at, self.delivery_id.as_str())
-    }
-}
-
-const MAX_DELIVERY_ID_CURSOR_BYTES: usize = 256;
-
-/// Page selector for [`Store::list_deliveries`]: newest first, optionally
-/// bounded below by `since`, continued from `before`, filtered by `state`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct DeliveryPage {
-    pub since: Option<DateTime<Utc>>,
-    pub before: Option<DeliveryCursor>,
-    pub state: Option<DeliveryState>,
-    pub limit: usize,
-}
-
-/// Failures of the durable store. Callers treat every variant as retryable
-/// except [`StoreError::Invalid`].
-#[derive(Debug, Error)]
-pub enum StoreError {
-    #[error("store unavailable")]
-    Unavailable(#[source] Option<sqlx::Error>),
-    #[error("migration failed")]
-    Migrate(#[from] sqlx::migrate::MigrateError),
-    #[error("{0}")]
-    Invalid(&'static str),
-}
-
-impl From<sqlx::Error> for StoreError {
-    fn from(error: sqlx::Error) -> Self {
-        StoreError::Unavailable(Some(error))
-    }
-}
-
-/// Public view of an integration returned by the management API and stored as
-/// the idempotent response of the operation that produced it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IntegrationView {
-    pub id: Uuid,
-    pub community_host: String,
-    pub provider: Provider,
-    pub revision: i64,
-    pub enabled: bool,
-    pub has_secret: bool,
-    pub rotating_until: Option<DateTime<Utc>>,
-    pub updated_at: DateTime<Utc>,
-}
-
-impl IntegrationView {
-    /// URL the provider must deliver webhooks to for this integration.
-    pub fn delivery_url(&self, scheme: RelayScheme) -> String {
-        format!(
-            "{}://{}/webhooks/{}",
-            scheme.as_str(),
-            self.community_host,
-            self.id
-        )
-    }
-
-    /// Project an integration and its currently verifying secrets at `now`.
-    pub fn new(
-        integration: &Integration,
-        secrets: &[IntegrationSecret],
-        now: DateTime<Utc>,
-    ) -> Self {
-        let has_secret = secrets.iter().any(|s| s.retired_at.is_none());
-        let rotating_until = secrets
-            .iter()
-            .filter(|s| s.retired_at.is_some() && s.verifies_at(now))
-            .filter_map(|s| s.grace_until)
-            .max();
-        Self {
-            id: integration.id,
-            community_host: integration.community_host.clone(),
-            provider: integration.provider,
-            revision: integration.revision,
-            enabled: integration.enabled,
-            has_secret,
-            rotating_until,
-            updated_at: integration.updated_at,
-        }
-    }
-}
-
-#[async_trait]
-pub trait Store: Send + Sync {
-    /// Readiness must fail closed when durable state cannot participate.
-    async fn ready(&self) -> Result<(), StoreError>;
-    /// Look up an integration by id.
-    async fn integration(&self, id: Uuid) -> Result<Option<Integration>, StoreError>;
-    /// An integration and its verifying secrets read from one snapshot, so a
-    /// concurrent write cannot pair one revision with another's secrets.
-    async fn integration_with_secrets(
-        &self,
-        id: Uuid,
-        now: DateTime<Utc>,
-    ) -> Result<Option<(Integration, Vec<IntegrationSecret>)>, StoreError>;
-    /// Secrets that still verify at `now`, newest first.
-    async fn verifying_secrets(
-        &self,
-        integration_id: Uuid,
-        now: DateTime<Utc>,
-    ) -> Result<Vec<IntegrationSecret>, StoreError>;
-    /// The idempotency record for `operation_id`, if it was ever applied.
-    async fn applied_operation(
-        &self,
-        operation_id: Uuid,
-    ) -> Result<Option<AppliedOperation>, StoreError>;
-    /// Apply a mutation exactly once, atomically with its idempotency record.
-    async fn apply(
-        &self,
-        operation: Operation,
-        now: DateTime<Utc>,
-    ) -> Result<ApplyOutcome, StoreError>;
-    /// Record a verified delivery exactly once per `(integration, delivery_id)`.
-    async fn insert_delivery(&self, delivery: NewDelivery) -> Result<InsertOutcome, StoreError>;
-    /// Delivery summaries for one integration, newest first, payloads omitted.
-    async fn list_deliveries(
-        &self,
-        integration_id: Uuid,
-        page: DeliveryPage,
-    ) -> Result<Vec<DeliverySummary>, StoreError>;
-    /// Lease up to `limit` queued deliveries due at `now`, pushing their
-    /// `next_attempt_at` to `now + lease` so a crashed worker's claims return.
-    async fn claim_due(
-        &self,
-        now: DateTime<Utc>,
-        lease: Duration,
-        limit: usize,
-    ) -> Result<Vec<ClaimedDelivery>, StoreError>;
-    /// Record the result of a forward attempt for a claimed delivery.
-    async fn complete_forward(
-        &self,
-        integration_id: Uuid,
-        delivery_id: &str,
-        outcome: ForwardOutcome,
-        now: DateTime<Utc>,
-    ) -> Result<(), StoreError>;
-}
-
-/// Pure in-process transition shared by the memory store and the Postgres
-/// implementation's tests, so both agree on revision and secret semantics.
-pub fn transition(
-    integration: Option<Integration>,
-    secrets: &mut Vec<IntegrationSecret>,
-    operation: &Operation,
-    now: DateTime<Utc>,
-) -> Result<Integration, ApplyOutcome> {
-    if let Some(current) = &integration {
-        if operation.revision <= current.revision {
-            return Err(ApplyOutcome::StaleRevision {
-                current: current.revision,
-            });
-        }
-    }
-    let mut next = match (&operation.mutation, integration) {
-        (
-            Mutation::PutIntegration {
-                community_host,
-                provider,
-            },
-            existing,
-        ) => Integration {
-            id: operation.integration_id,
-            community_host: community_host.clone(),
-            provider: *provider,
-            revision: operation.revision,
-            enabled: existing.as_ref().is_none_or(|e| e.enabled),
-            disabled_at: existing.as_ref().and_then(|e| e.disabled_at),
-            created_at: existing.as_ref().map_or(now, |e| e.created_at),
-            updated_at: now,
-        },
-        (_, None) => return Err(ApplyOutcome::NotFound),
-        (
-            Mutation::PutSecret {
-                key_id,
-                ciphertext,
-                grace,
-            },
-            Some(existing),
-        ) => {
-            for secret in secrets.iter_mut().filter(|s| s.retired_at.is_none()) {
-                secret.retired_at = Some(now);
-                secret.grace_until = Some(now + *grace);
-            }
-            secrets.insert(
-                0,
-                IntegrationSecret {
-                    id: Uuid::new_v4(),
-                    integration_id: existing.id,
-                    key_id: key_id.clone(),
-                    ciphertext: ciphertext.clone(),
-                    created_at: now,
-                    retired_at: None,
-                    grace_until: None,
-                },
-            );
-            existing
-        }
-        (Mutation::Disable, Some(mut existing)) => {
-            existing.enabled = false;
-            existing.disabled_at = Some(now);
-            existing
-        }
-        (Mutation::Enable, Some(mut existing)) => {
-            existing.enabled = true;
-            existing.disabled_at = None;
-            existing
-        }
-    };
-    next.revision = operation.revision;
-    next.updated_at = now;
-    Ok(next)
-}
-
-/// A queued delivery the forwarder has leased, joined with the routing
-/// fields it needs. `attempts` already counts this attempt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClaimedDelivery {
-    pub integration_id: Uuid,
-    pub delivery_id: String,
-    pub community_host: String,
-    pub provider: Provider,
-    pub event_type: String,
-    pub body: Vec<u8>,
-    pub received_at: DateTime<Utc>,
-    pub attempts: i32,
-    pub event_id: Option<String>,
-}
-
-/// Terminal or deferred result of one forward attempt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ForwardOutcome {
-    /// The relay stored the event; the payload is dropped.
-    Accepted { event_id: String },
-    /// The relay refused the event or the retry budget is spent.
-    Failed {
-        event_id: Option<String>,
-        error: String,
-    },
-    /// Transient failure; the row stays queued until `next_attempt_at`.
-    Retry {
-        event_id: Option<String>,
-        error: String,
-        next_attempt_at: DateTime<Utc>,
-    },
-}
 
 /// A delivery row as the memory store holds it; exposed for tests only.
 #[derive(Clone, Debug)]
@@ -540,12 +39,37 @@ impl StoredDelivery {
     }
 }
 
+/// A message row as the memory store holds it; exposed for tests only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredMessage {
+    pub channel_id: Uuid,
+    pub content: String,
+    pub state: DeliveryState,
+    pub event_id: Option<String>,
+    pub attempts: i32,
+    pub next_attempt_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub received_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Default)]
 struct MemoryState {
     integrations: HashMap<Uuid, Integration>,
     secrets: HashMap<Uuid, Vec<IntegrationSecret>>,
     operations: HashMap<Uuid, AppliedOperation>,
     deliveries: HashMap<(Uuid, String), StoredDelivery>,
+    subscriptions: HashMap<Uuid, Subscription>,
+    messages: HashMap<MessageKey, StoredMessage>,
+}
+
+impl MemoryState {
+    fn live_count(&self, integration_id: Uuid) -> usize {
+        self.subscriptions
+            .values()
+            .filter(|s| s.integration_id == integration_id && s.is_live())
+            .count()
+    }
 }
 
 /// Reference store for tests. One lock gives every transition a single
@@ -742,29 +266,186 @@ impl Store for MemoryStore {
             claimed.push(ClaimedDelivery {
                 integration_id: key.0,
                 delivery_id: key.1.clone(),
-                community_host: integration.community_host,
                 provider: integration.provider,
                 event_type: row.delivery.event_type.clone(),
                 body: row.delivery.body.clone(),
                 received_at: row.delivery.received_at,
                 attempts: row.attempts,
-                event_id: row.event_id.clone(),
             });
         }
         Ok(claimed)
     }
+}
 
-    async fn complete_forward(
+#[async_trait]
+impl SubscriptionStore for MemoryStore {
+    async fn write_subscription(
+        &self,
+        write: SubscriptionWrite,
+        now: DateTime<Utc>,
+    ) -> Result<WriteOutcome, StoreError> {
+        let mut s = self.0.lock().map_err(|_| StoreError::Unavailable(None))?;
+        if matches!(write.change, SubscriptionChange::Put { .. })
+            && !s.integrations.contains_key(&write.integration_id)
+        {
+            return Ok(WriteOutcome::NotFound);
+        }
+        let current = s.subscriptions.get(&write.id).cloned();
+        let live = s.live_count(write.integration_id);
+        let next = match write_transition(current, &write, live, now) {
+            WriteOutcome::Applied(next) => next,
+            outcome => return Ok(outcome),
+        };
+        if !next.is_live() {
+            for (_, message) in s
+                .messages
+                .iter_mut()
+                .filter(|(k, m)| k.subscription_id == next.id && m.state == DeliveryState::Queued)
+            {
+                message.state = DeliveryState::Failed;
+                message.next_attempt_at = None;
+                message.completed_at = Some(now);
+                message.last_error = Some("subscription deleted".to_owned());
+            }
+        }
+        s.subscriptions.insert(next.id, next.clone());
+        Ok(WriteOutcome::Applied(next))
+    }
+
+    async fn subscription(
+        &self,
+        integration_id: Uuid,
+        id: Uuid,
+    ) -> Result<Option<Subscription>, StoreError> {
+        let s = self.0.lock().map_err(|_| StoreError::Unavailable(None))?;
+        Ok(s.subscriptions
+            .get(&id)
+            .filter(|sub| sub.integration_id == integration_id)
+            .cloned())
+    }
+
+    async fn live_subscriptions(
+        &self,
+        integration_id: Uuid,
+    ) -> Result<Vec<Subscription>, StoreError> {
+        let s = self.0.lock().map_err(|_| StoreError::Unavailable(None))?;
+        let mut live: Vec<_> = s
+            .subscriptions
+            .values()
+            .filter(|sub| sub.integration_id == integration_id && sub.is_live())
+            .cloned()
+            .collect();
+        live.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        Ok(live)
+    }
+
+    async fn complete_fanout(
         &self,
         integration_id: Uuid,
         delivery_id: &str,
-        outcome: ForwardOutcome,
+        outcome: FanoutOutcome,
         now: DateTime<Utc>,
     ) -> Result<(), StoreError> {
         let mut s = self.0.lock().map_err(|_| StoreError::Unavailable(None))?;
         let Some(row) = s
             .deliveries
             .get_mut(&(integration_id, delivery_id.to_owned()))
+            .filter(|row| row.state == DeliveryState::Queued)
+        else {
+            return Ok(());
+        };
+        row.completed_at = Some(now);
+        row.next_attempt_at = None;
+        let received_at = row.delivery.received_at;
+        let messages = match outcome {
+            FanoutOutcome::Failed(error) => {
+                row.state = DeliveryState::Failed;
+                row.last_error = Some(error);
+                return Ok(());
+            }
+            FanoutOutcome::Fanned(messages) => {
+                row.state = DeliveryState::Accepted;
+                row.last_error = None;
+                row.delivery.body.clear();
+                messages
+            }
+        };
+        for message in messages {
+            let key = MessageKey {
+                integration_id,
+                delivery_id: delivery_id.to_owned(),
+                subscription_id: message.subscription_id,
+            };
+            let (state, content, error) = initial_message_state(&message);
+            let stored = StoredMessage {
+                channel_id: message.channel_id,
+                content: content.to_owned(),
+                state,
+                event_id: None,
+                attempts: 0,
+                next_attempt_at: (state == DeliveryState::Queued).then_some(received_at),
+                last_error: error.map(str::to_owned),
+                received_at,
+                completed_at: (state != DeliveryState::Queued).then_some(now),
+            };
+            s.messages.entry(key).or_insert(stored);
+        }
+        Ok(())
+    }
+
+    async fn claim_due_messages(
+        &self,
+        now: DateTime<Utc>,
+        lease: Duration,
+        limit: usize,
+    ) -> Result<Vec<ClaimedMessage>, StoreError> {
+        let mut s = self.0.lock().map_err(|_| StoreError::Unavailable(None))?;
+        let mut due: Vec<(Option<DateTime<Utc>>, MessageKey)> = s
+            .messages
+            .iter()
+            .filter(|(_, m)| m.state == DeliveryState::Queued)
+            .filter(|(_, m)| m.next_attempt_at.is_some_and(|at| at <= now))
+            .map(|(key, m)| (m.next_attempt_at, key.clone()))
+            .collect();
+        due.sort();
+        due.truncate(limit);
+        let mut claimed = Vec::with_capacity(due.len());
+        for (_, key) in due {
+            let Some(host) = s
+                .integrations
+                .get(&key.integration_id)
+                .map(|i| i.community_host.clone())
+            else {
+                continue;
+            };
+            let Some(row) = s.messages.get_mut(&key) else {
+                continue;
+            };
+            row.attempts += 1;
+            row.next_attempt_at = Some(now + lease);
+            claimed.push(ClaimedMessage {
+                community_host: host,
+                channel_id: row.channel_id,
+                content: row.content.clone(),
+                received_at: row.received_at,
+                attempts: row.attempts,
+                key,
+            });
+        }
+        Ok(claimed)
+    }
+
+    async fn complete_message(
+        &self,
+        key: &MessageKey,
+        outcome: ForwardOutcome,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        let mut s = self.0.lock().map_err(|_| StoreError::Unavailable(None))?;
+        let Some(row) = s
+            .messages
+            .get_mut(key)
+            .filter(|row| row.state == DeliveryState::Queued)
         else {
             return Ok(());
         };
@@ -775,7 +456,6 @@ impl Store for MemoryStore {
                 row.completed_at = Some(now);
                 row.next_attempt_at = None;
                 row.last_error = None;
-                row.delivery.body.clear();
             }
             ForwardOutcome::Failed { event_id, error } => {
                 row.state = DeliveryState::Failed;
@@ -799,6 +479,11 @@ impl Store for MemoryStore {
 }
 
 impl MemoryStore {
+    /// Test seam: the stored message row.
+    pub fn message(&self, key: &MessageKey) -> Option<StoredMessage> {
+        self.0.lock().ok()?.messages.get(key).cloned()
+    }
+
     /// Test seam: the stored delivery row, payload included.
     pub fn delivery(&self, integration_id: Uuid, delivery_id: &str) -> Option<StoredDelivery> {
         self.0
@@ -813,6 +498,7 @@ impl MemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::{DeliveryCursor, Mutation, NewMessage, Provider};
 
     fn at(secs: i64) -> DateTime<Utc> {
         DateTime::from_timestamp(1_700_000_000 + secs, 0).unwrap()
@@ -962,7 +648,7 @@ mod tests {
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].delivery_id, "early");
         assert_eq!(first[0].attempts, 1);
-        assert_eq!(first[0].community_host, "acme.communities.example.org");
+        assert_eq!(first[0].provider, Provider::Github);
         let second = store.claim_due(at(31), lease, 10).await.unwrap();
         assert_eq!(second.len(), 1, "the leased row is hidden");
         assert_eq!(second[0].delivery_id, "late");
@@ -975,12 +661,10 @@ mod tests {
         );
         assert!(reclaimed.iter().all(|d| d.attempts == 2));
         store
-            .complete_forward(
+            .complete_fanout(
                 integration_id,
                 "early",
-                ForwardOutcome::Accepted {
-                    event_id: "ab".repeat(32),
-                },
+                FanoutOutcome::Fanned(vec![]),
                 at(92),
             )
             .await
@@ -1099,5 +783,153 @@ mod tests {
         let enabled = store.integration(id).await.unwrap().unwrap();
         assert!(enabled.enabled && enabled.disabled_at.is_none());
         assert_eq!(enabled.revision, 3);
+    }
+
+    #[tokio::test]
+    async fn fanout_queues_messages_once_and_delete_cancels_unsent_ones() {
+        let store = MemoryStore::default();
+        let integration_id = Uuid::new_v4();
+        store.apply(put(integration_id, 1), at(0)).await.unwrap();
+        let (sub_a, sub_b, channel) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        for sub in [sub_a, sub_b] {
+            let write = SubscriptionWrite {
+                id: sub,
+                integration_id,
+                revision: 1,
+                change: SubscriptionChange::Put {
+                    channel_id: channel,
+                    filter: None,
+                    message: None,
+                },
+            };
+            assert!(matches!(
+                store.write_subscription(write, at(1)).await.unwrap(),
+                WriteOutcome::Applied(_)
+            ));
+        }
+        assert_eq!(
+            store
+                .write_subscription(
+                    SubscriptionWrite {
+                        id: Uuid::new_v4(),
+                        integration_id: Uuid::new_v4(),
+                        revision: 1,
+                        change: SubscriptionChange::Put {
+                            channel_id: channel,
+                            filter: None,
+                            message: None,
+                        },
+                    },
+                    at(1),
+                )
+                .await
+                .unwrap(),
+            WriteOutcome::NotFound,
+            "a subscription needs an existing integration"
+        );
+        store
+            .insert_delivery(NewDelivery {
+                integration_id,
+                delivery_id: "d1".into(),
+                event_type: "push".into(),
+                provider_timestamp: None,
+                headers: serde_json::json!({}),
+                body: b"{}".to_vec(),
+                received_at: at(10),
+            })
+            .await
+            .unwrap();
+        let messages = vec![
+            NewMessage {
+                subscription_id: sub_a,
+                channel_id: channel,
+                content: Ok("hello".into()),
+            },
+            NewMessage {
+                subscription_id: sub_b,
+                channel_id: channel,
+                content: Err("filter failed".into()),
+            },
+        ];
+        let fanned = FanoutOutcome::Fanned(messages);
+        store
+            .complete_fanout(integration_id, "d1", fanned.clone(), at(11))
+            .await
+            .unwrap();
+        store
+            .complete_fanout(
+                integration_id,
+                "d1",
+                FanoutOutcome::Failed("late".into()),
+                at(12),
+            )
+            .await
+            .unwrap();
+        let delivery = store.delivery(integration_id, "d1").unwrap();
+        assert_eq!(delivery.state, DeliveryState::Accepted, "settled once");
+        assert!(delivery.delivery.body.is_empty());
+        let key = |subscription_id| MessageKey {
+            integration_id,
+            delivery_id: "d1".into(),
+            subscription_id,
+        };
+        let failed = store.message(&key(sub_b)).unwrap();
+        assert_eq!(failed.state, DeliveryState::Failed);
+        assert_eq!(failed.last_error.as_deref(), Some("filter failed"));
+
+        let lease = Duration::seconds(60);
+        let claimed = store.claim_due_messages(at(20), lease, 10).await.unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].key, key(sub_a));
+        assert_eq!(claimed[0].content, "hello");
+        assert_eq!(claimed[0].received_at, at(10));
+        assert_eq!(claimed[0].community_host, "acme.communities.example.org");
+        assert!(store
+            .claim_due_messages(at(21), lease, 10)
+            .await
+            .unwrap()
+            .is_empty());
+
+        let delete = SubscriptionWrite {
+            id: sub_a,
+            integration_id,
+            revision: 2,
+            change: SubscriptionChange::Delete,
+        };
+        store.write_subscription(delete, at(22)).await.unwrap();
+        let cancelled = store.message(&key(sub_a)).unwrap();
+        assert_eq!(cancelled.state, DeliveryState::Failed);
+        assert_eq!(
+            cancelled.last_error.as_deref(),
+            Some("subscription deleted")
+        );
+        store
+            .complete_message(
+                &key(sub_a),
+                ForwardOutcome::Accepted {
+                    event_id: "ab".repeat(32),
+                },
+                at(23),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.message(&key(sub_a)).unwrap(),
+            cancelled,
+            "an in-flight send cannot revive a cancelled message"
+        );
+        assert!(store
+            .claim_due_messages(at(200), lease, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .live_subscriptions(integration_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }
