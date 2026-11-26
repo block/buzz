@@ -31,7 +31,7 @@ export function NotificationSettingsCard({
   notificationPermission,
   notificationSettings,
   onSetDesktopNotificationsEnabled,
-  onSetAllSlotAlertsEnabled,
+  onSetSoundEnabled,
   onSetHomeBadgeEnabled,
   onSetSlotAlertsEnabled,
   onSetNotifyWhileViewing,
@@ -42,7 +42,7 @@ export function NotificationSettingsCard({
   notificationPermission: DesktopNotificationPermissionState;
   notificationSettings: NotificationSettings;
   onSetDesktopNotificationsEnabled: (enabled: boolean) => Promise<boolean>;
-  onSetAllSlotAlertsEnabled: (enabled: boolean) => void;
+  onSetSoundEnabled: (enabled: boolean) => void;
   onSetHomeBadgeEnabled: (enabled: boolean) => void;
   onSetSlotAlertsEnabled: (slot: SoundSlot, enabled: boolean) => void;
   onSetNotifyWhileViewing: (enabled: boolean) => void;
@@ -51,13 +51,6 @@ export function NotificationSettingsCard({
   const permissionBlocked =
     notificationPermission === "denied" ||
     notificationPermission === "unsupported";
-  // The parent Sound switch derives from its children: on when any live
-  // event row is on, and toggling it bulk-sets every live row.
-  const anyAlertsOn = SOUND_SLOTS.some(
-    (slot) =>
-      !COMING_SOON_SLOTS.has(slot) &&
-      notificationSettings.slotAlertsEnabled[slot],
-  );
   const [showComingSoon, setShowComingSoon] = useState(false);
   const visibleSlots = SOUND_SLOTS.filter(
     (slot) => showComingSoon || !COMING_SOON_SLOTS.has(slot),
@@ -162,99 +155,97 @@ export function NotificationSettingsCard({
                   </p>
                 </div>
                 <Switch
-                  checked={anyAlertsOn}
+                  checked={notificationSettings.soundEnabled}
                   data-testid="notifications-sound-toggle"
                   id="notification-sound-switch"
                   onCheckedChange={(checked) => {
-                    onSetAllSlotAlertsEnabled(checked);
+                    onSetSoundEnabled(checked);
                   }}
                 />
               </SettingsOptionRow>
             </SettingsOptionGroup>
 
-            {anyAlertsOn ? (
-              <div className="space-y-4">
-                <SettingsOptionGroup title="Alert sounds">
-                  {visibleSlots.map((slot) => {
-                    const comingSoon = COMING_SOON_SLOTS.has(slot);
-                    const alertsOn =
-                      notificationSettings.slotAlertsEnabled[slot];
-                    return (
-                      <SettingsOptionRow
-                        aria-disabled={comingSoon || undefined}
-                        className={cn(
-                          comingSoon && "cursor-not-allowed opacity-40",
-                        )}
-                        key={slot}
-                      >
-                        <div className="min-w-0">
-                          <span className="flex items-center gap-2 text-sm font-medium">
-                            {SLOT_LABELS[slot]}
-                            {comingSoon ? (
-                              <span className="rounded-full bg-muted/70 px-2 py-0.5 text-2xs font-normal uppercase tracking-wide text-muted-foreground">
-                                Coming soon
-                              </span>
-                            ) : null}
-                          </span>
-                          <p
-                            className="text-sm font-normal text-muted-foreground/70"
-                            data-settings-subcopy
-                          >
-                            {SLOT_DESCRIPTIONS[slot]}
-                          </p>
-                        </div>
-                        <span className="flex items-center gap-3">
-                          <span
-                            className={cn(
-                              "transition-opacity duration-200",
-                              !alertsOn && "pointer-events-none opacity-40",
-                            )}
-                          >
-                            <SoundPicker
-                              disabled={comingSoon || !alertsOn}
-                              onChange={(next) => onSetSoundForSlot(slot, next)}
-                              recommended={RECOMMENDED_SOUND_BY_SLOT[slot]}
-                              value={notificationSettings.sounds[slot]}
-                            />
-                          </span>
-                          <Switch
-                            checked={alertsOn && !comingSoon}
-                            data-testid={`notifications-alerts-enabled-${slot}`}
-                            disabled={comingSoon}
-                            id={`alerts-enabled-${slot}-switch`}
-                            onCheckedChange={(checked) => {
-                              onSetSlotAlertsEnabled(slot, checked);
-                            }}
+            <div className="space-y-4">
+              <SettingsOptionGroup title="Alert sounds">
+                {visibleSlots.map((slot) => {
+                  const comingSoon = COMING_SOON_SLOTS.has(slot);
+                  const alertsOn = notificationSettings.slotAlertsEnabled[slot];
+                  const soundOn = alertsOn && notificationSettings.soundEnabled;
+                  return (
+                    <SettingsOptionRow
+                      aria-disabled={comingSoon || undefined}
+                      className={cn(
+                        comingSoon && "cursor-not-allowed opacity-40",
+                      )}
+                      key={slot}
+                    >
+                      <div className="min-w-0">
+                        <span className="flex items-center gap-2 text-sm font-medium">
+                          {SLOT_LABELS[slot]}
+                          {comingSoon ? (
+                            <span className="rounded-full bg-muted/70 px-2 py-0.5 text-2xs font-normal uppercase tracking-wide text-muted-foreground">
+                              Coming soon
+                            </span>
+                          ) : null}
+                        </span>
+                        <p
+                          className="text-sm font-normal text-muted-foreground/70"
+                          data-settings-subcopy
+                        >
+                          {SLOT_DESCRIPTIONS[slot]}
+                        </p>
+                      </div>
+                      <span className="flex items-center gap-3">
+                        <span
+                          className={cn(
+                            "transition-opacity duration-200",
+                            !soundOn && "pointer-events-none opacity-40",
+                          )}
+                        >
+                          <SoundPicker
+                            disabled={comingSoon || !soundOn}
+                            onChange={(next) => onSetSoundForSlot(slot, next)}
+                            recommended={RECOMMENDED_SOUND_BY_SLOT[slot]}
+                            value={notificationSettings.sounds[slot]}
                           />
                         </span>
-                      </SettingsOptionRow>
-                    );
-                  })}
-                </SettingsOptionGroup>
+                        <Switch
+                          checked={alertsOn && !comingSoon}
+                          data-testid={`notifications-alerts-enabled-${slot}`}
+                          disabled={comingSoon}
+                          id={`alerts-enabled-${slot}-switch`}
+                          onCheckedChange={(checked) => {
+                            onSetSlotAlertsEnabled(slot, checked);
+                          }}
+                        />
+                      </span>
+                    </SettingsOptionRow>
+                  );
+                })}
+              </SettingsOptionGroup>
 
-                <div className="flex justify-center">
-                  <Button
-                    data-testid="notifications-toggle-coming-soon"
-                    onClick={() => setShowComingSoon((current) => !current)}
-                    size="sm"
-                    type="button"
-                    variant="secondary"
-                  >
-                    {showComingSoon ? (
-                      <>
-                        <ChevronUp className="h-4 w-4" />
-                        Show less
-                      </>
-                    ) : (
-                      <>
-                        <ChevronDown className="h-4 w-4" />
-                        View all
-                      </>
-                    )}
-                  </Button>
-                </div>
+              <div className="flex justify-center">
+                <Button
+                  data-testid="notifications-toggle-coming-soon"
+                  onClick={() => setShowComingSoon((current) => !current)}
+                  size="sm"
+                  type="button"
+                  variant="secondary"
+                >
+                  {showComingSoon ? (
+                    <>
+                      <ChevronUp className="h-4 w-4" />
+                      Show less
+                    </>
+                  ) : (
+                    <>
+                      <ChevronDown className="h-4 w-4" />
+                      View all
+                    </>
+                  )}
+                </Button>
               </div>
-            ) : null}
+            </div>
           </>
         ) : null}
 

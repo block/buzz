@@ -53,7 +53,8 @@ function readWatermark(pubkey: string): number {
  * it fires reminders newly crossing their `not_before` since the persisted
  * watermark, coalescing multiple due reminders into one toast, then advances
  * the watermark. The toast respects `desktopEnabled` + the `needs_action`
- * alert slot. This hook is the sole detector — mount it once at app level.
+ * alert slot; its chime also respects `soundEnabled`. This hook is the sole
+ * detector — mount it once at app level.
  */
 export function useReminderNotifications(
   pubkey: string | undefined,
@@ -110,7 +111,9 @@ export function useReminderNotifications(
       body,
     }).then((didSend) => {
       if (!didSend) return;
-      playNotificationSound(resolveSlotSound(current, "needs_action"));
+      if (current.soundEnabled) {
+        playNotificationSound(resolveSlotSound(current, "needs_action"));
+      }
       void requestDockBounce();
     });
   });
