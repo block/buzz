@@ -197,7 +197,7 @@ If you'd rather point buzz at a different bash-compatible shell, set `BUZZ_SHELL
 │  Human client         AI agent              CLI / scripts               │
 │  (desktop, mobile)    (Goose, Codex, ...)   (buzz-cli, agents)          │
 │       │               ┌──────────────┐               │                  │
-│       │               │  buzz-acp  │                 │                  │
+│       │               │   buzz-acp   │               │                  │
 │       │               │  (ACP ↔ MCP) │               │                  │
 │       │               └──────┬───────┘               │                  │
 │       │                      │                       │                  │
