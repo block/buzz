@@ -475,6 +475,11 @@ pub struct CliArgs {
     )]
     pub permission_mode: PermissionMode,
 
+    /// Timeout in seconds for applying an ACP session permission mode.
+    #[arg(long = "permission-mode-timeout", env = "BUZZ_ACP_PERMISSION_MODE_TIMEOUT", default_value_t = 5,
+          value_parser = clap::value_parser!(u64).range(1..=300))]
+    pub permission_mode_timeout_secs: u64,
+
     /// Inbound author gate: which authors' events the harness forwards.
     /// Modes: owner-only (default), allowlist, anyone, nobody.
     #[arg(
@@ -489,6 +494,19 @@ pub struct CliArgs {
     /// Owner pubkey is always implicitly included.
     #[arg(long, env = "BUZZ_ACP_RESPOND_TO_ALLOWLIST", value_delimiter = ',')]
     pub respond_to_allowlist: Option<Vec<String>>,
+
+    /// Teammate pubkeys whose consecutive messages are capped per conversation.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_TEAM_PUBKEYS",
+        value_delimiter = ',',
+        hide_env_values = true
+    )]
+    pub team_pubkeys: Option<Vec<String>>,
+
+    /// Maximum consecutive teammate messages before further teammate triggers are dropped.
+    #[arg(long, env = "BUZZ_ACP_TEAM_LOOP_LIMIT", default_value_t = 6)]
+    pub team_loop_limit: usize,
 
     /// Comma-separated list of allowed `--respond-to` modes.
     /// When set, the harness rejects startup if `--respond-to` is not in this list.
@@ -596,10 +614,13 @@ pub struct Config {
     pub session_title: Option<String>,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
+    pub permission_mode_timeout_secs: u64,
     /// Inbound author gate mode.
     pub respond_to: RespondTo,
     /// Validated allowlist of pubkey hex strings (used when respond_to == Allowlist).
     pub respond_to_allowlist: HashSet<String>,
+    pub team_pubkeys: HashSet<String>,
+    pub team_loop_limit: usize,
     /// Allowed `respond_to` modes. Empty = all modes allowed.
     pub allowed_respond_to: Vec<String>,
     /// Per-persona env vars to inject at agent spawn time (e.g., GOOSE_PROVIDER, GOOSE_MODEL, BUZZ_AGENT_MODEL).
@@ -1139,6 +1160,12 @@ impl Config {
             }
             HashSet::new()
         };
+        let team_pubkeys = validate_allowlist(&args.team_pubkeys.unwrap_or_default())?;
+        if args.team_loop_limit == 0 {
+            return Err(ConfigError::ConfigFile(
+                "--team-loop-limit must be greater than zero".into(),
+            ));
+        }
 
         // Validate respond_to against the allowed set.
         let allowed_respond_to = if let Some(raw) = args.allowed_respond_to {
@@ -1224,8 +1251,11 @@ impl Config {
                 .as_deref()
                 .and_then(sanitize_session_title),
             permission_mode: args.permission_mode,
+            permission_mode_timeout_secs: args.permission_mode_timeout_secs,
             respond_to: args.respond_to,
             respond_to_allowlist,
+            team_pubkeys,
+            team_loop_limit: args.team_loop_limit,
             allowed_respond_to,
             persona_env_vars,
             has_generated_codex_config,
@@ -1379,6 +1409,19 @@ pub(crate) fn default_mention_kinds() -> Vec<u32> {
     ]
 }
 
+fn include_team_reset_kinds(config: &Config, mut kinds: Option<Vec<u32>>) -> Option<Vec<u32>> {
+    if !config.team_pubkeys.is_empty() {
+        if let Some(ref mut values) = kinds {
+            for kind in [9, 45001, 45003] {
+                if !values.contains(&kind) {
+                    values.push(kind);
+                }
+            }
+        }
+    }
+    kinds
+}
+
 /// Resolve per-channel NIP-01 filters from config + discovered channels.
 pub fn resolve_channel_filters(
     config: &Config,
@@ -1399,16 +1442,24 @@ pub fn resolve_channel_filters(
 
     match config.subscribe_mode {
         SubscribeMode::Mentions => {
-            let kinds = config
-                .kinds_override
-                .clone()
-                .unwrap_or_else(default_mention_kinds);
-            let require_mention = !config.no_mention_filter;
+            let kinds = include_team_reset_kinds(
+                config,
+                Some(
+                    config
+                        .kinds_override
+                        .clone()
+                        .unwrap_or_else(default_mention_kinds),
+                ),
+            );
+            // A team guard must see human resets and teammate messages even
+            // when neither mentions this agent. Local rule matching still
+            // enforces the requested mention policy for actual turns.
+            let require_mention = !config.no_mention_filter && config.team_pubkeys.is_empty();
             for ch in &target_channels {
                 result.insert(
                     *ch,
                     ChannelFilter {
-                        kinds: Some(kinds.clone()),
+                        kinds: kinds.clone(),
                         require_mention,
                     },
                 );
@@ -1419,7 +1470,7 @@ pub fn resolve_channel_filters(
                 result.insert(
                     *ch,
                     ChannelFilter {
-                        kinds: config.kinds_override.clone(),
+                        kinds: include_team_reset_kinds(config, config.kinds_override.clone()),
                         require_mention: false,
                     },
                 );
@@ -1454,8 +1505,8 @@ pub fn resolve_channel_filters(
                     result.insert(
                         *ch,
                         ChannelFilter {
-                            kinds: merged_kinds,
-                            require_mention,
+                            kinds: include_team_reset_kinds(config, merged_kinds),
+                            require_mention: require_mention && config.team_pubkeys.is_empty(),
                         },
                     );
                 }
@@ -1497,16 +1548,19 @@ pub fn resolve_dynamic_channel_filter(
 
     match config.subscribe_mode {
         SubscribeMode::Mentions => Some(ChannelFilter {
-            kinds: Some(
-                config
-                    .kinds_override
-                    .clone()
-                    .unwrap_or_else(default_mention_kinds),
+            kinds: include_team_reset_kinds(
+                config,
+                Some(
+                    config
+                        .kinds_override
+                        .clone()
+                        .unwrap_or_else(default_mention_kinds),
+                ),
             ),
-            require_mention: !config.no_mention_filter,
+            require_mention: !config.no_mention_filter && config.team_pubkeys.is_empty(),
         }),
         SubscribeMode::All => Some(ChannelFilter {
-            kinds: config.kinds_override.clone(),
+            kinds: include_team_reset_kinds(config, config.kinds_override.clone()),
             require_mention: false,
         }),
         SubscribeMode::Config => {
@@ -1543,8 +1597,8 @@ pub fn resolve_dynamic_channel_filter(
             }
 
             Some(ChannelFilter {
-                kinds: merged_kinds,
-                require_mention,
+                kinds: include_team_reset_kinds(config, merged_kinds),
+                require_mention: require_mention && config.team_pubkeys.is_empty(),
             })
         }
     }
@@ -1602,8 +1656,11 @@ mod tests {
             effort_level: None,
             session_title: None,
             permission_mode: PermissionMode::BypassPermissions,
+            permission_mode_timeout_secs: 5,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
+            team_pubkeys: HashSet::new(),
+            team_loop_limit: 6,
             allowed_respond_to: Vec::new(),
             persona_env_vars: vec![],
             has_generated_codex_config: false,
@@ -1616,6 +1673,29 @@ mod tests {
             no_base_prompt: false,
             base_prompt_content: None,
         }
+    }
+
+    #[test]
+    fn permission_timeout_reaches_prompt_context() {
+        let mut config = test_config(SubscribeMode::Mentions);
+        config.permission_mode_timeout_secs = 30;
+        let rest = crate::relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: "http://127.0.0.1:1".into(),
+            keys: nostr::Keys::generate(),
+            auth_tag_json: None,
+        };
+        let context = crate::runtime::make_prompt_context(
+            &config,
+            rest,
+            std::collections::HashMap::new(),
+            crate::runtime::SessionMode::Conversation,
+        )
+        .unwrap();
+        assert_eq!(
+            context.permission_mode_timeout,
+            std::time::Duration::from_secs(30)
+        );
     }
 
     fn make_rule(
@@ -3003,6 +3083,44 @@ channels = "ALL"
     // A minimal valid private key for test use (secp256k1 scalar = 1).
     const TEST_PRIVATE_KEY: &str =
         "0000000000000000000000000000000000000000000000000000000000000001";
+
+    #[test]
+    fn team_loop_widens_wire_subscription_but_not_turn_rules() {
+        let mut config = test_config(SubscribeMode::Mentions);
+        let channel = Uuid::new_v4();
+        assert!(resolve_channel_filters(&config, &[channel], &[])[&channel].require_mention);
+        config.team_pubkeys.insert("a".repeat(64));
+        assert!(!resolve_channel_filters(&config, &[channel], &[])[&channel].require_mention);
+        assert!(resolve_channel_filters(&config, &[channel], &[])[&channel]
+            .kinds
+            .as_ref()
+            .unwrap()
+            .contains(&45003));
+        assert!(
+            !resolve_dynamic_channel_filter(&config, channel, &[])
+                .unwrap()
+                .require_mention
+        );
+    }
+
+    #[test]
+    fn permission_mode_timeout_defaults_to_five_seconds_and_accepts_thirty() {
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", TEST_PRIVATE_KEY]);
+        assert_eq!(default.permission_mode_timeout_secs, 5);
+        let custom = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--permission-mode-timeout",
+            "30",
+        ]);
+        assert_eq!(
+            Config::from_args(custom)
+                .unwrap()
+                .permission_mode_timeout_secs,
+            30
+        );
+    }
 
     #[test]
     fn allowed_respond_to_full_path_rejects_disallowed_mode() {
