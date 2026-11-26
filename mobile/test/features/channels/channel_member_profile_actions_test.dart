@@ -243,12 +243,12 @@ void main() {
       actions: actions,
       load: () async => [_member('self', 'owner'), _member('alice', role)],
     );
-    await tester.tap(find.text('Make admin'));
+    await tester.tap(find.text('Make conversation admin'));
     await tester.pumpAndSettle();
     role = 'admin';
     container.invalidate(channelMembersProvider('test'));
     await tester.pumpAndSettle();
-    expect(find.text('Make admin'), findsNothing);
+    expect(find.text('Make conversation admin'), findsNothing);
     await tester.tap(find.text('Change to member'));
     await tester.pumpAndSettle();
     expect(actions.calls, ['test:alice:admin', 'test:alice:member']);
@@ -258,7 +258,7 @@ void main() {
     role = 'bot';
     container.invalidate(channelMembersProvider('test'));
     await tester.pumpAndSettle();
-    expect(find.text('Make admin'), findsOneWidget);
+    expect(find.text('Make conversation admin'), findsOneWidget);
   });
   group('in a DM', () {
     // Ownership comes from verified naming facts, which need hex keys.
@@ -295,7 +295,7 @@ void main() {
         inSheet: true,
         actions: actions,
       );
-      expect(find.text('Make admin'), findsNothing);
+      expect(find.text('Make conversation admin'), findsNothing);
       await tester.tap(find.text('Remove from conversation'));
       await tester.pumpAndSettle();
       expect(find.text('Remove from conversation?'), findsOneWidget);
@@ -369,7 +369,7 @@ void main() {
     testWidgets('management rows for $role', (tester) async {
       await _pump(tester, targetRole: role);
       expect(
-        find.text('Make admin'),
+        find.text('Make conversation admin'),
         role == 'admin' ? findsNothing : findsOneWidget,
       );
       expect(
@@ -411,7 +411,7 @@ void main() {
             ? () => Future.error(Exception('offline'))
             : null,
       );
-      expect(find.text('Make admin'), findsNothing);
+      expect(find.text('Make conversation admin'), findsNothing);
       expect(find.text('Remove from conversation'), findsNothing);
     });
   }
@@ -424,7 +424,7 @@ void main() {
         ..pending = Completer<void>()
         ..fail = true;
       await _pump(tester, actions: actions);
-      await tester.tap(find.text('Make admin'));
+      await tester.tap(find.text('Make conversation admin'));
       await tester.pump();
       final pending = find.bySemanticsLabel('Updating member');
       expect(pending, findsOneWidget);
@@ -437,7 +437,7 @@ void main() {
         isTrue,
       );
       expect(find.bySemanticsLabel('Updating…'), findsNothing);
-      for (final label in ['Make admin', 'Remove from conversation']) {
+      for (final label in ['Make conversation admin', 'Remove from conversation']) {
         expect(
           tester
               .getSemantics(find.text(label))
@@ -446,7 +446,7 @@ void main() {
           isFalse,
         );
       }
-      await tester.tap(find.text('Make admin'));
+      await tester.tap(find.text('Make conversation admin'));
       expect(actions.calls, ['test:alice:admin']);
       actions.pending!.complete();
       await tester.pumpAndSettle();
@@ -469,7 +469,7 @@ void main() {
       );
       expect(
         tester
-            .getSemantics(find.text('Make admin'))
+            .getSemantics(find.text('Make conversation admin'))
             .getSemanticsData()
             .hasAction(SemanticsAction.tap),
         isTrue,

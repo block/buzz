@@ -165,7 +165,7 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
             if (!isDm && member.role != 'admin')
               AppListRow(
                 icon: BuzzIcons.shieldCheck,
-                title: 'Make admin',
+                title: 'Make conversation admin',
                 onTap: busy.value ? null : () => perform(role: 'admin'),
               ),
             if (!isDm && (member.role == 'admin' || member.role == 'guest'))
