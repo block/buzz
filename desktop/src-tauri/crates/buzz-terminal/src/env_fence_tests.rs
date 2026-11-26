@@ -241,6 +241,39 @@ fn resolve_shell_falls_through_to_passwd_not_the_default() {
     );
 }
 
+/// Exercise overlapping reads through both the raw lookup and shell resolver.
+/// This is supplemental runtime coverage, not a deterministic race detector.
+/// `shell.rs`'s production `forbid(unsafe_code)` guard rejects restoration of
+/// the old direct `getpwuid` implementation even on macOS, where it can pass
+/// concurrent runtime checks. Linux runtime validation remains necessary.
+#[test]
+fn passwd_shell_concurrent_reads_agree() {
+    let reference = crate::shell::passwd_shell();
+    let resolved = reference
+        .as_deref()
+        .filter(|shell| is_executable_file(std::path::Path::new(shell)))
+        .unwrap_or(FALLBACK_SHELL)
+        .to_owned();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let readers: Vec<_> = (0..8)
+        .map(|_| {
+            let barrier = std::sync::Arc::clone(&barrier);
+            let reference = reference.clone();
+            let resolved = resolved.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..32 {
+                    assert_eq!(crate::shell::passwd_shell(), reference);
+                    assert_eq!(resolve_shell(None), resolved);
+                }
+            })
+        })
+        .collect();
+    for reader in readers {
+        reader.join().expect("passwd reader thread");
+    }
+}
+
 /// `access(X_OK)` returns 0 for a directory, so a `$SHELL` pointing at one
 /// passes portable-pty's own check and produces a child that dies with a Rust
 /// runtime panic. Requiring an executable *regular file* is what closes it.
