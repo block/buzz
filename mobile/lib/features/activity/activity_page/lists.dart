@@ -113,7 +113,7 @@ class _DraftsList extends ConsumerWidget {
         final draft = drafts[index];
         final channel = channelById[draft.channelId];
         final destination = channel == null
-            ? 'Unavailable channel'
+            ? 'Unavailable conversation'
             : channel.isDm
             ? resolveDmChannelDisplayLabel(
                 channel,

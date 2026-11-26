@@ -376,7 +376,7 @@ class _MemberTile extends ConsumerWidget {
                       final confirmed = await showDestructiveConfirmation(
                         context: context,
                         title: 'Remove member',
-                        message: 'Remove $label from this channel?',
+                        message: 'Remove $label from this conversation?',
                         confirmLabel: 'Remove',
                       );
                       if (confirmed == true) {

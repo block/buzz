@@ -59,9 +59,7 @@ class _ConversationAppBarTitle extends StatelessWidget {
             child: NavigationButtonSurface(
               capsule: true,
               child: Tooltip(
-                message: channel.isDm
-                    ? 'Open conversation details'
-                    : 'Open channel settings',
+                message: 'Open conversation details',
                 child: InkWell(
                   key: ValueKey('$prefix-header-settings-trigger'),
                   onTap: onTap,
@@ -101,7 +99,7 @@ class _ConversationAppBarTitle extends StatelessWidget {
                               BuzzIcons.lock,
                               size: 14,
                               color: context.colors.onSurfaceVariant,
-                              semanticLabel: 'Private channel',
+                              semanticLabel: 'Private conversation',
                             ),
                             const SizedBox(width: Grid.quarter),
                           ],
@@ -134,9 +132,7 @@ class _ConversationAppBarTitle extends StatelessWidget {
     final title = Semantics(
       button: true,
       child: Tooltip(
-        message: channel.isDm
-            ? 'Open conversation details'
-            : 'Open channel settings',
+        message: 'Open conversation details',
         child: InkWell(
           key: ValueKey('$prefix-header-settings-trigger'),
           borderRadius: BorderRadius.circular(Radii.md),
@@ -158,7 +154,7 @@ class _ConversationAppBarTitle extends StatelessWidget {
                         BuzzIcons.lock,
                         size: 14,
                         color: context.colors.onSurfaceVariant,
-                        semanticLabel: 'Private channel',
+                        semanticLabel: 'Private conversation',
                       ),
                       const SizedBox(width: Grid.quarter),
                     ],

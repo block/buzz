@@ -337,7 +337,6 @@ Widget _composerSuggestionPanel({
   required VoidCallback onMentionSearchRetry,
   required Map<String, UserProfile> userCache,
   required String? currentPubkey,
-  required bool isDmChannel,
   required ValueChanged<Channel> onChannelSelect,
   required ValueChanged<MentionCandidate> onMentionSelect,
 }) => channelSuggestions.isNotEmpty
@@ -370,7 +369,6 @@ Widget _composerSuggestionPanel({
             onRetry: onMentionSearchRetry,
             userCache: userCache,
             currentPubkey: currentPubkey,
-            isDmChannel: isDmChannel,
             onSelect: onMentionSelect,
           ),
         ),
@@ -584,12 +582,12 @@ Future<_NonMemberMentionChoice?> _promptNonMemberMention(
   return showBuzzDialog<_NonMemberMentionChoice>(
     context: context,
     builder: (dialogContext) => AlertDialog(
-      title: const Text('Mention people outside this channel?'),
+      title: const Text('Mention people outside this conversation?'),
       content: Text(
         canInvite
-            ? '${names.join(', ')} $verb not in this channel. Invite them to '
-                  'the channel, or send without inviting them.'
-            : '${names.join(', ')} $verb not in this channel. '
+            ? '${names.join(', ')} $verb not in this conversation. Invite them to '
+                  'the conversation, or send without inviting them.'
+            : '${names.join(', ')} $verb not in this conversation. '
                   '$privateChannelAddDeniedMessage You can still send without '
                   'inviting them.',
       ),

@@ -118,15 +118,15 @@ void main() {
         await tester.tap(find.text('Open settings'));
         await tester.pumpAndSettle();
         if (native) {
-          selection!.complete('Archive chat');
+          selection!.complete('Archive conversation');
           await tester.pumpAndSettle();
         } else {
           await tester.scrollUntilVisible(
-            find.text('Archive chat').hitTestable(),
+            find.text('Archive conversation').hitTestable(),
             200,
             scrollable: find.byType(Scrollable).last,
           );
-          await tester.tap(find.text('Archive chat'));
+          await tester.tap(find.text('Archive conversation'));
         }
         await tester.pumpAndSettle();
         await tester.tap(find.text('Archive'));
@@ -143,7 +143,7 @@ void main() {
         expect(opened, 2);
         selection!.complete(null);
       } else {
-        expect(find.text('Archive chat'), findsOneWidget);
+        expect(find.text('Archive conversation'), findsOneWidget);
         await tester.tap(find.byTooltip('Close sheet'));
       }
       await tester.pumpAndSettle();
@@ -156,7 +156,7 @@ void main() {
       await confirmArchive();
       archive.complete();
       await tester.pumpAndSettle();
-      expect(find.text('Archive chat'), findsNothing);
+      expect(find.text('Archive conversation'), findsNothing);
       expect(find.text('Open settings'), findsOneWidget);
       expect(result, isTrue);
       debugDefaultTargetPlatformOverride = null;

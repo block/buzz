@@ -231,7 +231,6 @@ class ComposeBar extends HookConsumerWidget {
     final currentPubkey = ref.watch(currentPubkeyProvider);
     final userCache = ref.watch(userCacheProvider);
     final composeChannel = ref.watch(channelByIdProvider(channelId));
-    final isDmChannel = composeChannel?.isDm ?? false;
 
     // Preload profiles for channel members, mentionable agents, and their
     // owners so @mention suggestions show names ("managed by …" included).
@@ -989,7 +988,6 @@ class ComposeBar extends HookConsumerWidget {
             },
             userCache: userCache,
             currentPubkey: currentPubkey,
-            isDmChannel: isDmChannel,
             onChannelSelect: insertChannel,
             onMentionSelect: insertMention,
           );

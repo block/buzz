@@ -153,7 +153,7 @@ void main() {
                   ),
               ],
             );
-            await tester.tap(find.text('Remove from channel'));
+            await tester.tap(find.text('Remove from conversation'));
             await tester.pumpAndSettle();
             if (platform == TargetPlatform.android) {
               final dialog = tester.widget<AlertDialog>(
@@ -196,13 +196,13 @@ void main() {
       try {
         final actions = _Actions();
         await _pump(tester, actions: actions, inSheet: true);
-        await tester.tap(find.text('Remove from channel'));
+        await tester.tap(find.text('Remove from conversation'));
         await tester.pumpAndSettle();
         expect(calls, hasLength(1));
         expect(calls.single.method, 'present');
         expect(
           calls.single.arguments,
-          containsPair('title', 'Remove from channel?'),
+          containsPair('title', 'Remove from conversation?'),
         );
         expect(calls.single.arguments, containsPair('confirmLabel', 'Remove'));
         expect(calls.single.arguments, containsPair('cancelLabel', 'Cancel'));
@@ -227,7 +227,7 @@ void main() {
   testWidgets('successful removal closes the member sheet', (tester) async {
     final actions = _Actions();
     await _pump(tester, actions: actions, inSheet: true);
-    await tester.tap(find.text('Remove from channel'));
+    await tester.tap(find.text('Remove from conversation'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Remove'));
     await tester.pumpAndSettle();
@@ -243,12 +243,12 @@ void main() {
       actions: actions,
       load: () async => [_member('self', 'owner'), _member('alice', role)],
     );
-    await tester.tap(find.text('Make channel admin'));
+    await tester.tap(find.text('Make admin'));
     await tester.pumpAndSettle();
     role = 'admin';
     container.invalidate(channelMembersProvider('test'));
     await tester.pumpAndSettle();
-    expect(find.text('Make channel admin'), findsNothing);
+    expect(find.text('Make admin'), findsNothing);
     await tester.tap(find.text('Change to member'));
     await tester.pumpAndSettle();
     expect(actions.calls, ['test:alice:admin', 'test:alice:member']);
@@ -258,7 +258,7 @@ void main() {
     role = 'bot';
     container.invalidate(channelMembersProvider('test'));
     await tester.pumpAndSettle();
-    expect(find.text('Make channel admin'), findsOneWidget);
+    expect(find.text('Make admin'), findsOneWidget);
   });
   group('in a DM', () {
     // Ownership comes from verified naming facts, which need hex keys.
@@ -295,12 +295,11 @@ void main() {
         inSheet: true,
         actions: actions,
       );
-      expect(find.text('Make channel admin'), findsNothing);
-      expect(find.text('Remove from channel'), findsNothing);
-      await tester.tap(find.text('Remove from DM'));
+      expect(find.text('Make admin'), findsNothing);
+      await tester.tap(find.text('Remove from conversation'));
       await tester.pumpAndSettle();
-      expect(find.text('Remove from DM?'), findsOneWidget);
-      expect(find.textContaining('from this DM?'), findsOneWidget);
+      expect(find.text('Remove from conversation?'), findsOneWidget);
+      expect(find.textContaining('from this conversation?'), findsOneWidget);
       await tester.tap(find.text('Remove'));
       await tester.pumpAndSettle();
       expect(actions.calls, ['test:$agent:remove']);
@@ -321,7 +320,7 @@ void main() {
             ? Future.value([_member(me, 'member'), _member(agent, 'bot')])
             : Completer<List<ChannelMember>>().future,
       );
-      await tester.tap(find.text('Remove from DM'));
+      await tester.tap(find.text('Remove from conversation'));
       await tester.pumpAndSettle();
       // The roster starts reloading while the confirmation is open.
       container.invalidate(channelMembersProvider('test'));
@@ -339,14 +338,14 @@ void main() {
       (tester) async {
         final container = await pumpDm(tester);
         await tester.pumpAndSettle();
-        expect(find.text('Remove from DM'), findsNothing);
+        expect(find.text('Remove from conversation'), findsNothing);
         container
             .read(userCacheProvider.notifier)
             .put(
               UserProfile(pubkey: agent, displayName: 'Scout', ownerPubkey: me),
             );
         await tester.pumpAndSettle();
-        expect(find.text('Remove from DM'), findsOneWidget);
+        expect(find.text('Remove from conversation'), findsOneWidget);
       },
     );
 
@@ -361,8 +360,8 @@ void main() {
           },
         );
         await tester.pumpAndSettle();
-        expect(find.text('Remove from DM'), findsNothing);
-        expect(find.text('Remove from channel'), findsNothing);
+        expect(find.text('Remove from conversation'), findsNothing);
+        expect(find.text('Remove from conversation'), findsNothing);
       });
     }
   });
@@ -370,7 +369,7 @@ void main() {
     testWidgets('management rows for $role', (tester) async {
       await _pump(tester, targetRole: role);
       expect(
-        find.text('Make channel admin'),
+        find.text('Make admin'),
         role == 'admin' ? findsNothing : findsOneWidget,
       );
       expect(
@@ -381,7 +380,7 @@ void main() {
         find.text('Make member'),
         role == 'guest' ? findsOneWidget : findsNothing,
       );
-      expect(find.text('Remove from channel'), findsOneWidget);
+      expect(find.text('Remove from conversation'), findsOneWidget);
     });
   }
   for (final scenario in [
@@ -412,8 +411,8 @@ void main() {
             ? () => Future.error(Exception('offline'))
             : null,
       );
-      expect(find.text('Make channel admin'), findsNothing);
-      expect(find.text('Remove from channel'), findsNothing);
+      expect(find.text('Make admin'), findsNothing);
+      expect(find.text('Remove from conversation'), findsNothing);
     });
   }
   testWidgets('role updates block duplicates and show rejection', (
@@ -425,9 +424,9 @@ void main() {
         ..pending = Completer<void>()
         ..fail = true;
       await _pump(tester, actions: actions);
-      await tester.tap(find.text('Make channel admin'));
+      await tester.tap(find.text('Make admin'));
       await tester.pump();
-      final pending = find.bySemanticsLabel('Updating channel member');
+      final pending = find.bySemanticsLabel('Updating member');
       expect(pending, findsOneWidget);
       expect(
         tester
@@ -438,7 +437,7 @@ void main() {
         isTrue,
       );
       expect(find.bySemanticsLabel('Updating…'), findsNothing);
-      for (final label in ['Make channel admin', 'Remove from channel']) {
+      for (final label in ['Make admin', 'Remove from conversation']) {
         expect(
           tester
               .getSemantics(find.text(label))
@@ -447,7 +446,7 @@ void main() {
           isFalse,
         );
       }
-      await tester.tap(find.text('Make channel admin'));
+      await tester.tap(find.text('Make admin'));
       expect(actions.calls, ['test:alice:admin']);
       actions.pending!.complete();
       await tester.pumpAndSettle();
@@ -470,7 +469,7 @@ void main() {
       );
       expect(
         tester
-            .getSemantics(find.text('Make channel admin'))
+            .getSemantics(find.text('Make admin'))
             .getSemanticsData()
             .hasAction(SemanticsAction.tap),
         isTrue,
@@ -484,13 +483,13 @@ void main() {
   ) async {
     final actions = _Actions()..fail = true;
     await _pump(tester, actions: actions);
-    await tester.tap(find.text('Remove from channel'));
+    await tester.tap(find.text('Remove from conversation'));
     await tester.pumpAndSettle();
     expect(actions.calls, isEmpty);
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
     expect(actions.calls, isEmpty);
-    await tester.tap(find.text('Remove from channel'));
+    await tester.tap(find.text('Remove from conversation'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Remove'));
     await tester.pumpAndSettle();
@@ -510,7 +509,7 @@ void main() {
       actions: actions,
       load: () async => [_member('self', role), _member('alice', 'member')],
     );
-    await tester.tap(find.text('Remove from channel'));
+    await tester.tap(find.text('Remove from conversation'));
     await tester.pumpAndSettle();
     role = 'member';
     container.invalidate(channelMembersProvider('test'));

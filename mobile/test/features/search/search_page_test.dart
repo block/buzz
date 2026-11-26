@@ -1033,7 +1033,7 @@ void main() {
       'explains a channel it cannot open',
       false,
       false,
-      'Channel not found here',
+      'Conversation not found here',
     ),
     // A failed channel list still leaves the channel's own metadata.
     ('opens its channel when the channel list failed', true, true, null),
@@ -1042,7 +1042,7 @@ void main() {
       'reports a failure when the channel list failed',
       false,
       true,
-      'Could not open the channel',
+      'Could not open the conversation',
     ),
   ]) {
     testWidgets('a message result $name', (tester) async {

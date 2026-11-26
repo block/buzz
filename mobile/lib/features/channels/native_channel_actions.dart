@@ -276,7 +276,9 @@ class _NativeChannelActions extends HookConsumerWidget {
           } else if (context.mounted) {
             ScaffoldMessenger.of(context).showFeedbackSnackBar(
               const SnackBar(
-                content: Text('Channel actions are unavailable in this build.'),
+                content: Text(
+                  'Conversation actions are unavailable in this build.',
+                ),
               ),
               kind: ToastKind.error,
             );
