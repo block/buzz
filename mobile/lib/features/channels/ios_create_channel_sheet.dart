@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../../shared/theme/theme.dart';
 import 'channel.dart';
+import 'create_channel_error.dart';
 
 /// Presents an entirely UIKit channel form; relay writes stay in Dart.
 class IosCreateChannelSheet {
@@ -23,7 +24,7 @@ class IosCreateChannelSheet {
     _open = true;
     Channel? created;
     final session = UniqueKey().toString();
-    final theme = utilitySurfaceThemeData(Theme.of(context));
+    final theme = utilitySheetThemeData(Theme.of(context));
     _channel.setMethodCallHandler((call) async {
       final data = Map<Object?, Object?>.from(call.arguments as Map);
       if (call.method != 'create' || data['session'] != session) return null;
@@ -36,7 +37,7 @@ class IosCreateChannelSheet {
         );
         return {'success': true};
       } catch (error) {
-        return {'error': error.toString()};
+        return {'error': createChannelErrorMessage(error)};
       }
     });
     try {

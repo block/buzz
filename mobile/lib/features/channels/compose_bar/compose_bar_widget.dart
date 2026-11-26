@@ -213,6 +213,7 @@ class ComposeBar extends HookConsumerWidget {
     );
 
     // Channel autocomplete state ----------------------------------------------
+    final emojiQuery = useState<String?>(null);
     final channelQuery = useState<String?>(null);
     final channelStartIdx = useState(-1);
     final channelsAsync = ref.watch(channelsProvider);
@@ -353,8 +354,12 @@ class ComposeBar extends HookConsumerWidget {
       void listener() {
         final editingValue = controller.value;
         final previousValue = lastObservedEditingValue.value;
+        // A notify without an edit, such as new channel names, must not
+        // reopen a query the user dismissed.
+        if (editingValue == previousValue) return;
         lastObservedEditingValue.value = editingValue;
-        if (isModifyingText.value || editingValue == previousValue) return;
+        emojiQuery.value = _emojiQuery(editingValue);
+        if (isModifyingText.value) return;
         final text = editingValue.text;
         final sel = editingValue.selection;
         final textChanged = text != previousValue.text;
@@ -403,6 +408,52 @@ class ComposeBar extends HookConsumerWidget {
     // Filter channels against the query.
     final channels = channelsAsync.asData?.value ?? <Channel>[];
     final channelSuggestions = filterChannels(channels, channelQuery.value);
+
+    // Load the catalog on the first colon query, then keep it so the next
+    // token reuses the index instead of rebuilding it.
+    final emojiIndexWanted = useRef(false);
+    if (emojiQuery.value != null) emojiIndexWanted.value = true;
+    final dataset = emojiIndexWanted.value
+        ? ref.watch(emojiDatasetOrEmptyProvider)
+        : null;
+    final emojiIndex = useMemoized(
+      () => dataset == null
+          ? null
+          : ShortcodeIndex<_EmojiChoice>([
+              for (final entry in customEmoji)
+                (
+                  code: entry.shortcode,
+                  text: ':${entry.shortcode}:',
+                  url: entry.url,
+                ),
+              for (final entry in dataset.all)
+                if (entry.skinIndex == 0)
+                  (code: entry.id, text: entry.native, url: null),
+            ], (entry) => entry.code),
+      [dataset, customEmoji],
+    );
+    final emojiSuggestions = useMemoized(() {
+      final query = emojiQuery.value;
+      if (query == null || emojiIndex == null) return const <_EmojiChoice>[];
+      return emojiIndex.rank(query, limit: _emojiSuggestionLimit);
+    }, [emojiQuery.value, emojiIndex]);
+
+    void selectEmoji(_EmojiChoice choice) {
+      final query = _emojiQuery(controller.value);
+      if (query == null || query != emojiQuery.value) return;
+      final caret = controller.selection.end;
+      final start = caret - query.length - 1;
+      final suffix = _emojiSuffix.matchAsPrefix(controller.text, caret)!;
+      _replaceComposerRange(
+        controller,
+        start: start,
+        end: suffix.end,
+        replacement: choice.text,
+        caret: start + choice.text.length,
+      );
+      focusNode.requestFocus();
+      emojiQuery.value = null;
+    }
 
     // Insert a selected channel into the text field.
     void insertChannel(Channel channel) {
@@ -484,6 +535,9 @@ class ComposeBar extends HookConsumerWidget {
         () => onSend(content, mentionPubkeys, mediaTags: mediaTags),
       );
       final submittedDraftRevision = draftRevision.value;
+      final cleanupStoredDraft = ref
+          .read(composeDraftsProvider.notifier)
+          .cleanupAfterSend(draftKey);
       // Resolved before any await: see
       // `_reportSendCancelledByCommunitySwitch`.
       final messenger = ScaffoldMessenger.maybeOf(context);
@@ -603,6 +657,8 @@ class ComposeBar extends HookConsumerWidget {
         messenger: messenger,
       );
 
+      // Another submission may have finished the same asynchronous checks.
+      if (!context.mounted || isSending.value) return;
       isSending.value = true;
       try {
         if (queuedAttachments.isEmpty) {
@@ -612,6 +668,7 @@ class ComposeBar extends HookConsumerWidget {
             controller: controller,
             draftRevision: draftRevision,
             submittedDraftRevision: submittedDraftRevision,
+            cleanupStoredDraft: cleanupStoredDraft,
             focusNode: focusNode,
             clearComposer: clearComposer,
             addMentionedNonMembers: addMentionedNonMembers,
@@ -869,7 +926,8 @@ class ComposeBar extends HookConsumerWidget {
     // can be edited.
     final pickerVisible =
         chooserOpen &&
-        (channelSuggestions.isNotEmpty ||
+        (emojiSuggestions.isNotEmpty ||
+            channelSuggestions.isNotEmpty ||
             suggestions.isNotEmpty ||
             mentionRows.searchFailed) &&
         attachmentSurface.value == _AttachmentSurface.closed &&
@@ -878,16 +936,22 @@ class ComposeBar extends HookConsumerWidget {
     final topMention = suggestions
         .where((s) => !mentionRows.unavailable.contains(s.pubkey))
         .firstOrNull;
-    final pickerQuery = (mentionChooser.query, channelQuery.value);
+    String? activeQuery() =>
+        emojiQuery.value == null ? channelQuery.value : ':${emojiQuery.value}';
+    final pickerQuery = (mentionChooser.query, activeQuery());
     KeyEventResult handleHardwareKey(FocusNode _, KeyEvent event) =>
         _handleComposerHardwareKey(
           event,
           controller,
           inputOwned: iosAttachmentPopover.isActive || isEmojiPickerOpen.value,
-          query: (mentionChooser.liveQuery.value, channelQuery.value),
+          query: (mentionChooser.liveQuery.value, activeQuery()),
           renderedQuery: pickerQuery,
           pickerVisible: pickerVisible,
-          acceptSuggestion: topChannel != null
+          acceptSuggestion: emojiSuggestions.isNotEmpty
+              ? () => _runComposerAction(
+                  () => selectEmoji(emojiSuggestions.first),
+                )
+              : topChannel != null
               ? () => _runComposerAction(() => insertChannel(topChannel))
               : topMention != null
               ? () => _runComposerAction(() => insertMention(topMention))
@@ -898,24 +962,37 @@ class ComposeBar extends HookConsumerWidget {
           },
         );
 
-    final suggestionPanel = _composerSuggestionPanel(
-      channelSuggestions: chooserOpen ? channelSuggestions : const [],
-      mentionSuggestions: chooserOpen ? suggestions : const [],
-      unavailableMentions: mentionRows.unavailable,
-      mentionSearchFailed: chooserOpen && mentionRows.searchFailed,
-      reserveMentionHeight: mentionRows.reserveHeight,
-      mentionSearching: mentionRows.searching,
-      onMentionSearchRetry: () {
-        if (mentionChooser.query case final query?) {
-          ref.invalidate(mentionUserSearchProvider(query));
-        }
-      },
-      userCache: userCache,
-      currentPubkey: currentPubkey,
-      isDmChannel: isDmChannel,
-      onChannelSelect: insertChannel,
-      onMentionSelect: insertMention,
-    );
+    final suggestionPanel = chooserOpen && emojiSuggestions.isNotEmpty
+        ? TextFieldTapRegion(
+            child: _ComposerSearchSuggestions<_EmojiChoice>(
+              surfaceKey: const ValueKey('emoji-suggestions-popover'),
+              suggestions: emojiSuggestions,
+              label: (entry) => ':${entry.code}:',
+              horizontalTitleGap: 8,
+              singleLineLabel: true,
+              labelStyle: context.textTheme.bodyLarge?.copyWith(fontSize: 14),
+              leading: _emojiSuggestionPreview,
+              onSelect: selectEmoji,
+            ),
+          )
+        : _composerSuggestionPanel(
+            channelSuggestions: chooserOpen ? channelSuggestions : const [],
+            mentionSuggestions: chooserOpen ? suggestions : const [],
+            unavailableMentions: mentionRows.unavailable,
+            mentionSearchFailed: chooserOpen && mentionRows.searchFailed,
+            reserveMentionHeight: mentionRows.reserveHeight,
+            mentionSearching: mentionRows.searching,
+            onMentionSearchRetry: () {
+              if (mentionChooser.query case final query?) {
+                ref.invalidate(mentionUserSearchProvider(query));
+              }
+            },
+            userCache: userCache,
+            currentPubkey: currentPubkey,
+            isDmChannel: isDmChannel,
+            onChannelSelect: insertChannel,
+            onMentionSelect: insertMention,
+          );
     _AttachmentSurfacePanel buildOverlayPanel(_AttachmentSurface surface) {
       return _composerAttachmentPanel(
         preparePhotos: prepare,
@@ -1011,6 +1088,7 @@ class ComposeBar extends HookConsumerWidget {
 
     return _ComposerDockFrame(
       expansionAnimation: composerExpansionController,
+      hasDraft: draftText.isNotEmpty,
       forceFullWidth: _voiceNoteFullWidth(voiceNote, attachments.value),
       child: _ComposerInputTray(
         tool: inputTool,
@@ -1021,10 +1099,14 @@ class ComposeBar extends HookConsumerWidget {
             defaultTargetPlatform == TargetPlatform.iOS &&
             !interactionLocked &&
             !voiceNote.isRecording,
-        suggestions: mentionChooser.query != null || channelQuery.value != null
+        suggestions:
+            (chooserOpen && emojiSuggestions.isNotEmpty) ||
+                mentionChooser.query != null ||
+                channelQuery.value != null
             ? suggestionPanel
             : null,
         onDismissSuggestions: () {
+          emojiQuery.value = null;
           mentionChooser.close();
           channelQuery.value = null;
         },

@@ -8,10 +8,14 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../shared/relay/relay.dart';
+import 'channel_sections_provider.dart';
+import 'channel_sections_storage.dart';
+import '../../../shared/theme/buzz_icons.dart';
 import '../../../shared/theme/theme.dart';
 import '../../../shared/widgets/app_list.dart';
 import '../../../shared/widgets/buzz_sheet_header.dart';
 import '../../../shared/widgets/ios_glass_navigation_button.dart';
+import '../../../shared/widgets/ios_message_create_button.dart';
 import '../../../shared/widgets/modal_presentation.dart';
 
 final mobileSectionOrderKeyProvider = Provider<String?>((ref) {
@@ -67,11 +71,16 @@ List<String> resolveMobileSectionOrder(
 class SectionOrderScope extends InheritedWidget {
   const SectionOrderScope({
     super.key,
+    this.sectionIds = const {},
+    this.edit,
     required this.labels,
     required this.defaultOrder,
     required this.storageKey,
     required super.child,
   });
+  final Map<String, String> sectionIds;
+  final Future<void> Function(String key, ChannelSection section, bool remove)?
+  edit;
   final Map<String, String> labels;
   final List<String> defaultOrder;
   final String storageKey;
@@ -85,7 +94,7 @@ class SectionOrderScope extends InheritedWidget {
       !listEquals(defaultOrder, oldWidget.defaultOrder) ||
       storageKey != oldWidget.storageKey;
 
-  Future<void> show(BuildContext context) async {
+  Future<void> show(BuildContext context, {bool editSections = false}) async {
     final container = ProviderScope.containerOf(context, listen: false);
     final route = ModalRoute.of(context);
     try {
@@ -102,18 +111,25 @@ class SectionOrderScope extends InheritedWidget {
     }
     if (!context.mounted || route?.isCurrent == false) return;
     if (container.read(mobileSectionOrderKeyProvider) != storageKey) return;
+    ModalRoute<dynamic>? sheetRoute;
     await showBuzzModalBottomSheet<void>(
       context: context,
+      nativeIosBarrier: defaultTargetPlatform == TargetPlatform.iOS,
       isScrollControlled: true,
       showCloseButton: false,
       enableDrag: false,
-      builder: (_) => _ReorderSheet(scope: this),
+      builder: (sheetContext) {
+        sheetRoute = ModalRoute.of(sheetContext);
+        return _ReorderSheet(scope: this, editSections: editSections);
+      },
     );
+    await sheetRoute?.completed;
   }
 }
 
 class _ReorderSheet extends HookConsumerWidget {
-  const _ReorderSheet({required this.scope});
+  const _ReorderSheet({required this.scope, required this.editSections});
+  final bool editSections;
   final SectionOrderScope scope;
 
   @override
@@ -128,7 +144,16 @@ class _ReorderSheet extends HookConsumerWidget {
     final initialVisible = useMemoized(
       () => fullOrder.where(scope.labels.containsKey).toList(),
     );
+    final sections = ref.watch(channelSectionsProvider);
+    final teams = {
+      for (final section in sections.store.sections) section.id: section,
+    };
     final draft = useState(initialVisible);
+    bool removed(String key) =>
+        sections.editable &&
+        scope.sectionIds.containsKey(key) &&
+        !teams.containsKey(scope.sectionIds[key]);
+    final visibleKeys = draft.value.where((key) => !removed(key)).toList();
     final saving = useState(false);
     final failed = useState(false);
     final orderChanged = !listEquals(saved, initialSaved);
@@ -152,7 +177,7 @@ class _ReorderSheet extends HookConsumerWidget {
       var slot = start;
       for (
         var i = start + direction;
-        i >= 0 && i < draft.value.length;
+        i >= 0 && i < visibleKeys.length;
         i += direction
       ) {
         final row = rowContexts[i];
@@ -176,7 +201,7 @@ class _ReorderSheet extends HookConsumerWidget {
 
     void move(int from, int to) {
       if (saving.value || !canEdit || from == to) return;
-      final next = draft.value.toList();
+      final next = visibleKeys.toList();
       if (from < 0 || from >= next.length || to < 0 || to >= next.length) {
         return;
       }
@@ -195,11 +220,11 @@ class _ReorderSheet extends HookConsumerWidget {
       failed.value = false;
       final route = ModalRoute.of(context)!;
       try {
-        final visible = draft.value.iterator;
+        final visible = visibleKeys.iterator;
         // Refill the visible slots in the new order and keep hidden slots
         // (such as an empty Starred section) in place.
         final next = [
-          for (final key in fullOrder)
+          for (final key in fullOrder.where((key) => !removed(key)))
             if (scope.labels.containsKey(key) && visible.moveNext())
               visible.current
             else
@@ -239,7 +264,7 @@ class _ReorderSheet extends HookConsumerWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             BuzzSheetHeader(
-              title: 'Reorder sections',
+              title: editSections ? 'Edit Sections' : 'Reorder sections',
               leading: defaultTargetPlatform == TargetPlatform.iOS
                   ? IosGlassNavigationButton(
                       icon: IosGlassNavigationIcon.close,
@@ -290,10 +315,16 @@ class _ReorderSheet extends HookConsumerWidget {
                       onReorderEnd: (_) => dragIndex.value = null,
                       shrinkWrap: true,
                       buildDefaultDragHandles: false,
-                      itemCount: draft.value.length,
+                      itemCount: visibleKeys.length,
                       onReorderItem: move,
                       itemBuilder: (_, index) {
-                        final key = draft.value[index];
+                        final key = visibleKeys[index];
+                        final section = sections.editable
+                            ? teams[scope.sectionIds[key]]
+                            : null;
+                        final label = section?.name ?? scope.labels[key]!;
+                        final edit =
+                            canEdit && scope.edit != null && section != null;
                         return Builder(
                           key: ValueKey(key),
                           builder: (rowContext) {
@@ -311,26 +342,51 @@ class _ReorderSheet extends HookConsumerWidget {
                                   ),
                                 AppListRow(
                                   verticalPadding: Grid.xxs,
-                                  title: scope.labels[key]!,
-                                  trailing: Listener(
-                                    onPointerDown: (event) {
-                                      if (dragIndex.value != null) return;
-                                      pointer.value = event.pointer;
-                                      pointerY.value = event.position.dy;
-                                      origin.value =
-                                          event.position.dy + scroll.offset;
-                                      heights.clear();
-                                    },
-                                    child: _SectionDragHandle(
-                                      index: index,
-                                      label: scope.labels[key]!,
-                                      enabled: canEdit,
-                                      onMove: (direction) {
-                                        if (dragIndex.value != null) return;
-                                        final from = draft.value.indexOf(key);
-                                        move(from, from + direction);
-                                      },
-                                    ),
+                                  title: label,
+                                  trailing: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      if (edit) ...[
+                                        _SectionMenu(
+                                          label: label,
+                                          rename: () =>
+                                              scope.edit!(key, section, false),
+                                          remove: () =>
+                                              scope.edit!(key, section, true),
+                                        ),
+                                        SizedBox(
+                                          height: 20,
+                                          child: VerticalDivider(
+                                            width: 1,
+                                            thickness: 1,
+                                            color:
+                                                context.colors.outlineVariant,
+                                          ),
+                                        ),
+                                      ],
+                                      Listener(
+                                        onPointerDown: (event) {
+                                          if (dragIndex.value != null) return;
+                                          pointer.value = event.pointer;
+                                          pointerY.value = event.position.dy;
+                                          origin.value =
+                                              event.position.dy + scroll.offset;
+                                          heights.clear();
+                                        },
+                                        child: _SectionDragHandle(
+                                          index: index,
+                                          label: label,
+                                          enabled: canEdit,
+                                          onMove: (direction) {
+                                            if (dragIndex.value != null) return;
+                                            final from = visibleKeys.indexOf(
+                                              key,
+                                            );
+                                            move(from, from + direction);
+                                          },
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
                               ],
@@ -357,6 +413,47 @@ class _ReorderSheet extends HookConsumerWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _SectionMenu extends StatelessWidget {
+  const _SectionMenu({
+    required this.label,
+    required this.rename,
+    required this.remove,
+  });
+  final String label;
+  final VoidCallback rename, remove;
+  @override
+  Widget build(BuildContext context) {
+    final actions = [
+      (label: 'Rename', symbol: 'pencil', onPressed: rename),
+      (label: 'Remove', symbol: 'trash', onPressed: remove),
+    ];
+    final tooltip = '$label actions';
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return IosMessageCreateButton(
+        icon: 'moreCircle',
+        iconSize: 16,
+        foregroundColor: context.colors.primary,
+        width: 44,
+        height: 44,
+        accessibilityLabel: tooltip,
+        actions: actions,
+        consumeOutsideTap: true,
+        eagerGestures: false,
+        destructiveIndices: const {1},
+      );
+    }
+    return PopupMenuButton<int>(
+      tooltip: tooltip,
+      icon: const Icon(Icons.more_horiz, size: 16),
+      onSelected: (i) => actions[i].onPressed(),
+      itemBuilder: (_) => [
+        for (final (i, action) in actions.indexed)
+          PopupMenuItem(value: i, child: Text(action.label)),
+      ],
     );
   }
 }
@@ -411,7 +508,11 @@ class _SectionDragHandle extends HookWidget {
                     ? Border.all(color: context.colors.primary)
                     : null,
               ),
-              child: const Icon(Icons.drag_handle, size: 20),
+              child: Icon(
+                BuzzIcons.menu2,
+                size: 20,
+                color: context.colors.onSurfaceVariant.withValues(alpha: .5),
+              ),
             ),
           ),
         ),

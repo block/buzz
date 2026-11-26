@@ -13,16 +13,13 @@ abstract final class CodeStyle {
   /// The mono face, already used by the composer and by code blocks.
   static const fontFamily = 'GeistMono';
 
-  /// Code size at message body scale.
-  static const fontSize = 13.0;
+  /// Relative size of rendered code, originally 13 points on a 15-point body.
+  static const fontSizeFactor = 13 / 15;
+
+  static final fontSize = messageBodyTextStyle.fontSize! * fontSizeFactor;
 
   /// Line height of code text.
   static const lineHeight = 1.5;
-
-  /// [fontSize] stated against the message body size, for APIs that scale code
-  /// relative to the text around it rather than fixing a point size. Keeping
-  /// it a ratio means code follows the body if that size ever changes.
-  static final fontSizeFactor = fontSize / messageBodyTextStyle.fontSize!;
 
   /// Fill behind a code surface.
   static Color background(ColorScheme scheme) => scheme.surfaceContainerHighest;

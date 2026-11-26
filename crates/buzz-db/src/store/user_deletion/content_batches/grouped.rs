@@ -194,6 +194,19 @@ async fn erase_events(tx: &mut AdmittedTx, number: i64) -> Result<()> {
     if referenced || !legacy.is_empty() {
         return Err(invalid("new surviving references appeared; current batch rolled back; rerun to classify delete versus scrub"));
     }
+    // Queue the index changes while every row and its edit target still exist.
+    let (changed, changed_at): (Vec<Vec<u8>>, Vec<DateTime<Utc>>) =
+        sqlx::query_as::<_, (Vec<u8>, DateTime<Utc>)>(
+            "SELECT decode(row_key->>'id','hex'),(row_key->>'created_at')::timestamptz
+         FROM content_batch_work WHERE table_name='events' AND batch=$1
+           AND action IN ('would_delete','would_scrub')",
+        )
+        .bind(number)
+        .fetch_all(tx.conn())
+        .await?
+        .into_iter()
+        .unzip();
+    crate::search_outbox::enqueue_events_in_transaction(tx, &changed, &changed_at).await?;
     // Keep counters consistent in every committed prefix, including interruption.
     sqlx::query(include_str!("account.sql"))
         .bind(community)

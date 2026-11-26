@@ -385,6 +385,24 @@ pub async fn resolve_emoji_tags_for_content(
     Ok(tags)
 }
 
+/// NIP-30 emoji tags for the custom emoji in `content`, for decorating an
+/// outgoing message or edit.
+///
+/// Skips the palette fetch when `content` has no `:`. A fetch or parse failure
+/// must not block delivering valid content, so it degrades to no emoji tags
+/// and reports a warning on stderr.
+pub async fn emoji_tags_for_content(client: &BuzzClient, content: &str) -> Vec<Vec<String>> {
+    if !content.contains(':') {
+        return Vec::new();
+    }
+    resolve_emoji_tags_for_content(client, content)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("warning: emoji palette fetch failed ({e}); sending without emoji tags");
+            Vec::new()
+        })
+}
+
 /// Collect candidate shortcodes from `content` without a regex dependency.
 ///
 /// Implements `:([a-z0-9_-]+):` (applied case-insensitively with lowercase

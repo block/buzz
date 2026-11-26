@@ -443,7 +443,8 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
         let owner = parse_owner_claim(owner_rule, &claims, asserted_key)?;
 
         let now = Utc::now();
-        let deadlines = self.check_time_and_deadlines(policy, &key_set, &claims, now)?;
+        let (issued_at, deadlines) =
+            self.check_time_and_deadlines(policy, &key_set, &claims, now)?;
         let capabilities = capture_capabilities(policy, &claims);
 
         // Offline validation (token-class, key, signature, audience, claims,
@@ -504,6 +505,7 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
             owner,
             capabilities,
             deadlines,
+            issued_at,
             policy.id_for_community(community.expected_aud()),
             self.transport_contract_id,
             RevalidationDependencies::new(
@@ -527,7 +529,7 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
         key_set: &AssertionKeySet,
         claims: &Map<String, Value>,
         now: DateTime<Utc>,
-    ) -> Result<Vec<DateTime<Utc>>, VerifierError> {
+    ) -> Result<(DateTime<Utc>, Vec<DateTime<Utc>>), VerifierError> {
         let iat = numeric_date(claims, "iat")?;
         let exp = numeric_date(claims, "exp")?;
         let skew = seconds(policy.skew_seconds());
@@ -564,7 +566,7 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
             policy.freshness(),
             FreshnessClass::OfflineJwt | FreshnessClass::CurrentStatus
         ));
-        Ok(deadlines)
+        Ok((iat, deadlines))
     }
 }
 

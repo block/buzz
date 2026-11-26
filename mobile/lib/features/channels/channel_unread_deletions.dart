@@ -52,20 +52,37 @@ extension _UnreadDeletions on ChannelsNotifier {
     return true;
   }
 
+  /// The posts among [events] that a deletion seen so far removed.
+  Set<String> _deletedAmong(List<NostrEvent>? events) => {
+    for (final event in events ?? const <NostrEvent>[])
+      if (_unscopedUnreadDeletedIds.contains(event.id) ||
+          _unreadDeletedIdsByChannel[event.channelId]?.contains(event.id) ==
+              true)
+        event.id,
+  };
+
   void _applySavedMessageEdit(NostrEvent event, String channelId) {
     if (event.kind != EventKind.streamMessageEdit) return;
     _removeSavedMessageTargets(channelId, {
       for (final tag in event.tags)
         if (tag.length >= 2 && tag[0] == 'e') tag[1],
-    });
+    }, edited: true);
   }
 
-  void _removeSavedMessageTargets(String channelId, Set<String> targets) {
+  void _removeSavedMessageTargets(
+    String channelId,
+    Set<String> targets, {
+    bool edited = false,
+  }) {
     if (targets.isEmpty) return;
     final scope = _lifecycleRef.read(savedMessageScopeProvider);
     if (scope == null) return;
-    _lifecycleRef
-        .read(savedMessageStoreProvider)
-        .removeChannelEvents(scope, channelId, targets);
+    pruneSavedMessageTargets(
+      _lifecycleRef,
+      scope,
+      channelId,
+      targets,
+      edited: edited,
+    );
   }
 }

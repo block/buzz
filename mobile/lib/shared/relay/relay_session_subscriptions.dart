@@ -6,6 +6,21 @@ class _HistorySubscription {
   final Timer timeout;
   final DateTime startedAt;
 
+  /// Where the call was made, before any wait. Errors completed later, from a
+  /// timer or a socket callback, carry it, so an escaped error's stack reaches
+  /// the caller.
+  final StackTrace callSite;
+
+  void fail(Object error) => completer.completeErrorAt(error, callSite);
+
+  void timedOut(Duration timeout) => fail(
+    RelayTimeoutException(
+      RelayCall.history,
+      'Relay history request timed out after $timeout',
+      timeout,
+    ),
+  );
+
   /// The filter of a request held until the socket authenticates.
   NostrFilter? heldFilter;
 
@@ -13,6 +28,7 @@ class _HistorySubscription {
     required this.completer,
     required this.timeout,
     required this.startedAt,
+    required this.callSite,
   });
 }
 
@@ -25,6 +41,11 @@ class _LiveSubscription {
   /// Whether a replay narrows [filter] with a `since` from what this
   /// subscription last saw.
   final bool resumeSince;
+
+  /// Where the call was made. Errors completed later, from a timer or a
+  /// socket callback, carry it, so an escaped error's stack reaches the caller.
+  final StackTrace callSite = StackTrace.current;
+
   Completer<void>? readyCompleter;
   int? lastSeenCreatedAt;
 
@@ -78,10 +99,25 @@ class _PendingEvent {
   final Timer timeout;
   final DateTime startedAt;
 
+  /// Where the call was made, before any wait. Errors completed later, from a
+  /// timer or a socket callback, carry it, so an escaped error's stack reaches
+  /// the caller.
+  final StackTrace callSite;
+
+  void fail(Object error) => completer.completeErrorAt(error, callSite);
+
+  void timedOut(String eventId, Duration timeout) => fail(
+    RelayAckTimeoutError(
+      'Event $eventId not acknowledged within $timeout',
+      timeout,
+    ),
+  );
+
   _PendingEvent({
     required this.completer,
     required this.timeout,
     required this.startedAt,
+    required this.callSite,
   });
 }
 

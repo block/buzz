@@ -120,6 +120,8 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "relay_invites",
     "relay_members",
     "scheduled_workflow_fires",
+    "search_backfill",
+    "search_outbox",
     "thread_metadata",
     "users",
     "workflow_approvals",
@@ -157,9 +159,11 @@ pub const RETIRING_SCOPED_TABLES: &[&str] = &["delivery_log", "subscriptions"];
 /// [`EXPECTED_SCOPED_TABLES`] and [`PURGE_SCOPED_TABLES`]. These tables have
 /// no foreign keys, so purge order does not matter.
 pub const PENDING_SCOPED_TABLES: &[&str] = &[
+    "channel_heads",
     "identity_retirement_actions",
     "identity_retirement_holds",
     "identity_retirement_workflows",
+    "thread_heads",
 ];
 
 /// Tenant tables an expand migration may add between a deletion's approval
@@ -173,9 +177,13 @@ pub const PENDING_SCOPED_TABLES: &[&str] = &[
 /// `PENDING_SCOPED_TABLES`, so a request approved before its migration still
 /// runs on the release that requires it.
 pub const APPROVAL_FORWARD_TABLES: &[&str] = &[
+    "channel_heads",
     "identity_retirement_actions",
     "identity_retirement_holds",
     "identity_retirement_workflows",
+    "search_backfill",
+    "search_outbox",
+    "thread_heads",
 ];
 
 /// Control-plane tables with community provenance that the tenant purge does
@@ -201,6 +209,8 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "scheduled_workflow_fires",
     "workflow_runs",
     "push_wake_outbox",
+    "search_backfill",
+    "search_outbox",
     "join_policy_acceptances",
     "media_uploaders",
     "media_publications",
@@ -4863,6 +4873,9 @@ pub(crate) mod postgres_tests {
         crate::migration::run_migrations_through(&db.pool, 89)
             .await
             .expect("migrate with fence objects present");
+        crate::migration::create_tenant_tables_added_after_fence_retirement(&db.pool)
+            .await
+            .expect("tenant tables added since");
         let store = db.deletion_store();
         let community = db
             .ensure_configured_community("optional-fences.example")
@@ -5008,6 +5021,9 @@ DROP FUNCTION community_deletion_lock_key(UUID);
         crate::migration::run_migrations_through(&db.pool, 86)
             .await
             .expect("phase-one schema");
+        crate::migration::create_tenant_tables_added_after_fence_retirement(&db.pool)
+            .await
+            .expect("tenant tables added since");
         let community = db
             .ensure_configured_community("optional-guards.example")
             .await
@@ -9702,6 +9718,124 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         .expect("connect scratch database");
         let store = db.deletion_store();
         (db, store, scratch)
+    }
+
+    /// Once a community is fenced for deletion, admission refuses its writes
+    /// (and so its outbox rows), claims and backfill skip it, and its rows do
+    /// not count against the backfill bound; the purge
+    /// removes its outbox rows and backfill progress and keeps another
+    /// community's.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn search_outbox_is_fenced_and_purged() {
+        let (db, store) = store().await;
+        crate::search_outbox::enable(&db.pool)
+            .await
+            .expect("enable outbox");
+        let (request, inventory) = inventoried_request(&db, &store).await;
+        let community = request.community_id;
+        let bystander = db
+            .ensure_configured_community(&format!("bystander-{}.example", Uuid::new_v4().simple()))
+            .await
+            .expect("bystander community")
+            .id;
+        let keys = nostr::Keys::generate();
+        let message = |content: &str| {
+            nostr::EventBuilder::new(nostr::Kind::Custom(9), content)
+                .sign_with_keys(&keys)
+                .expect("sign")
+        };
+        for owner in [community, bystander] {
+            db.insert_event(owner, &message("queued"), None)
+                .await
+                .expect("insert");
+        }
+        let queued = |owner: CommunityId| {
+            let pool = db.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM search_outbox WHERE community_id = $1",
+                )
+                .bind(owner.as_uuid())
+                .fetch_one(&pool)
+                .await
+                .expect("count outbox rows")
+            }
+        };
+
+        let backfill = |owner: CommunityId| {
+            let pool = db.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM search_backfill WHERE community_id = $1",
+                )
+                .bind(owner.as_uuid())
+                .fetch_one(&pool)
+                .await
+                .expect("count backfill rows")
+            }
+        };
+        let others: Vec<CommunityId> =
+            sqlx::query_scalar::<_, Uuid>("SELECT id FROM communities WHERE id <> $1")
+                .bind(community.as_uuid())
+                .fetch_all(&db.pool)
+                .await
+                .expect("other communities")
+                .into_iter()
+                .map(CommunityId::from_uuid)
+                .collect();
+        let step = crate::search_backfill::step(&db.pool, 1, &others)
+            .await
+            .expect("backfill step")
+            .expect("the community's backfill");
+        assert_eq!((step.community, step.queued), (community, 1));
+        assert_eq!(queued(community).await, 2);
+
+        let token = fence_and_drain(&store, &request, &inventory).await;
+        db.insert_event(community, &message("after fence"), None)
+            .await
+            .expect_err("a fenced community admits no writes");
+        assert_eq!(queued(community).await, 2);
+        let mut skip = others.clone();
+        skip.retain(|other| *other != bystander);
+        let step = crate::search_backfill::step(&db.pool, 10, &skip)
+            .await
+            .expect("backfill step")
+            .expect("the bystander's backfill");
+        assert_eq!(
+            step.community, bystander,
+            "backfill skips a fenced community"
+        );
+        assert_eq!(
+            crate::search_backfill::step(&db.pool, 10, &skip)
+                .await
+                .expect("backfill step"),
+            None
+        );
+        assert_eq!(backfill(community).await, 1);
+        let batch = crate::search_outbox::claim_batch(&db.pool, 10, &[])
+            .await
+            .expect("claim")
+            .expect("the bystander's batch");
+        assert_eq!(
+            batch.community(),
+            bystander,
+            "claims skip a fenced community"
+        );
+        drop(batch);
+        // The fenced community's rows cannot drain before the purge, so they
+        // do not count against the backfill bound of the others.
+        assert_eq!(queued(bystander).await, 2);
+        assert!(crate::search_backfill::outbox_below(&db.pool, 3)
+            .await
+            .expect("outbox depth"));
+
+        let deleted = store.purge_postgres(&token).await.expect("purge postgres");
+        assert_eq!(deleted.get("search_outbox"), Some(&2));
+        assert_eq!(deleted.get("search_backfill"), Some(&1));
+        assert_eq!(queued(community).await, 0);
+        assert_eq!(backfill(community).await, 0);
+        assert_eq!(backfill(bystander).await, 1);
     }
 
     /// Approve, claim, fence, drain and remove bindings, leaving the request

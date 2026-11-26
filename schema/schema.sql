@@ -6,9 +6,10 @@
 -- namespace, so nothing else may live under it.
 --
 -- Everything SchemaBot cannot apply lives in this directory's other
--- subdirectories: `types/`, `partitions/`, and `seeds/`. This file composes
--- them into one fresh database, in load order: types → tables → partitions →
--- seeds. docs/database.md forbids triggers, functions, and foreign keys.
+-- subdirectories: `types/`, `sequences/`, `partitions/`, and `seeds/`. This
+-- file composes them into one fresh database, in load order: types →
+-- sequences → tables → partitions → seeds. docs/database.md forbids
+-- triggers, functions, and foreign keys.
 --
 -- `./bin/pgschema apply --file schema/schema.sql` resolves the `\i` includes
 -- relative to this file (it refuses `..`). `pgschema` skips INSERTs and some
@@ -60,6 +61,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i types/subscription_status.sql
 \i types/pause_reason.sql
 \i types/channel_add_policy.sql
+\i sequences/search_index_version.sql
 
 -- tables
 \i tables/public/communities.sql
@@ -97,6 +99,8 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i tables/public/push_leases.sql
 \i tables/public/push_wake_outbox.sql
 \i tables/public/push_match_queue.sql
+\i tables/public/search_backfill.sql
+\i tables/public/search_outbox.sql
 \i tables/public/push_gateway_challenges.sql
 \i tables/public/push_gateway_installations.sql
 \i tables/public/push_gateway_delegations.sql

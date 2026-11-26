@@ -185,7 +185,7 @@ void main() {
         );
         expect(
           tester.widget<Text>(find.text('Project')).style?.color,
-          dark ? const Color(0xFFC7C7C7) : const Color(0xFF525252),
+          Theme.of(tester.element(find.text('Project'))).colorScheme.onSurface,
         );
         expect(find.bySemanticsLabel('Project, unread'), findsNothing);
         typing.show([const TypingEntry(pubkey: 'human', expiresAtMs: 999999)]);
@@ -219,7 +219,7 @@ void main() {
         await tester.pump();
         expect(
           tester.widget<Text>(find.text('solo')).style?.fontWeight,
-          FontWeight.w400,
+          FontWeight.w500,
         );
         expect(
           tester.widget<Text>(find.text('solo')).style?.color,

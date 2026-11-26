@@ -77,6 +77,7 @@ enum NativeTabler {
     "person.crop.circle": 0xeb4d, // user
     "arrow.left.arrow.right": 0xf1f4, // arrows-left-right
     "person.badge.plus": 0xeb4b, // user-plus
+    "adjustments-horizontal": 0xec38,
     "gearshape": 0xeb20, // settings
     "person.2": 0xebf2, // users
     "rectangle.stack": 0xeb0a, // photo
@@ -105,6 +106,13 @@ enum NativeTabler {
     "doc": 0xeaa4, // file
     "plus": 0xeb0b, // plus
     "building.2.crop.circle": 0xebf6, // building-community
+    "message.circle": 0xeaed, // message-circle
+    "person.circle": 0xef68, // user-circle
+    "archive": 0xea0b,
+    "mail": 0xeae5,
+    "tabler-pencil": 0xeb04,
+    "folder-input": 0xf91b,
+    "folder": 0xeaad, // folder
     "workspace": 0xecd7, // cube-3d-sphere
     "folder.badge.plus": 0xeaab, // folder-plus
     "headphones": 0xeabd, // headphones

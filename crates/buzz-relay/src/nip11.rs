@@ -146,7 +146,8 @@ pub struct RelayLimitation {
     pub restricted_writes: bool,
     /// Whether the relay supports NIP-FI federated identity assertions.
     /// Advertised `true` in `Enforce` and `Shadow` mode, so clients attach
-    /// evidence; in `Shadow` the relay evaluates it without requiring it.
+    /// evidence; in `Shadow` the relay evaluates it, requiring it only for
+    /// communities stored Required or inside the enforce-percent cohort.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub federated_identity: bool,
     /// NIP-ER: how the relay delivers due reminders ("push" or "lazy").
@@ -438,13 +439,13 @@ pub(crate) async fn nip11_document(
             community_id: *tenant.community().as_uuid(),
             mode: state.config.nip_fi.mode,
             required: false,
-            stored_required: false,
+            policy_required: false,
             mapped: true,
         }
     } else {
         crate::nip_fi_policy::resolve(state, &headers).await?
     };
-    if !state.config.nip_fi.mode.is_off() && policy.stored_required {
+    if !state.config.nip_fi.mode.is_off() && policy.policy_required {
         // Required implies a usable binding and verifier, not merely a bit.
         state
             .nip_fi_communities()

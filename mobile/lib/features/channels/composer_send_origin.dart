@@ -6,6 +6,16 @@ import 'package:flutter/widgets.dart';
 class ComposerSendOrigin {
   static final _zoneKey = Object();
 
+  static final _insertionKey = Object();
+
+  static Future<void> uponLocalInsertion(
+    VoidCallback inserted,
+    Future<void> Function() send,
+  ) => runZoned(send, zoneValues: {_insertionKey: inserted});
+
+  static void didInsertLocalMessage() =>
+      (Zone.current[_insertionKey] as VoidCallback?)?.call();
+
   /// Captures only geometry; no draft or identity data is retained.
   static Rect? capture(GlobalKey key) {
     final box = key.currentContext?.findRenderObject();

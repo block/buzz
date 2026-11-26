@@ -2,6 +2,8 @@ import 'package:buzz/features/channels/voice_note_composer_recorder.dart';
 import 'package:clock/clock.dart';
 import 'package:buzz/features/channels/composer_transcription.dart';
 import 'package:buzz/shared/transcription/device_transcription.dart';
+import 'package:buzz/shared/emoji/emoji_data.dart';
+import 'package:buzz/shared/emoji/emoji_data_provider.dart';
 import 'package:buzz/shared/emoji/emoji_picker.dart';
 import 'package:buzz/shared/widgets/concentric_sheet_surface.dart';
 import 'package:flutter/scheduler.dart';
@@ -54,6 +56,7 @@ import 'package:buzz/features/channels/voice_note_recording.dart';
 import 'package:buzz/features/channels/voice_note_waveform.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji_render.dart';
 import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/mentions/mention_bindings.dart';
@@ -79,6 +82,11 @@ part 'compose_bar_test/share_delivery_tests.dart';
 part 'compose_bar_test/mention_chip_tests.dart';
 part 'compose_bar_test/mention_search_tests.dart';
 part 'compose_bar_test/large_roster_tests.dart';
+
+/// A complete 1x1 PNG, for tests that need a frame to decode.
+final _decodablePngBytes = base64Decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+);
 
 final _pngBytes = Uint8List.fromList([
   0x89,
@@ -1022,10 +1030,27 @@ void main() {
       await tester.tap(find.text('Message'));
       await tester.pump();
       await tester.pump();
+      const draft = 'First line  with spacing\n\nLast line';
+      await tester.enterText(find.byType(TextField), draft);
       focusNode.unfocus();
       await tester.pump();
       await tester.pumpAndSettle();
       expect(find.byType(TextField), findsNothing);
+
+      final width = tester.widget<FractionallySizedBox>(
+        find.byKey(const ValueKey('composer-width-transition')),
+      );
+      expect(width.widthFactor, 1);
+      final surface = tester.widget<Container>(
+        find.byKey(const ValueKey('composer-surface')),
+      );
+      expect(
+        surface.padding,
+        const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      );
+      final preview = tester.widget<Text>(find.text(draft));
+      expect(preview.maxLines, isNull);
+      expect(tester.getSize(find.text(draft)).height, greaterThan(40));
 
       restoreFocus!();
       await tester.pump();
@@ -1379,42 +1404,61 @@ void main() {
       expect(sentContent, 'First line\nSecond line');
     });
 
-    testWidgets('clears text before the optimistic send completes', (
-      tester,
-    ) async {
-      final delivery = Completer<void>();
-      await tester.pumpWidget(
-        _buildComposeBar(
-          uploadService: _testUploadService(nostr.Keys.generate().nsec),
-          onSend:
-              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
-                  delivery.future,
-        ),
-      );
+    testWidgets(
+      'holds the draft until local insertion and clears before delivery',
+      (tester) async {
+        final insertion = Completer<void>();
+        final delivery = Completer<void>();
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {
+                  await insertion.future;
+                  ComposerSendOrigin.didInsertLocalMessage();
+                  await delivery.future;
+                },
+          ),
+        );
 
-      await _expandComposer(tester);
-      await tester.enterText(find.byType(TextField), 'hello');
-      await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-      for (var i = 0; i < 20; i++) {
-        await tester.pump(const Duration(milliseconds: 20));
-        if (tester
-            .widget<TextField>(find.byType(TextField))
-            .controller!
-            .text
-            .isEmpty) {
-          break;
+        await _expandComposer(tester);
+        const draft = 'First line\nSecond line\nThird line';
+        await tester.enterText(find.byType(TextField), draft);
+        await tester.pumpAndSettle();
+        final surface = find.byKey(const ValueKey('composer-surface'));
+        final submittedHeight = tester.getSize(surface).height;
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        await tester.pump(const Duration(milliseconds: 30));
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          draft,
+        );
+        expect(tester.getSize(surface).height, submittedHeight);
+        insertion.complete();
+        for (var i = 0; i < 20; i++) {
+          await tester.pump(const Duration(milliseconds: 20));
+          if (tester
+              .widget<TextField>(find.byType(TextField))
+              .controller!
+              .text
+              .isEmpty) {
+            break;
+          }
         }
-      }
 
-      expect(
-        tester.widget<TextField>(find.byType(TextField)).controller!.text,
-        '',
-      );
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          '',
+        );
 
-      delivery.complete();
-      await tester.pumpAndSettle();
-    });
+        delivery.complete();
+        await tester.pumpAndSettle();
+      },
+    );
 
     testWidgets('a failed send restores an untouched cleared draft', (
       tester,
@@ -1424,8 +1468,14 @@ void main() {
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
           onSend:
-              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
-                  delivery.future,
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                ComposerSendOrigin.didInsertLocalMessage();
+                await delivery.future;
+              },
         ),
       );
 
@@ -1471,7 +1521,10 @@ void main() {
                   content,
                   mentionPubkeys, {
                   mediaTags = const <List<String>>[],
-                }) => delivery.future,
+                }) async {
+                  ComposerSendOrigin.didInsertLocalMessage();
+                  await delivery.future;
+                },
           ),
         );
 
@@ -1815,7 +1868,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('@Scout'));
+      await tester.tap(find.text('@Scout '));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), '');
       await tester.pumpAndSettle();
@@ -1996,6 +2049,357 @@ void main() {
       expect(textField.controller!.selection.baseOffset, 12);
       expect(find.byType(TextField), findsOneWidget);
       expect(textField.focusNode!.hasFocus, isTrue);
+    });
+
+    testWidgets(
+      'colon search replaces only the emoji token at the caret',
+      (tester) async {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            overrides: [
+              emojiDatasetOrEmptyProvider.overrideWithValue(
+                const EmojiDataset(
+                  categories: [],
+                  nativeToShortcode: {'😄': 'smile'},
+                  all: [
+                    EmojiEntry(
+                      id: 'smile',
+                      name: 'Smile',
+                      keywords: [],
+                      native: '😄',
+                      categoryId: 'people',
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            customEmoji: const [
+              CustomEmoji(
+                shortcode: 'blob-prayge',
+                url: 'https://example.com/blob.png',
+              ),
+            ],
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        final field = find.byType(TextField);
+        final controller = tester.widget<TextField>(field).controller!;
+        final panel = find.byKey(const ValueKey('emoji-suggestions-popover'));
+        for (final text in [':', ':s', '10:30', 'https://']) {
+          await tester.enterText(field, text);
+          await tester.pump();
+          expect(panel, findsNothing);
+        }
+        await tester.enterText(field, ':sm');
+        await tester.pumpAndSettle();
+        expect(
+          find.descendant(of: panel, matching: find.text(':smile:')),
+          findsOneWidget,
+        );
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.pumpAndSettle();
+        expect(controller.text, '😄');
+        await tester.enterText(field, 'try :smile: later');
+        controller.selection = const TextSelection.collapsed(offset: 7);
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.descendant(of: panel, matching: find.text(':smile:')),
+        );
+        await tester.pumpAndSettle();
+        expect(controller.text, 'try 😄 later');
+        expect(controller.selection.extentOffset, 'try 😄'.length);
+        await tester.enterText(field, 'try :blob-pr later');
+        controller.selection = const TextSelection.collapsed(offset: 12);
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.descendant(
+            of: panel,
+            matching: find.widgetWithText(ListTile, ':blob-prayge:').first,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(controller.text, 'try :blob-prayge: later');
+        expect(controller.selection.extentOffset, 17);
+        expect(panel, findsNothing);
+      },
+      variant: TargetPlatformVariant({
+        TargetPlatform.iOS,
+        TargetPlatform.android,
+      }),
+    );
+
+    testWidgets(
+      'colon search ranks the palette once and starts no image requests',
+      (tester) async {
+        final mediaRequests = <Uri>[];
+        final palette = _CountingCustomEmojiList([
+          for (var i = 0; i < 30; i++)
+            CustomEmoji(
+              shortcode: 'blob-$i',
+              url: 'https://example.com/blob-$i.gif',
+            ),
+        ]);
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            overrides: [
+              emojiDatasetOrEmptyProvider.overrideWithValue(
+                const EmojiDataset(
+                  categories: [],
+                  nativeToShortcode: {'😄': 'smile'},
+                  all: [
+                    EmojiEntry(
+                      id: 'smile',
+                      name: 'Smile',
+                      keywords: [],
+                      native: '😄',
+                      categoryId: 'people',
+                    ),
+                  ],
+                ),
+              ),
+              mediaHttpClientProvider.overrideWithValue(
+                http_testing.MockClient((request) async {
+                  mediaRequests.add(request.url);
+                  return http.Response('', 404);
+                }),
+              ),
+            ],
+            customEmoji: palette,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        final field = find.byType(TextField);
+        final panel = find.byKey(const ValueKey('emoji-suggestions-popover'));
+
+        // The palette is indexed once, not ranked again per keystroke or
+        // rebuilt for the next token.
+        await tester.enterText(field, ':sm');
+        await tester.pump();
+        final iterations = palette.iterations;
+        for (final text in [':smi', ':smil', ':smil ', ':smil :bl']) {
+          await tester.enterText(field, text);
+          await tester.pump();
+        }
+        expect(palette.iterations, iterations);
+
+        // Uncached custom emoji show placeholders; typing fetches nothing.
+        await tester.enterText(field, ':bl');
+        await tester.pumpAndSettle();
+        expect(
+          find.descendant(of: panel, matching: find.text(':blob-0:')),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(of: panel, matching: find.byIcon(BuzzIcons.sparkles)),
+          findsWidgets,
+        );
+        expect(mediaRequests, isEmpty);
+
+        // An emoji another surface already downloaded shows its image, and
+        // the row reads its shortcode once.
+        final container = ProviderScope.containerOf(tester.element(field));
+        container
+            .read(customEmojiBytesCacheProvider)
+            .remember('https://example.com/blob-0.gif', _decodablePngBytes);
+        await tester.enterText(field, ':blo');
+        await tester.pumpAndSettle();
+        final firstRow = find.descendant(
+          of: panel,
+          matching: find.widgetWithText(ListTile, ':blob-0:'),
+        );
+        final preview = find.descendant(
+          of: firstRow,
+          matching: find.byType(Image),
+        );
+        expect(preview, findsOneWidget);
+        await tester.runAsync(
+          () => precacheImage(
+            tester.widget<Image>(preview).image,
+            tester.element(preview),
+          ),
+        );
+        await tester.pump();
+        expect(
+          tester
+              .widget<RawImage>(
+                find.descendant(of: firstRow, matching: find.byType(RawImage)),
+              )
+              .image,
+          isNotNull,
+        );
+        expect(tester.getSemantics(firstRow), isSemantics(label: ':blob-0:'));
+        expect(mediaRequests, isEmpty);
+      },
+    );
+
+    testWidgets('iOS hides colon suggestions with the keyboard', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        var outsideTaps = 0;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            overrides: [
+              emojiDatasetOrEmptyProvider.overrideWithValue(
+                const EmojiDataset(
+                  categories: [],
+                  nativeToShortcode: {'😄': 'smile'},
+                  all: [
+                    EmojiEntry(
+                      id: 'smile',
+                      name: 'Smile',
+                      keywords: [],
+                      native: '😄',
+                      categoryId: 'people',
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            wrapPage: (page) => Column(
+              children: [
+                SafeArea(
+                  child: TextButton(
+                    onPressed: () => outsideTaps += 1,
+                    child: const Text('Outside'),
+                  ),
+                ),
+                Expanded(child: page),
+              ],
+            ),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        final field = find.byType(TextField);
+        await tester.enterText(field, ':sm');
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('emoji-suggestions-popover')),
+          findsOneWidget,
+        );
+
+        // An outside tap dismisses the query, and a notify without an edit,
+        // such as new channel names, does not bring it back.
+        await tester.tap(find.text('Outside'));
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('emoji-suggestions-popover')),
+          findsNothing,
+        );
+        final container = ProviderScope.containerOf(tester.element(field));
+        (container.read(channelsProvider.notifier) as _FakeChannelsNotifier)
+            .replaceChannels([
+              Channel(
+                id: 'general',
+                name: 'general',
+                channelType: 'stream',
+                visibility: 'open',
+                description: '',
+                createdBy: 'creator',
+                createdAt: DateTime(2026),
+                memberCount: 1,
+                isMember: true,
+              ),
+            ]);
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('emoji-suggestions-popover')),
+          findsNothing,
+        );
+
+        await tester.enterText(field, ':smi');
+        await tester.pumpAndSettle();
+        tester.widget<TextField>(field).focusNode!.unfocus();
+        await tester.pumpAndSettle();
+        expect(find.text('No matching results'), findsNothing);
+        final tapsBefore = outsideTaps;
+        await tester.tap(find.text('Outside'));
+        await tester.pumpAndSettle();
+        expect(outsideTaps, tapsBefore + 1);
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('formatting a colon token closes its suggestions', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        final sent = <String>[];
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            overrides: [
+              emojiDatasetOrEmptyProvider.overrideWithValue(
+                const EmojiDataset(
+                  categories: [],
+                  nativeToShortcode: {'😄': 'smile'},
+                  all: [
+                    EmojiEntry(
+                      id: 'smile',
+                      name: 'Smile',
+                      keywords: [],
+                      native: '😄',
+                      categoryId: 'people',
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {
+                  sent.add(content);
+                },
+          ),
+        );
+        await _expandComposer(tester);
+        final field = find.byType(TextField);
+        final panel = find.byKey(const ValueKey('emoji-suggestions-popover'));
+        await tester.enterText(field, ':sm');
+        await tester.pumpAndSettle();
+        expect(panel, findsOneWidget);
+
+        await tester.tap(find.byIcon(BuzzIcons.aLargeSmall));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(BuzzIcons.bold));
+        await tester.pumpAndSettle();
+        expect(panel, findsNothing);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pumpAndSettle();
+        expect(sent, hasLength(1));
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
     });
 
     testWidgets('iOS measures each character only of shorter drafts', (
@@ -6370,7 +6774,7 @@ void main() {
 
       // The prompt took focus; reopen the composer to edit the draft.
       await tester.pump(const Duration(milliseconds: 200));
-      await tester.tap(find.text('hello @Helper Bot'));
+      await tester.tap(find.text('hello @Helper Bot '));
       await tester.pump(const Duration(milliseconds: 200));
       await tester.enterText(find.byType(TextField), 'newer draft');
       addMemberAcknowledgement.complete();
@@ -8344,4 +8748,31 @@ Future<void> _selectComposerAttachment(
     find.byKey(ValueKey('attachment-menu-item-${label.toLowerCase()}')),
   );
   await tester.pumpAndSettle();
+}
+
+/// A custom-emoji palette that counts how often it is iterated.
+class _CountingCustomEmojiList extends ListBase<CustomEmoji> {
+  _CountingCustomEmojiList(this._items);
+
+  final List<CustomEmoji> _items;
+  var iterations = 0;
+
+  @override
+  int get length => _items.length;
+
+  @override
+  set length(int value) => throw UnsupportedError('read-only');
+
+  @override
+  CustomEmoji operator [](int index) => _items[index];
+
+  @override
+  void operator []=(int index, CustomEmoji value) =>
+      throw UnsupportedError('read-only');
+
+  @override
+  Iterator<CustomEmoji> get iterator {
+    iterations += 1;
+    return super.iterator;
+  }
 }

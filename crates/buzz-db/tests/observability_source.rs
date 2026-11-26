@@ -1706,15 +1706,16 @@ fn events_insert_tails(source: &str) -> Vec<String> {
     tails
 }
 
-/// An events insert must run both follow-ups: the push enqueue and the
-/// pre-commit TTL refresh. `after_admitted_insert` does both; a writer that
-/// inserts inside a savepoint calls the two halves separately.
+/// An events insert must run every follow-up: the push enqueue, the search
+/// outbox row and the pre-commit TTL refresh. `after_admitted_insert` does
+/// all three; a writer that inserts inside a savepoint calls them separately.
 ///
 /// Only real calls count: a hook in a comment or a string literal does not.
 fn runs_event_follow_ups(function_source: &str) -> bool {
     let code = mask_comments_and_literals(function_source);
     code.contains("event_follow_up::after_admitted_insert(")
         || (code.contains("event_follow_up::enqueue_push_match(")
+            && code.contains("search_outbox::enqueue_in_transaction(")
             && code.contains(".record_channel_event("))
 }
 
@@ -1759,6 +1760,16 @@ pub(crate) async fn hooked_writer(tx: &mut AdmittedTx) {
         .await
         .expect("follow up");
 }
+pub(crate) async fn unsearched_writer(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(tx.conn())
+        .await
+        .expect("write");
+    crate::store::event_follow_up::enqueue_push_match(tx.conn(), community, id, kind)
+        .await
+        .expect("enqueue");
+    tx.record_channel_event(channel, kind);
+}
 pub(crate) async fn savepoint_writer(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
         .execute(tx.conn())
@@ -1767,6 +1778,9 @@ pub(crate) async fn savepoint_writer(tx: &mut AdmittedTx) {
     crate::store::event_follow_up::enqueue_push_match(tx.conn(), community, id, kind)
         .await
         .expect("enqueue");
+    crate::search_outbox::enqueue_in_transaction(tx, id, created_at, kind)
+        .await
+        .expect("search");
     tx.record_channel_event(channel, kind);
 }
 pub(crate) async fn mention_writer(tx: &mut AdmittedTx) {
@@ -1900,6 +1914,7 @@ mod tests {
             "pub(crate) async fn unhooked_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn quoted_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn push_only_writer(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn unsearched_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn lowercase_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn continued_writer(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_under_doc_mention(tx: &mut AdmittedTx) {",
@@ -1915,7 +1930,7 @@ mod tests {
             "pub(crate) async fn writer_after_raw_string_example(tx: &mut AdmittedTx) {",
             "pub(crate) async fn writer_after_test_helper(tx: &mut AdmittedTx) {",
         ],
-        "an events insert must run the push enqueue and record the TTL refresh"
+        "an events insert must run the push enqueue, queue the search row and record the TTL refresh"
     );
 }
 
@@ -4099,6 +4114,190 @@ fn every_production_single_table_guard_writer_preserves_its_invariants() {
         assert!(
             seen >= floor,
             "{table}: expected at least {floor} writers, found {seen}"
+        );
+    }
+}
+
+/// Whether `source` updates or deletes `events` rows (or a partition's), in
+/// the same normalized forms [`inserts_events_row`] recognizes.
+fn changes_events_rows(source: &str) -> bool {
+    let normalized = normalized_sql(source);
+    ["update ", "delete from "].iter().any(|verb| {
+        normalized.match_indices(verb).any(|(index, _)| {
+            let rest = &normalized[index + verb.len()..];
+            let rest = rest.strip_prefix("public.").unwrap_or(rest);
+            let table_len = rest
+                .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .unwrap_or(rest.len());
+            is_events_table(&rest[..table_len])
+        })
+    })
+}
+
+fn queues_search_outbox(function_source: &str) -> bool {
+    let code = mask_comments_and_literals(function_source);
+    code.contains("search_outbox::enqueue_in_transaction(")
+        || code.contains("search_outbox::enqueue_events_in_transaction(")
+}
+
+/// Production functions that update or delete `events` rows without queuing a
+/// search outbox row, as `file: header`, each because it only ever touches
+/// kinds that are never searchable (or columns search never reads). A slice
+/// runs to the next function, so a module-level SQL constant counts toward the
+/// function above it.
+const SEARCH_OUTBOX_EXEMPT_EVENT_WRITERS: [(&str, &str); 10] = [
+    (
+        "store/event.rs: pub async fn soft_delete_discovery_events(",
+        "NIP-29 discovery kinds 39000-39002",
+    ),
+    (
+        "store/event_deletion.rs: pub(crate) async fn remove_coordinate_versions_in_tx(",
+        "addressable coordinates, plus the known-event SQL constants of \
+         soft_delete_event_and_update_thread_in_tx, which queues",
+    ),
+    (
+        "store/replaceable.rs: async fn replace_parameterized_event_in_transaction_impl(",
+        "replaceable and addressable kinds, plus the module's supersede macros",
+    ),
+    (
+        "store/push.rs: pub async fn accept_lease_event(",
+        "push lease kind 30350",
+    ),
+    (
+        "store/pins.rs: async fn delete_erased_command_records(",
+        "pin command kinds",
+    ),
+    (
+        "store/reminder.rs: pub async fn claim_due_reminder_with_stamp(",
+        "reminder kind 30300 delivery stamp",
+    ),
+    (
+        "store/reminder.rs: pub async fn release_due_reminder(",
+        "reminder kind 30300 delivery stamp",
+    ),
+    (
+        "store/workflow/deletion.rs: async fn delete_workflow_in_transaction(",
+        "workflow definition kind",
+    ),
+    (
+        "store/user_deletion/account_batches/memberships.rs: pub(super) async fn rebuild(",
+        "channel metadata kinds 39000-39002",
+    ),
+    (
+        "store/user_deletion/profile_batches/events.rs: pub(super) async fn replace_snapshot(",
+        "profile and identity kinds",
+    ),
+];
+
+#[test]
+fn search_outbox_policy_rejects_event_writers_without_the_hook() {
+    let source = r#"
+pub(crate) async fn silent_delete(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events SET deleted_at = NOW() WHERE id = $1");
+}
+pub(crate) async fn silent_purge(tx: &mut AdmittedTx) {
+    sqlx::query("DELETE FROM \"public\".\"events_p2026_01\" WHERE id = $1");
+}
+pub(crate) async fn queued_delete(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events e SET content = '' WHERE id = $1");
+    crate::search_outbox::enqueue_in_transaction(tx, id, created_at, kind).await?;
+}
+pub(crate) async fn other_table(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE event_mentions SET pubkey_hex = '' WHERE id = $1");
+    sqlx::query("DELETE FROM events_outbox WHERE id = $1");
+}
+pub(crate) async fn commented_hook(tx: &mut AdmittedTx) {
+    sqlx::query("UPDATE events SET content = '' WHERE id = $1");
+    // crate::search_outbox::enqueue_in_transaction(tx, id, created_at, kind)
+}
+"#;
+    let violations: Vec<&str> = function_slices(source)
+        .into_iter()
+        .filter(|function| changes_events_rows(function) && !queues_search_outbox(function))
+        .map(function_header)
+        .collect();
+    assert_eq!(
+        violations,
+        [
+            "pub(crate) async fn silent_delete(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn silent_purge(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn commented_hook(tx: &mut AdmittedTx) {",
+        ]
+    );
+}
+
+/// Every production write that changes or removes an `events` row queues a
+/// search outbox row in its transaction, unless it is listed in
+/// [`SEARCH_OUTBOX_EXEMPT_EVENT_WRITERS`]. A new delete, scrub or edit path
+/// that skips the outbox would leave stale documents in the search index.
+#[test]
+fn every_production_event_change_queues_the_search_outbox() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let files = production_event_writer_source_files();
+    let mut queued = Vec::new();
+    let mut unlisted = Vec::new();
+    let mut exempt_seen = Vec::new();
+    for path in files {
+        let source = std::fs::read_to_string(&path).expect("read source file");
+        let production = strip_cfg_test_items(&source);
+        if !changes_events_rows(&production) {
+            continue;
+        }
+        let name = path
+            .strip_prefix(&src)
+            .map(|relative| relative.display().to_string())
+            .unwrap_or_else(|_| path.display().to_string());
+        for function in function_slices(&production) {
+            if !changes_events_rows(function) {
+                continue;
+            }
+            let key = format!("{name}: {}", function_header(function));
+            if queues_search_outbox(function) {
+                queued.push(key);
+            } else if SEARCH_OUTBOX_EXEMPT_EVENT_WRITERS
+                .iter()
+                .any(|(exempt, _)| key.starts_with(exempt))
+            {
+                exempt_seen.push(key);
+            } else {
+                unlisted.push(key);
+            }
+        }
+    }
+    assert!(
+        unlisted.is_empty(),
+        "these production functions update or delete `events` rows without queuing a \
+         search_outbox row; call search_outbox::enqueue_in_transaction (or \
+         enqueue_events_in_transaction) in the same transaction, or add the function to \
+         SEARCH_OUTBOX_EXEMPT_EVENT_WRITERS with why it never touches searchable content: \
+         {unlisted:?}"
+    );
+    assert_eq!(
+        queued,
+        [
+            "store/user_deletion/content_batches/grouped.rs: async fn erase_events(tx: &mut AdmittedTx, number: i64) -> Result<()> {"
+        ],
+        "the scan stopped seeing a queuing writer"
+    );
+    // The shared soft delete (NIP-09, NIP-29 and moderation deletes) runs SQL
+    // constants defined above it, which the slice scan attributes to the
+    // function before them, so pin its hook by name.
+    let deletion = strip_cfg_test_items(
+        &std::fs::read_to_string(src.join("store/event_deletion.rs")).expect("read source"),
+    );
+    let soft_delete = function_slices(&deletion)
+        .into_iter()
+        .find(|function| {
+            function_header(function)
+                .starts_with("pub(crate) async fn soft_delete_event_and_update_thread_in_tx(")
+        })
+        .expect("the shared soft delete exists");
+    assert!(soft_delete.contains("SOFT_DELETE_KNOWN_EVENT_SQL"));
+    assert!(queues_search_outbox(soft_delete));
+    for (exempt, _) in SEARCH_OUTBOX_EXEMPT_EVENT_WRITERS {
+        assert!(
+            exempt_seen.iter().any(|key| key.starts_with(exempt)),
+            "stale exemption, no longer an events writer: {exempt}"
         );
     }
 }

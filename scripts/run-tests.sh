@@ -98,6 +98,12 @@ run_unit_tests() {
   run_test_step "buzz-pubsub conn_control tests" \
     cargo test -p buzz-pubsub --lib conn_control::tests:: -- --nocapture
 
+  # Pub/sub keepalive against a scripted fake Redis (infra-free). Mirrors
+  # `just test-unit`.
+  run_test_step "buzz-pubsub keepalive tests" \
+    cargo test -p buzz-pubsub --lib -- --nocapture keepalive::tests:: subscriber::tests::keepalive:: \
+      cache_invalidation::tests::subscriber_drops_socket_when_pong_withheld
+
   # Shared Redis connection timeout bounds (loopback fake peers; infra-free).
   # Mirrors `just test-unit`.
   run_test_step "buzz-pubsub connection tests" \
@@ -108,6 +114,11 @@ run_unit_tests() {
   run_test_step "buzz-pubsub full-queue retain test" \
     cargo test -p buzz-pubsub --lib -- --exact --nocapture \
       tests::queue_full_retain_does_not_wait_and_schedules_reconciliation
+
+  # NIP-FI deny-store keys and `until` rounding (infra-free). Mirrors
+  # `just test-unit`.
+  run_test_step "buzz-pubsub NIP-FI deny store tests" \
+    cargo test -p buzz-pubsub --lib nip_fi_command_replay::tests:: -- --nocapture
 
   run_test_step "buzz-voice tests" \
     cargo test -p buzz-voice --lib -- --nocapture

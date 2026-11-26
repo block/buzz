@@ -74,6 +74,17 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 16));
 
+    final first = find.byKey(const ValueKey('row-0'));
+    final second = find.byKey(const ValueKey('row-1'));
+    final rowTop = tester.getTopLeft(first).dy;
+    void expectSteadyRows() {
+      expect(tester.getTopLeft(first).dy, rowTop);
+      expect(tester.getTopLeft(second).dy - rowTop, 48);
+      expect(find.byType(SliverFadeTransition), findsNothing);
+    }
+
+    expectSteadyRows();
+
     final clipBottom = tester.getTopLeft(find.text('Following section')).dy;
     final reachable = _reachableRows(tester);
     for (var i = 0; i < _rowCount; i++) {
@@ -84,13 +95,21 @@ void main() {
         reason: 'Row $i top=$rowTop, painted extent ends at $clipBottom',
       );
     }
-    expect(reachable, {for (var i = 0; i < 4; i++) 'Row $i'});
+    expect(reachable, {for (var i = 0; i < 3; i++) 'Row $i'});
 
     await tester.pumpAndSettle();
     expect(_reachableRows(tester), {
       for (var i = 0; i < _rowCount; i++) 'Row $i',
     });
 
+    await tester.tap(find.text('Toggle'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 70));
+    expectSteadyRows();
+    expect(
+      tester.getTopLeft(find.text('Following section')).dy,
+      lessThan(rowTop + 48 * _rowCount),
+    );
     handle.dispose();
   });
 }

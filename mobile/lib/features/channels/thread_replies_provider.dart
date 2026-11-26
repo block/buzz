@@ -3,16 +3,22 @@ import 'dart:async';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart' show KeepAliveLink;
 
+import '../../shared/channels/saved_message_store.dart';
 import '../../shared/relay/relay.dart';
 import 'channel_event_order.dart';
 import 'channel_messages_provider.dart';
 import 'pending_local_messages_provider.dart';
+import 'saved_channel_page.dart';
+
+const _threadReplyPageSize = 200;
 
 class ThreadRepliesArgs {
   final String channelId;
   final String rootId;
 
   const ThreadRepliesArgs({required this.channelId, required this.rootId});
+
+  SavedMessagePage get savedPage => (channelId: channelId, rootId: rootId);
 
   @override
   bool operator ==(Object other) =>
@@ -38,6 +44,19 @@ class _ThreadCursor {
       (createdAt == other.createdAt && eventId.compareTo(other.eventId) > 0);
 }
 
+// Keep the save budget across live and reconnect rebuilds. It resets when
+// the thread closes or the cache scope changes.
+final _claimThreadSaveProvider = Provider.autoDispose
+    .family<bool Function(), ThreadRepliesArgs>((ref, args) {
+      ref.watch(savedMessageScopeProvider);
+      var claimed = false;
+      return () {
+        if (claimed) return false;
+        claimed = true;
+        return true;
+      };
+    });
+
 final threadRepliesProvider = FutureProvider.autoDispose
     .family<List<NostrEvent>, ThreadRepliesArgs>((ref, args) async {
       // A reply missed while the socket is stale cannot invalidate this
@@ -50,25 +69,48 @@ final threadRepliesProvider = FutureProvider.autoDispose
         }
       });
       final session = ref.read(relaySessionProvider.notifier);
+      final scope = ref.watch(savedMessageScopeProvider);
+      final cache = ref.read(savedMessageStoreProvider);
+      final ticket = scope == null
+          ? null
+          : cache.capture(scope, args.savedPage);
+      final claimSave = ref.watch(_claimThreadSaveProvider(args));
       final channelProvider = channelMessagesProvider(args.channelId);
       final channelMessages = ref.exists(channelProvider)
           ? ref.read(channelProvider.notifier)
           : null;
+      void denyAccess(Object error, StackTrace trace) {
+        if (ref.exists(channelProvider)) {
+          ref.read(channelProvider.notifier).denyAccessFromThread(error, trace);
+        } else if (scope != null) {
+          unawaited(cache.removeChannel(scope, args.channelId));
+          invalidateSavedMessagePreviews(ref, args.channelId);
+        }
+      }
+
       final cachedReplyIds = channelMessages?.cachedThreadReplyIds(args.rootId);
       final unconfirmedIds = channelMessages?.unconfirmedThreadReplyIds(
         args.rootId,
       );
       final queryVersion = channelMessages?.beginThreadQuery(args.rootId);
-      if (queryVersion != null) {
-        ref.onDispose(
-          () => channelMessages?.failThreadQuery(args.rootId, queryVersion),
-        );
-      }
+      // Riverpod can invalidate this build while its element remains mounted.
+      var current = true;
+      ref.onDispose(() {
+        current = false;
+        if (queryVersion != null) {
+          channelMessages?.failThreadQuery(args.rootId, queryVersion);
+        }
+      });
       try {
         // Edits, reactions and deletions of the root and its replies ride
         // along, so a reply edited before the thread opens shows that edit.
         // Only the replies themselves feed the reply cache below.
-        final (:replies, :aux) = await fetchCompleteThread(session, args);
+        final (:replies, :aux) = await fetchCompleteThread(
+          session,
+          args,
+          isCurrent: () => current,
+        );
+        if (!current) return const [];
         // Explicit markers also settle unacknowledged local sends, whose
         // absence cannot prove deletion even in an insertion-complete scan.
         final missingIds =
@@ -98,7 +140,8 @@ final threadRepliesProvider = FutureProvider.autoDispose
             ]),
           );
         }
-        if (ref.mounted && ref.exists(channelProvider)) {
+        if (!current) return const [];
+        if (ref.exists(channelProvider)) {
           final channel = ref.read(channelProvider.notifier);
           final deletedTargets = {
             for (final event in deletions)
@@ -120,14 +163,166 @@ final threadRepliesProvider = FutureProvider.autoDispose
             );
           }
         }
-        return [...replies, ...aux];
-      } catch (_) {
-        if (queryVersion != null) {
+        final events = [...replies, ...aux];
+        if (current &&
+            ticket != null &&
+            channelMessages?.isAccessDenied != true) {
+          final rootPending = ref
+              .read(pendingLocalMessagesProvider(args.channelId))
+              .containsKey(args.rootId);
+          final knownRoot = ref.exists(channelProvider) && !rootPending
+              ? ref
+                    .read(channelProvider)
+                    .value
+                    ?.where((event) => event.id == args.rootId)
+                    .firstOrNull
+              : null;
+          unawaited(
+            saveMessagePage(
+              ref,
+              cache,
+              ticket,
+              events,
+              isCurrent: () =>
+                  current && channelMessages?.isAccessDenied != true,
+              refreshEvents: () async {
+                if (!claimSave()) return null;
+                try {
+                  return await _readSavedThreadEvents(
+                    session,
+                    args,
+                    events,
+                    cache,
+                    ticket,
+                    knownRoot,
+                    isCurrent: () => current && cache.isCurrent(ticket),
+                  );
+                } catch (error, trace) {
+                  if (current &&
+                      cache.isCurrent(ticket) &&
+                      isRelayChannelAccessDenied(error)) {
+                    denyAccess(error, trace);
+                  }
+                  rethrow;
+                }
+              },
+            ),
+          );
+        }
+        return events;
+      } catch (error, stackTrace) {
+        if (current && isRelayChannelAccessDenied(error)) {
+          denyAccess(error, stackTrace);
+        }
+        if (current && queryVersion != null) {
           channelMessages?.failThreadQuery(args.rootId, queryVersion);
         }
         rethrow;
       }
     });
+
+Future<List<NostrEvent>> _readSavedThreadEvents(
+  RelaySessionNotifier session,
+  ThreadRepliesArgs args,
+  List<NostrEvent> events,
+  SavedMessageStore store,
+  SavedMessageTicket ticket,
+  NostrEvent? knownRoot, {
+  required bool Function() isCurrent,
+}) async {
+  if (events.length > SavedMessageStore.maxPageEvents) return const [];
+  final targets = {
+    args.rootId,
+    for (final event in events)
+      if (EventKind.channelTimelineContentKinds.contains(event.kind)) event.id,
+  };
+  // Bound the writer query to the root and one reply page. A larger thread
+  // still has complete relay history, but cannot replace its saved page
+  // without also verifying its edits.
+  if (targets.length > _threadReplyPageSize + 1) return const [];
+  final prior = await store.inspectThread(ticket);
+  if (!isCurrent()) return const [];
+  String? editTarget(NostrEvent event) => event.tags.reversed
+      .where((tag) => tag.length > 1 && tag[0] == 'e')
+      .firstOrNull?[1];
+  final (:edited, :deleted) = store.threadMutations(ticket, {
+    args.rootId,
+    ...events.map((event) => event.id),
+  });
+  final pruned = prior?.pruned ?? const <String, bool>{};
+  deleted.addAll({
+    for (final entry in pruned.entries)
+      if (!entry.value) entry.key,
+    for (final event in prior?.events ?? const <NostrEvent>[])
+      if (event.kind == EventKind.deletion ||
+          event.kind == EventKind.nip29DeleteEvent)
+        for (final tag in event.tags)
+          if (tag.length > 1 && tag[0] == 'e') tag[1],
+  });
+  final prunedEdits = targets.where((id) => pruned[id] == true).toSet();
+  final idsToVerify = {if (knownRoot == null) args.rootId, ...prunedEdits}
+    ..removeAll(deleted);
+  final editTargets = targets.intersection({
+    ...edited,
+    ...prunedEdits,
+    for (final event in prior?.events ?? const <NostrEvent>[])
+      if (event.kind == EventKind.streamMessageEdit) ?editTarget(event),
+  })..removeAll(deleted);
+  // Verify only mutations observed live or in a previous saved page.
+  const editLimit = 1000;
+  const strong = {'consistency': 'strong'};
+  final filters = [
+    if (idsToVerify.isNotEmpty)
+      NostrFilter(
+        kinds: EventKind.channelTimelineContentKinds,
+        ids: idsToVerify.toList(),
+        tags: {
+          '#h': [args.channelId],
+        },
+        limit: idsToVerify.length,
+        extensions: strong,
+      ),
+    if (editTargets.isNotEmpty)
+      NostrFilter(
+        kinds: const [EventKind.streamMessageEdit],
+        tags: {
+          '#h': [args.channelId],
+          '#e': editTargets.toList(),
+        },
+        limit: editLimit,
+        extensions: strong,
+      ),
+  ];
+  final current = filters.isEmpty
+      ? const <NostrEvent>[]
+      : await session.queryRelay(filters);
+  final writerEdits = current
+      .where((event) => event.kind == EventKind.streamMessageEdit)
+      .toList();
+  // At the limit the response may omit an edit. Clear the whole saved page.
+  if (writerEdits.length >= editLimit) return const [];
+  final verifiedRows = current
+      .where(
+        (event) =>
+            idsToVerify.contains(event.id) &&
+            EventKind.channelTimelineContentKinds.contains(event.kind),
+      )
+      .toList();
+  return [
+    if (knownRoot != null &&
+        !deleted.contains(knownRoot.id) &&
+        !idsToVerify.contains(knownRoot.id))
+      knownRoot,
+    ...verifiedRows,
+    ...writerEdits.where((event) => !deleted.contains(event.id)),
+    for (final event in events)
+      if (!deleted.contains(event.id) &&
+          !idsToVerify.contains(event.id) &&
+          !(event.kind == EventKind.streamMessageEdit &&
+              editTargets.contains(editTarget(event))))
+        event,
+  ];
+}
 
 /// Exhaustively scans a thread using insertion-complete cursor pages.
 /// [isCurrent] lets a background refresh stop between pages after disposal.
@@ -175,7 +370,7 @@ Future<({List<NostrEvent> replies, List<NostrEvent> aux})> fetchCompleteThread(
     for (final event in events.skip(rows.length)) {
       if (auxIds.add(event.id)) aux.add(event);
     }
-    if (rows.length < 200) return (replies: replies, aux: aux);
+    if (rows.length < _threadReplyPageSize) return (replies: replies, aux: aux);
     final last = rows.last;
     final next = _ThreadCursor(createdAt: last.createdAt, eventId: last.id);
     // A full page of real rows always moves past the cursor. One that does
@@ -197,7 +392,7 @@ Future<({List<NostrEvent> replies, List<NostrEvent> aux})> fetchCompleteThread(
 List<NostrEvent> _leadingRows(List<NostrEvent> events, String rootId) {
   var count = 0;
   while (count < events.length &&
-      count < 200 &&
+      count < _threadReplyPageSize &&
       events[count].threadReference.parentId != null &&
       events[count].threadReference.rootId == rootId &&
       events[count].kind != EventKind.reaction &&
@@ -218,7 +413,7 @@ NostrFilter _threadRepliesFilter(
       '#e': [args.rootId],
       '#h': [args.channelId],
     },
-    limit: 200,
+    limit: _threadReplyPageSize,
     extensions: {
       // The relay binds this as signed i32. Include every representable depth.
       'depth_limit': 0x7fffffff,
