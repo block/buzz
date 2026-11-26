@@ -35,6 +35,32 @@ fn sub_id(name: &str) -> String {
     format!("e2e-{name}-{}", uuid::Uuid::new_v4())
 }
 
+async fn assert_no_event_of_kind(
+    client: &mut BuzzTestClient,
+    kind: Kind,
+    timeout_dur: Duration,
+    context: &str,
+) {
+    let deadline = tokio::time::Instant::now() + timeout_dur;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or(Duration::ZERO);
+        if remaining.is_zero() {
+            return;
+        }
+
+        match client.recv_event(remaining).await {
+            Err(TestClientError::Timeout) => return,
+            Ok(RelayMessage::Event { event, .. }) if event.kind == kind => {
+                panic!("{context}: {}", event.id)
+            }
+            Ok(_) => {}
+            Err(error) => panic!("{context}: unexpected receive error: {error}"),
+        }
+    }
+}
+
 fn relay_http_url() -> String {
     relay_url()
         .replace("wss://", "https://")
@@ -205,6 +231,158 @@ async fn create_test_channel(keys: &Keys) -> String {
     );
 
     channel_uuid.to_string()
+}
+
+/// A successful kind:9002 name edit emits one relay-signed kind:40099 event,
+/// delivers it to live subscribers, and persists it for later subscriptions.
+#[tokio::test]
+#[ignore]
+async fn test_channel_rename_emits_persistent_system_message() {
+    let url = relay_url();
+    let owner_keys = Keys::generate();
+    let channel = create_test_channel(&owner_keys).await;
+    let mut client = BuzzTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as channel owner");
+
+    let live_sid = sub_id("channel-rename-live");
+    let filter = Filter::new()
+        .kind(Kind::Custom(40099))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+    client
+        .subscribe(&live_sid, vec![filter.clone()])
+        .await
+        .expect("subscribe to system messages");
+    client
+        .collect_until_eose(&live_sid, Duration::from_secs(5))
+        .await
+        .expect("system message EOSE");
+
+    let new_name = format!("renamed-{}", Uuid::new_v4());
+    let rename = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", &channel]).expect("h tag"),
+            Tag::parse(["name", &new_name]).expect("name tag"),
+        ])
+        .sign_with_keys(&owner_keys)
+        .expect("sign rename event");
+    let ok = client.send_event(rename).await.expect("send rename event");
+    assert!(ok.accepted, "rename rejected: {}", ok.message);
+
+    let live_event = loop {
+        match client
+            .recv_event(Duration::from_secs(5))
+            .await
+            .expect("receive live system message")
+        {
+            RelayMessage::Event { event, .. } if event.kind == Kind::Custom(40099) => {
+                break event;
+            }
+            _ => {}
+        }
+    };
+    buzz_core::verify_event(&live_event).expect("system message signature");
+    let live_content: serde_json::Value =
+        serde_json::from_str(&live_event.content).expect("system message JSON");
+    assert_eq!(live_content["type"], "name_changed");
+    assert_eq!(live_content["actor"], owner_keys.public_key().to_hex());
+    assert_eq!(
+        live_content["previous_name"],
+        format!("relay-e2e-{channel}")
+    );
+    assert_eq!(live_content["name"], new_name);
+
+    let persisted_sid = sub_id("channel-rename-persisted");
+    client
+        .subscribe(&persisted_sid, vec![filter.clone()])
+        .await
+        .expect("subscribe for persisted system message");
+    let persisted = client
+        .collect_until_eose(&persisted_sid, Duration::from_secs(5))
+        .await
+        .expect("persisted system message EOSE");
+    assert_eq!(
+        persisted
+            .iter()
+            .filter(|event| event.id == live_event.id)
+            .count(),
+        1,
+        "rename system message should be persisted exactly once"
+    );
+
+    // A display-equivalent rename is accepted and stored canonically, but it
+    // must not emit another system message.
+    let equivalent_name = format!("  ###{new_name}  ");
+    let no_op_rename = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", &channel]).expect("h tag"),
+            Tag::parse(["name", &equivalent_name]).expect("name tag"),
+        ])
+        .sign_with_keys(&owner_keys)
+        .expect("sign canonical no-op rename event");
+    let no_op = client
+        .send_event(no_op_rename)
+        .await
+        .expect("send canonical no-op rename event");
+    assert!(
+        no_op.accepted,
+        "canonical no-op rename rejected: {}",
+        no_op.message
+    );
+
+    assert_no_event_of_kind(
+        &mut client,
+        Kind::Custom(40099),
+        Duration::from_millis(500),
+        "canonical no-op rename emitted system message",
+    )
+    .await;
+
+    let no_op_persisted_sid = sub_id("channel-rename-no-op-persisted");
+    client
+        .subscribe(&no_op_persisted_sid, vec![filter])
+        .await
+        .expect("subscribe after canonical no-op rename");
+    let persisted_after_no_op = client
+        .collect_until_eose(&no_op_persisted_sid, Duration::from_secs(5))
+        .await
+        .expect("canonical no-op persistence EOSE");
+    let name_change_count = persisted_after_no_op
+        .iter()
+        .filter(|event| {
+            serde_json::from_str::<serde_json::Value>(&event.content)
+                .is_ok_and(|content| content["type"] == "name_changed")
+        })
+        .count();
+    assert_eq!(
+        name_change_count, 1,
+        "canonical no-op rename should not persist another system message"
+    );
+
+    // Invalid names are rejected before the metadata side effect runs, so a
+    // failed update must not produce a second system message.
+    let invalid_rename = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", &channel]).expect("h tag"),
+            Tag::parse(["name", "###   "]).expect("name tag"),
+        ])
+        .sign_with_keys(&owner_keys)
+        .expect("sign invalid rename event");
+    let rejected = client
+        .send_event(invalid_rename)
+        .await
+        .expect("send invalid rename event");
+    assert!(!rejected.accepted, "invalid rename should be rejected");
+
+    assert_no_event_of_kind(
+        &mut client,
+        Kind::Custom(40099),
+        Duration::from_millis(500),
+        "failed rename emitted system message",
+    )
+    .await;
+
+    client.disconnect().await.expect("disconnect");
 }
 
 #[tokio::test]

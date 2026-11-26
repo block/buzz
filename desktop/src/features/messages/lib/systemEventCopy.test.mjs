@@ -4,8 +4,23 @@ import test from "node:test";
 import {
   addedByActionPrefix,
   describeChannelTextFieldChange,
+  describeChannelNameChange,
   toInlineName,
 } from "./systemEventCopy.ts";
+
+test("a channel rename names both the old and new names", () => {
+  assert.equal(
+    describeChannelNameChange("old-name", "new-name"),
+    "renamed the channel from “old-name” to “new-name”",
+  );
+});
+
+test("a channel rename falls back to the new name when the old name is unavailable", () => {
+  assert.equal(
+    describeChannelNameChange(undefined, "new-name"),
+    "renamed the channel to “new-name”",
+  );
+});
 
 test("an add to the reader uses passive wording", () => {
   assert.equal(addedByActionPrefix(true), "were added by");
