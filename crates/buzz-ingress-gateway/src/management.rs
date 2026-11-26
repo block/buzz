@@ -15,6 +15,8 @@
 //! Every mutation carries a caller-chosen `operation_id` and the integration
 //! `revision` it produces, so a relay can retry blindly: a replay returns the
 //! original response and an out-of-date relay learns the current revision.
+mod subscriptions;
+
 use crate::http::{error, AppState};
 use crate::secrets::MAX_SECRET_BYTES;
 use crate::store::{
@@ -58,6 +60,7 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/integrations/{id}/enable", post(enable))
         .route("/v1/integrations/{id}/deliveries", get(list_deliveries))
         .route("/v1/operations/{operation_id}", get(get_operation))
+        .merge(subscriptions::routes())
 }
 
 /// Verify a NIP-98 header against the request method, path, and body, and
@@ -237,6 +240,9 @@ async fn apply(state: &AppState, operation: Operation) -> Response {
         )
             .into_response(),
         Ok(ApplyOutcome::NotFound) => error(StatusCode::NOT_FOUND, "not_found"),
+        Ok(ApplyOutcome::CommunityChanged) => {
+            error(StatusCode::CONFLICT, "community_host_immutable")
+        }
         Err(e) => store_error(e),
     }
 }
@@ -490,14 +496,14 @@ mod tests {
     use std::sync::{atomic::AtomicBool, Arc};
     use tower::ServiceExt;
 
-    struct Fixture {
-        private: Router,
-        relay: Keys,
-        store: Arc<MemoryStore>,
+    pub(super) struct Fixture {
+        pub(super) private: Router,
+        pub(super) relay: Keys,
+        pub(super) store: Arc<MemoryStore>,
         secrets: Arc<SecretKeyring>,
     }
 
-    fn fixture() -> Fixture {
+    pub(super) fn fixture() -> Fixture {
         let relay = Keys::generate();
         let store = Arc::new(MemoryStore::default());
         let secrets =
@@ -540,7 +546,7 @@ mod tests {
         format!("Nostr {}", STANDARD.encode(event.as_json()))
     }
 
-    async fn call(
+    pub(super) async fn call(
         fx: &Fixture,
         keys: &Keys,
         method: &str,
@@ -574,7 +580,7 @@ mod tests {
         (status, json)
     }
 
-    fn put_body(operation_id: Uuid, revision: i64) -> serde_json::Value {
+    pub(super) fn put_body(operation_id: Uuid, revision: i64) -> serde_json::Value {
         serde_json::json!({
             "operation_id": operation_id,
             "revision": revision,
@@ -621,9 +627,16 @@ mod tests {
             serde_json::json!({ "error": "stale_revision", "current": 1 })
         );
 
+        let mut moved = put_body(Uuid::new_v4(), 2);
+        moved["community_host"] = serde_json::json!("other.communities.example.org");
+        let (status, refused) = call(&fx, &fx.relay, "PUT", &path, &path, Some(moved)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "queued messages stay bound");
+        assert_eq!(refused["error"], "community_host_immutable");
+
         let (status, read) = call(&fx, &fx.relay, "GET", &path, &path, None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(read["community_host"], "acme.communities.example.org");
+        assert_eq!(read["revision"], 1);
 
         let op_path = format!("/v1/operations/{op}");
         let (status, recorded) = call(&fx, &fx.relay, "GET", &op_path, &op_path, None).await;
@@ -781,6 +794,10 @@ mod tests {
             .collect();
         assert_eq!(ids, ["d4", "d3"]);
         assert_eq!(body["deliveries"][0]["state"], "queued");
+        assert_eq!(
+            body["deliveries"][0]["messages"],
+            serde_json::json!({ "queued": 0, "accepted": 0, "failed": 0 })
+        );
         assert!(body["deliveries"][0].get("body").is_none());
         assert!(!body.to_string().contains("payload"));
         let next = body["next"].as_str().unwrap().to_owned();

@@ -1,7 +1,7 @@
 use buzz_ingress_gateway::{
-    config::Config, forwarder::Forwarder, http::IntakeLimits, intake::RateLimiter,
+    config::Config, fanout::Fanout, forwarder::Forwarder, http::IntakeLimits, intake::RateLimiter,
     postgres::PostgresStore, relay_client::HttpRelayClient, router_with_metrics,
-    secrets::SecretKeyring, AppState,
+    secrets::SecretKeyring, signer::GatewayKeySigner, store::Store, AppState,
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -59,14 +59,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
+    let retry_max_age = chrono::Duration::seconds(c.retry_max_age_seconds);
+    let fanout = tokio::spawn(
+        Fanout {
+            store: Arc::clone(&store) as Arc<dyn Store>,
+            concurrency: c.forward_concurrency,
+            retry_max_age,
+            now: chrono::Utc::now,
+        }
+        .run(),
+    );
     let forwarder = tokio::spawn(
         Forwarder {
-            store: Arc::clone(&store) as Arc<dyn buzz_ingress_gateway::store::Store>,
-            client: Arc::new(HttpRelayClient::new(c.signing_keys.clone())?),
-            keys: c.signing_keys.clone(),
+            store: Arc::clone(&store) as Arc<dyn Store>,
+            client: Arc::new(HttpRelayClient::new()?),
+            signer: Arc::new(GatewayKeySigner::new(c.signing_keys.clone())),
             scheme: c.relay_scheme,
             concurrency: c.forward_concurrency,
-            retry_max_age: chrono::Duration::seconds(c.retry_max_age_seconds),
+            retry_max_age,
             now: chrono::Utc::now,
         }
         .run(),
@@ -114,6 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(30), p).await;
     let _ = htx.send(true);
     let _ = h.await;
+    fanout.abort();
     forwarder.abort();
     reaper.abort();
     Ok(())

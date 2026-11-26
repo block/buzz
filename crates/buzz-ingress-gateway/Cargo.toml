@@ -1,6 +1,6 @@
 [package]
 name = "buzz-ingress-gateway"
-description = "Webhook ingress gateway that verifies provider deliveries and forwards them to Buzz relays"
+description = "Webhook ingress gateway that verifies provider deliveries and fans them out to Buzz channels"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,6 +20,7 @@ aes-gcm = "0.10"
 async-trait = "0.1"
 axum = { workspace = true }
 base64 = "0.22"
+cel = { version = "0.16", default-features = false, features = ["json", "regex"] }
 chrono = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
