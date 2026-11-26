@@ -509,7 +509,12 @@ Propose(e) ==
 
 \* A review approves a commit for a ref.  It records the ref's tip as the
 \* reviewer saw it, and whether the reviewer could write the repo then
-\* (only the seeded error "eligibility-at-approve" reads that).  An
+\* (only the seeded error "eligibility-at-approve" reads that).  The relay
+\* is looser: it takes an approval of any commit, shown or not, naming any
+\* tip, and binds it only at the decision.  The model keeps this narrower
+\* step on purpose.  An approval free to name any tip can always name the
+\* right one, so no check could catch "target-tip-ignored", and approving
+\* unshown commits multiplies the review scenario's states.  An
 \* attestation on it records the agent's owner if none is recorded, as
 \* Register does and under the same fence.
 Approve(e) ==
