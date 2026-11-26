@@ -49,6 +49,7 @@ fn test_runtime() -> &'static KnownAcpRuntime {
         model_env_var: Some("GOOSE_MODEL"),
         provider_env_var: Some("GOOSE_PROVIDER"),
         provider_locked: false,
+        provider_inventory: false,
         default_env: &[],
         config_file_path: Some("~/.config/goose/config.yaml"),
         config_file_format: Some("yaml"),
@@ -265,6 +266,7 @@ fn provider_locked_shows_locked() {
     let record = test_record();
     let runtime = &KnownAcpRuntime {
         provider_locked: true,
+        provider_inventory: false,
         ..*test_runtime()
     };
     let surface = read_config_surface(&record, Some(runtime), None, &no_tiers(), None);
@@ -646,6 +648,7 @@ fn buzz_agent_runtime() -> &'static KnownAcpRuntime {
         model_env_var: Some("BUZZ_AGENT_MODEL"),
         provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
         provider_locked: false,
+        provider_inventory: false,
         default_env: &[],
         config_file_path: None,
         config_file_format: None,
