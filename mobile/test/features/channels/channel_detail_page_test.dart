@@ -5342,7 +5342,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.byType(UserProfileSheet), findsOneWidget);
-      expect(find.text('Make admin'), findsOneWidget);
+      expect(find.text('Make conversation admin'), findsOneWidget);
       expect(find.text('Remove from conversation'), findsOneWidget);
       Navigator.of(tester.element(find.byType(UserProfileSheet))).pop();
       await tester.pumpAndSettle();

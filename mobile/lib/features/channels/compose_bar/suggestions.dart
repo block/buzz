@@ -160,7 +160,8 @@ class _MentionSuggestions extends StatelessWidget {
 
 /// The secondary info line under a mention suggestion — mirrors desktop's
 /// `MentionAutocomplete` subtitle: bot icon + "agent" (or an "admin" badge
-/// for human admins), then "managed by …" / "not in conversation".
+/// for human admins), then "not in conversation" / "managed by …". The
+/// membership hint leads so the ellipsis clips the owner name, not the hint.
 abstract final class _MentionSuggestionInfo {
   static Widget? build(
     BuildContext context, {
@@ -177,7 +178,7 @@ abstract final class _MentionSuggestionInfo {
 
     final String? detail;
     if (ownerLabel != null && notInChannel) {
-      detail = 'managed by $ownerLabel \u00b7 $outside';
+      detail = '$outside \u00b7 managed by $ownerLabel';
     } else if (ownerLabel != null) {
       detail = 'managed by $ownerLabel';
     } else if (notInChannel) {

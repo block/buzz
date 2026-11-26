@@ -20,6 +20,13 @@ void mentionSearchTests() {
       ),
   ];
   final quinn = UserProfile(pubkey: 'c' * 64, displayName: 'Quinn');
+  final me = nostr.Keys.generate().public;
+  // The viewer's own agent, also outside the channel.
+  final quill = UserProfile(
+    pubkey: '8' * 64,
+    displayName: 'Quill',
+    ownerPubkey: me,
+  );
   final joseMaria = UserProfile(pubkey: 'd' * 64, displayName: 'José María');
   final aliceSmith = UserProfile(pubkey: 'e' * 64, displayName: 'Alice Smith');
   // Found for `bo` too, so only the chip rule keeps the prose after a
@@ -55,7 +62,7 @@ void mentionSearchTests() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
-          currentPubkey: nostr.Keys.generate().public,
+          currentPubkey: me,
           members: members,
           channels: [_makeCurrentChannel()],
           // The relay matches each query word against the start of a name
@@ -65,7 +72,7 @@ void mentionSearchTests() {
             searched.add(query);
             final words = fold(query).split(' ').where((w) => w.isNotEmpty);
             return [
-              for (final person in [quinn, joseMaria, aliceSmith, bobby])
+              for (final person in [quinn, quill, joseMaria, aliceSmith, bobby])
                 if (words.every(
                   (word) => fold(
                     person.displayName!,
@@ -112,6 +119,8 @@ void mentionSearchTests() {
       expect(searched.where((q) => q.isNotEmpty), ['q', 'qu']);
       expect(row('Quinn'), findsOneWidget);
       expect(row('not in conversation'), findsOneWidget);
+      // The membership hint leads, so a long owner name is what clips.
+      expect(row('not in conversation \u00b7 managed by you'), findsOneWidget);
 
       // Closing punctuation after a person the directory found selects them
       // as Space does once the search has finished (recommendation 7), and
