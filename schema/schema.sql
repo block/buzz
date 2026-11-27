@@ -173,3 +173,4 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i tables/public/media_publications.sql
 \i tables/public/scheduled_messages.sql
 \i tables/public/scheduled_message_disconnects.sql
+\i seeds/scheduled_message_disconnects.sql

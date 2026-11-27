@@ -32,6 +32,8 @@ CREATE INDEX scheduled_messages_federated_agent_pending ON scheduled_messages (a
 
 CREATE INDEX scheduled_messages_terminal_expiry ON scheduled_messages (prune_at) WHERE prune_at IS NOT NULL;
 
+-- Issuer disconnects can fence admissions in every community. These records
+-- have no community provenance and expire independently of community deletion.
 CREATE TABLE scheduled_message_disconnects (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     issuer TEXT NOT NULL,
@@ -43,3 +45,7 @@ CREATE TABLE scheduled_message_disconnects (
 );
 CREATE INDEX scheduled_message_disconnects_target ON scheduled_message_disconnects (issuer, target);
 CREATE INDEX scheduled_message_disconnects_expiry ON scheduled_message_disconnects (issuer, expires_at);
+
+INSERT INTO _operator_global_tables (table_name, reason)
+VALUES ('scheduled_message_disconnects', 'Issuer-wide disconnects fence deferred actions across communities')
+ON CONFLICT (table_name) DO NOTHING;

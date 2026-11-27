@@ -696,6 +696,7 @@ mod postgres_tests {
             "operator_listener_pubkeys",
             "operator_listener_outbox",
             "community_auth_upgrades",
+            "scheduled_message_disconnects",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
