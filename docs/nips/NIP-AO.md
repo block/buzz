@@ -110,20 +110,142 @@ Unknown `kind` values MUST be ignored.
 | `acp_write`        | Outbound ACP protocol frame (harness → model)            |
 | `turn_started`     | A new agent turn has begun                               |
 | `session_resolved` | Session completed or terminated                          |
+| `control_result`   | The agent's answer to a control frame (see below)        |
 
 ### Control (`frame=control`)
 
-The `content` field decrypts to:
+The `content` field decrypts to a JSON object whose `type` names the command.
+The defined types are `cancel_turn`, `switch_model` and
+`publish_project_owner_announcements`. Implementations MUST ignore events with
+unrecognized `type` values, and SHOULD drop a frame whose required fields are
+missing or invalid without answering it.
+
+The agent answers a control frame with a telemetry frame of `kind`
+`control_result`. Its `payload` carries the command's `type`, a `status` and
+the frame's `requestId`, so the owner can match the answer to the command that
+caused it and ignore answers to earlier ones. A sender that gets no answer
+cannot tell a dropped frame from an offline or outdated agent, and SHOULD time
+out.
+
+#### `cancel_turn`
+
+Stops the agent's running turn in a conversation.
 
 ```json
 {
-  "type":      "cancel_turn",
-  "channelId": "<channel_uuid>"
+  "type":         "cancel_turn",
+  "channelId":    "<channel_uuid>",
+  "threadRootId": "<event_id_hex>",
+  "requestId":    "<opaque_id>"
 }
 ```
 
-The only defined control type is `cancel_turn`. Implementations MUST ignore
-events with unrecognized `type` values.
+| Field          | Required | Meaning                                                    |
+|----------------|----------|------------------------------------------------------------|
+| `channelId`    | yes      | Channel the turn runs in.                                  |
+| `threadRootId` | no       | Root event id (64 hex characters) of the thread to stop.   |
+| `requestId`    | no       | Opaque correlator, echoed in the result.                   |
+
+With `threadRootId`, the agent stops the turn of the session that serves that
+thread. An agent that keeps one session for the whole channel (or a DM) stops
+that session's turn, since every thread of the channel runs in it. Without
+`threadRootId`, the target is the whole channel; an agent with more than one
+session in the channel MUST NOT pick one and answers `ambiguous_target`. A
+sender SHOULD include `threadRootId` whenever the turn it stops belongs to a
+thread, and omit it for a conversation with no threads.
+
+The result is a `control_result` telemetry frame with `channelId` set:
+
+```json
+{ "type": "cancel_turn", "status": "sent", "requestId": "<opaque_id>" }
+```
+
+| `status`           | Meaning                                                              |
+|--------------------|----------------------------------------------------------------------|
+| `sent`             | A running turn was signalled to stop. It may not have ended yet.     |
+| `no_active_turn`   | No turn was running there, or it was already stopping.               |
+| `ambiguous_target` | Without `threadRootId`, the channel has more than one session.       |
+
+`sent` is not proof that the turn ended. A sender that needs that SHOULD watch
+the turn's own telemetry, or other evidence of activity, end.
+
+#### `switch_model`
+
+Changes the model the agent uses in a channel.
+
+```json
+{
+  "type":      "switch_model",
+  "channelId": "<channel_uuid>",
+  "modelId":   "<model_id>",
+  "requestId": "<opaque_id>"
+}
+```
+
+`channelId` and `modelId` are required; `requestId` is an optional string,
+echoed in every result for this command. If a turn is running, the agent stops
+it and runs its request again under the new model. If none is, the new model
+applies from the next turn. Like `cancel_turn` without a thread, the target is
+the whole channel.
+
+The first `control_result` frame, with `channelId` set, carries `type`,
+`status`, `modelId` and `requestId`:
+
+| `status`            | Meaning                                                             |
+|---------------------|---------------------------------------------------------------------|
+| `sent`              | A running turn was signalled; a later frame reports the outcome.    |
+| `turn_ending`       | The running turn was already stopping, so the switch did not land.  |
+| `switched`          | No turn was running; the next turn uses the new model.              |
+| `unsupported_model` | The agent's model list does not include `modelId`.                  |
+| `no_active_turn`    | The agent has no idle session in the channel.                       |
+| `ambiguous_target`  | The channel has more than one session.                              |
+
+After `sent`, the agent sends one more `control_result` with the same fields
+when it creates the session under the new model: `switched`,
+`unsupported_model`, or `failure` if the agent runtime rejected the model.
+After `switched`, the same session creation can still send `unsupported_model`
+or `failure`, when the agent had not yet learned its model list.
+
+#### `publish_project_owner_announcements`
+
+Asks the agent to sign and publish, as itself, git project announcements the
+owner prepared.
+
+```json
+{
+  "type":      "publish_project_owner_announcements",
+  "requestId": "<uuid>",
+  "announcements": [
+    {
+      "kind":      30617,
+      "content":   "",
+      "createdAt": 1777464041,
+      "tags":      [["d", "<project_id>"]]
+    }
+  ]
+}
+```
+
+`requestId` MUST be a UUID. `announcements` holds one or two event templates.
+Each template's `kind` MUST be 30617 or 30621 and its `tags` MUST include a
+non-empty `d` tag. `createdAt` is optional; the agent uses the current time
+when it is absent and rejects a value more than five minutes in the future. The
+agent publishes the templates in order and stops at the first failure.
+
+The result is a `control_result` telemetry frame with `channelId` null:
+
+```json
+{
+  "type":      "publish_project_owner_announcements",
+  "requestId": "<uuid>",
+  "status":    "ok",
+  "events":    [ { "...": "the signed events it published" } ],
+  "error":     null
+}
+```
+
+`status` is `ok` when every template was published, or `error`, with `error`
+describing the failure and `events` holding the events published before it.
 
 ## Ephemerality Contract
 
@@ -290,8 +412,33 @@ of decrypted payloads and MUST NOT log it at INFO level or above.
 
 ```json
 {
-  "type":      "cancel_turn",
-  "channelId": "52a85618-0f8f-4542-94ec-599e6e1c6f2e"
+  "type":         "cancel_turn",
+  "channelId":    "52a85618-0f8f-4542-94ec-599e6e1c6f2e",
+  "threadRootId": "9f2c4e1a7b3d5f6081a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708",
+  "requestId":    "0b6f2d4e-8a1c-4f3e-9d2b-7c5a1e0f4b6d"
+}
+```
+
+---
+
+### 3. Telemetry Event — `control_result` for that cancel
+
+**Decrypted payload** (wire event shaped as in example 1):
+
+```json
+{
+  "seq":        43,
+  "timestamp":  "2026-04-29T12:00:42.120Z",
+  "kind":       "control_result",
+  "agentIndex": null,
+  "channelId":  "52a85618-0f8f-4542-94ec-599e6e1c6f2e",
+  "sessionId":  null,
+  "turnId":     null,
+  "payload": {
+    "type":      "cancel_turn",
+    "status":    "sent",
+    "requestId": "0b6f2d4e-8a1c-4f3e-9d2b-7c5a1e0f4b6d"
+  }
 }
 ```
 
