@@ -3,10 +3,10 @@
 //! ```text
 //! forwarder ──POST {scheme}://{community_host}/events──▶ relay
 //!            Authorization: Nostr <NIP-98 event signed by the message author>
-//!            body: the kind-9 channel message
+//!            body: the signed channel message or edit
 //!
 //! forwarder ──POST {scheme}://{community_host}/query───▶ relay
-//!            body: [{"ids": [...], "kinds": [9], "#h": [channel]}]
+//!            body: [{"ids": [...], "kinds": [9, 40003], "#h": [channel]}]
 //!            (did an earlier send land before its timestamp expired?)
 //! ```
 //!
@@ -31,7 +31,7 @@ pub trait RelayClient: Send + Sync {
     async fn submit(&self, url: &Url, event: &Event, signer: &Arc<dyn NostrSigner>)
         -> SubmitResult;
 
-    /// Ask the relay at `url` whether the channel holds any of the kind-9
+    /// Ask the relay at `url` whether the channel holds any of the requested
     /// events `ids`, reading as `signer`.
     async fn find(
         &self,
@@ -138,7 +138,7 @@ impl RelayClient for HttpRelayClient {
     ) -> LookupResult {
         let filter = serde_json::json!([{
             "ids": ids,
-            "kinds": [9],
+            "kinds": [9, 40003],
             "#h": [channel_id.to_string()],
             "limit": ids.len(),
         }]);

@@ -37,7 +37,20 @@ impl DeliveryMode {
     }
 }
 
-/// An integration's delivery mode and CEL expressions. Each field defaults so
+/// How a subsequent delivery with the same group key relates to the first
+/// message in its destination channel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum GroupKeyAction {
+    /// Post a reply in the original message's thread.
+    #[default]
+    ReplyInThread,
+    /// Edit the original message.
+    UpdateMessage,
+}
+
+/// An integration's delivery settings and CEL expressions. Each field defaults so
 /// responses stored before it existed still deserialize.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntegrationConfig {
@@ -56,6 +69,9 @@ pub struct IntegrationConfig {
     /// Extracts the key that groups related deliveries, such as an incident.
     #[serde(default)]
     pub group_key_expr: Option<String>,
+    /// Action for a repeated key from `group_key_expr`.
+    #[serde(default)]
+    pub group_key_action: GroupKeyAction,
 }
 
 impl IntegrationConfig {
@@ -89,12 +105,31 @@ impl IntegrationConfig {
                 }
             }
         }
+        // Requests with the default action must replay operations recorded
+        // before the field existed, using their original fingerprint.
+        match self.group_key_action {
+            GroupKeyAction::ReplyInThread => {}
+            GroupKeyAction::UpdateMessage => hasher.update(b"update_message"),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_config_keeps_its_action_and_fingerprint_on_replay() {
+        let config: IntegrationConfig = serde_json::from_str(
+            r#"{"delivery_mode":"channel_subscriptions","group_key_expr":"payload.id"}"#,
+        )
+        .unwrap();
+        assert_eq!(config.group_key_action, GroupKeyAction::ReplyInThread);
+        let mut hasher = Sha256::new();
+        config.fingerprint(&mut hasher);
+        let legacy = b"channel_subscriptions\0\0\0\0\x01\0\0\0\0\0\0\0\x0apayload.id";
+        assert_eq!(hasher.finalize(), Sha256::digest(legacy));
+    }
 
     #[test]
     fn every_field_changes_the_fingerprint() {
@@ -124,6 +159,10 @@ mod tests {
             },
             IntegrationConfig {
                 group_key_expr: some(),
+                ..base.clone()
+            },
+            IntegrationConfig {
+                group_key_action: GroupKeyAction::UpdateMessage,
                 ..base.clone()
             },
         ];

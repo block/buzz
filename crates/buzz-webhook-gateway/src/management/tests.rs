@@ -180,6 +180,7 @@ async fn relay_creates_reads_and_idempotently_retries_an_integration() {
     assert_eq!(conflict["error"], "operation_conflict");
 
     assert_eq!(body["delivery_mode"], "channel_subscriptions");
+    assert_eq!(body["group_key_action"], "reply_in_thread");
     let mut configured = put_body(Uuid::new_v4(), 2);
     for (field, value) in [
         ("delivery_mode", "caller_selects_channel"),
@@ -187,6 +188,7 @@ async fn relay_creates_reads_and_idempotently_retries_an_integration() {
         ("message_expr", "\"PR #\" + string(payload.number)"),
         ("message_data_expr", "{\"status\": payload.action}"),
         ("group_key_expr", "string(payload.number)"),
+        ("group_key_action", "update_message"),
     ] {
         configured[field] = serde_json::json!(value);
     }
@@ -206,9 +208,16 @@ async fn relay_creates_reads_and_idempotently_retries_an_integration() {
         "message_expr",
         "message_data_expr",
         "group_key_expr",
+        "group_key_action",
     ] {
         assert_eq!(updated[field], configured[field], "{field}");
     }
+    let mut changed_action = configured.clone();
+    changed_action["group_key_action"] = serde_json::json!("reply_in_thread");
+    let (status, conflict) = call(&fx, &fx.relay, "PUT", &path, &path, Some(changed_action)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict["error"], "operation_conflict");
+
     let mut changed = configured;
     changed["group_key_expr"] = serde_json::json!("payload.id");
     let (status, conflict) = call(&fx, &fx.relay, "PUT", &path, &path, Some(changed)).await;
@@ -243,6 +252,11 @@ async fn relay_creates_reads_and_idempotently_retries_an_integration() {
         assert_eq!(refused["error"], "invalid_expression");
         assert_eq!(refused["field"], field, "{refused}");
     }
+    let mut unknown_action = put_body(Uuid::new_v4(), 3);
+    unknown_action["group_key_action"] = serde_json::json!("replace_thread");
+    let (status, _) = call(&fx, &fx.relay, "PUT", &path, &path, Some(unknown_action)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
     let mut unknown_mode = put_body(Uuid::new_v4(), 3);
     unknown_mode["delivery_mode"] = serde_json::json!("broadcast");
     let (status, _) = call(&fx, &fx.relay, "PUT", &path, &path, Some(unknown_mode)).await;

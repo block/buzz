@@ -7,6 +7,7 @@ CREATE TABLE webhook_gateway_integrations (
     message_expr TEXT CHECK (message_expr IS NULL OR length(message_expr) BETWEEN 1 AND 4096),
     message_data_expr TEXT CHECK (message_data_expr IS NULL OR length(message_data_expr) BETWEEN 1 AND 4096),
     group_key_expr TEXT CHECK (group_key_expr IS NULL OR length(group_key_expr) BETWEEN 1 AND 4096),
+    group_key_action TEXT NOT NULL DEFAULT 'reply_in_thread' CHECK (group_key_action IN ('reply_in_thread', 'update_message')),
     revision BIGINT NOT NULL CHECK (revision > 0),
     enabled BOOLEAN NOT NULL DEFAULT true,
     disabled_at TIMESTAMPTZ,

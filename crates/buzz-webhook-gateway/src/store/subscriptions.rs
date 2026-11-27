@@ -11,7 +11,7 @@
 //!   filter or the integration's message expression errored)
 //!        │
 //!        ▼
-//!   sender: kind-9 event to the subscription's channel on the community relay
+//!   sender: signed message or edit to the subscription's channel on the community relay
 //! ```
 //!
 //! Every settlement names the attempt it claimed, so a worker whose lease
@@ -179,6 +179,8 @@ fn repeats(current: &Subscription, change: &SubscriptionChange) -> bool {
 /// One subscription's share of a fanned-out delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewMessage {
+    /// Channel- and integration-scoped digest of the evaluated group key, and its action.
+    pub group: Option<(String, super::GroupKeyAction)>,
     pub subscription_id: Uuid,
     pub channel_id: Uuid,
     /// The rendered message text, or why the filter or message expression
@@ -248,6 +250,8 @@ pub struct MessageKey {
 /// `attempts` already counts this attempt and fences its settlement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimedMessage {
+    /// Action and accepted root event for a follow-up in this group.
+    pub target: Option<(super::GroupKeyAction, String)>,
     pub key: MessageKey,
     pub community_host: String,
     pub channel_id: Uuid,

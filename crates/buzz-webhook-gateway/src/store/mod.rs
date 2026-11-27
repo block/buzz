@@ -1,10 +1,12 @@
 //! Durable gateway state behind a trait, so the HTTP surface is tested against
 //! an in-memory reference store and production runs on Postgres.
+#[cfg(test)]
+pub(crate) mod grouping_tests;
 mod integration_config;
 mod memory;
 mod subscriptions;
 
-pub use integration_config::{DeliveryMode, IntegrationConfig};
+pub use integration_config::{DeliveryMode, GroupKeyAction, IntegrationConfig};
 
 pub use memory::{MemoryStore, StoredDelivery, StoredMessage};
 pub(crate) use subscriptions::initial_state as initial_message_state;
@@ -527,6 +529,8 @@ pub fn transition(
 /// this attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimedDelivery {
+    pub group_key_expr: Option<String>,
+    pub group_key_action: GroupKeyAction,
     pub integration_id: Uuid,
     pub delivery_id: String,
     pub provider: Provider,

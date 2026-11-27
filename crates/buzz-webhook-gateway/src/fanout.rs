@@ -25,6 +25,7 @@ use crate::store::{
     StoreError, Subscription,
 };
 use chrono::{DateTime, Duration, Utc};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::task::JoinSet;
 
@@ -61,22 +62,35 @@ pub fn evaluate(delivery: &ClaimedDelivery, subscriptions: &[Subscription]) -> E
         ));
     };
     let input = Delivery::new(delivery.provider.as_str(), &delivery.event_type, &payload);
-    let mut message: Option<Result<String, String>> = None;
+    let mut rendered = None;
     let mut messages = Vec::new();
     for subscription in subscriptions {
-        let content = match filter_matches(&input, subscription) {
+        let result = match filter_matches(&input, subscription) {
             Ok(false) => continue,
-            Ok(true) => match &message {
-                Some(content) => content.clone(),
-                None => match message_for(delivery, &input) {
-                    Ok(content) => message.insert(content).clone(),
-                    Err(error) => return Evaluation::Retry(error),
-                },
-            },
+            Ok(true) => rendered
+                .get_or_insert_with(|| message_for(delivery, &input))
+                .as_ref()
+                .map_err(Clone::clone),
+            Err(error) => Err(error),
+        };
+        let (content, group) = match result {
+            Ok((text, key)) => {
+                let group = key.as_ref().map(|key| {
+                    // UUIDs are fixed-width, so each integration, channel and CEL key
+                    // selects an unambiguous group without indexing provider data.
+                    let mut hash = Sha256::new();
+                    hash.update(delivery.integration_id.as_bytes());
+                    hash.update(subscription.channel_id.as_bytes());
+                    hash.update(key.as_bytes());
+                    (hex::encode(hash.finalize()), delivery.group_key_action)
+                });
+                (Ok(text.clone()), group)
+            }
             Err(EvalError::Unavailable(error)) => return Evaluation::Retry(error),
-            Err(error) => Err(storable(&error.to_string())),
+            Err(error) => (Err(storable(&error.to_string())), None),
         };
         messages.push(NewMessage {
+            group,
             subscription_id: subscription.id,
             channel_id: subscription.channel_id,
             content,
@@ -108,24 +122,30 @@ fn filter_matches(input: &Delivery, subscription: &Subscription) -> Result<bool,
     }
 }
 
-/// The message every matching subscription stores: the rendered text, or why
-/// rendering failed. `Err` is a reason to retry the whole delivery.
+/// Render the shared content and optional grouping key once, after a filter matches.
 fn message_for(
     delivery: &ClaimedDelivery,
     input: &Delivery,
-) -> Result<Result<String, String>, String> {
-    let rendered = match &delivery.message_expr {
-        Some(source) => compile_message_expr(source)
-            .map_err(compile_failure)
-            .and_then(|expr| expr.render(input, &BUDGET)),
-        None => Ok(default_message(delivery)),
+) -> Result<(String, Option<String>), EvalError> {
+    let render = |source: &str| {
+        compile_message_expr(source)
+            .map_err(compile_failure)?
+            .render(input, &BUDGET)
     };
-    match rendered {
-        Ok(text) if text.contains('\0') => Ok(Err("message contains a NUL character".to_owned())),
-        Ok(text) => Ok(Ok(text)),
-        Err(EvalError::Unavailable(error)) => Err(error),
-        Err(error) => Ok(Err(storable(&error.to_string()))),
+    let text = match delivery.message_expr.as_deref() {
+        Some(source) => render(source)?,
+        None => default_message(delivery),
+    };
+    if text.contains('\0') {
+        return Err(EvalError::Failed("message contains a NUL character".into()));
     }
+    let key = delivery.group_key_expr.as_deref().map(render).transpose()?;
+    if key.as_deref() == Some("") {
+        return Err(EvalError::Failed(
+            "group_key_expr returned an empty key".into(),
+        ));
+    }
+    Ok((text, key))
 }
 
 /// Drains queued deliveries into the message outbox.

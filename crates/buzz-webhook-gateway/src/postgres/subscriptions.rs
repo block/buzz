@@ -235,11 +235,29 @@ impl SubscriptionStore for PostgresStore {
         for message in &messages {
             let (state, content, error) = initial_message_state(message);
             let queued = state == DeliveryState::Queued;
+            // The upsert serializes enqueue order within this destination only.
+            let group = message.group.as_ref().filter(|_| queued);
+            let position: Option<i64> =
+                if let Some((id, _)) = group {
+                    Some(sqlx::query_scalar(
+                    "INSERT INTO webhook_gateway_message_groups (id, last_position, updated_at)
+                     VALUES ($1, 1, $2) ON CONFLICT (id) DO UPDATE
+                     SET last_position = webhook_gateway_message_groups.last_position + 1,
+                         updated_at = EXCLUDED.updated_at
+                     RETURNING last_position",
+                )
+                .bind(id)
+                .bind(now)
+                .fetch_one(&mut *tx)
+                .await?)
+                } else {
+                    None
+                };
             sqlx::query(
                 "INSERT INTO webhook_gateway_messages
                      (integration_id, delivery_id, subscription_id, channel_id, content, state,
-                      next_attempt_at, last_error, received_at, completed_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                      next_attempt_at, last_error, received_at, completed_at, group_id, group_position, group_key_action)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                  ON CONFLICT (integration_id, delivery_id, subscription_id) DO NOTHING",
             )
             .bind(integration_id)
@@ -252,6 +270,9 @@ impl SubscriptionStore for PostgresStore {
             .bind(error)
             .bind(received_at)
             .bind((!queued).then_some(now))
+            .bind(group.map(|(id, _)| id))
+            .bind(position)
+            .bind(group.map(|(_, action)| *action))
             .execute(&mut *tx)
             .await?;
         }
@@ -268,12 +289,19 @@ impl SubscriptionStore for PostgresStore {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         sqlx::query(
             "WITH due AS (
-                 SELECT integration_id, delivery_id, subscription_id
-                 FROM webhook_gateway_messages
-                 WHERE state = 'queued' AND next_attempt_at <= $1
-                 ORDER BY next_attempt_at
+                 SELECT m.integration_id, m.delivery_id, m.subscription_id, g.root_event_id
+                 FROM webhook_gateway_messages m
+                 LEFT JOIN webhook_gateway_message_groups g ON g.id = m.group_id
+                 WHERE m.state = 'queued' AND m.next_attempt_at <= $1
+                   AND (m.group_id IS NULL OR (g.id IS NOT NULL AND NOT EXISTS (
+                       SELECT 1 FROM webhook_gateway_messages older
+                       WHERE older.group_id = m.group_id AND older.state = 'queued'
+                         AND older.group_position < m.group_position)
+                       AND (m.group_key_action <> 'update_message' OR g.last_signed_at IS NULL
+                            OR date_trunc('second', g.last_signed_at) < date_trunc('second', $1::timestamptz))))
+                 ORDER BY m.next_attempt_at
                  LIMIT $3
-                 FOR UPDATE SKIP LOCKED
+                 FOR UPDATE OF m SKIP LOCKED
              ), claimed AS (
                  UPDATE webhook_gateway_messages m
                  SET attempts = m.attempts + 1, next_attempt_at = $2,
@@ -283,7 +311,8 @@ impl SubscriptionStore for PostgresStore {
                    AND m.delivery_id = due.delivery_id
                    AND m.subscription_id = due.subscription_id
                  RETURNING m.integration_id, m.delivery_id, m.subscription_id, m.channel_id,
-                           m.content, m.received_at, m.attempts, m.signed_at, m.event_id
+                           m.content, m.received_at, m.attempts, m.signed_at, m.event_id,
+                           m.group_key_action, due.root_event_id
              )
              SELECT c.*, i.community_host
              FROM claimed c
@@ -296,7 +325,13 @@ impl SubscriptionStore for PostgresStore {
         .await?
         .into_iter()
         .map(|row| {
+            let root: Option<String> = row.try_get("root_event_id")?;
+            let target = match root {
+                Some(id) => Some((row.try_get("group_key_action")?, id)),
+                None => None,
+            };
             Ok(ClaimedMessage {
+                target,
                 key: MessageKey {
                     integration_id: row.try_get("integration_id")?,
                     delivery_id: row.try_get("delivery_id")?,
@@ -344,13 +379,19 @@ impl SubscriptionStore for PostgresStore {
         };
         let terminal = state != DeliveryState::Queued;
         sqlx::query(
-            "UPDATE webhook_gateway_messages
+            "WITH settled AS (
+             UPDATE webhook_gateway_messages
              SET state = $5,
                  event_id = CASE WHEN $10 THEN NULL ELSE COALESCE($6, event_id) END,
                  signed_at = CASE WHEN $10 THEN NULL ELSE signed_at END,
                  last_error = $7, next_attempt_at = $8, completed_at = $9
              WHERE integration_id = $1 AND delivery_id = $2 AND subscription_id = $3
-               AND state = 'queued' AND attempts = $4",
+               AND state = 'queued' AND attempts = $4
+             RETURNING group_id, state, event_id, signed_at)
+             UPDATE webhook_gateway_message_groups g
+             SET root_event_id = COALESCE(g.root_event_id, s.event_id),
+                 last_signed_at = s.signed_at, updated_at = $9
+             FROM settled s WHERE s.state = 'accepted' AND g.id = s.group_id",
         )
         .bind(message.key.integration_id)
         .bind(&message.key.delivery_id)
@@ -377,8 +418,8 @@ mod postgres_tests {
     use crate::relay_client::{LookupResult, RelayClient, SubmitResult};
     use crate::signer::GatewayKeySigner;
     use crate::store::{
-        DeliveryMode, DeliveryPage, IntegrationConfig, Mutation, NewDelivery, Operation, Provider,
-        Store,
+        DeliveryMode, DeliveryPage, GroupKeyAction, IntegrationConfig, Mutation, NewDelivery,
+        Operation, Provider, Store,
     };
     use nostr::{Event, Keys, NostrSigner, Url};
     use std::sync::{Arc, Mutex};
@@ -455,6 +496,7 @@ mod postgres_tests {
             message_expr: Some("payload.title".to_owned()),
             message_data_expr: Some("{\"status\": payload.action}".to_owned()),
             group_key_expr: Some("string(payload.number)".to_owned()),
+            group_key_action: GroupKeyAction::UpdateMessage,
         };
         for (id, config) in [
             (integration_id, IntegrationConfig::default()),
@@ -636,6 +678,7 @@ mod postgres_tests {
         let live = Evaluated::of(&store.live_subscriptions(integration_id).await.unwrap());
         let fanned = |evaluated: Vec<Evaluated>| FanoutOutcome::Fanned {
             messages: vec![crate::store::NewMessage {
+                group: None,
                 subscription_id: all,
                 channel_id: channel,
                 content: Ok("late".to_owned()),
@@ -716,5 +759,6 @@ mod postgres_tests {
         .await
         .unwrap();
         assert_eq!(left, 0, "terminal messages reaped");
+        crate::store::grouping_tests::exercise_grouped_delivery(store).await;
     }
 }

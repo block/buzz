@@ -23,8 +23,8 @@ use cel_validator::refuse_config;
 use crate::http::{error, AppState};
 use crate::secrets::MAX_SECRET_BYTES;
 use crate::store::{
-    ApplyOutcome, DeliveryCursor, DeliveryMode, DeliveryPage, DeliveryState, IntegrationConfig,
-    IntegrationView, Mutation, Operation, Provider, StoreError,
+    ApplyOutcome, DeliveryCursor, DeliveryMode, DeliveryPage, DeliveryState, GroupKeyAction,
+    IntegrationConfig, IntegrationView, Mutation, Operation, Provider, StoreError,
 };
 use axum::{
     body::Bytes,
@@ -193,6 +193,8 @@ struct PutIntegrationBody {
     message_data_expr: Option<String>,
     #[serde(default)]
     group_key_expr: Option<String>,
+    #[serde(default)]
+    group_key_action: GroupKeyAction,
 }
 
 #[derive(Deserialize)]
@@ -284,6 +286,7 @@ async fn put_integration(
         message_expr: request.message_expr,
         message_data_expr: request.message_data_expr,
         group_key_expr: request.group_key_expr,
+        group_key_action: request.group_key_action,
     };
     if let Some(refusal) = refuse_config(&config).await {
         return refusal;

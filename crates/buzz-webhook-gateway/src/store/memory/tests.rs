@@ -346,11 +346,13 @@ async fn fanout_queues_messages_once_and_delete_cancels_unsent_ones() {
         .unwrap();
     let messages = vec![
         NewMessage {
+            group: None,
             subscription_id: sub_a,
             channel_id: channel,
             content: Ok("hello".into()),
         },
         NewMessage {
+            group: None,
             subscription_id: sub_b,
             channel_id: channel,
             content: Err("filter failed".into()),

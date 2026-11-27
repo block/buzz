@@ -12,3 +12,4 @@
 \i tables/public/webhook_gateway_deliveries.sql
 \i tables/public/webhook_gateway_subscriptions.sql
 \i tables/public/webhook_gateway_messages.sql
+\i tables/public/webhook_gateway_message_groups.sql
