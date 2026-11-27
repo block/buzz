@@ -176,6 +176,52 @@ async fn an_exact_phrase_outranks_scattered_words() {
     fx.teardown(pool).await;
 }
 
+/// An identifier in the query ranks itself first, then its parts side by
+/// side, then its parts apart or out of order, alone and inside a longer
+/// query.
+#[tokio::test]
+#[ignore = "requires Postgres and OpenSearch"]
+async fn an_identifier_outranks_its_parts_side_by_side_then_apart() {
+    let (pool, fx, c) = setup().await;
+    let snake = post(&pool, c, "rename retry_budget in the client", DAY).await;
+    let snake_parts = post(&pool, c, "rename the retry budget in the client", DAY).await;
+    let snake_apart = post(&pool, c, "rename it, retry later within budget", DAY).await;
+    let snake_reversed = post(&pool, c, "rename the budget before any retry", DAY).await;
+    let camel = post(&pool, c, "rename OutboxBatch soon", DAY).await;
+    let camel_parts = post(&pool, c, "rename the outbox batch soon", DAY).await;
+    let camel_apart = post(&pool, c, "rename the outbox, one batch at a time", DAY).await;
+    let camel_reversed = post(&pool, c, "rename this batch in the outbox", DAY).await;
+
+    let cases = [
+        ("retry_budget", SearchMode::FullText, snake, snake_parts),
+        (
+            "rename retry_budget",
+            SearchMode::FullText,
+            snake,
+            snake_parts,
+        ),
+        ("rename retry_bud", SearchMode::Prefix, snake, snake_parts),
+        ("OutboxBatch", SearchMode::FullText, camel, camel_parts),
+        (
+            "rename OutboxBatch",
+            SearchMode::FullText,
+            camel,
+            camel_parts,
+        ),
+    ];
+    for (q, mode, whole, parts) in cases {
+        let hits = ranked(&fx, c, q, mode).await;
+        assert_eq!(hits[..2], [whole, parts], "{q}");
+    }
+    // Parts apart still match, by stem, below both.
+    let hits = words(&fx, c, "retry_budget").await;
+    assert_eq!(hits.len(), 4, "retry_budget finds its parts apart too");
+    assert!(hits.contains(&snake_apart) && hits.contains(&snake_reversed));
+    let hits = words(&fx, c, "OutboxBatch").await;
+    assert!(hits.contains(&camel_apart) && hits.contains(&camel_reversed));
+    fx.teardown(pool).await;
+}
+
 /// A short message holding the query as a phrase outranks long messages
 /// holding its words several times, close together or scattered: the
 /// production "ranking rules" case, where long agent output filled the top.

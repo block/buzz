@@ -8,9 +8,11 @@
 //!   `.`, `_`, `-`, `:` and case changes but not between letters and digits,
 //!   so a hex id stays one token instead of dozens of fragments. The query
 //!   is split the same way, so part of an identifier (`snake_case` of
-//!   `snake_case_name`, `OutboxBatch` of `SearchOutboxBatch`) finds it; the
-//!   cost is that `foo_bar` also finds a message holding `foo` and `bar`
-//!   apart.
+//!   `snake_case_name`, `OutboxBatch` of `SearchOutboxBatch`) finds it. On
+//!   `content` the split parts are a phrase, so `foo_bar` ranks itself, then
+//!   `foo bar`. The stem and prefix fields keep no positions, so there the
+//!   parts match anywhere: a message holding `foo` and `bar` apart is still
+//!   found, last.
 //! - **Typos only rank.** A word matched only with a typo scores a third
 //!   of an exact match, so relevance order keeps it below. Newest order has
 //!   no such defence: for a short word most matches are other words one
