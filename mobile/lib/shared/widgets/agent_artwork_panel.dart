@@ -5,6 +5,7 @@ import '../theme/theme.dart';
 import 'avatar_image.dart';
 
 const profilePortraitSize = 80.0;
+const teamPortraitSize = 108.0;
 
 /// A desktop-style profile container with static, faded portrait artwork.
 class AgentArtworkPanel extends StatelessWidget {
@@ -28,6 +29,21 @@ class AgentArtworkPanel extends StatelessWidget {
       preferThumbnail: true,
       fallback: const SizedBox.shrink(),
     );
+    final sampledPortrait =
+        personProfile && Theme.of(context).brightness == Brightness.dark;
+    final extendsThroughHeader =
+        personProfile && Theme.of(context).platform == TargetPlatform.iOS;
+    final baseBlur = sampledPortrait ? 18.0 : 40.0;
+    final blur = extendsThroughHeader ? baseBlur * 1.56 : baseBlur;
+    final boundedArtwork = sampledPortrait
+        ? ColorFiltered(
+            colorFilter: const ColorFilter.mode(
+              Color(0xffb0b0b0),
+              BlendMode.modulate,
+            ),
+            child: artwork,
+          )
+        : artwork;
     return ClipRRect(
       borderRadius: borderRadius ?? BorderRadius.circular(Radii.card),
       child: ColoredBox(
@@ -41,27 +57,32 @@ class AgentArtworkPanel extends StatelessWidget {
                     child: RepaintBoundary(
                       child: ShaderMask(
                         blendMode: BlendMode.dstIn,
-                        shaderCallback: (bounds) => const LinearGradient(
+                        shaderCallback: (bounds) => LinearGradient(
                           begin: Alignment.topCenter,
                           end: Alignment.bottomCenter,
-                          colors: [Colors.white, Colors.transparent],
-                          stops: [0.05, 1.0],
+                          colors: const [Colors.white, Colors.transparent],
+                          stops: [extendsThroughHeader ? 0.75 : 0.05, 1.0],
                         ).createShader(bounds),
                         child: Opacity(
-                          opacity: .55,
+                          opacity:
+                              personProfile &&
+                                  Theme.of(context).brightness ==
+                                      Brightness.light
+                              ? .30
+                              : .55,
                           child: ImageFiltered(
                             imageFilter: ImageFilter.blur(
-                              sigmaX: 40,
-                              sigmaY: 40,
+                              sigmaX: blur,
+                              sigmaY: blur,
                             ),
                             child: Transform.scale(
-                              scale: 2,
+                              scale: sampledPortrait ? 1.25 : 2,
                               child: FittedBox(
                                 fit: BoxFit.cover,
                                 child: SizedBox.square(
                                   // Match the portrait's decoded-image cache key.
                                   dimension: profilePortraitSize,
-                                  child: artwork,
+                                  child: boundedArtwork,
                                 ),
                               ),
                             ),

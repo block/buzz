@@ -160,9 +160,7 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         AppListCard(
-          label: isDm ? 'DM actions' : 'Channel actions',
-          labelOverArtwork: true,
-          outlined: true,
+          profileGlass: true,
           iconColumnWidth: Grid.md,
           horizontalPadding: 0,
           children: [

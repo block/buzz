@@ -19,11 +19,15 @@ class NativeProfileSheet extends InheritedWidget {
     required this.id,
     required this.expanded,
     required this.offset,
+    this.rosterKey,
+    this.focused = true,
     required super.child,
     super.key,
   });
 
+  final bool focused;
   final int id;
+  final GlobalKey? rosterKey;
   final bool expanded;
   final ValueNotifier<double> offset;
 
@@ -33,6 +37,9 @@ class NativeProfileSheet extends InheritedWidget {
   Future<void> setPhotoOpen(bool open) =>
       _channel.invokeMethod('photo', {'id': id, 'open': open});
 
+  Future<void> resetScroll() =>
+      _channel.invokeMethod('resetScroll', {'id': id});
+
   Future<void> expand() => _channel.invokeMethod('expand', {'id': id});
 
   Future<void> setDimensions(
@@ -40,28 +47,36 @@ class NativeProfileSheet extends InheritedWidget {
     double document,
     bool active, {
     required bool showGrabber,
+    Rect? roster,
   }) => _channel.invokeMethod('height', {
     'id': id,
     'height': height,
     'document': document,
     'active': active,
+    'roster': roster == null
+        ? null
+        : [roster.left, roster.top, roster.width, roster.height],
     'showGrabber': showGrabber,
   });
 
   @override
   bool updateShouldNotify(NativeProfileSheet oldWidget) =>
-      oldWidget.expanded != expanded || oldWidget.id != id;
+      oldWidget.focused != focused ||
+      oldWidget.expanded != expanded ||
+      oldWidget.id != id;
 }
 
 Future<T?> showNativeProfileSheet<T>({
   required BuildContext context,
+  bool initiallyExpanded = false,
   required WidgetBuilder builder,
   required Future<T?> Function() fallback,
 }) async {
   final navigator = Navigator.of(context, rootNavigator: true);
   final id = ++_nextId;
+  final rosterKey = GlobalKey();
   final offset = ValueNotifier(0.0);
-  final expanded = ValueNotifier(false);
+  final expanded = ValueNotifier(initiallyExpanded);
   final route = PageRouteBuilder<T>(
     transitionDuration: Duration.zero,
     reverseTransitionDuration: Duration.zero,
@@ -71,6 +86,7 @@ Future<T?> showNativeProfileSheet<T>({
         id: id,
         expanded: large,
         offset: offset,
+        rosterKey: rosterKey,
         child: Material(
           color: utilitySurfaceThemeData(
             Theme.of(routeContext),
@@ -103,7 +119,11 @@ Future<T?> showNativeProfileSheet<T>({
   try {
     try {
       presented =
-          await _channel.invokeMethod<bool>('prepare', {'id': id}) ?? false;
+          await _channel.invokeMethod<bool>('prepare', {
+            'id': id,
+            'expanded': initiallyExpanded,
+          }) ??
+          false;
     } on MissingPluginException {
       presented = false;
     }

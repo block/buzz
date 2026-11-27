@@ -368,11 +368,15 @@ enum NativeAttachmentMenuTypography {
     )
   }()
 
+  static func interFont(size: CGFloat) -> UIFont? {
+    _ = registeredInter
+    return UIFont(name: interPostScriptName, size: size)
+  }
+
   static func font(
     forTextStyle textStyle: UIFont.TextStyle,
     compatibleWith traitCollection: UITraitCollection? = nil
   ) -> UIFont {
-    _ = registeredInter
     let scaledPointSize = UIFontMetrics(forTextStyle: textStyle).scaledValue(
       for: 20,
       compatibleWith: traitCollection
@@ -382,10 +386,7 @@ enum NativeAttachmentMenuTypography {
       compatibleWith: traitCollection
     )
     guard
-      let interFont = UIFont(
-        name: interPostScriptName,
-        size: scaledPointSize
-      )
+      let interFont = interFont(size: scaledPointSize)
     else {
       return preferredFont
     }

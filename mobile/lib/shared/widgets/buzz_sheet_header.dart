@@ -18,6 +18,7 @@ class BuzzSheetHeader extends StatelessWidget {
     this.leading,
     this.trailing,
     this.onClose,
+    this.closeControlSize = 40,
     this.showDragHandle = false,
   });
 
@@ -29,6 +30,7 @@ class BuzzSheetHeader extends StatelessWidget {
   /// Overrides route dismissal while retaining the standard close control.
   final VoidCallback? onClose;
   final bool showDragHandle;
+  final double closeControlSize;
 
   @override
   Widget build(BuildContext context) {
@@ -67,7 +69,12 @@ class BuzzSheetHeader extends StatelessWidget {
             if (trailing != null || !DuoSheetCloseScope.of(context))
               Align(
                 alignment: Alignment.bottomRight,
-                child: trailing ?? _SheetCloseButton(onClose: onClose),
+                child:
+                    trailing ??
+                    _SheetCloseButton(
+                      onClose: onClose,
+                      controlSize: closeControlSize,
+                    ),
               ),
             if (leading case final leading?)
               Align(alignment: Alignment.bottomLeft, child: leading),
@@ -79,7 +86,8 @@ class BuzzSheetHeader extends StatelessWidget {
 }
 
 class _SheetCloseButton extends StatelessWidget {
-  const _SheetCloseButton({this.onClose});
+  const _SheetCloseButton({this.onClose, required this.controlSize});
+  final double controlSize;
   final VoidCallback? onClose;
 
   @override
@@ -101,6 +109,7 @@ class _SheetCloseButton extends StatelessWidget {
         onPressed: closeSheet,
         width: buzzNavigationActionSize,
         height: buzzNavigationActionSize,
+        controlSize: controlSize,
         foregroundColor: context.colors.primary,
       );
     }

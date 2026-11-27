@@ -1293,7 +1293,43 @@ private final class ProfileGlobeFactory: NSObject, FlutterPlatformViewFactory {
 
 private final class ProfileGlobe: NSObject, FlutterPlatformView {
   private let map: ProfileCityMap
-  private let viewport = UIView()
+  private final class Viewport: UIView {
+    var officeMap: ProfileCityMap?
+    var cornerBlur: UIVisualEffectView?
+    private var maskSize = CGSize.zero
+    override func layoutSubviews() {
+      super.layoutSubviews()
+      if let map = officeMap, let window, !bounds.isEmpty {
+        // Crop a sheet-height map around the office. Translating the view
+        // preserves the city-facing camera used when the card opens.
+        let center = CGPoint(x: bounds.width * 0.68, y: bounds.midY + 26)
+        let height = max(window.bounds.height - window.safeAreaInsets.top - 10,
+                         2 * center.y)
+        let width = max(window.bounds.width, 2 * center.x)
+        // Match the detail sheet’s apparent globe scale in this wider crop.
+        let mapSize = CGSize(width: width * 1.28, height: height * 1.28)
+        map.frame = CGRect(x: center.x - mapSize.width / 2, y: center.y - mapSize.height / 2,
+                           width: mapSize.width, height: mapSize.height)
+      }
+      guard let blur = cornerBlur, !bounds.isEmpty, maskSize != bounds.size else { return }
+      maskSize = bounds.size
+      blur.frame = bounds
+      let image = UIGraphicsImageRenderer(size: bounds.size).image { renderer in
+        let context = renderer.cgContext
+        context.scaleBy(x: bounds.width, y: bounds.height)
+        let center = CGPoint(x: 0, y: 1)
+        let colors = [UIColor.black.cgColor, UIColor.black.cgColor, UIColor.clear.cgColor]
+        if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                     colors: colors as CFArray, locations: [0, 0.32, 1]) {
+          context.drawRadialGradient(gradient, startCenter: center, startRadius: 0,
+                                     endCenter: center, endRadius: 0.9, options: [])
+        }
+      }
+      // UIVisualEffectView propagates a UIView mask to its backdrop filters.
+      blur.mask = UIImageView(image: image)
+    }
+  }
+  private let viewport = Viewport()
 
   private let channel: FlutterMethodChannel
 
@@ -1301,7 +1337,8 @@ private final class ProfileGlobe: NSObject, FlutterPlatformView {
     self.channel = channel
     let city = CLLocationCoordinate2D(latitude: parameters["latitude"] as? Double ?? 0,
                                       longitude: parameters["longitude"] as? Double ?? 0)
-    map = ProfileCityMap(frame: .zero, city: city)
+    let officePreview = parameters["officePreview"] as? Bool == true
+    map = ProfileCityMap(frame: .zero, city: city, officePreview: officePreview)
     super.init()
     viewport.overrideUserInterfaceStyle = parameters["dark"] as? Bool == true ? .dark : .light
     configureImagery(map)
@@ -1314,13 +1351,23 @@ private final class ProfileGlobe: NSObject, FlutterPlatformView {
     viewport.frame = frame
     viewport.clipsToBounds = true
     viewport.addSubview(map)
-    map.translatesAutoresizingMaskIntoConstraints = false
-    NSLayoutConstraint.activate([
-      map.widthAnchor.constraint(equalTo: viewport.widthAnchor),
-      map.heightAnchor.constraint(equalTo: viewport.widthAnchor, multiplier: 0.9),
-      map.centerXAnchor.constraint(equalTo: viewport.centerXAnchor),
-      map.centerYAnchor.constraint(equalTo: viewport.centerYAnchor),
-    ])
+    if officePreview {
+      viewport.officeMap = map
+      let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+      blur.frame = viewport.bounds
+      blur.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+      blur.isUserInteractionEnabled = false
+      viewport.addSubview(blur)
+      viewport.cornerBlur = blur
+    } else {
+      map.translatesAutoresizingMaskIntoConstraints = false
+      NSLayoutConstraint.activate([
+        map.widthAnchor.constraint(equalTo: viewport.widthAnchor),
+        map.heightAnchor.constraint(equalTo: viewport.widthAnchor, multiplier: 0.9),
+        map.centerXAnchor.constraint(equalTo: viewport.centerXAnchor),
+        map.centerYAnchor.constraint(equalTo: viewport.centerYAnchor),
+      ])
+    }
     viewport.backgroundColor = .black
     channel.setMethodCallHandler { [weak self] call, result in
       guard call.method == "open" else { result(FlutterMethodNotImplemented); return }
@@ -1348,13 +1395,16 @@ private final class ProfileGlobe: NSObject, FlutterPlatformView {
     let detail = ProfileMapDetail(pin: pin, city: map.city)
     let interactiveMap = MKMapView()
     configureImagery(interactiveMap)
+    let distance = ProfileCityMap.globeDistance
+    interactiveMap.isScrollEnabled = true
+    interactiveMap.isZoomEnabled = false
+    interactiveMap.isPitchEnabled = false
+    interactiveMap.isRotateEnabled = false
+    interactiveMap.setCameraZoomRange(MKMapView.CameraZoomRange(
+      minCenterCoordinateDistance: distance, maxCenterCoordinateDistance: distance), animated: false)
     interactiveMap.delegate = detail
     detail.view = interactiveMap
     detail.title = "Location"
-    let marker = MKPointAnnotation()
-    marker.coordinate = map.city
-    marker.title = "Profile location"
-    if pin == nil { interactiveMap.addAnnotation(marker) }
     let sheet = UINavigationController(rootViewController: detail)
     sheet.modalPresentationStyle = .pageSheet
     // Satellite space behind the navigation bar is dark in both app themes.
@@ -1369,50 +1419,73 @@ private final class ProfileGlobe: NSObject, FlutterPlatformView {
     detail.navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .done, primaryAction:
       UIAction { [weak sheet] _ in sheet?.dismiss(animated: true) })
     presenter.present(sheet, animated: true)
-    interactiveMap.setCamera(MKMapCamera(lookingAtCenter: map.city,
-      fromDistance: map.camera.centerCoordinateDistance, pitch: 0, heading: 0), animated: false)
   }
 
   func view() -> UIView { viewport }
 }
 
 private final class ProfileMapDetail: UIViewController, MKMapViewDelegate {
-  private let portrait: UIImageView
-  private let city: CLLocationCoordinate2D
+  private let pin: UIImage?
+  private var openingPin: UIImageView?
+  private let marker = MKPointAnnotation()
 
   init(pin: UIImage?, city: CLLocationCoordinate2D) {
-    self.city = city
-    portrait = UIImageView(image: pin)
+    self.pin = pin
+    marker.coordinate = city
+    marker.title = "Profile location"
     super.init(nibName: nil, bundle: nil)
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
 
-  override func viewDidLayoutSubviews() {
-    super.viewDidLayoutSubviews()
+  override func viewWillAppear(_ animated: Bool) {
+    super.viewWillAppear(animated)
     guard let map = view as? MKMapView else { return }
-    if portrait.superview == nil { map.addSubview(portrait) }
-    mapViewDidChangeVisibleRegion(map)
+    map.setCamera(MKMapCamera(lookingAtCenter: marker.coordinate,
+      fromDistance: ProfileCityMap.globeDistance, pitch: 0, heading: 0), animated: false)
+
+    // The opening camera centres the city. Carry its pin with the sheet until
+    // MapKit installs the geographic annotation after presentation.
+    guard let pin, openingPin == nil, map.view(for: marker) == nil else { return }
+    let imageView = UIImageView(image: pin)
+    imageView.translatesAutoresizingMaskIntoConstraints = false
+    map.addSubview(imageView)
+    NSLayoutConstraint.activate([
+      imageView.centerXAnchor.constraint(equalTo: map.centerXAnchor),
+      imageView.bottomAnchor.constraint(equalTo: map.centerYAnchor),
+    ])
+    openingPin = imageView
   }
 
-  func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
-    let point = mapView.convert(city, toPointTo: mapView)
-    guard point.x.isFinite, point.y.isFinite, mapView.bounds.contains(point) else {
-      portrait.isHidden = true
-      return
-    }
-    // A city on the far side of the globe can project inside the visible disc.
-    let visible = mapView.convert(point, toCoordinateFrom: mapView)
-    portrait.isHidden = !CLLocationCoordinate2DIsValid(visible)
-      || MKMapPoint(visible).distance(to: MKMapPoint(city)) > 1000
-    portrait.center = CGPoint(x: point.x, y: point.y - portrait.bounds.height / 2)
-    mapView.bringSubviewToFront(portrait)
+  func mapView(_ mapView: MKMapView, didAdd views: [MKAnnotationView]) {
+    guard views.contains(where: { $0.annotation === marker }) else { return }
+    openingPin?.removeFromSuperview()
+    openingPin = nil
+  }
+
+  override func viewDidAppear(_ animated: Bool) {
+    super.viewDidAppear(animated)
+    guard let map = view as? MKMapView,
+          !map.annotations.contains(where: { $0 === marker }) else { return }
+    map.addAnnotation(marker)
+  }
+
+  func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+    guard annotation is MKPointAnnotation, let pin else { return nil }
+    let view = MKAnnotationView(annotation: annotation, reuseIdentifier: nil)
+    view.image = pin
+    view.centerOffset = CGPoint(x: 0, y: -pin.size.height / 2)
+    view.displayPriority = .required
+    return view
   }
 }
 
 private final class ProfileCityMap: MKMapView {
   let city: CLLocationCoordinate2D
+  static let globeDistance: CLLocationDistance = 18_536_380
+  let officePreview: Bool
   private var framedSize = CGSize.zero
-  init(frame: CGRect, city: CLLocationCoordinate2D) {
+  init(frame: CGRect, city: CLLocationCoordinate2D, officePreview: Bool) {
+    self.officePreview = officePreview
     self.city = city
     super.init(frame: frame)
   }
@@ -1424,21 +1497,24 @@ private final class ProfileCityMap: MKMapView {
     guard !bounds.isEmpty, bounds.size != framedSize else { return }
     framedSize = bounds.size
     // Keep the native Maps attribution inside the visible wide slice.
-    let inset = max(0, (bounds.height - bounds.width * 60 / 160) / 2)
+    let inset = officePreview ? 0 : max(0, (bounds.height - bounds.width * 60 / 160) / 2)
     layoutMargins = UIEdgeInsets(top: inset, left: 0, bottom: inset, right: 0)
     frameCity()
   }
 
   private func frameCity() {
-    let camera = MKMapCamera(lookingAtCenter: city, fromDistance: 18_536_380, pitch: 0, heading: 0)
+    let camera = MKMapCamera(lookingAtCenter: city, fromDistance: Self.globeDistance, pitch: 0, heading: 0)
     setCamera(camera, animated: false)
+    if officePreview { return }
     // Anchor the 52-point marker tip half a marker below the visual center.
     // Adjust geographic center so MapKit can use the whole viewport for lighting.
     let targetY = bounds.midY + 26
     for _ in 0..<5 {
-      let delta = convert(city, toPointTo: self).y - targetY
-      guard abs(delta) > 0.2 else { break }
-      let center = convert(CGPoint(x: bounds.midX, y: bounds.midY + delta), toCoordinateFrom: self)
+      let point = convert(city, toPointTo: self)
+      let dx = point.x - bounds.midX
+      let delta = point.y - targetY
+      guard abs(delta) > 0.2 || abs(dx) > 0.2 else { break }
+      let center = convert(CGPoint(x: bounds.midX + dx, y: bounds.midY + delta), toCoordinateFrom: self)
       guard CLLocationCoordinate2DIsValid(center) else { break }
       camera.centerCoordinate = center
       setCamera(camera, animated: false)

@@ -255,6 +255,23 @@ class ChannelDetailsPage extends HookConsumerWidget {
         isDirectDm && participants.contains(resolvedCurrentPubkey)
         ? participants.where((pubkey) => pubkey != resolvedCurrentPubkey).single
         : null;
+    final profileRow = !solo && counterpart != null
+        ? AppListRow(
+            icon: BuzzIcons.user,
+            title: 'View profile',
+            trailing: const _ChannelDetailsChevron(),
+            onTap: () => showUserProfileSheet(
+              context,
+              counterpart,
+              initiallyExpanded: true,
+              names: channelIdentityNamesProvider(resolvedChannel.id),
+              contextualActions: (_) => ChannelMemberProfileActions(
+                channel: resolvedChannel,
+                pubkey: counterpart,
+              ),
+            ),
+          )
+        : null;
     final counterpartProfile = userCache[counterpart];
     final identityNames = ref.watch(identityNameSourcesProvider);
     final displayName = counterpart != null
@@ -765,6 +782,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                 ),
             ],
           ),
+          if (profileRow != null) SheetActionSection(children: [profileRow]),
           if (settings != null)
             SheetActionSection(
               children: [
@@ -911,6 +929,12 @@ class ChannelDetailsPage extends HookConsumerWidget {
             ),
           ),
         ),
+        if (profileRow != null)
+          AppListCard(
+            iconColumnWidth: aligned ? Grid.md : null,
+            verticalPadding: _channelDetailsSectionPadding,
+            children: [profileRow],
+          ),
         if (solo)
           (sheetSoloSettings?.call(renameRow, (settings) => settings) ??
               soloSettings?.call(renameRow) ??

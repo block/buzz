@@ -1,9 +1,12 @@
+import 'package:flutter/gestures.dart' show Drag;
 import 'dart:math' as math;
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'profile_artwork_theme.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import 'package:flutter/material.dart';
-import '../../shared/theme/utility_surface_theme.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import '../../shared/widgets/agent_artwork_panel.dart';
+import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/buzz_sheet_header.dart';
 import '../../shared/widgets/buzz_navigation_metrics.dart';
 import '../../shared/widgets/buzz_toast.dart';
@@ -14,7 +17,7 @@ import '../../shared/widgets/ios_navigation_bar.dart';
 const _compactHeight = 340.0;
 const _navigationHeight = 60.0;
 
-class ProfileSheetLayout extends HookWidget {
+class ProfileSheetLayout extends HookConsumerWidget {
   const ProfileSheetLayout({
     super.key,
     required this.hero,
@@ -24,32 +27,49 @@ class ProfileSheetLayout extends HookWidget {
     this.enlargedPhoto,
     this.portraitKey,
     this.onPhotoBack,
+    this.onPhotoClosed,
     this.status,
+    this.memberActions,
+    this.leading,
     this.embedded = false,
     this.sheetControls = true,
+    this.initiallyExpanded = false,
     this.agent = false,
     this.contentPadding = EdgeInsets.zero,
   });
   final Widget hero, body;
   final bool photoOpen;
-  final Widget? enlargedPhoto, status;
+  final Widget? enlargedPhoto, status, memberActions, leading;
   final GlobalKey? portraitKey;
-  final VoidCallback? onPhotoBack;
+  final VoidCallback? onPhotoBack, onPhotoClosed;
   final String? avatarUrl;
-  final bool embedded, sheetControls, agent;
+  final bool embedded, sheetControls, initiallyExpanded, agent;
   final EdgeInsets contentPadding;
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final native = NativeProfileSheet.maybeOf(context);
     final showGrabber = !useValueListenable(buzzToastVisibleOf(context));
-    final lastDimensions = useRef<(double, double, bool, bool)?>(null);
+    final lastDimensions = useRef<(double, double, bool, bool, Rect?)?>(null);
+    final contentTopInset =
+        (sheetControls ? _navigationHeight : 0.0) +
+        (!agent && Theme.of(context).platform == TargetPlatform.iOS
+            ? 4.0
+            : 0.0);
     final documentKey = useMemoized(GlobalKey.new);
+    final headerDrag = useRef<Drag?>(null);
+    useEffect(
+      () =>
+          () => headerDrag.value?.cancel(),
+      const [],
+    );
     final nativeScroll = useMemoized(_NativeScrollController.new);
     useEffect(() => nativeScroll.dispose, [nativeScroll]);
     final active = (ModalRoute.isCurrentOf(context) ?? true) && !photoOpen;
     useEffect(() {
       void scroll() {
-        if (native == null || !nativeScroll.hasClients) return;
+        if (native == null || !native.focused || !nativeScroll.hasClients) {
+          return;
+        }
         (nativeScroll.position as _NativeScrollPosition).follow(
           native.offset.value,
         );
@@ -57,10 +77,16 @@ class ProfileSheetLayout extends HookWidget {
 
       native?.offset.addListener(scroll);
       return () => native?.offset.removeListener(scroll);
-    }, [native?.offset, nativeScroll]);
+    }, [native?.offset, native?.focused, nativeScroll]);
     final statusKey = useMemoized(GlobalKey.new);
-    final statusHeight = useState(0.0);
-    final compactHeight = _compactHeight + statusHeight.value;
+    final actionsKey = useMemoized(GlobalKey.new);
+    final compactExtraHeight = useState(0.0);
+    final largerPortrait =
+        !agent && Theme.of(context).platform == TargetPlatform.iOS;
+    final baseHeight =
+        _compactHeight +
+        (largerPortrait ? teamPortraitSize - profilePortraitSize + 8 : 0);
+    final compactHeight = baseHeight + compactExtraHeight.value;
     final heroKey = useMemoized(GlobalKey.new);
     final heroHeight = useState(280.0);
     final detents = useMemoized(DraggableScrollableController.new);
@@ -71,21 +97,38 @@ class ProfileSheetLayout extends HookWidget {
         if (!context.mounted) return;
         final box = heroKey.currentContext?.findRenderObject();
         final bubble = statusKey.currentContext?.findRenderObject();
-        final extra = bubble is RenderBox && bubble.hasSize
+        final actions = actionsKey.currentContext?.findRenderObject();
+        final bubbleHeight = bubble is RenderBox && bubble.hasSize
             ? bubble.size.height
             : 0.0;
-        if (extra != statusHeight.value) statusHeight.value = extra;
+        final extra =
+            bubbleHeight +
+            (actions is RenderBox && actions.hasSize
+                ? actions.size.height
+                : 0.0);
+        if (extra != compactExtraHeight.value) compactExtraHeight.value = extra;
         final document = documentKey.currentContext?.findRenderObject();
         if (native != null &&
+            native.focused &&
             box is RenderBox &&
             document is RenderBox &&
             box.hasSize &&
             document.hasSize) {
+          final strip = native.rosterKey?.currentContext?.findRenderObject();
+          final roster = active && strip is RenderBox && strip.hasSize
+              ? (strip.localToGlobal(Offset.zero) +
+                        Offset(
+                          0,
+                          nativeScroll.hasClients ? nativeScroll.offset : 0,
+                        )) &
+                    strip.size
+              : null;
           final dimensions = (
-            _compactHeight + extra,
-            _navigationHeight + document.size.height,
+            baseHeight + extra,
+            contentTopInset + document.size.height,
             active,
             showGrabber,
+            roster,
           );
           if (lastDimensions.value != dimensions) {
             lastDimensions.value = dimensions;
@@ -94,6 +137,7 @@ class ProfileSheetLayout extends HookWidget {
               dimensions.$2,
               dimensions.$3,
               showGrabber: showGrabber,
+              roster: roster,
             );
           }
         }
@@ -106,7 +150,12 @@ class ProfileSheetLayout extends HookWidget {
     }
 
     measureHeader();
-    final sectionTheme = utilitySurfaceThemeData(Theme.of(context));
+    final sectionTheme = useProfileArtworkTheme(
+      context,
+      ref,
+      avatarUrl,
+      personProfile: !agent,
+    );
     final panelKey = useMemoized(GlobalKey.new);
     final photoOrigin = useRef(Rect.zero);
     final duration = MediaQuery.disableAnimationsOf(context)
@@ -151,6 +200,36 @@ class ProfileSheetLayout extends HookWidget {
         ),
       ),
     );
+    final backdropHeight = contentTopInset + heroHeight.value;
+    final backdrop = IgnorePointer(
+      child: AgentArtworkPanel(
+        key: const ValueKey('profile-artwork-backdrop'),
+        imageUrl: avatarUrl,
+        personProfile: !agent,
+        borderRadius: BorderRadius.zero,
+        child: const SizedBox.expand(),
+      ),
+    );
+    final embeddedScroll = useScrollController();
+    final movesWithPortrait =
+        !agent && sectionTheme.platform == TargetPlatform.iOS;
+    Widget scrollingBackdrop(ScrollController controller) => AnimatedBuilder(
+      animation: controller,
+      child: backdrop,
+      builder: (context, child) {
+        final offset = controller.hasClients ? controller.offset : 0.0;
+        final fraction = backdropHeight > 0 ? offset / backdropHeight : 0.0;
+        // Keep the artwork mounted as rubber-banding crosses the resting offset.
+        return Transform.translate(
+          offset: Offset(0, -offset.clamp(0.0, double.infinity)),
+          child: Transform.scale(
+            alignment: Alignment.topCenter,
+            scale: fraction < 0 ? 1 - fraction : 1,
+            child: Opacity(opacity: 1 - fraction.clamp(0.0, 1.0), child: child),
+          ),
+        );
+      },
+    );
     Widget panel(ScrollController? scroll, Widget header) => PopScope(
       canPop: !photoOpen,
       onPopInvokedWithResult: (didPop, _) {
@@ -158,7 +237,7 @@ class ProfileSheetLayout extends HookWidget {
       },
       child: Theme(
         data: sectionTheme,
-        child: ColoredBox(
+        child: Material(
           color: sectionTheme.scaffoldBackgroundColor,
           child: Stack(
             key: panelKey,
@@ -167,25 +246,20 @@ class ProfileSheetLayout extends HookWidget {
                 top: 0,
                 left: 0,
                 right: 0,
-                height: (sheetControls ? 60 : 0) + heroHeight.value,
-                child: IgnorePointer(
-                  child: AgentArtworkPanel(
-                    key: const ValueKey('profile-fixed-backdrop'),
-                    imageUrl: avatarUrl,
-                    personProfile: !agent,
-                    borderRadius: BorderRadius.zero,
-                    child: const SizedBox.expand(),
-                  ),
+                height: backdropHeight,
+                child: fade(
+                  movesWithPortrait
+                      ? scrollingBackdrop(scroll ?? embeddedScroll)
+                      : backdrop,
                 ),
               ),
               fade(
                 Padding(
                   padding: contentPadding,
                   child: SingleChildScrollView(
-                    controller: scroll,
-                    padding: EdgeInsets.only(
-                      top: sheetControls ? _navigationHeight : 0,
-                    ),
+                    controller:
+                        scroll ?? (movesWithPortrait ? embeddedScroll : null),
+                    padding: EdgeInsets.only(top: contentTopInset),
                     physics: native != null
                         ? const NeverScrollableScrollPhysics()
                         : useDetents
@@ -219,7 +293,8 @@ class ProfileSheetLayout extends HookWidget {
                                     child: Padding(
                                       padding: EdgeInsets.fromLTRB(
                                         16,
-                                        sheetControls ? 8 : 44,
+                                        (sheetControls ? 8.0 : 44.0) +
+                                            (agent ? 0 : 4),
                                         16,
                                         32,
                                       ),
@@ -232,6 +307,11 @@ class ProfileSheetLayout extends HookWidget {
                                               child: bubble,
                                             ),
                                           hero,
+                                          if (memberActions case final actions?)
+                                            SizeChangedLayoutNotifier(
+                                              key: actionsKey,
+                                              child: actions,
+                                            ),
                                         ],
                                       ),
                                     ),
@@ -239,7 +319,10 @@ class ProfileSheetLayout extends HookWidget {
                                 ),
                               ),
                             ),
-                            body,
+                            if (sectionTheme.platform == TargetPlatform.iOS)
+                              FlatListSections(child: body)
+                            else
+                              body,
                           ],
                         ),
                       ),
@@ -262,6 +345,7 @@ class ProfileSheetLayout extends HookWidget {
                     tween: Tween<double>(begin: 0, end: photoOpen ? 1 : 0),
                     duration: duration,
                     curve: Curves.easeInOutCubic,
+                    onEnd: photoOpen ? null : onPhotoClosed,
                     child: enlargedPhoto,
                     builder: (context, progress, photo) {
                       if (progress == 0) return const SizedBox.shrink();
@@ -297,6 +381,7 @@ class ProfileSheetLayout extends HookWidget {
                                   semanticLabel: 'Back to profile',
                                   width: buzzNavigationActionSize,
                                   height: buzzNavigationActionSize,
+                                  controlSize: buzzNavigationActionSize,
                                   onPressed: onPhotoBack,
                                 )
                               : BackButton(onPressed: onPhotoBack);
@@ -359,14 +444,9 @@ class ProfileSheetLayout extends HookWidget {
         offset: native.offset,
         child: panel(
           nativeScroll,
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onVerticalDragUpdate: native.expanded
-                ? null
-                : (event) {
-                    if (event.delta.dy < 0) native.expand();
-                  },
-            child: const BuzzSheetHeader(),
+          BuzzSheetHeader(
+            leading: leading,
+            closeControlSize: buzzNavigationActionSize,
           ),
         ),
       );
@@ -378,51 +458,56 @@ class ProfileSheetLayout extends HookWidget {
               ? double.infinity
               : MediaQuery.sizeOf(context).height * .88,
         ),
-        child: panel(null, const BuzzSheetHeader()),
+        child: panel(
+          null,
+          BuzzSheetHeader(
+            leading: leading,
+            closeControlSize: buzzNavigationActionSize,
+          ),
+        ),
       );
     }
     return LayoutBuilder(
       builder: (context, box) {
         final height = box.maxHeight;
         final compact = (compactHeight / height).clamp(.12, 1.0);
-        void settle(double velocity) {
-          if (!detents.isAttached) return;
-          final expand = velocity.abs() > 150
-              ? velocity < 0
-              : detents.size > (1 + compact) / 2;
-          if (!expand && detents.size <= compact + .001 && velocity > 500) {
-            Navigator.of(context).maybePop();
-            return;
-          }
-          detents.animateTo(
-            expand ? 1 : compact,
-            duration: const Duration(milliseconds: 220),
-            curve: Curves.easeOutCubic,
-          );
-        }
-
-        final header = GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          onVerticalDragUpdate: (event) {
-            if (detents.isAttached) {
-              detents.jumpTo(
-                (detents.size - event.delta.dy / height).clamp(compact, 1.0),
-              );
-            }
-          },
-          onVerticalDragEnd: (event) =>
-              settle(event.velocity.pixelsPerSecond.dy),
-          child: BuzzSheetHeader(showDragHandle: showGrabber),
-        );
         return DraggableScrollableSheet(
           controller: detents,
-          initialChildSize: compact,
+          initialChildSize: initiallyExpanded ? 1 : compact,
           minChildSize: compact,
           maxChildSize: 1,
           expand: false,
           snap: true,
           shouldCloseOnMinExtent: false,
-          builder: (context, scroll) => panel(scroll, header),
+          builder: (context, scroll) => panel(
+            scroll,
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onVerticalDragStart: (details) {
+                headerDrag.value = scroll.position.drag(
+                  details,
+                  () => headerDrag.value = null,
+                );
+              },
+              onVerticalDragUpdate: (details) =>
+                  headerDrag.value?.update(details),
+              onVerticalDragCancel: () => headerDrag.value?.cancel(),
+              onVerticalDragEnd: (details) {
+                final dismiss =
+                    detents.isAttached &&
+                    detents.size <= compact + .001 &&
+                    scroll.offset <= 0 &&
+                    details.velocity.pixelsPerSecond.dy > 500;
+                headerDrag.value?.end(details);
+                if (dismiss) Navigator.of(context).maybePop();
+              },
+              child: BuzzSheetHeader(
+                leading: leading,
+                showDragHandle: showGrabber,
+                closeControlSize: buzzNavigationActionSize,
+              ),
+            ),
+          ),
         );
       },
     );
