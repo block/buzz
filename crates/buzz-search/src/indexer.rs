@@ -496,6 +496,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn write_budget_ends_well_before_the_idle_limit() {
+        assert_eq!(write_budget(None), Duration::from_secs(60));
+        assert_eq!(
+            write_budget(Some(Duration::from_secs(60))),
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            write_budget(Some(Duration::from_secs(120))),
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
     fn backoff_grows_to_a_cap_with_jitter() {
         let idle: Vec<Duration> = (0..64).map(|_| backoff(0)).collect();
         assert!(idle
