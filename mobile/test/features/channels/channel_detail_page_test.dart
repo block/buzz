@@ -17002,6 +17002,64 @@ void main() {
             find.byKey(const ValueKey('channel-details-members-card')),
             participants.length == 2 ? findsNothing : findsOneWidget,
           );
+          final viewProfile = find.text('View profile');
+          expect(
+            viewProfile,
+            participants.length == 2 ? findsOneWidget : findsNothing,
+          );
+          if (participants.length == 2) {
+            expect(
+              tester.getCenter(viewProfile).dy,
+              greaterThan(
+                tester
+                    .getCenter(
+                      find.byKey(const ValueKey('channel-details-actions')),
+                    )
+                    .dy,
+              ),
+            );
+            final pin = find.byKey(
+              const ValueKey('channel-details-pin-action'),
+            );
+            final pinLabel = find.descendant(
+              of: pin,
+              matching: find.text('Pin'),
+            );
+            expect(
+              tester.getTopLeft(viewProfile).dx,
+              tester.getTopLeft(pinLabel).dx,
+            );
+            expect(
+              tester.getCenter(viewProfile).dy,
+              lessThan(tester.getCenter(pinLabel).dy),
+            );
+            const profileBridge = MethodChannel('buzz/profile_sheet');
+            final messenger = tester.binding.defaultBinaryMessenger;
+            messenger.setMockMethodCallHandler(
+              profileBridge,
+              (call) async =>
+                  call.method == 'prepare' || call.method == 'present'
+                  ? true
+                  : null,
+            );
+            addTearDown(
+              () => messenger.setMockMethodCallHandler(profileBridge, null),
+            );
+            await tester.tap(viewProfile);
+            await tester.pumpAndSettle();
+            expect(
+              tester
+                  .widget<UserProfileSheet>(find.byType(UserProfileSheet))
+                  .pubkey,
+              'alice',
+            );
+            expect(
+              tester
+                  .widget<UserProfileSheet>(find.byType(UserProfileSheet))
+                  .initiallyExpanded,
+              isTrue,
+            );
+          }
           expect(tester.takeException(), isNull);
           await tester.pumpWidget(const SizedBox());
           debugDefaultTargetPlatformOverride = null;

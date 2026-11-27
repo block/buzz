@@ -46,6 +46,7 @@ Future<T?> showBuzzModalBottomSheet<T>({
   Color? barrierColor,
   bool nativeIosBarrier = false,
   bool detentCorners = false,
+  bool initiallyExpanded = false,
   bool isScrollControlled = false,
   double scrollControlDisabledMaxHeightRatio = 9.0 / 16.0,
   bool useRootNavigator = false,
@@ -270,6 +271,7 @@ Future<T?> showBuzzModalBottomSheet<T>({
       context: context,
       builder: builder,
       fallback: flutterSheet,
+      initiallyExpanded: initiallyExpanded,
     );
   }
   return flutterSheet();

@@ -220,8 +220,39 @@ final class ProfileSheetPresenter: NSObject, UISheetPresentationControllerDelega
   private let channel: FlutterMethodChannel
   // UIKit uses the same scroll view for detent negotiation and list scrolling.
   // Keep the Flutter viewport at its expanded height while the sheet reveals it.
-  private final class ProfileHost: UIViewController, UIScrollViewDelegate {
-    let scroll = UIScrollView()
+  private final class ProfileScrollView: UIScrollView {
+    override func touchesShouldCancel(in view: UIView) -> Bool {
+      // Flutter handles taps. Once the finger pans, UIKit owns the drag,
+      // including when a second swipe begins over an embedded control.
+      true
+    }
+  }
+  private final class ProfileViewport: UIView {
+    weak var scroll: UIScrollView?
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+      let hit = super.hitTest(point, with: event)
+      guard hit != nil, let scroll, scroll.isScrollEnabled,
+            point.y >= 0, point.y < 60 else { return hit }
+      // The center of the fixed profile header is decorative. Make UIKit see
+      // the profile scroll view here, rather than the navigation effect's
+      // embedded scroll view. Keep both navigation action areas tappable.
+      if point.x >= 60 && point.x < bounds.width - 60 { return scroll }
+      return hit
+    }
+  }
+  private final class ProfileHost: UIViewController, UIScrollViewDelegate, UIGestureRecognizerDelegate {
+    var rosterRect = CGRect.zero
+    private let rosterPan = UIPanGestureRecognizer()
+    private var coordinatedPans = Set<ObjectIdentifier>()
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+      let point = touch.location(in: surface.view)
+      return scroll.isScrollEnabled && point.y >= 60 &&
+        rosterRect.contains(CGPoint(x: point.x, y: point.y + scroll.contentOffset.y))
+    }
+
+    let scroll = ProfileScrollView()
     let surface: FlutterViewController
     let onScroll: (CGFloat) -> Void
     var documentHeight: CGFloat = 340
@@ -234,8 +265,14 @@ final class ProfileSheetPresenter: NSObject, UISheetPresentationControllerDelega
     }
     required init?(coder: NSCoder) { fatalError() }
     override func loadView() {
-      view = scroll
+      let viewport = ProfileViewport()
+      viewport.scroll = scroll
+      view = viewport
+      scroll.frame = view.bounds
+      scroll.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+      view.addSubview(scroll)
       scroll.contentInsetAdjustmentBehavior = .never
+      scroll.delaysContentTouches = false
       scroll.alwaysBounceVertical = true
       scroll.showsVerticalScrollIndicator = false
       scroll.delegate = self
@@ -243,18 +280,35 @@ final class ProfileSheetPresenter: NSObject, UISheetPresentationControllerDelega
       // profile viewport explicitly for UIKit’s sheet expansion gesture.
       setContentScrollView(scroll)
       addChild(surface)
-      scroll.addSubview(surface.view)
+      // Keep the Flutter viewport stationary. The scroll view supplies UIKit's
+      // pan, momentum and detent coordination across the whole profile.
+      view.addSubview(surface.view)
+      view.addGestureRecognizer(scroll.panGestureRecognizer)
+      rosterPan.delegate = self
+      rosterPan.cancelsTouchesInView = false
+      rosterPan.delaysTouchesEnded = false
+      surface.view.addGestureRecognizer(rosterPan)
+      scroll.panGestureRecognizer.require(toFail: rosterPan)
       surface.didMove(toParent: self)
     }
     override func viewDidLayoutSubviews() {
       super.viewDidLayoutSubviews()
+      // Let Flutter receive the entire drag when it begins in the roster.
+      var ancestor = view.superview
+      while let current = ancestor {
+        for case let pan as UIPanGestureRecognizer in current.gestureRecognizers ?? [] {
+          if coordinatedPans.insert(ObjectIdentifier(pan)).inserted { pan.require(toFail: rosterPan) }
+        }
+        if current === presentationController?.containerView { break }
+        ancestor = current.superview
+      }
       let size = scroll.bounds.size
       let height = max(viewportHeight, size.height)
-      scroll.contentSize = CGSize(width: size.width, height: max(size.height, documentHeight))
-      surface.view.frame = CGRect(x: 0, y: scroll.contentOffset.y, width: size.width, height: height)
+      let content = CGSize(width: size.width, height: max(height, documentHeight))
+      if scroll.contentSize != content { scroll.contentSize = content }
+      surface.view.frame = CGRect(x: 0, y: 0, width: size.width, height: height)
     }
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
-      surface.view.frame.origin.y = scrollView.contentOffset.y
       onScroll(scrollView.contentOffset.y)
     }
   }
@@ -308,7 +362,7 @@ final class ProfileSheetPresenter: NSObject, UISheetPresentationControllerDelega
             min(context.maximumDetentValue, max(1, (session?.height ?? 340) - (session?.source.view.safeAreaInsets.bottom ?? 0)))
           }, .large()]
           session.ordinaryDetents = sheet.detents
-          sheet.selectedDetentIdentifier = self.compact
+          sheet.selectedDetentIdentifier = args["expanded"] as? Bool == true ? .large : self.compact
           sheet.prefersGrabberVisible = true
           sheet.prefersScrollingExpandsWhenScrolledToEdge = true
           sheet.delegate = self
@@ -332,6 +386,11 @@ final class ProfileSheetPresenter: NSObject, UISheetPresentationControllerDelega
           self.channel.invokeMethod("expanded", arguments: ["id": id, "expanded": true])
         }
         result(nil)
+      case "resetScroll":
+        if let s = self.sessions.last, s.id == id {
+          s.host.scroll.setContentOffset(.zero, animated: false)
+        }
+        result(nil)
       case "expand":
         if let s = self.sessions.last, s.id == id, let sheet = s.host.sheetPresentationController,
            sheet.selectedDetentIdentifier != .large {
@@ -341,8 +400,14 @@ final class ProfileSheetPresenter: NSObject, UISheetPresentationControllerDelega
       case "height":
         if let s = self.sessions.last, s.id == id, let h = args["height"] as? Double {
           if let document = args["document"] as? Double {
+            if let r = args["roster"] as? [CGFloat], r.count == 4 {
+              s.host.rosterRect = CGRect(x: r[0], y: r[1], width: r[2], height: r[3])
+            } else {
+              s.host.rosterRect = .zero
+            }
             s.host.documentHeight = document
-            s.host.scroll.isScrollEnabled = args["active"] as? Bool ?? true
+            let active = args["active"] as? Bool ?? true
+            if s.host.scroll.isScrollEnabled != active { s.host.scroll.isScrollEnabled = active }
             s.host.view.setNeedsLayout()
           }
           s.host.sheetPresentationController?.prefersGrabberVisible = args["showGrabber"] as? Bool ?? true

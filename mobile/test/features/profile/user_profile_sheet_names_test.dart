@@ -48,56 +48,79 @@ void main() {
   final other = 'b' * 64;
 
   for (final hasPubkey in [true, false]) {
-    testWidgets('Led by replaces the profile (lead has pubkey: $hasPubkey)', (
-      tester,
-    ) async {
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            userCacheProvider.overrideWith(
-              () => _UserCache({
-                scout: UserProfile(pubkey: scout, displayName: 'Scout'),
-                other: UserProfile(pubkey: other, displayName: 'Lead'),
-              }),
-            ),
-          ],
-          child: MaterialApp(
-            theme: AppTheme.light(),
-            home: Scaffold(
-              body: Builder(
-                builder: (context) => TextButton(
-                  onPressed: () => showUserProfileSheet(context, scout),
-                  child: const Text('Open Scout'),
+    testWidgets(
+      'Led by replaces the profile sheet at full height (lead has pubkey: $hasPubkey)',
+      (tester) async {
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              userCacheProvider.overrideWith(
+                () => _UserCache({
+                  scout: UserProfile(pubkey: scout, displayName: 'Scout'),
+                  other: UserProfile(pubkey: other, displayName: 'Lead'),
+                }),
+              ),
+            ],
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: Scaffold(
+                body: Builder(
+                  builder: (context) => TextButton(
+                    onPressed: () => showUserProfileSheet(context, scout),
+                    child: const Text('Open Scout'),
+                  ),
                 ),
               ),
             ),
           ),
-        ),
-      );
-      await tester.tap(find.text('Open Scout'));
-      await tester.pumpAndSettle();
-      final sheet = tester.widget<UserProfileSheet>(
-        find.byType(UserProfileSheet),
-      );
-      sheet.onLead!((
-        name: 'Lead',
-        avatarUrl: null,
-        pubkey: hasPubkey ? other : null,
-      ));
-      await tester.pumpAndSettle();
-      expect(
-        find.byType(ProfileSheetLayout, skipOffstage: false),
-        findsOneWidget,
-      );
-      expect(find.text('Lead'), findsOneWidget);
-      Navigator.of(tester.element(find.byType(ProfileSheetLayout))).pop();
-      await tester.pumpAndSettle();
-      expect(
-        find.byType(ProfileSheetLayout, skipOffstage: false),
-        findsNothing,
-      );
-      expect(find.text('Open Scout'), findsOneWidget);
-    });
+        );
+        await tester.tap(find.text('Open Scout'));
+        await tester.pumpAndSettle();
+        final sheet = tester.widget<UserProfileSheet>(
+          find.byType(UserProfileSheet),
+        );
+        final route = ModalRoute.of(
+          tester.element(find.byType(UserProfileSheet)),
+        );
+        sheet.onLead!((
+          name: 'Lead',
+          avatarUrl: null,
+          pubkey: hasPubkey ? other : null,
+        ));
+        await tester.pumpAndSettle();
+        expect(route!.isActive, isFalse);
+        expect(find.text('Lead'), findsOneWidget);
+        expect(find.byType(BackButton), findsNothing);
+        expect(
+          tester
+              .widget<DraggableScrollableSheet>(
+                find.byType(DraggableScrollableSheet),
+              )
+              .initialChildSize,
+          1,
+        );
+        if (hasPubkey) {
+          tester
+              .widget<UserProfileSheet>(find.byType(UserProfileSheet))
+              .onLead!((name: 'Scout', avatarUrl: null, pubkey: scout));
+          await tester.pumpAndSettle();
+          expect(
+            tester
+                .widget<UserProfileSheet>(find.byType(UserProfileSheet))
+                .pubkey,
+            scout,
+          );
+          expect(find.byType(BackButton), findsNothing);
+        }
+        Navigator.of(tester.element(find.byType(ProfileSheetLayout))).pop();
+        await tester.pumpAndSettle();
+        expect(
+          find.byType(ProfileSheetLayout, skipOffstage: false),
+          findsNothing,
+        );
+        expect(find.text('Open Scout'), findsOneWidget);
+      },
+    );
   }
 
   testWidgets(
@@ -294,16 +317,18 @@ void main() {
     final offset = ValueNotifier(0.0);
     addTearDown(offset.dispose);
     await tester.pumpWidget(
-      MaterialApp(
-        theme: AppTheme.light(),
-        home: Scaffold(
-          body: NativeProfileSheet(
-            id: 1,
-            expanded: true,
-            offset: offset,
-            child: const ProfileSheetLayout(
-              hero: Text('Portrait'),
-              body: SizedBox(height: 1400),
+      ProviderScope(
+        child: MaterialApp(
+          theme: AppTheme.light().copyWith(platform: TargetPlatform.iOS),
+          home: Scaffold(
+            body: NativeProfileSheet(
+              id: 1,
+              expanded: true,
+              offset: offset,
+              child: const ProfileSheetLayout(
+                hero: Text('Portrait'),
+                body: SizedBox(height: 1400),
+              ),
             ),
           ),
         ),
@@ -314,9 +339,14 @@ void main() {
         .widget<SingleChildScrollView>(find.byType(SingleChildScrollView))
         .controller!;
     final portraitTop = tester.getTopLeft(find.text('Portrait')).dy;
+    final backdrop = find.byKey(const ValueKey('profile-artwork-backdrop'));
+    final top = tester.getTopLeft(backdrop).dy;
+    final bottomAtRest = tester.getBottomLeft(backdrop).dy;
     offset.value = -30;
     await tester.pump();
     expect(tester.getTopLeft(find.text('Portrait')).dy, portraitTop + 30);
+    expect(tester.getTopLeft(backdrop).dy, closeTo(top, .001));
+    expect(tester.getBottomLeft(backdrop).dy, closeTo(bottomAtRest + 30, .001));
     final bottom = scroll.position.maxScrollExtent;
     offset.value = bottom + 24;
     await tester.pump();
@@ -324,7 +354,7 @@ void main() {
     offset.value = bottom;
     await tester.pumpAndSettle();
     expect(scroll.offset, bottom);
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets(
     'sheet opens at the end of the header and expands before scrolling',
@@ -362,7 +392,7 @@ void main() {
       expect(find.textContaining('Thinking'), findsNothing);
       expect(find.byType(NavigationBackdrop), findsOneWidget);
       final artwork = find.descendant(
-        of: find.byKey(const ValueKey('profile-fixed-backdrop')),
+        of: find.byKey(const ValueKey('profile-artwork-backdrop')),
         matching: find.byType(AvatarImageContent),
       );
       final portrait = find.descendant(

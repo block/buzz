@@ -8,6 +8,7 @@ Future<Uint8List?> nativeAvatarImage({
   bool isAgent = false,
   bool circular = false,
   double dimension = 72,
+  ui.ImageByteFormat format = ui.ImageByteFormat.png,
   required Color background,
   required Color foreground,
   required List<ImageProvider> Function(String url) networkImages,
@@ -109,9 +110,7 @@ Future<Uint8List?> nativeAvatarImage({
   final image = await picture.toImage(dimension.toInt(), dimension.toInt());
   picture.dispose();
   try {
-    return (await image.toByteData(
-      format: ui.ImageByteFormat.png,
-    ))?.buffer.asUint8List();
+    return (await image.toByteData(format: format))?.buffer.asUint8List();
   } finally {
     image.dispose();
   }

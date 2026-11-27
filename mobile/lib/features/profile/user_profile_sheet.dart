@@ -1,6 +1,7 @@
 import '../../shared/widgets/agent_artwork_panel.dart';
 import 'profile_sheet_layout.dart';
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -46,55 +47,74 @@ import 'user_status_cache_provider.dart';
 Future<void> showUserProfileSheet(
   BuildContext context,
   String pubkey, {
+  bool initiallyExpanded = false,
   ProviderListenable<IdentityNames>? names,
   WidgetBuilder? contextualActions,
   ProfileDetails details = const ProfileDetails(),
 }) async {
   final rootNavigator = Navigator.of(context, rootNavigator: true);
-  ProfileLead? selectedLead;
+  ProfileLead? current;
   var editRequested = false;
-  final channel = await showBuzzModalBottomSheet<Channel>(
-    context: context,
-    isScrollControlled: true,
-    useSafeArea: true,
-    showDragHandle: false,
-    backgroundColor: utilitySurfaceThemeData(
-      Theme.of(context),
-    ).scaffoldBackgroundColor,
-    showCloseButton: false,
-    showRailCloseButton: true,
-    detentCorners: true,
-    builder: (sheetContext) => UserProfileSheet(
-      pubkey: pubkey,
-      sheetControls: true,
-      details: details,
-      onLead: (lead) {
-        selectedLead = lead;
-        Navigator.of(sheetContext).pop();
+  Channel? channel;
+  do {
+    ProfileLead? next;
+    TransitionRoute<dynamic>? closingRoute;
+    final expanded = initiallyExpanded || current != null;
+    channel = await showBuzzModalBottomSheet<Channel>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: false,
+      backgroundColor: utilitySurfaceThemeData(
+        Theme.of(context),
+      ).scaffoldBackgroundColor,
+      showCloseButton: false,
+      showRailCloseButton: true,
+      detentCorners: true,
+      initiallyExpanded: expanded,
+      builder: (sheetContext) {
+        final person = current;
+        if (person != null && person.pubkey == null) {
+          return previewLeadContent(person, initiallyExpanded: expanded);
+        }
+        return UserProfileSheet(
+          pubkey: person?.pubkey ?? pubkey,
+          sheetControls: true,
+          initiallyExpanded: expanded,
+          details: person == null ? details : const ProfileDetails(),
+          names: person == null ? names : null,
+          contextualActions: person == null ? contextualActions : null,
+          onLead: (lead) {
+            final route = ModalRoute.of(sheetContext);
+            if (next != null || route?.isCurrent != true) return;
+            next = lead;
+            closingRoute = route;
+            Navigator.of(sheetContext).pop();
+          },
+          onEditProfile: () {
+            editRequested = true;
+            Navigator.of(sheetContext).pop();
+          },
+        );
       },
-      onEditProfile: () {
-        editRequested = true;
-        Navigator.of(sheetContext).pop();
-      },
-      names: names,
-      contextualActions: contextualActions,
-    ),
-  );
-  if (selectedLead case final lead?) {
-    if (context.mounted) await _openLead(context, lead);
-    return;
-  }
+    );
+    if (next == null) break;
+    await closingRoute?.completed;
+    if (!context.mounted) return;
+    current = next;
+  } while (true);
   if (editRequested && rootNavigator.mounted) {
     await rootNavigator.push(
       MaterialPageRoute<void>(builder: (_) => const ProfileEditPage()),
     );
     return;
   }
-  if (channel == null || !context.mounted) return;
+  final conversation = channel;
+  if (conversation == null || !context.mounted) return;
   await Navigator.of(context).push(
     MaterialPageRoute<void>(
       builder: (_) => ChannelDetailPage(
-        channel: channel,
+        channel: conversation,
         placement: ChannelRoutePlacement.ordinary,
       ),
     ),
@@ -106,9 +126,20 @@ Future<void> _openLead(BuildContext context, ProfileLead lead) =>
     ? showUserProfileSheet(context, lead.pubkey!)
     : showPreviewLead(context, lead);
 
+typedef ProfilePreview = ({
+  String name,
+  String username,
+  String? portrait,
+  ProfileDetails details,
+});
+
+final profilePreviewsProvider = Provider<Map<String, ProfilePreview>>(
+  (ref) => const {},
+);
+
 class UserProfileSheet extends HookConsumerWidget {
   final String pubkey;
-  final bool sheetControls;
+  final bool sheetControls, initiallyExpanded;
   final VoidCallback? onEditProfile;
   final ValueChanged<ProfileLead>? onLead;
   final ProfileDetails details;
@@ -153,6 +184,7 @@ class UserProfileSheet extends HookConsumerWidget {
     super.key,
     required this.pubkey,
     this.sheetControls = false,
+    this.initiallyExpanded = false,
     this.onEditProfile,
     this.onLead,
     this.details = const ProfileDetails(),
@@ -191,14 +223,14 @@ class UserProfileSheet extends HookConsumerWidget {
       () => ref
           .read(relaySessionProvider.notifier)
           .fetchHistory(NostrFilters.profile(pk))
-          .then((events) {
-            if (events.isEmpty) return '';
+          .then<String?>((events) {
+            if (events.isEmpty) return null;
             return ProfileData.fromEvent(events.first).about ?? '';
           })
-          .catchError((_) => ''),
+          .catchError((_) => null),
       [pk],
     );
-    final aboutSnapshot = useFuture(aboutFuture);
+    final aboutSnapshot = useFuture(aboutFuture, preserveState: false);
     final about = aboutSnapshot.data ?? profile?.about ?? '';
 
     // Ensure presence and status are tracked.
@@ -210,29 +242,35 @@ class UserProfileSheet extends HookConsumerWidget {
     }, [pk]);
     const preview = bool.fromEnvironment('BUZZ_PROFILE_PREVIEW');
     final photoOpen = useState(false);
+    final hideHeaderPortrait = useState(false);
     final photoTransform = useTransformationController(keys: [photoOpen.value]);
     final swipeStart = useRef<Offset?>(null);
     final pointers = useMemoized(() => <int>{}, [photoOpen.value]);
     final portraitKey = useMemoized(GlobalKey.new);
 
     final isAgent = agentPresentation || profile?.isAgent == true;
-    final detailsToShow = !preview
-        ? details
-        : ProfileDetails(
-            personal: const [(label: 'Email', value: 'viewer@example.org')],
-            team: const [(label: 'Team', value: 'Product design')],
-            tenure: const (
-              label: String.fromEnvironment(
-                'BUZZ_PROFILE_TENURE_LABEL',
-                defaultValue: 'Time at organization',
-              ),
-              value: '2 years',
-            ),
-            lead: previewDesignLead,
-            city: 'London, United Kingdom',
-            timeZone: 'Europe/London',
-            coordinates: (latitude: 51.51, longitude: -0.13),
-          );
+    final personalPreview = preview
+        ? ref.watch(profilePreviewsProvider)[pk]
+        : null;
+    final detailsToShow =
+        personalPreview?.details ??
+        (!preview
+            ? details
+            : ProfileDetails(
+                personal: const [(label: 'Email', value: 'viewer@example.org')],
+                team: const [(label: 'Team', value: 'Product design')],
+                tenure: const (
+                  label: String.fromEnvironment(
+                    'BUZZ_PROFILE_TENURE_LABEL',
+                    defaultValue: 'Time at organization',
+                  ),
+                  value: '2 years',
+                ),
+                lead: previewDesignLead,
+                city: 'London, United Kingdom',
+                timeZone: 'Europe/London',
+                coordinates: (latitude: 51.51, longitude: -0.13),
+              ));
     final copied = useState(false);
     final isOpeningDirectMessage = useState(false);
 
@@ -243,17 +281,21 @@ class UserProfileSheet extends HookConsumerWidget {
 
     // Keep the opening surface's comparison context and qualified identity.
     final opener = names;
-    final displayName =
-        (opener != null ? ref.watch(opener) : watchIdentityNames(ref, {pk}))
-            .labelFor(pk);
+    final identityNames = opener != null
+        ? ref.watch(opener)
+        : watchIdentityNames(ref, {pk});
+    final displayName = identityNames.labelFor(pk);
     final verified = ref.watch(
       verifiedProfilesProvider.select((all) => all[pk]),
     );
     final titleName = agentPresentation
         ? displayName
-        : verified?.fullName ?? displayName;
-    final secondaryName = titleName != displayName ? displayName : null;
-    final avatarUrl = profile?.avatarUrl ?? initialAvatarUrl;
+        : personalPreview?.name ?? verified?.fullName ?? displayName;
+    final secondaryName = titleName != displayName && identityNames.hasName(pk)
+        ? displayName
+        : null;
+    final avatarUrl =
+        personalPreview?.portrait ?? profile?.avatarUrl ?? initialAvatarUrl;
     final nip05 = profile?.nip05Handle;
     final initial =
         profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
@@ -306,224 +348,288 @@ class UserProfileSheet extends HookConsumerWidget {
       if (userStatus != null) userStatus.emoji,
       if (userStatus != null) userStatus.text,
     ].where((part) => part.trim().isNotEmpty).join(' ');
+    final appTheme = Theme.of(context);
+    Widget actionChip({
+      required String label,
+      required VoidCallback? onPressed,
+    }) {
+      final sampled = !isAgent && appTheme.platform == TargetPlatform.iOS;
+      final chip = ProfileActionChip(
+        label: label,
+        onPressed: onPressed,
+        sampled: sampled,
+        useThreeButtonWidth: appTheme.platform == TargetPlatform.iOS,
+      );
+      return sampled ? chip : Theme(data: appTheme, child: chip);
+    }
+
+    final edgeToEdgeRoster =
+        !isAgent && Theme.of(context).platform == TargetPlatform.iOS;
     return ProfileSheetLayout(
       avatarUrl: avatarUrl,
       agent: isAgent,
       embedded: embedded,
       sheetControls: sheetControls,
+      initiallyExpanded: initiallyExpanded,
+      leading: headerLeading,
       contentPadding: contentPadding,
       status: status.isEmpty ? null : _ThoughtBubble(text: status),
-      hero: Column(
-        children: [
-          SizedBox.square(
-            key: portraitKey,
-            dimension: profilePortraitSize,
-            child: Stack(
-              clipBehavior: Clip.none,
-              children: [
-                ClipPath(
-                  clipper: hasBadge ? _StatusNotch(isAgent) : null,
-                  child: _ProfileAvatar(
-                    avatarUrl: avatarUrl,
-                    initial: initial,
-                    isAgent: isAgent,
-                    onEnlarge: avatarUrl == null
-                        ? null
-                        : () => photoOpen.value = true,
-                  ),
-                ),
-                if (!hasBadge)
-                  Semantics(
-                    label: 'Presence: Unknown',
-                    child: const SizedBox.shrink(),
-                  ),
-                if (hasBadge)
-                  Positioned(
-                    right: 2,
-                    bottom: 2,
-                    child: Semantics(
-                      label: 'Presence: $presenceLabel',
-                      child: Container(
-                        width: 20,
-                        height: 20,
-                        decoration: ShapeDecoration(
-                          shape: avatarShape(isAgent: isAgent),
-                          color: presence == 'online'
-                              ? context.appColors.success
-                              : presence == 'away'
-                              ? context.appColors.warning
-                              : context.colors.outline,
-                        ),
+      memberActions: !agentPresentation && contextualActions != null
+          ? Builder(builder: contextualActions!)
+          : null,
+      hero: Builder(
+        builder: (context) => Column(
+          children: [
+            SizedBox.square(
+              key: portraitKey,
+              dimension: edgeToEdgeRoster
+                  ? teamPortraitSize
+                  : profilePortraitSize,
+              child: Opacity(
+                opacity: hideHeaderPortrait.value && avatarUrl != null ? 0 : 1,
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    ClipPath(
+                      clipper: hasBadge ? _StatusNotch(isAgent) : null,
+                      child: _ProfileAvatar(
+                        avatarUrl: avatarUrl,
+                        initial: initial,
+                        isAgent: isAgent,
+                        onEnlarge: avatarUrl == null
+                            ? null
+                            : () {
+                                hideHeaderPortrait.value = true;
+                                photoOpen.value = true;
+                              },
                       ),
                     ),
-                  ),
-                if (status.isNotEmpty) ...[
-                  for (final dot in [
-                    (left: 5.0, top: -6.0, size: 13.0),
-                    (left: 15.0, top: 7.0, size: 7.0),
-                  ])
-                    Positioned(
-                      left: dot.left,
-                      top: dot.top,
-                      child: IgnorePointer(
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            color: context.colors.surface,
-                            shape: BoxShape.circle,
+                    if (!hasBadge)
+                      Semantics(
+                        label: 'Presence: Unknown',
+                        child: const SizedBox.shrink(),
+                      ),
+                    if (hasBadge)
+                      Positioned(
+                        right: 2,
+                        bottom: 2,
+                        child: Semantics(
+                          label: 'Presence: $presenceLabel',
+                          child: Container(
+                            width: 20,
+                            height: 20,
+                            decoration: ShapeDecoration(
+                              shape: avatarShape(isAgent: isAgent),
+                              color: presence == 'online'
+                                  ? context.appColors.success
+                                  : presence == 'away'
+                                  ? context.appColors.warning
+                                  : context.colors.outline,
+                            ),
                           ),
-                          child: SizedBox.square(dimension: dot.size),
                         ),
                       ),
-                    ),
-                ],
+                    if (status.isNotEmpty) ...[
+                      for (final dot in [
+                        (left: 5.0, top: -6.0, size: 13.0),
+                        (left: 15.0, top: 7.0, size: 7.0),
+                      ])
+                        Positioned(
+                          left: dot.left,
+                          top: dot.top,
+                          child: IgnorePointer(
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                color: context.colors.surface,
+                                shape: BoxShape.circle,
+                              ),
+                              child: SizedBox.square(dimension: dot.size),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            Builder(
+              builder: (context) => ProfileSectionLabel(
+                label: titleName,
+                opaqueTitle: !isAgent,
+                center: true,
+                textStyle: Theme.of(context).platform == TargetPlatform.iOS
+                    ? context.textTheme.headlineSmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                        color: context.colors.onSurface,
+                      )
+                    : context.textTheme.titleMedium,
+              ),
+            ),
+            if (secondaryName != null)
+              ProfileSectionLabel(
+                label: secondaryName,
+                center: true,
+                body: true,
+                translucent: true,
+                textStyle: context.textTheme.bodySmall,
+              ),
+            if (isAgent && about.isNotEmpty)
+              ProfileSectionLabel(
+                label: about,
+                center: true,
+                body: true,
+                textStyle: context.textTheme.bodyMedium,
+              ),
+            if (!isAgent &&
+                (detailsToShow.city != null || detailsToShow.timeZone != null))
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: ProfileHeaderClock(
+                  city: detailsToShow.city,
+                  zoneName: detailsToShow.timeZone,
+                ),
+              ),
+            SizedBox(height: edgeToEdgeRoster ? Grid.xs : Grid.xxs),
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: Grid.xxs,
+              runSpacing: Grid.xxs,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                if (pk == currentPubkey && !isAgent) ...[
+                  actionChip(
+                    label: 'Edit profile',
+                    onPressed:
+                        onEditProfile ??
+                        () => Navigator.of(context, rootNavigator: true).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => const ProfileEditPage(),
+                          ),
+                        ),
+                  ),
+                  actionChip(
+                    label: status.isEmpty ? 'Set a status' : 'Update status',
+                    onPressed: () =>
+                        showSetStatusSheet(context, currentStatus: userStatus),
+                  ),
+                ] else if (pk != currentPubkey)
+                  actionChip(
+                    label: isOpeningDirectMessage.value
+                        ? 'Opening…'
+                        : 'Message',
+                    onPressed: isOpeningDirectMessage.value
+                        ? null
+                        : openDirectMessage,
+                  ),
+                if (agentPresentation && contextualActions != null)
+                  Builder(builder: contextualActions!),
               ],
             ),
-          ),
-          const SizedBox(height: 14),
-          Text(
-            titleName,
-            textAlign: TextAlign.center,
-            style: context.textTheme.titleMedium,
-          ),
-          if (secondaryName != null)
-            Text(secondaryName, style: context.textTheme.bodySmall),
-          if (isAgent && about.isNotEmpty)
-            Text(about, textAlign: TextAlign.center),
-          if (!isAgent && detailsToShow.city != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Text(detailsToShow.city!),
-            ),
-          if (!isAgent && detailsToShow.timeZone != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: ProfileHeaderClock(zoneName: detailsToShow.timeZone!),
-            ),
-          const SizedBox(height: Grid.xxs),
-          Wrap(
-            alignment: WrapAlignment.center,
-            spacing: Grid.xxs,
-            runSpacing: Grid.xxs,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              if (pk == currentPubkey && !isAgent) ...[
-                ProfileActionChip(
-                  label: 'Edit profile',
-                  onPressed:
-                      onEditProfile ??
-                      () => Navigator.of(context, rootNavigator: true).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) => const ProfileEditPage(),
-                        ),
-                      ),
-                ),
-                ProfileActionChip(
-                  label: status.isEmpty ? 'Set a status' : 'Update status',
-                  onPressed: () =>
-                      showSetStatusSheet(context, currentStatus: userStatus),
-                ),
-              ] else if (pk != currentPubkey)
-                ProfileActionChip(
-                  label: isOpeningDirectMessage.value ? 'Opening…' : 'Message',
-                  onPressed: isOpeningDirectMessage.value
-                      ? null
-                      : openDirectMessage,
-                ),
-              if (agentPresentation && contextualActions != null)
-                Builder(builder: contextualActions!),
-            ],
-          ),
-        ],
+          ],
+        ),
       ),
-      body: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (isAgent) ...[
-              if (agentIdentity != null) Builder(builder: agentIdentity!),
-              AppListCard(
-                outlined: true,
-                label: 'Public key',
-                horizontalPadding: 0,
-                children: [
-                  Semantics(
-                    button: true,
-                    enabled: npub != null,
-                    label: copied.value
-                        ? 'Copied public key'
-                        : 'Copy public key',
-                    value: npub,
-                    liveRegion: true,
-                    child: Tooltip(
-                      message: 'Copy public key',
-                      excludeFromSemantics: true,
-                      child: InkWell(
-                        onTap: npub == null ? null : copyPublicKey,
-                        child: Padding(
-                          padding: const EdgeInsets.all(Grid.xs),
-                          child: ExcludeSemantics(
-                            child: Row(
-                              children: [
-                                Expanded(
-                                  child: Text(
-                                    npub ?? 'Public key unavailable',
-                                    style: context.textTheme.bodySmall,
+      body: Builder(
+        builder: (context) => Padding(
+          padding: EdgeInsets.fromLTRB(
+            edgeToEdgeRoster ? 0 : 16,
+            8,
+            edgeToEdgeRoster ? 0 : 16,
+            16,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (isAgent) ...[
+                if (agentIdentity != null) Builder(builder: agentIdentity!),
+                AppListCard(
+                  outlined: true,
+                  label: 'Public key',
+                  horizontalPadding: 0,
+                  children: [
+                    Semantics(
+                      button: true,
+                      enabled: npub != null,
+                      label: copied.value
+                          ? 'Copied public key'
+                          : 'Copy public key',
+                      value: npub,
+                      liveRegion: true,
+                      child: Tooltip(
+                        message: 'Copy public key',
+                        excludeFromSemantics: true,
+                        child: InkWell(
+                          onTap: npub == null ? null : copyPublicKey,
+                          child: Padding(
+                            padding: const EdgeInsets.all(Grid.xs),
+                            child: ExcludeSemantics(
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      npub ?? 'Public key unavailable',
+                                      style: context.textTheme.bodySmall,
+                                    ),
                                   ),
-                                ),
-                                const SizedBox(width: Grid.xs),
-                                AnimatedSwitcher(
-                                  duration:
-                                      MediaQuery.disableAnimationsOf(context)
-                                      ? Duration.zero
-                                      : const Duration(milliseconds: 180),
-                                  switchInCurve: Curves.easeOutCubic,
-                                  switchOutCurve: Curves.easeInCubic,
-                                  transitionBuilder: (child, animation) =>
-                                      ScaleTransition(
-                                        scale: animation,
-                                        child: child,
-                                      ),
-                                  child: Icon(
-                                    copied.value
-                                        ? BuzzIcons.check
-                                        : BuzzIcons.copy,
-                                    key: ValueKey(copied.value),
-                                    size: 18,
+                                  const SizedBox(width: Grid.xs),
+                                  AnimatedSwitcher(
+                                    duration:
+                                        MediaQuery.disableAnimationsOf(context)
+                                        ? Duration.zero
+                                        : const Duration(milliseconds: 180),
+                                    switchInCurve: Curves.easeOutCubic,
+                                    switchOutCurve: Curves.easeInCubic,
+                                    transitionBuilder: (child, animation) =>
+                                        ScaleTransition(
+                                          scale: animation,
+                                          child: child,
+                                        ),
+                                    child: Icon(
+                                      copied.value
+                                          ? BuzzIcons.check
+                                          : BuzzIcons.copy,
+                                      key: ValueKey(copied.value),
+                                      size: 18,
+                                    ),
                                   ),
-                                ),
-                              ],
+                                ],
+                              ),
                             ),
                           ),
                         ),
                       ),
                     ),
-                  ),
-                ],
-              ),
-              if (agentSettings != null) Builder(builder: agentSettings!),
-            ] else
-              ProfileDetailsCards(
-                details: detailsToShow,
-                about: preview && about.trim().isEmpty
-                    ? 'Designing tools for collaboration.'
-                    : about,
-                username:
-                    verified?.username ?? nip05 ?? (preview ? 'viewer' : null),
-                avatarUrl: avatarUrl,
-                publicKey: npub == null ? 'Unavailable' : shortPubkey(npub),
-                onLead: onLead ?? (lead) => _openLead(context, lead),
-                onCopyKey: npub == null ? null : copyPublicKey,
-                copied: copied.value,
-              ),
-            if (!agentPresentation && contextualActions != null)
-              Builder(builder: contextualActions!),
-          ],
+                  ],
+                ),
+                if (agentSettings != null) Builder(builder: agentSettings!),
+              ] else
+                ProfileDetailsCards(
+                  horizontalInset: edgeToEdgeRoster ? 16 : 0,
+                  details: detailsToShow,
+                  about: about,
+                  ldap:
+                      personalPreview?.username ??
+                      verified?.username ??
+                      (preview ? 'viewer' : null),
+                  username:
+                      personalPreview?.username ??
+                      verified?.username ??
+                      nip05 ??
+                      (preview ? 'viewer' : null),
+                  avatarUrl: avatarUrl,
+                  publicKey: npub == null ? 'Unavailable' : shortPubkey(npub),
+                  onLead: onLead ?? (lead) => _openLead(context, lead),
+                  onCopyKey: npub == null ? null : copyPublicKey,
+                  copied: copied.value,
+                ),
+            ],
+          ),
         ),
       ),
       portraitKey: portraitKey,
       photoOpen: photoOpen.value && avatarUrl != null,
       onPhotoBack: () => photoOpen.value = false,
+      onPhotoClosed: () => hideHeaderPortrait.value = false,
       enlargedPhoto: avatarUrl == null
           ? null
           : AvatarClip(
@@ -814,6 +920,45 @@ class _StatusNotch extends CustomClipper<Path> {
   final bool isAgent;
   @override
   Path getClip(Size size) {
+    if (!isAgent && size.width == teamPortraitSize) {
+      final radius = size.width / 2;
+      final portrait = size.center(Offset.zero);
+      final badge = Offset(size.width - 12, size.height - 12);
+      const notch = 16.0; // 10-point badge radius plus 6 points of clearance.
+      const fillet = 5.0;
+      // A fillet tangent to both circles has its centre on their offset circles.
+      final delta = badge - portrait;
+      final axis = delta / delta.distance;
+      final inner = radius - fillet;
+      const outer = notch + fillet;
+      final along =
+          (inner * inner - outer * outer + delta.distanceSquared) /
+          (2 * delta.distance);
+      final across = math.sqrt(inner * inner - along * along);
+      final middle = portrait + axis * along;
+      final normal = Offset(axis.dy, -axis.dx) * across;
+      final upper = middle + normal;
+      final lower = middle - normal;
+      Offset onPortrait(Offset join) =>
+          portrait + (join - portrait) * (radius / inner);
+      Offset onNotch(Offset join) => badge + (join - badge) * (notch / outer);
+      final start = onPortrait(lower);
+      return Path()
+        ..moveTo(start.dx, start.dy)
+        ..arcToPoint(
+          onPortrait(upper),
+          radius: Radius.circular(radius),
+          largeArc: true,
+        )
+        ..arcToPoint(onNotch(upper), radius: const Radius.circular(fillet))
+        ..arcToPoint(
+          onNotch(lower),
+          radius: const Radius.circular(notch),
+          clockwise: false,
+        )
+        ..arcToPoint(start, radius: const Radius.circular(fillet))
+        ..close();
+    }
     final outline = isAgent
         ? (Path()
             ..moveTo(39.909, 24.629)

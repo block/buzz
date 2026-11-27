@@ -250,7 +250,8 @@ class ChannelSheetContent extends HookWidget {
                           icon: _sheetIcon(row['symbol']),
                           title: row['label'] as String,
                           trailing:
-                              (row['symbol'] == 'folder' ||
+                              (row['symbol'] == 'person' ||
+                                  row['symbol'] == 'folder' ||
                                   row['symbol'] == 'workspaceFolder')
                               ? const _ChannelDetailsChevron()
                               : row['symbol'] == 'loading'
@@ -292,6 +293,7 @@ IconData _sheetIcon(Object? symbol) => switch (symbol) {
   'trash' => BuzzIcons.trash2,
   'pencil' => BuzzIcons.pencil,
   'plus' => BuzzIcons.plus,
+  'person' => BuzzIcons.user,
   'person.2' => BuzzIcons.users,
   'loading' => BuzzIcons.loaderCircle,
   'warning' => BuzzIcons.triangleAlert,

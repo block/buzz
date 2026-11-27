@@ -318,6 +318,7 @@ String _channelActionSymbol(IconData? icon) => switch (icon) {
   BuzzIcons.logIn => 'join',
   BuzzIcons.pencil => 'pencil',
   BuzzIcons.plus => 'plus',
+  BuzzIcons.user => 'person',
   BuzzIcons.users => 'person.2',
   BuzzIcons.pinned => 'pin',
   BuzzIcons.pinnedOff => 'pin.slash',

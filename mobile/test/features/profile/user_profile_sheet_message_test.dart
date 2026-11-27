@@ -22,6 +22,52 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   final peer = 'a' * 64;
+  testWidgets(
+    'Message centres one of three equal slots with two 8-point gaps',
+    (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark(),
+          home: Scaffold(
+            body: Center(
+              child: SizedBox(
+                width: 358,
+                child: Wrap(
+                  alignment: WrapAlignment.center,
+                  spacing: 8,
+                  children: [
+                    ProfileActionChip(
+                      label: 'Message',
+                      sampled: true,
+                      useThreeButtonWidth: true,
+                      onPressed: () {},
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      final glass = find.descendant(
+        of: find.byType(ProfileActionChip),
+        matching: find.byType(BackdropFilter),
+      );
+      final rect = tester.getRect(glass);
+      expect(rect.width, 114);
+      expect(rect.height, greaterThanOrEqualTo(48));
+      expect(rect.center.dx, tester.getCenter(find.byType(Wrap).first).dx);
+      expect(
+        tester
+            .widget<ColoredBox>(
+              find.descendant(of: glass, matching: find.byType(ColoredBox)),
+            )
+            .color,
+        const Color(0x851C1C1C),
+      );
+      expect(tester.getCenter(find.text('Message')).dx, rect.center.dx);
+    },
+  );
 
   testWidgets(
     'Edit profile closes the sheet before opening the full-screen editor',
@@ -65,6 +111,40 @@ void main() {
       expect(find.text('Open profile'), findsOneWidget);
     },
   );
+
+  testWidgets('Own iOS profile uses Message sizing for both actions', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          currentPubkeyProvider.overrideWith((ref) => peer),
+          userCacheProvider.overrideWith(
+            () => _UserCache({
+              peer: UserProfile(
+                pubkey: peer,
+                displayName: 'Alex',
+                about: 'Cached Buzz bio',
+              ),
+            }),
+          ),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(body: UserProfileSheet(pubkey: peer, embedded: true)),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Cached Buzz bio'), findsOneWidget);
+    for (final label in ['Edit profile', 'Set a status']) {
+      final chip = tester.widget<ProfileActionChip>(
+        find.widgetWithText(ProfileActionChip, label),
+      );
+      expect(chip.useThreeButtonWidth, isTrue);
+      expect(chip.sampled, isTrue);
+    }
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   for (final nativeSheet in [false, true]) {
     testWidgets(

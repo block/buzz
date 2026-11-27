@@ -1153,10 +1153,24 @@ private final class ProfileVibrantLabel: NSObject, FlutterPlatformView {
 
     let label = UILabel(frame: container.bounds)
     label.text = parameters["text"] as? String
-    label.font = .systemFont(ofSize: parameters["size"] as? CGFloat ?? 12, weight: .semibold)
-    label.textAlignment = parameters["rtl"] as? Bool == true ? .right : .left
+    let weight = parameters["weight"] as? Int ?? 600
+    label.font = .systemFont(ofSize: parameters["size"] as? CGFloat ?? 12, weight: weight >= 700 ? .bold : weight >= 600 ? .semibold : .regular)
+    label.textAlignment = parameters["center"] as? Bool == true ? .center : parameters["rtl"] as? Bool == true ? .right : .left
     label.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-    label.numberOfLines = 0
+    let singleLine = parameters["singleLine"] as? Bool == true
+    label.numberOfLines = singleLine ? 1 : 0
+    label.lineBreakMode = singleLine ? .byTruncatingTail : .byWordWrapping
+    let messageLineHeight = parameters["messageLineHeight"] as? CGFloat
+    if let lineHeight = messageLineHeight {
+      let font = NativeAttachmentMenuTypography.interFont(size: label.font.pointSize) ?? label.font!
+      let paragraph = NSMutableParagraphStyle()
+      paragraph.alignment = label.textAlignment
+      paragraph.minimumLineHeight = lineHeight
+      paragraph.maximumLineHeight = lineHeight
+      label.attributedText = NSAttributedString(string: label.text ?? "", attributes: [
+        .font: font, .paragraphStyle: paragraph, .kern: parameters["tracking"] as? CGFloat ?? 0,
+      ])
+    }
     if UIAccessibility.isReduceTransparencyEnabled {
       label.textColor = .label
       container.addSubview(label)
@@ -1168,13 +1182,34 @@ private final class ProfileVibrantLabel: NSObject, FlutterPlatformView {
     backdrop.frame = container.bounds
     backdrop.autoresizingMask = [.flexibleWidth, .flexibleHeight]
     container.addSubview(backdrop)
-    let vibrancy = UIVisualEffectView(effect: UIVibrancyEffect(blurEffect: material, style: .label))
+    let strongerSecondary = parameters["strongerSecondary"] as? Bool == true
+    let style: UIVibrancyEffectStyle = parameters["translucent"] as? Bool == true && !strongerSecondary ? .secondaryLabel : .label
+    let vibrancy = UIVisualEffectView(effect: UIVibrancyEffect(blurEffect: material, style: style))
     vibrancy.frame = backdrop.bounds
     vibrancy.autoresizingMask = [.flexibleWidth, .flexibleHeight]
     backdrop.contentView.addSubview(vibrancy)
     let ink = UIView(frame: vibrancy.bounds)
     ink.autoresizingMask = [.flexibleWidth, .flexibleHeight]
     ink.backgroundColor = .label
+    if let tint = (parameters["glyphTint"] as? NSNumber)?.uint32Value,
+       let target = (parameters["inkColor"] as? NSNumber)?.uint32Value {
+      // Tint the finished material inside the glyph mask. Primary vibrancy
+      // alone resolves to white on a flat dark surface.
+      let wash = UIView(frame: backdrop.bounds)
+      wash.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+      wash.backgroundColor = UIColor(red: CGFloat((tint >> 16) & 255) / 255,
+                                     green: CGFloat((tint >> 8) & 255) / 255,
+                                     blue: CGFloat(tint & 255) / 255,
+                                     alpha: parameters["dark"] as? Bool == true ? 0.13 : CGFloat(max((target >> 16) & 255, (target >> 8) & 255, target & 255)) / 255)
+      backdrop.contentView.addSubview(wash)
+    } else if messageLineHeight != nil {
+      // Blend the finished vibrant glyph with the artwork, including its hue.
+      backdrop.alpha = 0.86
+    } else if strongerSecondary {
+      ink.alpha = 0.84
+    } else if parameters["body"] as? Bool == true {
+      ink.alpha = 0.88
+    }
     vibrancy.contentView.addSubview(ink)
     // Limit the material and its vibrant foreground to the letterforms.
     backdrop.glyphs = label
