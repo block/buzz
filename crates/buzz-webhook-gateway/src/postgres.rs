@@ -3,9 +3,10 @@
 mod subscriptions;
 
 use crate::store::{
-    transition, AppliedOperation, ApplyOutcome, ClaimedDelivery, DeliveryPage, DeliveryState,
-    DeliverySummary, InsertOutcome, Integration, IntegrationSecret, IntegrationView, MessageCounts,
-    Mutation, NewDelivery, Operation, Provider, Store, StoreError,
+    transition, AppliedOperation, ApplyOutcome, ClaimedDelivery, DeliveryMode, DeliveryPage,
+    DeliveryState, DeliverySummary, InsertOutcome, Integration, IntegrationConfig,
+    IntegrationSecret, IntegrationView, MessageCounts, Mutation, NewDelivery, Operation, Provider,
+    Store, StoreError,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -14,13 +15,14 @@ use uuid::Uuid;
 
 static GATEWAY_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-const GATEWAY_TABLES: [&str; 6] = [
+const GATEWAY_TABLES: [&str; 7] = [
     "webhook_gateway_integrations",
     "webhook_gateway_integration_secrets",
     "webhook_gateway_applied_operations",
     "webhook_gateway_deliveries",
     "webhook_gateway_subscriptions",
     "webhook_gateway_messages",
+    "webhook_gateway_message_groups",
 ];
 
 pub struct PostgresStore {
@@ -126,12 +128,36 @@ impl PostgresStore {
         .execute(&self.pool)
         .await?
         .rows_affected();
-        Ok(deliveries + messages + tombstones + operations + secrets)
+        let groups = sqlx::query(
+            "DELETE FROM webhook_gateway_message_groups g
+             WHERE updated_at < $1 AND NOT EXISTS (
+                 SELECT 1 FROM webhook_gateway_messages m
+                 WHERE m.group_id = g.id AND m.state = 'queued')",
+        )
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(deliveries + messages + tombstones + operations + secrets + groups)
     }
 }
 
 fn integration_from_row(row: PgRow) -> Result<Integration, StoreError> {
     integration_from_row_ref(&row)
+}
+
+fn config_from_row(row: &PgRow) -> Result<IntegrationConfig, StoreError> {
+    let delivery_mode: String = row.try_get("delivery_mode")?;
+    Ok(IntegrationConfig {
+        delivery_mode: DeliveryMode::parse(&delivery_mode).ok_or(StoreError::Invalid(
+            "unknown delivery mode stored for integration",
+        ))?,
+        channel_expr: row.try_get("channel_expr")?,
+        message_expr: row.try_get("message_expr")?,
+        message_data_expr: row.try_get("message_data_expr")?,
+        group_key_expr: row.try_get("group_key_expr")?,
+        group_key_action: row.try_get("group_key_action")?,
+    })
 }
 
 fn integration_from_row_ref(row: &PgRow) -> Result<Integration, StoreError> {
@@ -142,6 +168,7 @@ fn integration_from_row_ref(row: &PgRow) -> Result<Integration, StoreError> {
         provider: Provider::parse(&provider).ok_or(StoreError::Invalid(
             "unknown provider stored for integration",
         ))?,
+        config: config_from_row(row)?,
         revision: row.try_get("revision")?,
         enabled: row.try_get("enabled")?,
         disabled_at: row.try_get("disabled_at")?,
@@ -209,8 +236,10 @@ impl Store for PostgresStore {
 
     async fn integration(&self, id: Uuid) -> Result<Option<Integration>, StoreError> {
         sqlx::query(
-            "SELECT id, community_host, provider, revision, enabled, disabled_at,
-                    created_at, updated_at FROM webhook_gateway_integrations WHERE id = $1",
+            "SELECT id, community_host, provider, delivery_mode, channel_expr, message_expr,
+                    message_data_expr, group_key_expr, group_key_action, revision, enabled, disabled_at,
+                    created_at, updated_at
+             FROM webhook_gateway_integrations WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -225,8 +254,9 @@ impl Store for PostgresStore {
         now: DateTime<Utc>,
     ) -> Result<Option<(Integration, Vec<IntegrationSecret>)>, StoreError> {
         let rows = sqlx::query(
-            "SELECT i.id, i.community_host, i.provider, i.revision, i.enabled, i.disabled_at,
-                    i.created_at, i.updated_at,
+            "SELECT i.id, i.community_host, i.provider, i.delivery_mode, i.channel_expr,
+                    i.message_expr, i.message_data_expr, i.group_key_expr, i.group_key_action, i.revision,
+                    i.enabled, i.disabled_at, i.created_at, i.updated_at,
                     s.id AS secret_id, s.key_id, s.secret_ciphertext,
                     s.created_at AS secret_created_at, s.retired_at, s.grace_until
              FROM webhook_gateway_integrations i
@@ -318,9 +348,10 @@ impl Store for PostgresStore {
             });
         }
         let integration = sqlx::query(
-            "SELECT id, community_host, provider, revision, enabled, disabled_at,
-                    created_at, updated_at FROM webhook_gateway_integrations
-             WHERE id = $1 FOR UPDATE",
+            "SELECT id, community_host, provider, delivery_mode, channel_expr, message_expr,
+                    message_data_expr, group_key_expr, group_key_action, revision, enabled, disabled_at,
+                    created_at, updated_at
+             FROM webhook_gateway_integrations WHERE id = $1 FOR UPDATE",
         )
         .bind(operation.integration_id)
         .fetch_optional(&mut *tx)
@@ -338,11 +369,18 @@ impl Store for PostgresStore {
         };
         sqlx::query(
             "INSERT INTO webhook_gateway_integrations
-                 (id, community_host, provider, revision, enabled, disabled_at, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 (id, community_host, provider, revision, enabled, disabled_at, created_at, updated_at,
+                  delivery_mode, channel_expr, message_expr, message_data_expr, group_key_expr, group_key_action)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
              ON CONFLICT (id) DO UPDATE SET
                  community_host = EXCLUDED.community_host,
                  provider = EXCLUDED.provider,
+                 delivery_mode = EXCLUDED.delivery_mode,
+                 channel_expr = EXCLUDED.channel_expr,
+                 message_expr = EXCLUDED.message_expr,
+                 message_data_expr = EXCLUDED.message_data_expr,
+                 group_key_expr = EXCLUDED.group_key_expr,
+                 group_key_action = EXCLUDED.group_key_action,
                  revision = EXCLUDED.revision,
                  enabled = EXCLUDED.enabled,
                  disabled_at = EXCLUDED.disabled_at,
@@ -356,6 +394,12 @@ impl Store for PostgresStore {
         .bind(next.disabled_at)
         .bind(next.created_at)
         .bind(next.updated_at)
+        .bind(next.config.delivery_mode.as_str())
+        .bind(&next.config.channel_expr)
+        .bind(&next.config.message_expr)
+        .bind(&next.config.message_data_expr)
+        .bind(&next.config.group_key_expr)
+        .bind(next.config.group_key_action)
         .execute(&mut *tx)
         .await?;
         if let Mutation::PutSecret { grace, .. } = &operation.mutation {
@@ -516,12 +560,17 @@ impl Store for PostgresStore {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         sqlx::query(
             "WITH due AS (
-                 SELECT integration_id, delivery_id
-                 FROM webhook_gateway_deliveries
-                 WHERE state = 'queued' AND next_attempt_at <= $1
-                 ORDER BY next_attempt_at
+                 SELECT d.integration_id, d.delivery_id
+                 FROM webhook_gateway_deliveries d
+                 JOIN webhook_gateway_integrations i ON i.id = d.integration_id
+                 WHERE d.state = 'queued' AND d.next_attempt_at <= $1
+                   AND (i.group_key_expr IS NULL OR NOT EXISTS (
+                       SELECT 1 FROM webhook_gateway_deliveries older
+                       WHERE older.integration_id = d.integration_id AND older.state = 'queued'
+                         AND (older.received_at, older.delivery_id) < (d.received_at, d.delivery_id)))
+                 ORDER BY d.next_attempt_at
                  LIMIT $3
-                 FOR UPDATE SKIP LOCKED
+                 FOR UPDATE OF d SKIP LOCKED
              ), claimed AS (
                  UPDATE webhook_gateway_deliveries d
                  SET attempts = d.attempts + 1, next_attempt_at = $2
@@ -532,7 +581,7 @@ impl Store for PostgresStore {
                            d.received_at, d.attempts
              )
              SELECT c.integration_id, c.delivery_id, c.event_type, c.body, c.received_at,
-                    c.attempts, i.provider
+                    c.attempts, i.provider, i.message_expr, i.group_key_expr, i.group_key_action
              FROM claimed c
              JOIN webhook_gateway_integrations i ON i.id = c.integration_id",
         )
@@ -545,10 +594,13 @@ impl Store for PostgresStore {
         .map(|row| {
             let provider: String = row.try_get("provider")?;
             Ok(ClaimedDelivery {
+                group_key_expr: row.try_get("group_key_expr")?,
+                group_key_action: row.try_get("group_key_action")?,
                 integration_id: row.try_get("integration_id")?,
                 delivery_id: row.try_get("delivery_id")?,
                 provider: Provider::parse(&provider)
                     .ok_or(StoreError::Invalid("unknown provider stored"))?,
+                message_expr: row.try_get("message_expr")?,
                 event_type: row.try_get("event_type")?,
                 body: row.try_get("body")?,
                 received_at: row.try_get("received_at")?,

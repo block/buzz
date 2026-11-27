@@ -1,8 +1,8 @@
 use super::*;
 use crate::signer::GatewayKeySigner;
 use crate::store::{
-    DeliveryState, Evaluated, FanoutOutcome, MemoryStore, MessageKey, Mutation, NewDelivery,
-    NewMessage, Operation, Provider, SubscriptionStore,
+    DeliveryState, Evaluated, FanoutOutcome, IntegrationConfig, MemoryStore, MessageKey, Mutation,
+    NewDelivery, NewMessage, Operation, Provider, SubscriptionStore,
 };
 use async_trait::async_trait;
 use chrono::TimeZone;
@@ -16,6 +16,7 @@ fn t0() -> DateTime<Utc> {
 
 fn claimed(attempts: i32, subscription_id: Uuid) -> ClaimedMessage {
     ClaimedMessage {
+        target: None,
         key: MessageKey {
             integration_id: Uuid::nil(),
             delivery_id: "d-1".to_owned(),
@@ -189,6 +190,7 @@ async fn seeded_store() -> (Arc<MemoryStore>, MessageKey) {
                 mutation: Mutation::PutIntegration {
                     community_host: "acme.communities.example.org".to_owned(),
                     provider: Provider::Github,
+                    config: IntegrationConfig::default(),
                 },
             },
             t0(),
@@ -213,6 +215,7 @@ async fn seeded_store() -> (Arc<MemoryStore>, MessageKey) {
         .unwrap();
     let subscription_id = Uuid::new_v4();
     let message = NewMessage {
+        group: None,
         subscription_id,
         channel_id: Uuid::from_u128(7),
         content: Ok("github: push".to_owned()),

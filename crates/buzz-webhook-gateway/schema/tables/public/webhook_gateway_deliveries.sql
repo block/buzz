@@ -16,3 +16,4 @@ CREATE TABLE webhook_gateway_deliveries (
 );
 CREATE INDEX webhook_gateway_deliveries_due ON webhook_gateway_deliveries (next_attempt_at) WHERE state = 'queued';
 CREATE INDEX webhook_gateway_deliveries_retention ON webhook_gateway_deliveries (completed_at) WHERE state <> 'queued';
+CREATE INDEX webhook_gateway_deliveries_pending_order ON webhook_gateway_deliveries (integration_id, received_at, delivery_id) WHERE state = 'queued';

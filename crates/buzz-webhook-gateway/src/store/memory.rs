@@ -43,6 +43,8 @@ impl StoredDelivery {
 /// A message row as the memory store holds it; exposed for tests only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredMessage {
+    group: Option<(String, super::GroupKeyAction)>,
+    position: i64,
     pub channel_id: Uuid,
     pub content: String,
     pub state: DeliveryState,
@@ -56,7 +58,15 @@ pub struct StoredMessage {
 }
 
 #[derive(Default)]
+struct MessageGroup {
+    last_position: i64,
+    root_event_id: Option<String>,
+    last_signed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Default)]
 struct MemoryState {
+    groups: HashMap<String, MessageGroup>,
     integrations: HashMap<Uuid, Integration>,
     secrets: HashMap<Uuid, Vec<IntegrationSecret>>,
     operations: HashMap<Uuid, AppliedOperation>,
@@ -264,6 +274,17 @@ impl Store for MemoryStore {
             .iter()
             .filter(|(_, d)| d.state == DeliveryState::Queued)
             .filter(|(_, d)| d.next_attempt_at.is_some_and(|at| at <= now))
+            .filter(|((id, delivery_id), d)| {
+                s.integrations
+                    .get(id)
+                    .is_none_or(|i| i.config.group_key_expr.is_none())
+                    || !s.deliveries.iter().any(|((other, other_id), older)| {
+                        other == id
+                            && older.state == DeliveryState::Queued
+                            && (older.delivery.received_at, other_id)
+                                < (d.delivery.received_at, delivery_id)
+                    })
+            })
             .map(|(key, _)| key.clone())
             .collect();
         due.sort_by(|a, b| {
@@ -285,6 +306,9 @@ impl Store for MemoryStore {
                 integration_id: key.0,
                 delivery_id: key.1.clone(),
                 provider: integration.provider,
+                message_expr: integration.config.message_expr,
+                group_key_expr: integration.config.group_key_expr,
+                group_key_action: integration.config.group_key_action,
                 event_type: row.delivery.event_type.clone(),
                 body: row.delivery.body.clone(),
                 received_at: row.delivery.received_at,
@@ -407,7 +431,18 @@ impl SubscriptionStore for MemoryStore {
                 subscription_id: message.subscription_id,
             };
             let (state, content, error) = initial_message_state(&message);
+            let group = message
+                .group
+                .clone()
+                .filter(|_| state == DeliveryState::Queued);
+            let position = group.as_ref().map_or(0, |(id, _)| {
+                let group = s.groups.entry(id.clone()).or_default();
+                group.last_position += 1;
+                group.last_position
+            });
             let stored = StoredMessage {
+                group,
+                position,
                 channel_id: message.channel_id,
                 content: content.to_owned(),
                 state,
@@ -436,6 +471,23 @@ impl SubscriptionStore for MemoryStore {
             .iter()
             .filter(|(_, m)| m.state == DeliveryState::Queued)
             .filter(|(_, m)| m.next_attempt_at.is_some_and(|at| at <= now))
+            .filter(|(_, m)| {
+                m.group.as_ref().is_none_or(|(id, action)| {
+                    let blocked = s.messages.values().any(|other| {
+                        other.state == DeliveryState::Queued
+                            && other.position < m.position
+                            && other
+                                .group
+                                .as_ref()
+                                .is_some_and(|(other_id, _)| other_id == id)
+                    });
+                    !blocked
+                        && (*action != super::GroupKeyAction::UpdateMessage
+                            || s.groups[id]
+                                .last_signed_at
+                                .is_none_or(|last| last.timestamp() < now.timestamp()))
+                })
+            })
             .map(|(key, m)| (m.next_attempt_at, key.clone()))
             .collect();
         due.sort();
@@ -449,6 +501,12 @@ impl SubscriptionStore for MemoryStore {
             else {
                 continue;
             };
+            let target = s.messages[&key].group.as_ref().and_then(|(id, action)| {
+                s.groups[id]
+                    .root_event_id
+                    .clone()
+                    .map(|root| (*action, root))
+            });
             let Some(row) = s.messages.get_mut(&key) else {
                 continue;
             };
@@ -456,6 +514,7 @@ impl SubscriptionStore for MemoryStore {
             row.next_attempt_at = Some(now + lease);
             let signed_at = *row.signed_at.get_or_insert(now);
             claimed.push(ClaimedMessage {
+                target,
                 community_host: host,
                 channel_id: row.channel_id,
                 content: row.content.clone(),
@@ -486,10 +545,18 @@ impl SubscriptionStore for MemoryStore {
         match outcome {
             ForwardOutcome::Accepted { event_id } => {
                 row.state = DeliveryState::Accepted;
-                row.event_id = Some(event_id);
+                row.event_id = Some(event_id.clone());
                 row.completed_at = Some(now);
                 row.next_attempt_at = None;
                 row.last_error = None;
+                if let Some((id, _)) = row.group.clone() {
+                    let group = s
+                        .groups
+                        .get_mut(&id)
+                        .ok_or(StoreError::Invalid("missing message group"))?;
+                    group.root_event_id.get_or_insert(event_id);
+                    group.last_signed_at = Some(message.signed_at);
+                }
             }
             ForwardOutcome::Failed { event_id, error } => {
                 row.state = DeliveryState::Failed;

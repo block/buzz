@@ -1,17 +1,16 @@
 # buzz-webhook-gateway
 
 Receives webhooks from providers (GitHub, PagerDuty, Sentry, incident.io),
-verifies them, and posts one kind-9 message to each Buzz channel whose
-subscription matches.
+verifies them, and delivers them to each Buzz channel whose subscription matches.
 
 ```text
 provider ──POST /webhooks/{integration}──▶ intake: Host check, HMAC, dedupe
                                               │ webhook_gateway_deliveries
                                               ▼
-                                           fan-out: CEL filter + message template
+                                           fan-out: CEL filter + message expression
                                               │ webhook_gateway_messages
                                               ▼
-                                           forwarder: sign kind 9, POST {scheme}://{community_host}/events
+                                           forwarder: sign message, reply or edit, POST {scheme}://{community_host}/events
 ```
 
 Integrations, their secrets and subscriptions are written through the
@@ -126,20 +125,38 @@ mgmt() { # METHOD PATH [JSON]
 
 INTEGRATION=$(uuidgen | tr A-Z a-z)
 openssl rand -hex 20 > $GW/github.secret
-mgmt PUT /v1/integrations/$INTEGRATION \
-  "{\"operation_id\":\"$(uuidgen | tr A-Z a-z)\",\"revision\":1,\"community_host\":\"localhost\",\"provider\":\"github\"}"
+mgmt PUT /v1/integrations/$INTEGRATION "$(jq -nc --arg op $(uuidgen | tr A-Z a-z) '{
+  operation_id: $op, revision: 1, community_host: "localhost", provider: "github",
+  message_expr: "\"PR #\" + string(payload.number) + \" opened: \" + payload.pull_request.title"}')"
 mgmt PUT /v1/integrations/$INTEGRATION/secret \
   "{\"operation_id\":\"$(uuidgen | tr A-Z a-z)\",\"revision\":2,\"secret\":\"$(cat $GW/github.secret)\",\"grace_seconds\":0}"
 mgmt PUT /v1/integrations/$INTEGRATION/subscriptions/$(uuidgen | tr A-Z a-z) "$(jq -nc --arg c $CHANNEL '{
   revision: 1, channel_id: $c,
-  filter: "event.type == \"pull_request.opened\"",
-  message_template: "\"PR #\" + string(payload.number) + \" opened: \" + payload.pull_request.title"}')"
+  filter: "event.type == \"pull_request.opened\""}')"
 ```
 
-`filter` and `message_template` are CEL over `event` (`provider` and `type`,
-for example `pull_request.opened`) and `payload` (the webhook body). Both are
-optional. Without a filter, every delivery matches. Without a template, the
-message is `<provider>: <type>`.
+The integration's `message_expr` and each subscription's `filter` are CEL
+over `event` (`provider` and `type`, for example `pull_request.opened`) and
+`payload` (the webhook body). Both are optional. Without a filter, every
+delivery matches. Every matching subscription posts the integration's message;
+without a message expression, it is `<provider>: <type>`.
+
+An integration also stores `delivery_mode` (`channel_subscriptions`, the
+default, or `caller_selects_channel`, which requires `channel_expr`),
+`message_data_expr`, `group_key_expr` and `group_key_action`. For deliveries
+with the same group key in the same channel, `reply_in_thread` (the default)
+selects a reply in the original thread and `update_message` selects an edit
+to the original message. For example, a PagerDuty integration can set
+`group_key_expr` to `payload.event.data.id` to group an incident's lifecycle.
+The first successful delivery starts the thread. Subsequent deliveries with
+that key target its original message. Each integration and channel has its
+own groups. Idle groups expire after the gateway retention period (14 days by
+default). Omitting `group_key_expr` posts each match as a new message.
+
+The worker currently routes via subscriptions and renders `message_expr`.
+Routing by `channel_expr` and rendering `message_data_expr` are still pending.
+When upgrading, drain workers that predate grouping before enabling grouped
+delivery. Those workers send queued messages as top-level posts.
 
 ### 7. Send a webhook
 
@@ -167,7 +184,7 @@ mgmt GET /v1/integrations/$INTEGRATION/deliveries | jq '.deliveries[0] | {state,
 
 The channel shows `PR #42 opened: Fix the build`. The delivery reports
 `messages: {queued, accepted, failed}`. A message the relay refused, or whose
-template failed, is counted as failed; its error is in
+message expression failed, is counted as failed; its error is in
 `webhook_gateway_messages.last_error`:
 
 ```bash

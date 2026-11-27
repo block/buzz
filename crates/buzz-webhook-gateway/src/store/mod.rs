@@ -1,7 +1,12 @@
 //! Durable gateway state behind a trait, so the HTTP surface is tested against
 //! an in-memory reference store and production runs on Postgres.
+#[cfg(test)]
+pub(crate) mod grouping_tests;
+mod integration_config;
 mod memory;
 mod subscriptions;
+
+pub use integration_config::{DeliveryMode, GroupKeyAction, IntegrationConfig};
 
 pub use memory::{MemoryStore, StoredDelivery, StoredMessage};
 pub(crate) use subscriptions::initial_state as initial_message_state;
@@ -58,6 +63,7 @@ pub struct Integration {
     pub id: Uuid,
     pub community_host: String,
     pub provider: Provider,
+    pub config: IntegrationConfig,
     pub revision: i64,
     pub enabled: bool,
     pub disabled_at: Option<DateTime<Utc>>,
@@ -93,9 +99,12 @@ impl IntegrationSecret {
 /// and the integration revision it produces; the store applies it at most once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mutation {
+    /// Create or replace. The config's expressions are checked by the
+    /// caller before this.
     PutIntegration {
         community_host: String,
         provider: Provider,
+        config: IntegrationConfig,
     },
     PutSecret {
         key_id: String,
@@ -129,11 +138,14 @@ impl Operation {
             Mutation::PutIntegration {
                 community_host,
                 provider,
+                config,
             } => {
                 hasher.update(b"put_integration\0");
                 hasher.update(community_host.as_bytes());
                 hasher.update(b"\0");
                 hasher.update(provider.as_str().as_bytes());
+                hasher.update(b"\0");
+                config.fingerprint(&mut hasher);
             }
             Mutation::PutSecret { grace, .. } => {
                 hasher.update(b"put_secret\0");
@@ -331,6 +343,8 @@ pub struct IntegrationView {
     pub id: Uuid,
     pub community_host: String,
     pub provider: Provider,
+    #[serde(flatten)]
+    pub config: IntegrationConfig,
     pub revision: i64,
     pub enabled: bool,
     pub has_secret: bool,
@@ -365,6 +379,7 @@ impl IntegrationView {
             id: integration.id,
             community_host: integration.community_host.clone(),
             provider: integration.provider,
+            config: integration.config.clone(),
             revision: integration.revision,
             enabled: integration.enabled,
             has_secret,
@@ -452,12 +467,14 @@ pub fn transition(
             Mutation::PutIntegration {
                 community_host,
                 provider,
+                config,
             },
             existing,
         ) => Integration {
             id: operation.integration_id,
             community_host: community_host.clone(),
             provider: *provider,
+            config: config.clone(),
             revision: operation.revision,
             enabled: existing.as_ref().is_none_or(|e| e.enabled),
             disabled_at: existing.as_ref().and_then(|e| e.disabled_at),
@@ -508,12 +525,17 @@ pub fn transition(
 }
 
 /// A queued delivery the fan-out stage has leased, joined with its
-/// integration's provider. `attempts` already counts this attempt.
+/// integration's provider and message expression. `attempts` already counts
+/// this attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimedDelivery {
+    pub group_key_expr: Option<String>,
+    pub group_key_action: GroupKeyAction,
     pub integration_id: Uuid,
     pub delivery_id: String,
     pub provider: Provider,
+    /// The integration's message expression when the delivery was claimed.
+    pub message_expr: Option<String>,
     pub event_type: String,
     pub body: Vec<u8>,
     pub received_at: DateTime<Utc>,

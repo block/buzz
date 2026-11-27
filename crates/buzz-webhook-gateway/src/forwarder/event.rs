@@ -1,6 +1,6 @@
-//! The kind-9 event a queued message becomes.
+//! Nostr events for queued messages, thread replies and edits.
 use crate::config::RelayScheme;
-use crate::store::ClaimedMessage;
+use crate::store::{ClaimedMessage, GroupKeyAction};
 use nostr::Url;
 use nostr::{Event, EventBuilder, EventId, Kind, NostrSigner, PublicKey, Tag, TagKind, Timestamp};
 use sha2::{Digest, Sha256};
@@ -30,7 +30,18 @@ pub fn message_tag(message: &ClaimedMessage) -> String {
 
 fn builder(message: &ClaimedMessage) -> EventBuilder {
     let created_at = u64::try_from(message.signed_at.timestamp()).unwrap_or(0);
-    EventBuilder::new(CHANNEL_MESSAGE_KIND, &message.content)
+    let event = match &message.target {
+        None => EventBuilder::new(CHANNEL_MESSAGE_KIND, &message.content),
+        Some((GroupKeyAction::ReplyInThread, root)) => {
+            EventBuilder::new(CHANNEL_MESSAGE_KIND, &message.content)
+                .tag(Tag::custom(TagKind::e(), [root.as_str(), "", "reply"]))
+        }
+        Some((GroupKeyAction::UpdateMessage, root)) => {
+            EventBuilder::new(Kind::Custom(40003), &message.content)
+                .tag(Tag::custom(TagKind::e(), [root.as_str()]))
+        }
+    };
+    event
         .tag(Tag::custom(TagKind::h(), [message.channel_id.to_string()]))
         .tag(Tag::custom(
             TagKind::custom(MESSAGE_TAG),
@@ -39,7 +50,7 @@ fn builder(message: &ClaimedMessage) -> EventBuilder {
         .custom_created_at(Timestamp::from_secs(created_at))
 }
 
-/// Build the signed kind-9 event for a claimed message.
+/// Build the signed relay event for a claimed message.
 ///
 /// `created_at` is the message's `signed_at`, so every attempt by one author
 /// within a stamp produces the same event id, and the relay treats a resend

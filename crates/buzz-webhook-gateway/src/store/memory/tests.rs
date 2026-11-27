@@ -1,5 +1,5 @@
 use super::*;
-use crate::store::{DeliveryCursor, Mutation, NewMessage, Provider};
+use crate::store::{DeliveryCursor, IntegrationConfig, Mutation, NewMessage, Provider};
 
 fn at(secs: i64) -> DateTime<Utc> {
     DateTime::from_timestamp(1_700_000_000 + secs, 0).unwrap()
@@ -13,6 +13,7 @@ fn put(integration_id: Uuid, revision: i64) -> Operation {
         mutation: Mutation::PutIntegration {
             community_host: "acme.communities.example.org".into(),
             provider: Provider::Github,
+            config: IntegrationConfig::default(),
         },
     }
 }
@@ -124,6 +125,7 @@ async fn claims_lease_due_rows_oldest_first_and_hide_them_until_the_lease_ends()
                 mutation: Mutation::PutIntegration {
                     community_host: "acme.communities.example.org".into(),
                     provider: Provider::Github,
+                    config: IntegrationConfig::default(),
                 },
             },
             at(0),
@@ -304,7 +306,6 @@ async fn fanout_queues_messages_once_and_delete_cancels_unsent_ones() {
             change: SubscriptionChange::Put {
                 channel_id: channel,
                 filter: None,
-                message_template: None,
             },
         };
         assert!(matches!(
@@ -322,7 +323,6 @@ async fn fanout_queues_messages_once_and_delete_cancels_unsent_ones() {
                     change: SubscriptionChange::Put {
                         channel_id: channel,
                         filter: None,
-                        message_template: None,
                     },
                 },
                 at(1),
@@ -346,11 +346,13 @@ async fn fanout_queues_messages_once_and_delete_cancels_unsent_ones() {
         .unwrap();
     let messages = vec![
         NewMessage {
+            group: None,
             subscription_id: sub_a,
             channel_id: channel,
             content: Ok("hello".into()),
         },
         NewMessage {
+            group: None,
             subscription_id: sub_b,
             channel_id: channel,
             content: Err("filter failed".into()),

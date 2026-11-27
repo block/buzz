@@ -6,7 +6,7 @@
 //!        ▼
 //!   MessageSigner::signer_for(target) ── the author of the message
 //!        │
-//!        ├─ signed_at fresh ── build kind 9 at signed_at: the same id on
+//!        ├─ signed_at fresh ── build event at signed_at: the same id on
 //!        │                     every retry, so the relay dedupes a resend
 //!        │
 //!        └─ signed_at stale ── the relay would refuse it, so ask whether an

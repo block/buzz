@@ -2,15 +2,16 @@
 //!
 //! ```text
 //!   delivery (queued) ── fan-out: evaluate each live subscription's filter
-//!        │                and render its message, then in one transaction,
+//!        │                and render the integration's message, then in one
+//!        │                transaction,
 //!        │                if those are still the live subscriptions:
 //!        ▼
 //!   delivery → accepted, payload dropped
-//!   one message row per matching subscription (queued, or failed when the
-//!   subscription's program errored)
+//!   one message row per matching subscription (queued, or failed when its
+//!   filter or the integration's message expression errored)
 //!        │
 //!        ▼
-//!   sender: kind-9 event to the subscription's channel on the community relay
+//!   sender: signed message or edit to the subscription's channel on the community relay
 //! ```
 //!
 //! Every settlement names the attempt it claimed, so a worker whose lease
@@ -38,8 +39,6 @@ pub struct Subscription {
     pub channel_id: Uuid,
     /// CEL filter source; `None` matches every delivery.
     pub filter: Option<String>,
-    /// CEL message template source; `None` renders the default message.
-    pub message_template: Option<String>,
     pub revision: i64,
     pub deleted_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -60,7 +59,6 @@ pub struct SubscriptionView {
     pub integration_id: Uuid,
     pub channel_id: Uuid,
     pub filter: Option<String>,
-    pub message_template: Option<String>,
     pub revision: i64,
     pub deleted: bool,
     pub updated_at: DateTime<Utc>,
@@ -73,7 +71,6 @@ impl From<&Subscription> for SubscriptionView {
             integration_id: s.integration_id,
             channel_id: s.channel_id,
             filter: s.filter.clone(),
-            message_template: s.message_template.clone(),
             revision: s.revision,
             deleted: !s.is_live(),
             updated_at: s.updated_at,
@@ -84,11 +81,10 @@ impl From<&Subscription> for SubscriptionView {
 /// What a subscription write does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubscriptionChange {
-    /// Create or replace. Programs are checked by the caller before this.
+    /// Create or replace. The filter is checked by the caller before this.
     Put {
         channel_id: Uuid,
         filter: Option<String>,
-        message_template: Option<String>,
     },
     /// Tombstone the subscription and fail its unsent messages.
     Delete,
@@ -150,14 +146,7 @@ pub fn write_transition(
             existing.updated_at = now;
             WriteOutcome::Applied(existing)
         }
-        (
-            SubscriptionChange::Put {
-                channel_id,
-                filter,
-                message_template,
-            },
-            existing,
-        ) => {
+        (SubscriptionChange::Put { channel_id, filter }, existing) => {
             let was_live = existing.as_ref().is_some_and(Subscription::is_live);
             if !was_live && live_count >= MAX_SUBSCRIPTIONS_PER_INTEGRATION {
                 return WriteOutcome::LimitReached;
@@ -167,7 +156,6 @@ pub fn write_transition(
                 integration_id: write.integration_id,
                 channel_id: *channel_id,
                 filter: filter.clone(),
-                message_template: message_template.clone(),
                 revision: write.revision,
                 deleted_at: None,
                 created_at: existing
@@ -182,15 +170,8 @@ pub fn write_transition(
 fn repeats(current: &Subscription, change: &SubscriptionChange) -> bool {
     match change {
         SubscriptionChange::Delete => !current.is_live(),
-        SubscriptionChange::Put {
-            channel_id,
-            filter,
-            message_template,
-        } => {
-            current.is_live()
-                && current.channel_id == *channel_id
-                && current.filter == *filter
-                && current.message_template == *message_template
+        SubscriptionChange::Put { channel_id, filter } => {
+            current.is_live() && current.channel_id == *channel_id && current.filter == *filter
         }
     }
 }
@@ -198,9 +179,12 @@ fn repeats(current: &Subscription, change: &SubscriptionChange) -> bool {
 /// One subscription's share of a fanned-out delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewMessage {
+    /// Channel- and integration-scoped digest of the evaluated group key, and its action.
+    pub group: Option<(String, super::GroupKeyAction)>,
     pub subscription_id: Uuid,
     pub channel_id: Uuid,
-    /// The rendered message text, or why the subscription's programs failed.
+    /// The rendered message text, or why the filter or message expression
+    /// failed.
     /// A failed message is stored terminal so the failure stays visible.
     pub content: Result<String, String>,
 }
@@ -266,6 +250,8 @@ pub struct MessageKey {
 /// `attempts` already counts this attempt and fences its settlement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimedMessage {
+    /// Action and accepted root event for a follow-up in this group.
+    pub target: Option<(super::GroupKeyAction, String)>,
     pub key: MessageKey,
     pub community_host: String,
     pub channel_id: Uuid,
@@ -369,7 +355,6 @@ mod tests {
             change: SubscriptionChange::Put {
                 channel_id: channel,
                 filter: None,
-                message_template: None,
             },
         }
     }

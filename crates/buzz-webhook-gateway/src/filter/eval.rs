@@ -1,13 +1,13 @@
-//! Evaluating checked programs against a delivery, within a [`Budget`].
+//! Evaluating checked expressions against a delivery, within a [`Budget`].
 //!
-//! A program's cost is bounded three ways: its syntax tree by compile
+//! An expression's cost is bounded three ways: its syntax tree by compile
 //! ([`MAX_EXPRESSION_BYTES`](super::MAX_EXPRESSION_BYTES) and the depth
 //! limit), its loops by the budget's iteration count and time, which the
 //! interpreter checks on every comprehension iteration, and a message
-//! template's result by the budget's output size. Without loops, a program's work is bounded by its
+//! expression's result by the budget's output size. Without loops, an expression's work is bounded by its
 //! size and the payload's.
 //!
-//! The time limit also bounds memory: a program that copies the payload on
+//! The time limit also bounds memory: an expression that copies the payload on
 //! each iteration allocates until the deadline stops it.
 
 use std::collections::HashMap;
@@ -18,34 +18,34 @@ use std::time::Duration;
 use cel::objects::{Key, Map};
 use cel::{Context, Deadline, Env, ExecutionError, Interrupt, Value};
 
-use super::{Filter, MessageTemplate, PARSE_STACK_BYTES};
+use super::{Filter, MessageExpr, PARSE_STACK_BYTES};
 
-/// Why evaluating a program failed. Each is the program's fault, or its
+/// Why evaluating an expression failed. Each is the expression's fault, or its
 /// input's, except [`EvalError::Unavailable`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EvalError {
     /// CEL raised an error, such as a missing field or no matching overload.
     #[error("{0}")]
     Failed(String),
-    /// The program ran more comprehension iterations than the budget allows.
+    /// The expression ran more comprehension iterations than the budget allows.
     #[error("expression exceeded {0} loop iterations")]
     TooManyIterations(u64),
-    /// The program ran longer than the budget allows.
+    /// The expression ran longer than the budget allows.
     #[error("expression exceeded {0:?}")]
     TimedOut(Duration),
-    /// The program returned a value of the wrong type.
+    /// The expression returned a value of the wrong type.
     #[error("expression must return {0}")]
     WrongResult(&'static str),
     /// The message is longer than the budget allows.
     #[error("message exceeds {0} bytes")]
     TooLarge(usize),
-    /// The thread that evaluates programs could not start. Not the program's
+    /// The thread that evaluates expressions could not start. Not the expression's
     /// fault.
     #[error("could not start the expression evaluator: {0}")]
     Unavailable(String),
 }
 
-/// The limits on one program's evaluation.
+/// The limits on one expression's evaluation.
 #[derive(Debug, Clone, Copy)]
 pub struct Budget {
     /// Most comprehension iterations, nested ones included.
@@ -56,7 +56,7 @@ pub struct Budget {
     pub max_output_bytes: usize,
 }
 
-/// A delivery as programs read it, converted once and shared by every
+/// A delivery as expressions read it, converted once and shared by every
 /// subscription it is evaluated for.
 #[derive(Debug, Clone)]
 pub struct Delivery {
@@ -92,8 +92,8 @@ impl Filter {
     }
 }
 
-impl MessageTemplate {
-    /// The message text this template renders for `delivery`.
+impl MessageExpr {
+    /// The message text this expression renders for `delivery`.
     pub fn render(&self, delivery: &Delivery, budget: &Budget) -> Result<String, EvalError> {
         match evaluate(self.expression(), delivery, budget)? {
             Value::String(text) if text.len() > budget.max_output_bytes => {
@@ -105,7 +105,7 @@ impl MessageTemplate {
     }
 }
 
-/// The environment every program runs in: the standard library. Its own
+/// The environment every expression runs in: the standard library. Its own
 /// iteration limit is unset; [`evaluate`]'s interrupt counts iterations
 /// against each budget instead.
 static ENV: LazyLock<Arc<Env>> = LazyLock::new(|| Arc::new(Env::stdlib()));
@@ -183,7 +183,7 @@ fn to_value(json: &serde_json::Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::{compile_filter, compile_message_template};
+    use crate::filter::{compile_filter, compile_message_expr};
     use serde_json::json;
 
     const BUDGET: Budget = Budget {
@@ -271,7 +271,7 @@ mod tests {
     fn messages_render_deliveries() {
         let delivery = delivery();
         let render = |source: &str, budget: &Budget| {
-            compile_message_template(source)
+            compile_message_expr(source)
                 .unwrap()
                 .render(&delivery, budget)
         };
