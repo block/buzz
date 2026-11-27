@@ -22,8 +22,8 @@ use opensearch::http::response::Response;
 use opensearch::http::transport::{SingleNodeConnectionPool, TransportBuilder};
 use opensearch::http::Url;
 use opensearch::indices::{
-    IndicesCreateParts, IndicesDeleteParts, IndicesExistsParts, IndicesForcemergeParts,
-    IndicesGetSettingsParts, IndicesRefreshParts,
+    IndicesCreateParts, IndicesDeleteParts, IndicesExistsParts, IndicesGetSettingsParts,
+    IndicesRefreshParts,
 };
 use opensearch::params::VersionType;
 use opensearch::{BulkOperation, BulkParts, OpenSearch, SearchParts};
@@ -130,50 +130,26 @@ pub struct AwsSigV4 {
 }
 
 impl OpenSearchConfig {
-    /// Parse OpenSearch connection settings from process environment variables.
-    ///
-    /// Reads `BUZZ_OPENSEARCH_URL`, `BUZZ_OPENSEARCH_USERNAME`,
-    /// `BUZZ_OPENSEARCH_PASSWORD`, `BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE`, and
-    /// `BUZZ_OPENSEARCH_AWS_REGION` (falling back to `AWS_REGION`, then
-    /// `AWS_DEFAULT_REGION`). Returns `Ok(None)` when `BUZZ_OPENSEARCH_URL` is
-    /// unset or empty.
-    pub fn from_env() -> Result<Option<Self>, String> {
-        Self::parse_env(|name| std::env::var(name).ok())
-    }
-
-    /// Parse OpenSearch connection settings from a custom environment lookup.
-    pub fn parse_env(get_env: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
-        let non_empty = |name: &str| {
-            get_env(name)
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        };
-        let url = non_empty("BUZZ_OPENSEARCH_URL");
-        let username = non_empty("BUZZ_OPENSEARCH_USERNAME");
-        let password = non_empty("BUZZ_OPENSEARCH_PASSWORD");
-        let service = non_empty("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE");
-        let explicit_region = non_empty("BUZZ_OPENSEARCH_AWS_REGION");
-        let aws_region = non_empty("AWS_REGION").or_else(|| non_empty("AWS_DEFAULT_REGION"));
-
-        let Some(raw_url) = url else {
+    /// Parse the OpenSearch URL and optional basic credentials: an HTTP(S) URL
+    /// without credentials, query, or fragment, and basic credentials given
+    /// both or neither. Empty values count as unset.
+    pub fn parse_parts(
+        url: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> Result<Option<Self>, String> {
+        let set = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
+        let (username, password) = (set(username), set(password));
+        let Some(raw) = set(url) else {
             if username.is_some() || password.is_some() {
                 return Err(
                     "BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD need BUZZ_OPENSEARCH_URL"
                         .into(),
                 );
             }
-            if service.is_some() {
-                return Err("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE needs BUZZ_OPENSEARCH_URL".into());
-            }
-            if explicit_region.is_some() {
-                return Err(
-                    "BUZZ_OPENSEARCH_AWS_REGION needs BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE".into(),
-                );
-            }
             return Ok(None);
         };
-
-        let parsed = Url::parse(&raw_url)
+        let parsed = Url::parse(raw.trim())
             .map_err(|e| format!("BUZZ_OPENSEARCH_URL is not a valid URL: {e}"))?;
         if !matches!(parsed.scheme(), "http" | "https")
             || parsed.host().is_none()
@@ -184,7 +160,6 @@ impl OpenSearchConfig {
         {
             return Err("BUZZ_OPENSEARCH_URL must be an HTTP(S) URL without credentials, query, or fragment; set BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD for basic auth".into());
         }
-
         let basic_auth = match (username, password) {
             (Some(username), Some(password)) => Some((username, password)),
             (None, None) => None,
@@ -195,36 +170,82 @@ impl OpenSearchConfig {
                 );
             }
         };
-
-        let aws_sigv4 = match service {
-            None => {
-                if explicit_region.is_some() {
-                    return Err(
-                        "BUZZ_OPENSEARCH_AWS_REGION needs BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE".into(),
-                    );
-                }
-                None
-            }
-            Some(service) => {
-                if !matches!(service.as_str(), "es" | "aoss") {
-                    return Err("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE must be es (a managed domain) or aoss (a Serverless collection)".into());
-                }
-                if basic_auth.is_some() {
-                    return Err("set BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE or BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD, not both".into());
-                }
-                let Some(region) = explicit_region.or(aws_region) else {
-                    return Err("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE needs a region: set BUZZ_OPENSEARCH_AWS_REGION or AWS_REGION".into());
-                };
-                Some(AwsSigV4 { service, region })
-            }
-        };
-
         Ok(Some(Self {
             url: parsed.to_string(),
             basic_auth,
-            aws_sigv4,
+            aws_sigv4: None,
             index_prefix: DEFAULT_INDEX_PREFIX.to_string(),
         }))
+    }
+
+    /// Add AWS SigV4 request signing to the OpenSearch settings.
+    /// `BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE` turns it on and names the signing
+    /// service: `es` for a managed domain, `aoss` for a Serverless collection.
+    /// The region is `BUZZ_OPENSEARCH_AWS_REGION`, or else the AWS
+    /// environment's own (`aws_region`). Empty values count as unset.
+    ///
+    /// Signing replaces basic auth, so the two together are refused, as is
+    /// signing without a region.
+    pub fn with_aws_sigv4(
+        opensearch: Option<Self>,
+        service: Option<String>,
+        region: Option<String>,
+        aws_region: Option<String>,
+    ) -> Result<Option<Self>, String> {
+        let set = |value: Option<String>| {
+            value
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+        let (service, region) = (set(service), set(region));
+        let Some(service) = service else {
+            if region.is_some() {
+                return Err(
+                    "BUZZ_OPENSEARCH_AWS_REGION needs BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE".into(),
+                );
+            }
+            return Ok(opensearch);
+        };
+        let Some(mut opensearch) = opensearch else {
+            return Err("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE needs BUZZ_OPENSEARCH_URL".into());
+        };
+        if !matches!(service.as_str(), "es" | "aoss") {
+            return Err("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE must be es (a managed domain) or aoss (a Serverless collection)".into());
+        }
+        if opensearch.basic_auth.is_some() {
+            return Err("set BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE or BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD, not both".into());
+        }
+        let Some(region) = region.or(set(aws_region)) else {
+            return Err("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE needs a region: set BUZZ_OPENSEARCH_AWS_REGION or AWS_REGION".into());
+        };
+        opensearch.aws_sigv4 = Some(AwsSigV4 { service, region });
+        Ok(Some(opensearch))
+    }
+
+    /// Parse OpenSearch connection settings from process environment variables.
+    ///
+    /// Reads `BUZZ_OPENSEARCH_URL`, `BUZZ_OPENSEARCH_USERNAME`,
+    /// `BUZZ_OPENSEARCH_PASSWORD`, `BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE`, and
+    /// `BUZZ_OPENSEARCH_AWS_REGION` (falling back to `AWS_REGION`, then
+    /// `AWS_DEFAULT_REGION`). Returns `Ok(None)` when `BUZZ_OPENSEARCH_URL` is
+    /// unset or empty.
+    pub fn from_env() -> Result<Option<Self>, String> {
+        let env = |name: &str| std::env::var(name).ok();
+        let opensearch = Self::parse_parts(
+            env("BUZZ_OPENSEARCH_URL"),
+            env("BUZZ_OPENSEARCH_USERNAME"),
+            env("BUZZ_OPENSEARCH_PASSWORD"),
+        )?;
+        let aws_region = match env("AWS_REGION") {
+            Some(region) if !region.trim().is_empty() => Some(region),
+            _ => env("AWS_DEFAULT_REGION"),
+        };
+        Self::with_aws_sigv4(
+            opensearch,
+            env("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE"),
+            env("BUZZ_OPENSEARCH_AWS_REGION"),
+            aws_region,
+        )
     }
 }
 
@@ -719,32 +740,6 @@ impl SearchIndex {
             .as_u64()
             .ok_or_else(|| SearchError::Engine("missing hit total in purge count".into()))
     }
-
-    /// Ask a self-hosted or managed cluster to expunge deleted documents from
-    /// index segments (`_forcemerge?only_expunge_deletes=true`).
-    ///
-    /// Returns `Ok(false)` without making a request on Amazon OpenSearch
-    /// Serverless (`aoss`), which does not expose `_forcemerge`, or when the
-    /// index does not exist.
-    pub async fn expunge_deletes(&self) -> Result<bool, SearchError> {
-        if self.is_serverless || self.missing().await? {
-            return Ok(false);
-        }
-        let response = self
-            .client
-            .indices()
-            .forcemerge(IndicesForcemergeParts::Index(&[&self.alias]))
-            .only_expunge_deletes(true)
-            .request_timeout(BULK_TIMEOUT)
-            .send()
-            .await
-            .map_err(transport_error)?;
-        let body = checked(response).await?;
-        if body["_shards"]["failed"].as_u64().unwrap_or(0) > 0 {
-            return Err(SearchError::Engine("expunge deletes shards failed".into()));
-        }
-        Ok(true)
-    }
 }
 
 /// Settings, mapping and alias of a new index.
@@ -1025,78 +1020,5 @@ mod tests {
             request_ranges([4, 4, 4, 9, 1].into_iter(), 8),
             [0..2, 2..3, 3..4, 4..5]
         );
-    }
-
-    #[test]
-    fn parse_env_handles_unset_basic_auth_and_sigv4() {
-        let from_pairs = |pairs: &[(&str, &str)]| {
-            OpenSearchConfig::parse_env(|name| {
-                pairs
-                    .iter()
-                    .find(|(key, _)| *key == name)
-                    .map(|(_, value)| (*value).to_string())
-            })
-        };
-
-        assert!(from_pairs(&[]).expect("unset").is_none());
-
-        let basic = from_pairs(&[
-            ("BUZZ_OPENSEARCH_URL", "http://localhost:9200"),
-            ("BUZZ_OPENSEARCH_USERNAME", "admin"),
-            ("BUZZ_OPENSEARCH_PASSWORD", "secret"),
-        ])
-        .expect("basic auth")
-        .expect("some");
-        assert_eq!(basic.url, "http://localhost:9200/");
-        assert_eq!(basic.basic_auth, Some(("admin".into(), "secret".into())));
-        assert!(basic.aws_sigv4.is_none());
-        assert!(!SearchIndex::new(&basic).expect("index").is_serverless());
-
-        let aoss = from_pairs(&[
-            (
-                "BUZZ_OPENSEARCH_URL",
-                "https://example.us-west-2.aoss.amazonaws.com",
-            ),
-            ("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE", "aoss"),
-            ("AWS_REGION", "us-west-2"),
-        ])
-        .expect("aoss")
-        .expect("some");
-        assert_eq!(
-            aoss.aws_sigv4,
-            Some(AwsSigV4 {
-                service: "aoss".into(),
-                region: "us-west-2".into(),
-            })
-        );
-        assert!(SearchIndex::new(&aoss).expect("index").is_serverless());
-
-        let es = from_pairs(&[
-            (
-                "BUZZ_OPENSEARCH_URL",
-                "https://example.us-east-1.es.amazonaws.com",
-            ),
-            ("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE", "es"),
-            ("BUZZ_OPENSEARCH_AWS_REGION", "us-east-1"),
-        ])
-        .expect("es")
-        .expect("some");
-        assert!(!SearchIndex::new(&es).expect("index").is_serverless());
-
-        assert!(from_pairs(&[("BUZZ_OPENSEARCH_USERNAME", "admin")]).is_err());
-        assert!(from_pairs(&[("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE", "aoss")]).is_err());
-        assert!(from_pairs(&[
-            ("BUZZ_OPENSEARCH_URL", "https://example.org"),
-            ("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE", "aoss"),
-        ])
-        .is_err());
-        assert!(from_pairs(&[
-            ("BUZZ_OPENSEARCH_URL", "https://example.org"),
-            ("BUZZ_OPENSEARCH_USERNAME", "admin"),
-            ("BUZZ_OPENSEARCH_PASSWORD", "secret"),
-            ("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE", "aoss"),
-            ("AWS_REGION", "us-east-1"),
-        ])
-        .is_err());
     }
 }

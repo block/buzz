@@ -240,15 +240,6 @@ impl Indexer {
                 "search indexer drained the outbox"
             );
         }
-        if report.removed > 0 && result.is_ok() && !self.index.is_serverless() {
-            if let Err(error) = self.index.expunge_deletes().await {
-                warn!(
-                    error = %error.kind(),
-                    removed = report.removed,
-                    "search index expunge_deletes failed after drain"
-                );
-            }
-        }
         result.map(|()| report)
     }
 

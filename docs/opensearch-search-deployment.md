@@ -11,7 +11,7 @@ messages stored before it was set. Searches still run on Postgres.
 | `BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE` | Optional AWS SigV4 request signing, for Amazon OpenSearch Service: `es` for a managed domain, `aoss` for a Serverless collection. Unset turns signing off. Not combined with basic auth. |
 | `BUZZ_OPENSEARCH_AWS_REGION` | Region to sign for. Defaults to `AWS_REGION`, then `AWS_DEFAULT_REGION`. Signing needs one of them. |
 | `BUZZ_SEARCH_INDEXER_WORKERS` | Indexer workers on the relay that holds the lease: 1 to 32, default 1. Each holds one connection from `BUZZ_DB_POOL_SIZE` for the length of a bulk request, so leave the pool room for them. |
-| `BUZZ_OPENSEARCH_PREVIEW` | Required with the URL for now, because deleting a community leaves its messages in the index. Use it only on relays without real data. |
+| `BUZZ_OPENSEARCH_PREVIEW` | Required with the URL while OpenSearch indexing is in preview (see known gaps below for late writes and Postgres failover). |
 
 ## AWS request signing
 
@@ -109,14 +109,11 @@ across communities. After the fix, verify that the queue drains.
 - **Writes applied late.** OpenSearch forgets a delete's version after 60
   seconds (`gc_deletes`), so an older write that lands later, such as a
   previous lease holder's bulk request, brings the deleted document back.
-- **Removed text on disk.** After a community purge or a drain that removes
-  documents, a self-hosted or managed cluster is asked to expunge deleted
-  documents (`_forcemerge?only_expunge_deletes=true`); OpenSearch's
-  soft-delete retention still governs when segments are physically reclaimed.
-  On OpenSearch Serverless (`aoss`), `_forcemerge` is not exposed, so
-  removed text leaves storage when the service compacts segments.
+- **Removed text on disk.** A removed document can no longer be found, but
+  its text stays in the index's files until OpenSearch merges them. The
+  relay does not force that merge.
 
-In the first two cases, a search can match text a message no longer has. Every
+In the two cases before this one, a search can match text a message no longer has. Every
 hit is re-read from Postgres before it is returned, so that text is never
 shown.
 
@@ -127,8 +124,10 @@ When OpenSearch indexing is enabled, pass the same `BUZZ_OPENSEARCH_URL`
 drain` / `run`. Community deletion fails closed if the database has a
 maintained search index and `BUZZ_OPENSEARCH_URL` is unset. During deletion,
 the executor scans and bulk-deletes the community's documents with monotonic
-versions, then verifies that zero documents remain (logging and counting
-`buzz_search_community_purge_remaining_total` if any do).
+versions, then verifies that zero documents remain (on Serverless, after a
+60-second settle window and a second purge pass so late writes become
+searchable before counting). If any documents remain, the executor logs a
+warning, records the error on the deletion request, and retries.
 
 ## Local run
 

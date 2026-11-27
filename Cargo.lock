@@ -1598,7 +1598,6 @@ dependencies = [
  "chrono",
  "clap",
  "hex",
- "metrics",
  "nostr 0.44.7",
  "redis",
  "serde",

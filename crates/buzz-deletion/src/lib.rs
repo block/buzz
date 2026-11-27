@@ -42,6 +42,10 @@ const SWEEP_UNKNOWN_KEY_SAMPLE: usize = 100;
 const LIST_PAGE_SIZE: usize = 1000;
 /// Documents deleted per OpenSearch scan/bulk page during community purge.
 const SEARCH_PURGE_PAGE_SIZE: usize = 500;
+/// Settle window on OpenSearch Serverless (`aoss`), which has no `_refresh`:
+/// covers both write-to-searchable visibility lag (measured 0.7-19s) and the
+/// ~60s `gc_deletes` version retention window before accepting a zero count.
+const SERVERLESS_VERIFICATION_SETTLE_DELAY: Duration = Duration::from_secs(60);
 const RETRY_DELAY: Duration = Duration::from_secs(30);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -1933,27 +1937,24 @@ async fn purge_search_index(
         }
         after = next_cursor;
     }
-    if deleted > 0 {
-        metrics::counter!(
-            "buzz_search_community_purge_deleted_total",
-            "community" => community.to_string(),
-        )
-        .increment(deleted);
-        if !search.is_serverless() {
-            run_guarded_external_step(services, token, expected_stage, heartbeat_lost, || async {
-                search.refresh().await.map_err(anyhow::Error::from)
-            })
-            .await?;
-            if let Err(error) = search.expunge_deletes().await {
-                tracing::warn!(
-                    %community,
-                    error = %error.kind(),
-                    "search index expunge_deletes failed after community purge"
-                );
-            }
-        }
+    if deleted > 0 && !search.is_serverless() {
+        run_guarded_external_step(services, token, expected_stage, heartbeat_lost, || async {
+            search.refresh().await.map_err(anyhow::Error::from)
+        })
+        .await?;
     }
     Ok(deleted)
+}
+
+async fn sleep_while_leased(delay: Duration, heartbeat_lost: &CancellationToken) -> Result<()> {
+    if delay.is_zero() {
+        return Ok(());
+    }
+    tokio::select! {
+        biased;
+        _ = heartbeat_lost.cancelled() => Err(DeletionLeaseLost.into()),
+        () = tokio::time::sleep(delay) => Ok(()),
+    }
 }
 
 async fn verify_search_index_absence(
@@ -1962,7 +1963,87 @@ async fn verify_search_index_absence(
     token: &LeaseToken,
     heartbeat_lost: &CancellationToken,
 ) -> Result<()> {
+    verify_search_index_absence_with_settle_delay(
+        services,
+        search,
+        token,
+        heartbeat_lost,
+        search.is_serverless(),
+        SERVERLESS_VERIFICATION_SETTLE_DELAY,
+    )
+    .await
+}
+
+async fn verify_search_index_absence_with_settle_delay(
+    services: &Services,
+    search: &SearchIndex,
+    token: &LeaseToken,
+    heartbeat_lost: &CancellationToken,
+    is_serverless: bool,
+    settle_delay: Duration,
+) -> Result<()> {
+    let missing = run_guarded_external_step(
+        services,
+        token,
+        DeletionStage::CachePurged,
+        heartbeat_lost,
+        || async { search.missing().await.map_err(anyhow::Error::from) },
+    )
+    .await?;
+    if missing {
+        return Ok(());
+    }
     let community = token.community_id;
+    if is_serverless {
+        // Serverless has no `_refresh`: an in-flight indexer batch or late bulk
+        // write can become searchable well after `PostgresPurged` scanned.
+        // Only accept a zero count taken at least `settle_delay` after the last
+        // delete, purging again before counting.
+        sleep_while_leased(settle_delay, heartbeat_lost).await?;
+        let stragglers = purge_search_index(
+            services,
+            search,
+            token,
+            DeletionStage::CachePurged,
+            heartbeat_lost,
+        )
+        .await?;
+        if stragglers > 0 {
+            tracing::warn!(
+                %community,
+                deleted = stragglers,
+                "search index verification purged straggler documents on Serverless; waiting settle window before recounting"
+            );
+            sleep_while_leased(settle_delay, heartbeat_lost).await?;
+            let more = purge_search_index(
+                services,
+                search,
+                token,
+                DeletionStage::CachePurged,
+                heartbeat_lost,
+            )
+            .await?;
+            if more > 0 {
+                tracing::warn!(
+                    %community,
+                    deleted = more,
+                    "search index verification still found documents after second Serverless purge pass"
+                );
+                return Err(transient(format!(
+                    "logical verification purged {more} late search documents for community {community}"
+                )));
+            }
+        }
+    } else {
+        run_guarded_external_step(
+            services,
+            token,
+            DeletionStage::CachePurged,
+            heartbeat_lost,
+            || async { search.refresh().await.map_err(anyhow::Error::from) },
+        )
+        .await?;
+    }
     let remaining = run_guarded_external_step(
         services,
         token,
@@ -1984,13 +2065,6 @@ async fn verify_search_index_absence(
         remaining,
         "search index verification found documents remaining after community purge"
     );
-    metrics::counter!(
-        "buzz_search_community_purge_remaining_total",
-        "community" => community.to_string(),
-    )
-    .increment(remaining);
-    // Clean up any stragglers that became visible after an async refresh
-    // (such as Serverless) so the next verification attempt proves zero.
     let _ = purge_search_index(
         services,
         search,
@@ -3758,12 +3832,55 @@ mod postgres_tests {
         verify_search_index_absence(&services, &index, &token, &heartbeat_lost)
             .await
             .expect("verification passes after straggler cleanup");
+
+        // On Serverless (no `_refresh`), verification waits the settle window,
+        // purges any late straggler, waits another settle window before
+        // recounting, and only then accepts zero.
+        let late_version = services
+            .store
+            .next_search_index_version()
+            .await
+            .expect("late version");
+        let outcome = index
+            .write(
+                target,
+                &[make_doc(10, "late serverless")],
+                &[],
+                late_version,
+            )
+            .await
+            .expect("write late serverless straggler");
+        assert!(outcome.failed.is_empty());
+        index.refresh().await.expect("refresh late straggler");
+
+        let started = std::time::Instant::now();
+        verify_search_index_absence_with_settle_delay(
+            &services,
+            &index,
+            &token,
+            &heartbeat_lost,
+            true,
+            Duration::from_millis(50),
+        )
+        .await
+        .expect("serverless verification purges straggler and settles before accepting zero");
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "serverless verification must wait settle_delay both before and after purging a straggler"
+        );
         assert_eq!(
             index
                 .count_community_documents(target)
                 .await
                 .expect("final target count"),
             0
+        );
+        assert_eq!(
+            index
+                .count_community_documents(bystander)
+                .await
+                .expect("final bystander count"),
+            1
         );
 
         index.delete().await.expect("cleanup test index");

@@ -1697,102 +1697,31 @@ fn parse_search_indexer_workers(value: Option<String>) -> Result<usize, String> 
         .ok_or_else(|| "BUZZ_SEARCH_INDEXER_WORKERS must be a whole number from 1 to 32".into())
 }
 
-/// Parse the OpenSearch settings: an HTTP(S) URL without credentials, query,
-/// or fragment, and basic credentials given both or neither. Empty values
-/// count as unset.
-///
-/// Deleting a community doesn't remove its documents from the index yet, so
-/// a URL also needs the `BUZZ_OPENSEARCH_PREVIEW` opt-in.
+/// Parse the OpenSearch settings via `buzz_search`, adding the relay's
+/// `BUZZ_OPENSEARCH_PREVIEW` opt-in gate.
 fn parse_opensearch_config(
     url: Option<String>,
     username: Option<String>,
     password: Option<String>,
     preview: bool,
 ) -> Result<Option<buzz_search::opensearch::OpenSearchConfig>, String> {
-    let set = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
-    let (username, password) = (set(username), set(password));
-    let Some(raw) = set(url) else {
-        if username.is_some() || password.is_some() {
-            return Err(
-                "BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD need BUZZ_OPENSEARCH_URL"
-                    .into(),
-            );
-        }
-        return Ok(None);
-    };
-    if !preview {
-        return Err("BUZZ_OPENSEARCH_URL needs BUZZ_OPENSEARCH_PREVIEW=true: a deleted community's messages stay in the index, so use it only on a relay without real data".into());
+    let config = buzz_search::opensearch::OpenSearchConfig::parse_parts(url, username, password)?;
+    if config.is_some() && !preview {
+        return Err("BUZZ_OPENSEARCH_URL needs BUZZ_OPENSEARCH_PREVIEW=true: OpenSearch indexing is still in preview (see known gaps for late writes and Postgres failover)".into());
     }
-    let parsed = url::Url::parse(raw.trim())
-        .map_err(|e| format!("BUZZ_OPENSEARCH_URL is not a valid URL: {e}"))?;
-    if !matches!(parsed.scheme(), "http" | "https")
-        || parsed.host().is_none()
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-    {
-        return Err("BUZZ_OPENSEARCH_URL must be an HTTP(S) URL without credentials, query, or fragment; set BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD for basic auth".into());
-    }
-    let basic_auth = match (username, password) {
-        (Some(username), Some(password)) => Some((username, password)),
-        (None, None) => None,
-        _ => {
-            return Err(
-                "set both BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD, or neither".into(),
-            )
-        }
-    };
-    Ok(Some(buzz_search::opensearch::OpenSearchConfig {
-        url: parsed.to_string(),
-        basic_auth,
-        aws_sigv4: None,
-        index_prefix: buzz_search::opensearch::DEFAULT_INDEX_PREFIX.to_string(),
-    }))
+    Ok(config)
 }
 
 /// Add AWS SigV4 request signing to the OpenSearch settings.
-/// `BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE` turns it on and names the signing
-/// service: `es` for a managed domain, `aoss` for a Serverless collection.
-/// The region is `BUZZ_OPENSEARCH_AWS_REGION`, or else the AWS environment's
-/// own (`aws_region`). Empty values count as unset.
-///
-/// Signing replaces basic auth, so the two together are refused, as is
-/// signing without a region.
 fn with_opensearch_aws_sigv4(
     opensearch: Option<buzz_search::opensearch::OpenSearchConfig>,
     service: Option<String>,
     region: Option<String>,
     aws_region: Option<String>,
 ) -> Result<Option<buzz_search::opensearch::OpenSearchConfig>, String> {
-    let set = |value: Option<String>| {
-        value
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    };
-    let (service, region) = (set(service), set(region));
-    let Some(service) = service else {
-        if region.is_some() {
-            return Err(
-                "BUZZ_OPENSEARCH_AWS_REGION needs BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE".into(),
-            );
-        }
-        return Ok(opensearch);
-    };
-    let Some(mut opensearch) = opensearch else {
-        return Err("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE needs BUZZ_OPENSEARCH_URL".into());
-    };
-    if !matches!(service.as_str(), "es" | "aoss") {
-        return Err("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE must be es (a managed domain) or aoss (a Serverless collection)".into());
-    }
-    if opensearch.basic_auth.is_some() {
-        return Err("set BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE or BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD, not both".into());
-    }
-    let Some(region) = region.or(set(aws_region)) else {
-        return Err("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE needs a region: set BUZZ_OPENSEARCH_AWS_REGION or AWS_REGION".into());
-    };
-    opensearch.aws_sigv4 = Some(buzz_search::opensearch::AwsSigV4 { service, region });
-    Ok(Some(opensearch))
+    buzz_search::opensearch::OpenSearchConfig::with_aws_sigv4(
+        opensearch, service, region, aws_region,
+    )
 }
 
 #[cfg(test)]

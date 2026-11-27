@@ -18,7 +18,6 @@ buzz-search = { workspace = true }
 chrono = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 hex = { workspace = true }
-metrics = { workspace = true }
 nostr = { workspace = true }
 redis = { workspace = true }
 serde = { workspace = true }
