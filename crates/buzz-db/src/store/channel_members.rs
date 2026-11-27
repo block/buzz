@@ -516,7 +516,6 @@ impl LockedMemberSnapshot {
             &mut self.tx,
             created_at,
             Some(channel_id),
-            &event.id,
         )
         .await?;
         // A superseded roster is deleted, not soft-deleted.

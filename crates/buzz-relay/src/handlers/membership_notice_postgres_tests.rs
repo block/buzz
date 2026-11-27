@@ -723,7 +723,15 @@ async fn scheduled_dm_commits_message_unhide_and_queue_state() {
     let value = serde_json::to_value(&event).unwrap();
     state
         .db
-        .scheduled_mutate(tenant.community(), &owner, id, None, Some(&value), due)
+        .scheduled_mutate(
+            tenant.community(),
+            &owner,
+            id,
+            None,
+            Some(&value),
+            due,
+            None,
+        )
         .await
         .unwrap();
     let mut claim = state
@@ -760,4 +768,43 @@ async fn scheduled_dm_commits_message_unhide_and_queue_state() {
         .await
         .unwrap();
     assert_eq!(queue[0].status, "sent");
+
+    let now = chrono::Utc::now().timestamp();
+    let expired = now - buzz_db::scheduled::RELEASE_WINDOW_SECS - 1;
+    let expired_event = EventBuilder::new(Kind::Custom(9), "Missed DM")
+        .tags([Tag::parse(["h", channel.as_str()]).unwrap()])
+        .custom_created_at(nostr::Timestamp::from(expired as u64))
+        .sign_with_keys(&sender)
+        .unwrap();
+    let expired_id = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO scheduled_messages(community_id,owner,id,event,event_id,send_at,next_attempt_at)
+        VALUES($1,$2,$3,$4,$5,$6,$6)")
+        .bind(tenant.community().as_uuid()).bind(owner.as_slice()).bind(expired_id)
+        .bind(serde_json::to_value(&expired_event).unwrap())
+        .bind(expired_event.id.as_bytes().as_slice()).bind(expired)
+        .execute(state.db.pool()).await.unwrap();
+
+    assert_eq!(
+        crate::api::scheduled_messages::dispatch_due(&state)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(state
+        .db
+        .get_event_by_id(tenant.community(), expired_event.id.as_bytes())
+        .await
+        .unwrap()
+        .is_none());
+    let changed = state
+        .db
+        .scheduled_list(tenant.community(), &owner)
+        .await
+        .unwrap();
+    let row = changed.iter().find(|row| row.id == expired_id).unwrap();
+    assert_eq!(row.status, "failed");
+    assert_eq!(
+        row.error.as_deref(),
+        Some(buzz_db::scheduled::MISSED_DELIVERY)
+    );
 }

@@ -1478,6 +1478,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// Database connection pool.
     pub db: Db,
+    /// This writer has durable disconnect records for pending scheduled sends.
+    pub scheduled_disconnects_installed: bool,
     /// Redis pool for readiness health checks.
     pub redis_pool: buzz_pubsub::RedisConnection,
     /// Audit event service, absent when audit logging is disabled.
@@ -1997,6 +1999,7 @@ impl AppState {
             // `build_nip_fi_command_components` in `api::nip_fi`, called from
             // `main.rs` after startup validation.  `None` is safe before that
             // call: the endpoint returns 503 when the verifier is absent.
+            scheduled_disconnects_installed: false,
             nip_fi_deny_map: None,
             nip_fi_resolver: None,
             nip_fi_command_verifier: None,

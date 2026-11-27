@@ -2476,11 +2476,10 @@ pub async fn ingest_event(
     event: Event,
     auth: IngestAuth,
 ) -> Result<IngestResult, IngestError> {
-    ingest_event_with_due_time(state, tenant, event, auth, None).await
+    ingest_event_with_claim(state, tenant, event, auth, None).await
 }
 
-/// Only a locked, admitted queue claim can authorize a late signed timestamp.
-/// Future timestamps and every other ingest/auth check remain unchanged.
+/// Store an approved scheduled event through ordinary ingest using its held claim.
 pub(crate) async fn ingest_scheduled(
     state: &Arc<AppState>,
     tenant: &TenantContext,
@@ -2495,10 +2494,10 @@ pub(crate) async fn ingest_scheduled(
     {
         return Err(IngestError::Rejected("invalid scheduled claim".into()));
     }
-    ingest_event_with_due_time(state, tenant, event, auth, Some(claim)).await
+    ingest_event_with_claim(state, tenant, event, auth, Some(claim)).await
 }
 
-async fn ingest_event_with_due_time(
+async fn ingest_event_with_claim(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     event: Event,
@@ -2715,9 +2714,7 @@ async fn ingest_event_inner(
     const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
-    if event_ts > now + MAX_TIMESTAMP_DRIFT_SECS
-        || (scheduled.is_none() && event_ts < now - MAX_TIMESTAMP_DRIFT_SECS)
-    {
+    if (event_ts - now).abs() > MAX_TIMESTAMP_DRIFT_SECS {
         return Err(IngestError::Rejected(
             "invalid: event timestamp too far from server time".into(),
         ));

@@ -97,7 +97,7 @@ async fn search_inner(
 ) -> Result<Json<Value>, Response> {
     // Admission first so the denial contract wins over request validation.
     // [FI-TRACE-HTTP-INGRESS]
-    let (tenant, pubkey) =
+    let (tenant, pubkey, _) =
         bridge::authenticate_member_post(&state, &slot, &headers, SEARCH_PATH, &body).await?;
     let (query, limit, page) = parse_request(&body).map_err(IntoResponse::into_response)?;
 

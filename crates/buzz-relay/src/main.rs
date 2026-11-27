@@ -704,6 +704,15 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         relay_keypair,
         media_storage,
     );
+    if config.scheduled_messages_enabled || config.nip_fi.mode.evaluates() {
+        app_state.scheduled_disconnects_installed =
+            app_state.db.scheduled_disconnects_installed().await?;
+        if config.scheduled_messages_enabled && !app_state.scheduled_disconnects_installed {
+            return Err(anyhow::anyhow!(
+                "scheduled delivery requires the scheduling migration"
+            ));
+        }
+    }
     // NIP-FI S4: construct deny map + command verifier from startup config,
     // before Arc::new so we can mutate app_state directly. The installer does
     // no JWKS I/O; the warm + refresh block below is the single key lifecycle

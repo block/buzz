@@ -4,8 +4,9 @@ The relay owns a durable, private queue of exact user-signed kind:9 messages.
 Delivery runs without an open client. The desktop/web composer prepares ordinary
 messages, mentions, attachments and thread tags before asking the host signer to
 sign with the selected future timestamp. No account key is stored in the queue.
-The scheduled timestamp is the event's timestamp; after an outage a late delivery
-appears at its originally selected time in event history.
+The scheduled timestamp is the event's timestamp. Delivery can retry for up to
+15 minutes. If the window passes, the queue shows a missed-delivery reason and
+the author can choose a new time.
 
 ## Enable and roll back
 
@@ -19,17 +20,15 @@ the worker does not run and NIP-11 omits `buzz-scheduled-messages-v1`.
 2. Apply migration 0109, or the matching desired-state table and indexes. The
    migration creates a table and indexes with a five-second lock timeout and a
    30-second statement timeout.
-3. Replace **every relay process sharing this writer**, with the feature still
-   off, so every replica-fence probe understands pending queue reservations.
-   Confirm that no older probe process remains, including workers and canaries.
-4. Enable the flag, then deploy clients that recognize the advertised extension.
-   Verify delivery with clients closed, queue access isolation and replica reads.
+3. Restart relay processes that receive NIP-FI disconnect commands after applying
+   the migration. Check that all of them support durable cancellations before
+   admitting federated schedules.
+4. Enable the flag and verify delivery with clients closed, queue isolation,
+   and issuer disconnects.
 
-To pause delivery, turn the flag off on every worker. Existing queue rows remain;
-when re-enabled they are rechecked and delivered late. Turning it off alone does
-not cancel work already in flight. Never downgrade to reservation-unaware probes
-while pending rows exist. Keep the reservation-aware binary deployed, or hold
-replica routing closed and explicitly resolve all queued work before downgrading.
+To pause delivery, turn the flag off on every worker. The original delivery
+deadlines still apply. Drain or cancel federated schedules before downgrading
+disconnect handlers to a version that predates durable cancellations.
 
 ## Protocol
 
@@ -83,40 +82,39 @@ connection cannot later publish. Stable event IDs deduplicate crash recovery;
 an already stored event, including a deleted event, is reconciled as sent.
 
 A failing row does not abort the rest of the sweep. Transient storage and
-access failures use exponential backoff. If a failed insert released its claim,
-the relay records backoff only for the same pending revision while it is still
-due. After 20 failed attempts, the row becomes failed and releases its replica
-reservation. Permanent refusals also stay visible as failed. Users may
-reschedule a failed item or cancel it.
+access failures use exponential backoff within the delivery window. If a failed
+insert released its claim, the relay records backoff only for the same pending
+revision while it is still due. Missed deliveries and permanent refusals are
+visible as failed rows with a reason. Users can reschedule or cancel them.
 Regular ingest side effects and fan-out remain shared. Like ordinary ingest,
 external side effects after the database commit have their existing recovery
 semantics; the queue guarantees one durable event, not exactly-once execution of
 every external consumer.
 
-## Replica completeness
+## Release window
 
-Ordinary channel writes enforce an insert-time timestamp floor of 960 seconds.
-A previously queued event may legitimately be older after downtime. Only a held
-scheduled claim may exempt its exact stored event from the floor.
+Workers publish between the signed time and 900 seconds after it. They use
+ordinary ingest and the existing database timestamp floor. The worker checks
+the deadline again on the write transaction, before committing the message and
+sent state. An already-stored message can still reconcile as sent after the
+window. The existing replica proof applies to these writes.
 
-Every reservation-aware writer probe caps its ordinary proof wall at
-`min(send_at)-301` across pending rows, before committing the heartbeat token.
-The event timestamp is at least `send_at-300`, so it is strictly above every
-proof that did not yet observe its commit. The reservation disappears in the
-same commit that stores the event; a later heartbeat therefore orders after the
-event's commit. Cancellation removes the reservation without publishing a row.
+## Federated identity
 
-Admission uses the **database clock after lock waits**: a new/revised reservation
-must have `send_at >= DBnow-300`, and `created_at >= send_at-300`. Thus its earliest
-possible timestamp, `DBnow-600`, stays newer than an already proved ordinary wall
-(`S-965`). Transactions open during a probe are additionally bounded by its
-oldest-open-transaction term. This preserves previously retained proofs even
-when a reservation is created after their heartbeat. Host clock skew cannot
-introduce a retroactive reservation. An overdue pending item may conservatively
-hold the replica wall back until sent, failed or cancelled; reads then use the writer.
+The queue records the issuer, verified assertion issuance, and agent owner
+when a protected request admits a message. An authorized issuer disconnect
+records the revocation and cancels matching pending rows across communities
+in one transaction. Admission and disconnect serialize by issuer, and
+dispatch and cancellation serialize on the queued row. If the transaction
+fails, the disconnect returns 503 before closing sessions. The issuer must
+retry with a freshly signed command.
 
-The proof depends on every probe using reservations, which is why enabling during
-a mixed-version rollout and downgrading with pending work are unsupported.
+A cutoff covers assertions issued at or before it. Other issuers and newer
+assertions keep their schedules. Records remain effective until the later of
+the command deadline or its recorded time, plus the configured maximum
+connection lifetime. This uses the deferred-action rules proposed in
+[NIP-SL and NIP-FI](https://github.com/block/buzz/pull/9912). The queue still
+uses the HTTP protocol described above.
 
 ## Local verification
 
@@ -125,5 +123,5 @@ app checkout, run `BUZZ_SCHEDULED_TEST_RELAY=http://127.0.0.1:3000 pnpm exec vit
 run src/features/relay/scheduled-messages.live.test.ts`. The test refuses remote
 hosts, uses fictional random keys, and exercises authenticated queue operations
 through the real app service. The relay's database regressions additionally cover
-overdue insertion, replica reservation release, lost claims, stale revisions,
-worker exclusion, retry backoff and community deletion.
+bounded release, lost claims, stale revisions, worker exclusion, retry backoff,
+issuer disconnects and community deletion.

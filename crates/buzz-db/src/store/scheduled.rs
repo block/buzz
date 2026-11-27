@@ -1,9 +1,11 @@
 //! Durable, owner-scoped scheduled delivery. A dispatch holds its row lock until
 //! the normal message ingest has returned, serializing cancellation with sending.
 
+mod federation;
 #[cfg(test)]
 #[path = "scheduled/postgres_tests.rs"]
 mod postgres_tests;
+pub use federation::ScheduleAdmission;
 
 use buzz_core::{CommunityId, StoredEvent};
 use serde::Serialize;
@@ -46,6 +48,23 @@ fn row_message(row: &sqlx::postgres::PgRow) -> Result<ScheduledMessage> {
 
 const MAX_DELIVERY_ATTEMPTS: i32 = 20;
 const RETRY_EXHAUSTED: &str = "Delivery failed after repeated attempts. Review and reschedule it.";
+/// The relay may publish the signed event through this many seconds after its due time.
+pub const RELEASE_WINDOW_SECS: i64 = 900;
+/// A failed queue row remains visible to its author and can be rescheduled.
+pub const MISSED_DELIVERY: &str = "Missed the scheduled delivery window. Reschedule to try again.";
+
+/// Unix-second comparison, matching ordinary event ingress.
+pub fn delivery_window_expired(send_at: i64, now: i64) -> bool {
+    now > send_at.saturating_add(RELEASE_WINDOW_SECS)
+}
+
+async fn writer_time(tx: &mut AdmittedTx) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
+            .fetch_one(tx.conn())
+            .await?,
+    )
+}
 
 fn conflict() -> DbError {
     DbError::InvalidData("scheduled-message-conflict".into())
@@ -72,6 +91,8 @@ pub struct ScheduledDispatch {
     owner: Vec<u8>,
     /// Exact queued message.
     pub message: ScheduledMessage,
+    /// Verified owner to recheck for a federated agent.
+    pub token_owner: Option<nostr::PublicKey>,
 }
 
 impl ScheduledDispatch {
@@ -120,7 +141,6 @@ impl ScheduledDispatch {
 
     /// Store the approved message, mentions, thread counters, push work and sent
     /// state on the claim transaction. A lost claim can never publish afterward.
-    /// Pending queue timestamps reserve the replica fence until this commit.
     pub async fn persist(
         &mut self,
         db: &Db,
@@ -156,13 +176,21 @@ impl ScheduledDispatch {
             return Err(conflict().into());
         }
         let mut tx = self.tx.take().ok_or_else(conflict)?;
-        tx.authorize_scheduled_event(event.id);
         tx.set_push_enqueue(db.push_enqueue.clone());
         let result = write(&mut tx).await?;
         if result.0.event.id != event.id {
             return Err(conflict().into());
         }
         mark_sent(&mut tx, &self.owner, self.message.id).await?;
+        if result.1 {
+            let now = writer_time(&mut tx).await?;
+            if delivery_window_expired(self.message.send_at, now) {
+                return Err(DbError::InvalidData(MISSED_DELIVERY.into()).into());
+            }
+            if now < self.message.send_at {
+                return Err(conflict().into());
+            }
+        }
         tx.commit().await?;
         Ok(result)
     }
@@ -213,10 +241,27 @@ impl Db {
         expected: Option<i64>,
         event: Option<&serde_json::Value>,
         send_at: i64,
+        admission: Option<&ScheduleAdmission>,
     ) -> Result<()> {
-        let mut tx =
-            begin_community_write_transaction(&self.pool, community, WriterOperation::EventWrite)
-                .await?;
+        let admission = admission.filter(|_| event.is_some());
+        let mut tx = match admission {
+            Some(admission) => {
+                federation::begin_admission(&self.pool, community, owner, admission).await?
+            }
+            None => {
+                begin_community_write_transaction(
+                    &self.pool,
+                    community,
+                    WriterOperation::EventWrite,
+                )
+                .await?
+            }
+        };
+        let issuer = admission.map(|proof| proof.issuer.as_str());
+        let agent_owner =
+            admission.and_then(|proof| proof.owner.as_ref().map(|key| key.as_slice()));
+        let issued_second = admission.map(ScheduleAdmission::issued_second);
+        let admitted_at = admission.map(|proof| proof.admitted_at);
         let key = format!("scheduled:{community}:{}", hex::encode(owner));
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
             .bind(key)
@@ -264,25 +309,30 @@ impl Db {
             {
                 return Err(conflict());
             }
-            validate_reservation(&mut tx, event, send_at).await?;
+            validate_send_at(&mut tx, event, send_at).await?;
             sqlx::query("UPDATE scheduled_messages SET revision=revision+1, event=COALESCE($4,event), event_id=COALESCE($5,event_id), send_at=CASE WHEN $4 IS NULL THEN send_at ELSE $6 END, next_attempt_at=$6, status=$7, error=NULL, attempts=0,
                 updated_at=clock_timestamp(),
-                prune_at=CASE WHEN $7='cancelled' THEN GREATEST(clock_timestamp(), to_timestamp(send_at)) + interval '30 days' END
+                prune_at=CASE WHEN $7='cancelled' THEN GREATEST(clock_timestamp(), to_timestamp(send_at)) + interval '30 days' END,
+                admission_issuer=$8, admission_owner=$9, admission_issued_second=$10, admitted_at=$11
                 WHERE community_id=$1 AND owner=$2 AND id=$3")
                 .bind(community.as_uuid()).bind(owner).bind(id).bind(event).bind(event_id).bind(send_at)
-                .bind(if event.is_some() { "scheduled" } else { "cancelled" }).execute(tx.conn()).await?;
+                .bind(if event.is_some() { "scheduled" } else { "cancelled" })
+                .bind(issuer).bind(agent_owner).bind(issued_second).bind(admitted_at).execute(tx.conn()).await?;
         } else {
             if expected.is_some() || event.is_none() {
                 return Err(conflict());
             }
-            validate_reservation(&mut tx, event, send_at).await?;
+            validate_send_at(&mut tx, event, send_at).await?;
             let count: i64 = sqlx::query_scalar("SELECT count(*) FROM scheduled_messages WHERE community_id=$1 AND owner=$2 AND status IN ('scheduled','failed')")
                 .bind(community.as_uuid()).bind(owner).fetch_one(tx.conn()).await?;
             if count >= 256 {
                 return Err(DbError::InvalidData("scheduled-message-limit".into()));
             }
-            let inserted = sqlx::query("INSERT INTO scheduled_messages(community_id,owner,id,event,event_id,send_at,next_attempt_at) VALUES($1,$2,$3,$4,$5,$6,$6) ON CONFLICT (community_id,owner,event_id) DO NOTHING")
-                .bind(community.as_uuid()).bind(owner).bind(id).bind(event).bind(event_id).bind(send_at).execute(tx.conn()).await?;
+            let inserted = sqlx::query("INSERT INTO scheduled_messages(community_id,owner,id,event,event_id,send_at,next_attempt_at,
+                    admission_issuer,admission_owner,admission_issued_second,admitted_at)
+                VALUES($1,$2,$3,$4,$5,$6,$6,$7,$8,$9,$10) ON CONFLICT (community_id,owner,event_id) DO NOTHING")
+                .bind(community.as_uuid()).bind(owner).bind(id).bind(event).bind(event_id).bind(send_at)
+                .bind(issuer).bind(agent_owner).bind(issued_second).bind(admitted_at).execute(tx.conn()).await?;
             if inserted.rows_affected() != 1 {
                 return Err(conflict());
             }
@@ -376,12 +426,17 @@ impl Db {
         let row = sqlx::query("SELECT * FROM scheduled_messages WHERE community_id=$1 AND owner=$2 AND id=$3 AND status='scheduled' AND next_attempt_at<=$4 FOR UPDATE SKIP LOCKED")
             .bind(community.as_uuid()).bind(owner).bind(id).bind(now).fetch_optional(tx.conn()).await?;
         row.map(|r| {
+            let token_owner = r
+                .try_get::<Option<Vec<u8>>, _>("admission_owner")?
+                .map(|bytes| nostr::PublicKey::from_slice(&bytes).map_err(|_| conflict()))
+                .transpose()?;
             Ok(ScheduledDispatch {
                 message: row_message(&r)?,
                 tx: Some(tx),
                 pool: self.pool.clone(),
                 community,
                 owner: owner.to_vec(),
+                token_owner,
             })
         })
         .transpose()
@@ -422,7 +477,8 @@ async fn record_retry(
     SET status=CASE WHEN candidate.attempts >= $6-1 THEN 'failed' ELSE 'scheduled' END,
         error=CASE WHEN candidate.attempts >= $6-1 THEN $7 ELSE $8 END,
         attempts=candidate.attempts+1,
-        next_attempt_at=$5+(1::bigint << LEAST(candidate.attempts, 8)),
+        next_attempt_at=GREATEST($5+1, LEAST(
+            $5+(1::bigint << LEAST(candidate.attempts, 8)), s.send_at+$9+1)),
         updated_at=clock_timestamp()
     FROM candidate WHERE s.community_id=$1 AND s.owner=$2 AND s.id=$3",
     )
@@ -434,15 +490,14 @@ async fn record_retry(
     .bind(MAX_DELIVERY_ATTEMPTS)
     .bind(RETRY_EXHAUSTED)
     .bind(error)
+    .bind(RELEASE_WINDOW_SECS)
     .execute(tx.conn())
     .await?;
     Ok(())
 }
 
-// A new reservation must be newer than every previously proved fence wall.
-// Use the writer's clock, including after lock waits; host clock skew must not
-// admit an event behind an already published replica completeness proof.
-async fn validate_reservation(
+// Validate against the writer's clock after taking the owner and row locks.
+async fn validate_send_at(
     tx: &mut AdmittedTx,
     event: Option<&serde_json::Value>,
     send_at: i64,
@@ -451,15 +506,8 @@ async fn validate_reservation(
         return Ok(());
     };
     let created = event["created_at"].as_i64().ok_or_else(conflict)?;
-    let now: i64 =
-        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
-            .fetch_one(tx.conn())
-            .await?;
-    if send_at < now - 300
-        || send_at > now + 120 * 86_400
-        || created < send_at - 300
-        || created > send_at + 5
-    {
+    let now = writer_time(tx).await?;
+    if send_at < now - 300 || send_at > now + 120 * 86_400 || created != send_at {
         return Err(conflict());
     }
     Ok(())

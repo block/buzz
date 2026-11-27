@@ -8,8 +8,6 @@
 //!    each new row. Duplicate INSERTs need no floor check. This is the only
 //!    guard: migration 0089 retired 0021's deferred trigger and the
 //!    writer-pool `buzz.created_at_floor` GUC.
-//!    A locked scheduled-message claim permits only its exact reserved event.
-//!    Pending reservations cap the heartbeat wall until delivery commits.
 //! 2. **Ordered heartbeat handshake** (this module): on one pinned writer
 //!    connection, one transaction first takes the exclusive replica-floor
 //!    advisory lock (draining compliant shared-lock channel writers), then
@@ -98,11 +96,8 @@ pub(crate) async fn guard_event_created_at_floor(
     tx: &mut crate::AdmittedTx,
     created_at: DateTime<Utc>,
     channel_id: Option<Uuid>,
-    event_id: &nostr::EventId,
 ) -> crate::Result<()> {
-    // A locked scheduled claim reserves this exact signed event below the
-    // published fence wall; ordinary writes retain the fixed timestamp floor.
-    if channel_id.is_none() || tx.has_scheduled_event_reservation(event_id) {
+    if channel_id.is_none() {
         return Ok(());
     }
     let below_floor: bool = sqlx::query_scalar(
@@ -445,8 +440,6 @@ impl ReplicaFence {
 /// One writer-side sample of the ordered handshake.
 #[derive(Debug)]
 struct WriterSample {
-    /// Below every pending scheduled timestamp (including send-now clock slack).
-    scheduled_wall: Option<DateTime<Utc>>,
     /// `S`: writer `clock_timestamp()` captured first.
     sampled_at: DateTime<Utc>,
     /// Oldest open transaction among other client backends at scan time,
@@ -723,12 +716,6 @@ async fn sample_writer(
     })
     .await?;
 
-    let scheduled_wall: Option<DateTime<Utc>> = sqlx::query_scalar(
-        "SELECT to_timestamp(min(send_at)-301) FROM scheduled_messages WHERE status='scheduled'",
-    )
-    .fetch_one(&mut *tx)
-    .await?;
-
     // 3. Token commit LAST, on the same pinned connection. The single-row
     //    UPDATE serializes concurrent pods' probes, so RETURNING token is
     //    globally commit-ordered. `committed_at` is captured before the
@@ -746,7 +733,6 @@ async fn sample_writer(
     .ok_or(ProbeError::HeartbeatRowMissing)?;
 
     let sample = WriterSample {
-        scheduled_wall,
         sampled_at,
         oldest_xact_start,
         token: row.get("token"),
@@ -846,10 +832,7 @@ async fn probe_untraced(
     timings: &mut ProbeTimings,
 ) -> Result<TokenEntry, ProbeError> {
     let sample = sample_writer(writer, timings).await?;
-    let ordinary_wall = fence_wall(sample.sampled_at, sample.oldest_xact_start);
-    let wall = sample
-        .scheduled_wall
-        .map_or(ordinary_wall, |reservation| ordinary_wall.min(reservation));
+    let wall = fence_wall(sample.sampled_at, sample.oldest_xact_start);
     match fence.record(sample.token, sample.epoch, sample.committed_at, wall) {
         RecordOutcome::Recorded => Ok(TokenEntry {
             token: sample.token,

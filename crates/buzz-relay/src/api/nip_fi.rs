@@ -133,8 +133,25 @@ pub async fn disconnect(
 
     match result {
         Ok(cmd) => {
-            // ── Deny entry inserted; close sessions synchronously ─────────
             let pubkey_bytes = cmd.target_pubkey.to_bytes();
+            if state.scheduled_disconnects_installed {
+                if let Err(error) = state
+                    .db
+                    .scheduled_disconnect(
+                        &cmd.caller_iss,
+                        &pubkey_bytes,
+                        cmd.scope.revoke_through(),
+                        cmd.until,
+                        state.config.nip_fi.max_connection_lifetime_secs,
+                    )
+                    .await
+                {
+                    warn!(error_kind = %error.kind(), "scheduled disconnect did not commit");
+                    return (StatusCode::SERVICE_UNAVAILABLE, "disconnect not recorded\n")
+                        .into_response();
+                }
+            }
+            // Deny entry and deferred cancellations are recorded before closing sessions.
             // Issuer-scoped: the deny entry is keyed by (caller_iss, k), so only
             // sessions admitted under caller_iss are closed. [FI-TRACE-DENY-SET]
             // Shadow keeps the deny entry but closes nothing.

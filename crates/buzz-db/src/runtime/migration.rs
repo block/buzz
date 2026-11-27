@@ -3531,6 +3531,7 @@ mod postgres_tests {
 
         for table in [
             "scheduled_messages",
+            "scheduled_message_disconnects",
             "media_uploaders",
             "audit_log",
             "media_publications",

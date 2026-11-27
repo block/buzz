@@ -44,62 +44,42 @@ async fn scheduled_owner_isolation_revision_and_cancelled_duplicate() {
     let value = serde_json::to_value(queued_event(&keys, channel, at)).unwrap();
     let id = Uuid::new_v4();
     let owner = keys.public_key().to_bytes();
-    db.scheduled_mutate(c, &owner, id, None, Some(&value), at)
+    db.scheduled_mutate(c, &owner, id, None, Some(&value), at, None)
         .await
         .unwrap();
-    db.scheduled_mutate(c, &owner, id, None, Some(&value), at)
+    db.scheduled_mutate(c, &owner, id, None, Some(&value), at, None)
         .await
         .unwrap();
     assert_eq!(db.scheduled_list(c, &owner).await.unwrap().len(), 1);
     assert!(db.scheduled_list(c, &[7; 32]).await.unwrap().is_empty());
     assert!(db
-        .scheduled_mutate(c, &owner, id, Some(2), None, at)
+        .scheduled_mutate(c, &owner, id, Some(2), None, at, None)
         .await
         .is_err());
-    db.scheduled_mutate(c, &owner, id, Some(1), None, at)
+    db.scheduled_mutate(c, &owner, id, Some(1), None, at, None)
         .await
         .unwrap();
     assert!(db.scheduled_list(c, &owner).await.unwrap().is_empty());
     assert!(db
-        .scheduled_mutate(c, &owner, Uuid::new_v4(), None, Some(&value), at)
+        .scheduled_mutate(c, &owner, Uuid::new_v4(), None, Some(&value), at, None)
         .await
         .is_err());
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn scheduled_overdue_dispatch_atomically_stores_message_and_sent_state() {
+async fn scheduled_dispatch_atomically_stores_message_and_sent_state() {
     let (db, _scratch, c, keys, channel) = fixture().await;
-    let at = chrono::Utc::now().timestamp() - 7200;
+    let at = chrono::Utc::now().timestamp() - 60;
     let event = queued_event(&keys, channel, at);
     let value = serde_json::to_value(&event).unwrap();
     let id = Uuid::new_v4();
     let owner = keys.public_key().to_bytes();
-    assert!(db
-        .scheduled_mutate(c, &owner, id, None, Some(&value), at)
-        .await
-        .is_err());
-    assert!(matches!(
-        crate::event::insert_event(db.pool(), c, &event, Some(channel)).await,
-        Err(crate::DbError::CreatedAtFloorRejected)
-    ));
-    let future = chrono::Utc::now().timestamp() + 3600;
-    let initial = serde_json::to_value(queued_event(&keys, channel, future)).unwrap();
-    db.scheduled_mutate(c, &owner, id, None, Some(&initial), future)
+    db.scheduled_mutate(c, &owner, id, None, Some(&value), at, None)
         .await
         .unwrap();
-    // Simulate elapsed downtime without waiting hours. Only the fixture may
-    // bypass admission; production cannot introduce a retroactive reservation.
-    sqlx::query("UPDATE scheduled_messages SET event=$2,event_id=$3,send_at=$4,next_attempt_at=$4 WHERE id=$1")
-        .bind(id).bind(&value).bind(event.id.to_bytes().as_slice()).bind(at).execute(db.pool()).await.unwrap();
-    let fence = crate::replica_fence::ReplicaFence::new();
-    let reserved = crate::replica_fence::probe_once(db.pool(), &fence)
-        .await
-        .unwrap();
-    assert_eq!(reserved.fence_wall.timestamp(), at - 301);
-    assert!(!fence.covers(chrono::DateTime::from_timestamp(at, 0).unwrap()));
     let mut claim = db
-        .scheduled_claim(c, &owner, id, chrono::Utc::now().timestamp())
+        .scheduled_claim(c, &owner, id, at)
         .await
         .unwrap()
         .unwrap();
@@ -109,47 +89,55 @@ async fn scheduled_overdue_dispatch_atomically_stores_message_and_sent_state() {
         .unwrap();
     assert_eq!(stored.event.id, event.id);
     assert!(inserted);
-    let rows = db.scheduled_list(c, &owner).await.unwrap();
-    assert_eq!(rows[0].status, "sent");
-    // The reservation cannot authorize a different event with the same old
-    // timestamp, even on an admitted transaction carrying the reserved id.
-    let unrelated = EventBuilder::new(Kind::Custom(9), "Unreserved old message")
-        .tags([Tag::parse(["h".to_string(), channel.to_string()]).unwrap()])
-        .custom_created_at(event.created_at)
-        .sign_with_keys(&keys)
-        .unwrap();
-    let mut unrelated_tx = db.begin_event_write_transaction(c).await.unwrap();
-    unrelated_tx.authorize_scheduled_event(event.id);
-    assert!(matches!(
-        crate::event::insert_event_with_thread_metadata_tx(
-            &mut unrelated_tx,
-            &unrelated,
-            Some(channel),
-            None
-        )
-        .await,
-        Err(crate::DbError::CreatedAtFloorRejected)
-    ));
-    unrelated_tx.rollback().await.unwrap();
-    let released = crate::replica_fence::probe_once(db.pool(), &fence)
-        .await
-        .unwrap();
-    assert!(released.token > reserved.token);
-    assert!(released.fence_wall.timestamp() > at);
+    assert_eq!(
+        db.scheduled_list(c, &owner).await.unwrap()[0].status,
+        "sent"
+    );
     assert!(db
-        .get_event_by_id(c, &event.id.to_bytes())
-        .await
-        .unwrap()
-        .is_some());
-    assert!(db
-        .scheduled_claim(c, &owner, id, chrono::Utc::now().timestamp())
+        .scheduled_claim(c, &owner, id, at)
         .await
         .unwrap()
         .is_none());
     assert!(db
-        .scheduled_mutate(c, &owner, id, Some(1), None, at)
+        .scheduled_mutate(c, &owner, id, Some(1), None, at, None)
         .await
         .is_err());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn scheduled_expired_dispatch_rolls_back_a_write_within_the_database_floor() {
+    let (db, _scratch, c, keys, channel) = fixture().await;
+    let now = chrono::Utc::now().timestamp();
+    let at = now - RELEASE_WINDOW_SECS - 5;
+    let event = queued_event(&keys, channel, at);
+    let id = Uuid::new_v4();
+    let owner = keys.public_key().to_bytes();
+    // Model a message accepted earlier and due during an outage.
+    sqlx::query("INSERT INTO scheduled_messages(community_id,owner,id,event,event_id,send_at,next_attempt_at)
+                 VALUES($1,$2,$3,$4,$5,$6,$6)")
+        .bind(c.as_uuid()).bind(owner.as_slice()).bind(id)
+        .bind(serde_json::to_value(&event).unwrap())
+        .bind(event.id.to_bytes().as_slice()).bind(at)
+        .execute(db.pool()).await.unwrap();
+    let mut claim = db
+        .scheduled_claim(c, &owner, id, now)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        claim.persist(&db, &event, Some(channel), None).await,
+        Err(DbError::InvalidData(ref reason)) if reason == MISSED_DELIVERY
+    ));
+    assert!(db
+        .get_event_by_id(c, &event.id.to_bytes())
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        db.scheduled_list(c, &owner).await.unwrap()[0].status,
+        "scheduled"
+    );
 }
 
 #[tokio::test]
@@ -160,7 +148,7 @@ async fn scheduled_claim_rollback_allows_recovery_and_excludes_other_workers() {
     let value = serde_json::to_value(queued_event(&keys, channel, at)).unwrap();
     let id = Uuid::new_v4();
     let owner = keys.public_key().to_bytes();
-    db.scheduled_mutate(c, &owner, id, None, Some(&value), at)
+    db.scheduled_mutate(c, &owner, id, None, Some(&value), at, None)
         .await
         .unwrap();
     let claim = db
@@ -230,7 +218,7 @@ async fn scheduled_lost_claim_cannot_publish_after_successful_cancellation() {
     let value = serde_json::to_value(&event).unwrap();
     let id = Uuid::new_v4();
     let owner = keys.public_key().to_bytes();
-    db.scheduled_mutate(c, &owner, id, None, Some(&value), at)
+    db.scheduled_mutate(c, &owner, id, None, Some(&value), at, None)
         .await
         .unwrap();
     let mut claim = db
@@ -247,7 +235,7 @@ async fn scheduled_lost_claim_cannot_publish_after_successful_cancellation() {
         .execute(db.pool())
         .await
         .unwrap();
-    db.scheduled_mutate(c, &owner, id, Some(1), None, at)
+    db.scheduled_mutate(c, &owner, id, Some(1), None, at, None)
         .await
         .unwrap();
     assert!(claim
@@ -269,13 +257,13 @@ async fn scheduled_writers_and_claims_honor_community_deletion_admission() {
     let value = serde_json::to_value(queued_event(&keys, channel, at)).unwrap();
     let id = Uuid::new_v4();
     let owner = keys.public_key().to_bytes();
-    db.scheduled_mutate(c, &owner, id, None, Some(&value), at)
+    db.scheduled_mutate(c, &owner, id, None, Some(&value), at, None)
         .await
         .unwrap();
     crate::test_support::set_deletion_state(db.pool(), *c.as_uuid(), "fenced").await;
     assert!(db.scheduled_claim(c, &owner, id, at).await.is_err());
     assert!(db
-        .scheduled_mutate(c, &owner, id, Some(1), None, at)
+        .scheduled_mutate(c, &owner, id, Some(1), None, at, None)
         .await
         .is_err());
     assert!(db
@@ -294,7 +282,7 @@ async fn scheduled_replay_uses_committed_event_and_revision_after_delivery() {
     let id = Uuid::new_v4();
     let now = chrono::Utc::now().timestamp();
     let initial = serde_json::to_value(queued_event(&keys, channel, now + 3600)).unwrap();
-    db.scheduled_mutate(c, &owner, id, None, Some(&initial), now + 3600)
+    db.scheduled_mutate(c, &owner, id, None, Some(&initial), now + 3600, None)
         .await
         .unwrap();
     assert!(db
@@ -321,7 +309,7 @@ async fn scheduled_replay_uses_committed_event_and_revision_after_delivery() {
         .unwrap());
     let immediate = queued_event(&keys, channel, now - 2);
     let value = serde_json::to_value(&immediate).unwrap();
-    db.scheduled_mutate(c, &owner, id, Some(1), Some(&value), now - 2)
+    db.scheduled_mutate(c, &owner, id, Some(1), Some(&value), now - 2, None)
         .await
         .unwrap();
     assert!(db
@@ -356,10 +344,10 @@ async fn scheduled_replay_uses_committed_event_and_revision_after_delivery() {
 
     let cancelled = Uuid::new_v4();
     let other = serde_json::to_value(queued_event(&keys, channel, now + 7200)).unwrap();
-    db.scheduled_mutate(c, &owner, cancelled, None, Some(&other), now + 7200)
+    db.scheduled_mutate(c, &owner, cancelled, None, Some(&other), now + 7200, None)
         .await
         .unwrap();
-    db.scheduled_mutate(c, &owner, cancelled, Some(1), None, now)
+    db.scheduled_mutate(c, &owner, cancelled, Some(1), None, now, None)
         .await
         .unwrap();
     assert!(!db
@@ -370,13 +358,13 @@ async fn scheduled_replay_uses_committed_event_and_revision_after_delivery() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn scheduled_defer_stops_at_the_retry_limit_and_releases_the_fence() {
+async fn scheduled_defer_stops_at_the_retry_limit() {
     let (db, _scratch, community, keys, channel) = fixture().await;
     let now = chrono::Utc::now().timestamp();
     let owner = keys.public_key().to_bytes();
     let id = Uuid::new_v4();
     let value = serde_json::to_value(queued_event(&keys, channel, now)).unwrap();
-    db.scheduled_mutate(community, &owner, id, None, Some(&value), now)
+    db.scheduled_mutate(community, &owner, id, None, Some(&value), now, None)
         .await
         .unwrap();
 
@@ -391,21 +379,13 @@ async fn scheduled_defer_stops_at_the_retry_limit_and_releases_the_fence() {
         .unwrap();
     assert_eq!(attempts, 1);
 
-    sqlx::query(
-        "UPDATE scheduled_messages SET attempts=$2,send_at=$3,next_attempt_at=$4 WHERE id=$1",
-    )
-    .bind(id)
-    .bind(MAX_DELIVERY_ATTEMPTS - 1)
-    .bind(now - 7200)
-    .bind(now + 1)
-    .execute(db.pool())
-    .await
-    .unwrap();
-    let fence = crate::replica_fence::ReplicaFence::new();
-    let reserved = crate::replica_fence::probe_once(db.pool(), &fence)
+    sqlx::query("UPDATE scheduled_messages SET attempts=$2,next_attempt_at=$3 WHERE id=$1")
+        .bind(id)
+        .bind(MAX_DELIVERY_ATTEMPTS - 1)
+        .bind(now + 1)
+        .execute(db.pool())
         .await
         .unwrap();
-    assert_eq!(reserved.fence_wall.timestamp(), now - 7501);
 
     let claim = db
         .scheduled_claim(community, &owner, id, now + 1)
@@ -424,10 +404,6 @@ async fn scheduled_defer_stops_at_the_retry_limit_and_releases_the_fence() {
         .remove(0);
     assert_eq!(item.status, "failed");
     assert_eq!(item.error.as_deref(), Some(RETRY_EXHAUSTED));
-    let released = crate::replica_fence::probe_once(db.pool(), &fence)
-        .await
-        .unwrap();
-    assert!(released.fence_wall > reserved.fence_wall);
 }
 
 #[tokio::test]
@@ -447,7 +423,7 @@ async fn scheduled_retention_keeps_live_rows_and_unexpired_replays() {
         (future_cancelled, now + 86_400 * 90),
     ] {
         let value = serde_json::to_value(queued_event(&keys, channel, at)).unwrap();
-        db.scheduled_mutate(community, &owner, id, None, Some(&value), at)
+        db.scheduled_mutate(community, &owner, id, None, Some(&value), at, None)
             .await
             .unwrap();
     }
@@ -459,7 +435,7 @@ async fn scheduled_retention_keeps_live_rows_and_unexpired_replays() {
         .await
         .unwrap();
     for id in [cancelled, future_cancelled] {
-        db.scheduled_mutate(community, &owner, id, Some(1), None, now)
+        db.scheduled_mutate(community, &owner, id, Some(1), None, now, None)
             .await
             .unwrap();
     }
@@ -486,7 +462,87 @@ async fn scheduled_retention_keeps_live_rows_and_unexpired_replays() {
     assert_eq!(retained.len(), 2);
     assert!(retained.contains(&pending));
     assert!(retained.contains(&future_cancelled));
-    db.scheduled_mutate(community, &owner, future_cancelled, Some(1), None, now)
+    db.scheduled_mutate(
+        community,
+        &owner,
+        future_cancelled,
+        Some(1),
+        None,
+        now,
+        None,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn scheduled_disconnect_cancels_matching_agent_and_refuses_racing_admission() {
+    let (db, _scratch, community, keys, channel) = fixture().await;
+    let owner = keys.public_key().to_bytes();
+    let principal = Keys::generate().public_key().to_bytes();
+    let now = chrono::Utc::now();
+    let cutoff = chrono::DateTime::from_timestamp(now.timestamp() - 1, 0).unwrap();
+    let issuer = "https://issuer.example";
+    let admission = |issuer: &str, issued_at| ScheduleAdmission {
+        issuer: issuer.to_owned(),
+        owner: Some(principal),
+        issued_at,
+        admitted_at: now,
+    };
+    let revoked = admission(issuer, cutoff);
+    let newer = admission(issuer, cutoff + chrono::Duration::milliseconds(500));
+    let other_issuer = admission("https://other.example", cutoff);
+    let at = now.timestamp() + 3600;
+    let revoked_id = Uuid::new_v4();
+    let newer_id = Uuid::new_v4();
+    let other_id = Uuid::new_v4();
+    for (offset, id, proof) in [
+        (0, revoked_id, &revoked),
+        (1, newer_id, &newer),
+        (2, other_id, &other_issuer),
+    ] {
+        let event = serde_json::to_value(queued_event(&keys, channel, at + offset)).unwrap();
+        db.scheduled_mutate(
+            community,
+            &owner,
+            id,
+            None,
+            Some(&event),
+            at + offset,
+            Some(proof),
+        )
         .await
         .unwrap();
+    }
+    db.scheduled_disconnect(issuer, &principal, Some(cutoff.timestamp()), now, 300)
+        .await
+        .unwrap();
+    let ids: std::collections::BTreeSet<_> = db
+        .scheduled_list(community, &owner)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|item| item.id)
+        .collect();
+    assert_eq!(ids, [newer_id, other_id].into_iter().collect());
+    assert!(db
+        .scheduled_claim(community, &owner, revoked_id, at)
+        .await
+        .unwrap()
+        .is_none());
+    let event = serde_json::to_value(queued_event(&keys, channel, at + 3)).unwrap();
+    assert!(matches!(
+        db.scheduled_mutate(
+            community,
+            &owner,
+            Uuid::new_v4(),
+            None,
+            Some(&event),
+            at + 3,
+            Some(&revoked)
+        )
+        .await,
+        Err(DbError::AccessDenied(_))
+    ));
 }

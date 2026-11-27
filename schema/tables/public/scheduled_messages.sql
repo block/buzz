@@ -12,6 +12,10 @@ CREATE TABLE scheduled_messages (
     error TEXT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     prune_at TIMESTAMPTZ,
+    admission_issuer TEXT,
+    admission_owner BYTEA,
+    admission_issued_second BIGINT,
+    admitted_at TIMESTAMPTZ,
     PRIMARY KEY (community_id, owner, id),
     UNIQUE (community_id, owner, event_id)
 );
@@ -19,6 +23,9 @@ CREATE INDEX scheduled_messages_due ON scheduled_messages (next_attempt_at)
     WHERE status = 'scheduled';
 CREATE INDEX scheduled_messages_owner ON scheduled_messages (community_id, owner, status, send_at);
 
-CREATE INDEX scheduled_messages_reservation ON scheduled_messages (send_at) WHERE status='scheduled';
+CREATE INDEX scheduled_messages_federated_pending ON scheduled_messages (admission_issuer, owner)
+    WHERE status = 'scheduled' AND admission_issuer IS NOT NULL;
+CREATE INDEX scheduled_messages_federated_agent_pending ON scheduled_messages (admission_issuer, admission_owner)
+    WHERE status = 'scheduled' AND admission_owner IS NOT NULL;
 
 CREATE INDEX scheduled_messages_terminal_expiry ON scheduled_messages (prune_at) WHERE prune_at IS NOT NULL;

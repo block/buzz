@@ -13,7 +13,7 @@ use axum::{
     Json,
 };
 use buzz_core::TenantContext;
-use buzz_db::scheduled::ScheduledCandidate;
+use buzz_db::scheduled::{delivery_window_expired, ScheduledCandidate, MISSED_DELIVERY};
 use nostr::Event;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -99,11 +99,11 @@ pub async fn handle(
     if body.len() > 40 * 1024 {
         return api_error(StatusCode::PAYLOAD_TOO_LARGE, "Message is too large").into_response();
     }
-    let (tenant, owner) = match authenticate_member_post(&state, &slot, &headers, PATH, &body).await
-    {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
+    let (tenant, owner, authority) =
+        match authenticate_member_post(&state, &slot, &headers, PATH, &body).await {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
     let request: Request = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(_) => {
@@ -234,10 +234,16 @@ pub async fn handle(
             revision,
             value.as_ref(),
             at,
+            authority.as_ref(),
         )
         .await
     {
         Ok(()) => Json(json!({"accepted":true})).into_response(),
+        Err(buzz_db::DbError::AccessDenied(_)) => api_error(
+            StatusCode::FORBIDDEN,
+            "You no longer have permission to schedule messages",
+        )
+        .into_response(),
         Err(buzz_db::DbError::InvalidData(_)) => api_error(
             StatusCode::CONFLICT,
             "Message changed or the queue is full; refresh and try again",
@@ -321,13 +327,17 @@ async fn dispatch_candidate(
         claim.finish("sent", None, now).await?;
         return Ok(true);
     }
+    if delivery_window_expired(claim.message.send_at, chrono::Utc::now().timestamp()) {
+        claim.finish("failed", Some(MISSED_DELIVERY), now).await?;
+        return Ok(false);
+    }
     let member = crate::api::relay_members::enforce_relay_membership(
         state,
         &tenant,
         owner,
         None,
         Some(now as u64),
-        None,
+        claim.token_owner,
     )
     .await;
     if let Err(refusal) = member {
@@ -381,9 +391,13 @@ async fn dispatch_candidate(
             Ok(false)
         }
         _ => {
-            claim.finish(
-                "failed", Some("Delivery was refused. Review conversation access and message before retrying."), now,
-            ).await?;
+            let reason =
+                if delivery_window_expired(claim.message.send_at, chrono::Utc::now().timestamp()) {
+                    MISSED_DELIVERY
+                } else {
+                    "Delivery was refused. Review conversation access and message before retrying."
+                };
+            claim.finish("failed", Some(reason), now).await?;
             Ok(false)
         }
     }

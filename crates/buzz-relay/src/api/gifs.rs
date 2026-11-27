@@ -236,7 +236,7 @@ async fn search_inner(
     // Admission first: NIP-98 + NIP-FI must fire before any application-level
     // check (including provider availability) so the denial contract wins over
     // config or request-validation errors. [FI-TRACE-HTTP-INGRESS]
-    let (tenant, pubkey) =
+    let (tenant, pubkey, _) =
         bridge::authenticate_member_post(&state, &slot, &headers, SEARCH_PATH, &body).await?;
 
     let Some(config) = state.config.klipy.as_ref() else {
