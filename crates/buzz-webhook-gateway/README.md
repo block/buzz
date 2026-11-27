@@ -8,7 +8,7 @@ subscription matches.
 provider ──POST /webhooks/{integration}──▶ intake: Host check, HMAC, dedupe
                                               │ webhook_gateway_deliveries
                                               ▼
-                                           fan-out: CEL filter + message template
+                                           fan-out: CEL filter + message expression
                                               │ webhook_gateway_messages
                                               ▼
                                            forwarder: sign kind 9, POST {scheme}://{community_host}/events
@@ -126,20 +126,27 @@ mgmt() { # METHOD PATH [JSON]
 
 INTEGRATION=$(uuidgen | tr A-Z a-z)
 openssl rand -hex 20 > $GW/github.secret
-mgmt PUT /v1/integrations/$INTEGRATION \
-  "{\"operation_id\":\"$(uuidgen | tr A-Z a-z)\",\"revision\":1,\"community_host\":\"localhost\",\"provider\":\"github\"}"
+mgmt PUT /v1/integrations/$INTEGRATION "$(jq -nc --arg op $(uuidgen | tr A-Z a-z) '{
+  operation_id: $op, revision: 1, community_host: "localhost", provider: "github",
+  message_expr: "\"PR #\" + string(payload.number) + \" opened: \" + payload.pull_request.title"}')"
 mgmt PUT /v1/integrations/$INTEGRATION/secret \
   "{\"operation_id\":\"$(uuidgen | tr A-Z a-z)\",\"revision\":2,\"secret\":\"$(cat $GW/github.secret)\",\"grace_seconds\":0}"
 mgmt PUT /v1/integrations/$INTEGRATION/subscriptions/$(uuidgen | tr A-Z a-z) "$(jq -nc --arg c $CHANNEL '{
   revision: 1, channel_id: $c,
-  filter: "event.type == \"pull_request.opened\"",
-  message_template: "\"PR #\" + string(payload.number) + \" opened: \" + payload.pull_request.title"}')"
+  filter: "event.type == \"pull_request.opened\""}')"
 ```
 
-`filter` and `message_template` are CEL over `event` (`provider` and `type`,
-for example `pull_request.opened`) and `payload` (the webhook body). Both are
-optional. Without a filter, every delivery matches. Without a template, the
-message is `<provider>: <type>`.
+The integration's `message_expr` and each subscription's `filter` are CEL
+over `event` (`provider` and `type`, for example `pull_request.opened`) and
+`payload` (the webhook body). Both are optional. Without a filter, every
+delivery matches. Every matching subscription posts the integration's message;
+without a message expression, it is `<provider>: <type>`.
+
+An integration also stores `delivery_mode` (`channel_subscriptions`, the
+default, or `caller_selects_channel`, which requires `channel_expr`),
+`message_data_expr` and `group_key_expr`. They are checked and stored, but
+delivery does not use them yet: every integration fans out to its
+subscriptions.
 
 ### 7. Send a webhook
 
@@ -167,7 +174,7 @@ mgmt GET /v1/integrations/$INTEGRATION/deliveries | jq '.deliveries[0] | {state,
 
 The channel shows `PR #42 opened: Fix the build`. The delivery reports
 `messages: {queued, accepted, failed}`. A message the relay refused, or whose
-template failed, is counted as failed; its error is in
+message expression failed, is counted as failed; its error is in
 `webhook_gateway_messages.last_error`:
 
 ```bash

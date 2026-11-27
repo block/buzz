@@ -239,7 +239,9 @@ mod tests {
     use super::*;
     use crate::http::IntakeLimits;
     use crate::secrets::{SecretKey, SecretKeyring};
-    use crate::store::{DeliveryState, MemoryStore, Mutation, Operation, Provider, Store};
+    use crate::store::{
+        DeliveryState, IntegrationConfig, MemoryStore, Mutation, Operation, Provider, Store,
+    };
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
     use hmac::{Hmac, KeyInit, Mac};
@@ -270,6 +272,7 @@ mod tests {
                     mutation: Mutation::PutIntegration {
                         community_host: HOST_NAME.into(),
                         provider: Provider::Github,
+                        config: IntegrationConfig::default(),
                     },
                 },
                 now,

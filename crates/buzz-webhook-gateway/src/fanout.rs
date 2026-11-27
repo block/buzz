@@ -6,7 +6,8 @@
 //!        ▼
 //!   live subscriptions of the integration
 //!        │ per subscription: filter? ── false → nothing
-//!        │                           ── true  → render message template
+//!        │                           ── true  → the integration's message,
+//!        │                                      rendered once per delivery
 //!        │                           ── error → failed message (visible)
 //!        ▼
 //!   complete_fanout: messages + delivery → accepted, in one transaction,
@@ -16,7 +17,7 @@
 //! CEL runs on a blocking thread: each program is parsed and evaluated on a
 //! scoped thread with a large stack, and that must not stall the runtime.
 use crate::filter::{
-    compile_filter, compile_message_template, Budget, CompileError, Delivery, EvalError,
+    compile_filter, compile_message_expr, Budget, CompileError, Delivery, EvalError,
 };
 use crate::metrics::{record_fanout, record_forwarder_failure, FanoutResult};
 use crate::store::{
@@ -46,12 +47,13 @@ pub enum Evaluation {
     Retry(String),
 }
 
-/// The message a subscription without a message template sends.
+/// The message sent when the integration has no message expression.
 pub fn default_message(delivery: &ClaimedDelivery) -> String {
     format!("{}: {}", delivery.provider.as_str(), delivery.event_type)
 }
 
-/// Evaluate every subscription's programs against one delivery.
+/// Evaluate every subscription's filter against one delivery, and render the
+/// integration's message once for all the subscriptions that match.
 pub fn evaluate(delivery: &ClaimedDelivery, subscriptions: &[Subscription]) -> Evaluation {
     let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&delivery.body) else {
         return Evaluation::Settled(FanoutOutcome::Failed(
@@ -59,14 +61,18 @@ pub fn evaluate(delivery: &ClaimedDelivery, subscriptions: &[Subscription]) -> E
         ));
     };
     let input = Delivery::new(delivery.provider.as_str(), &delivery.event_type, &payload);
+    let mut message: Option<Result<String, String>> = None;
     let mut messages = Vec::new();
     for subscription in subscriptions {
-        let content = match render(delivery, &input, subscription) {
-            Ok(None) => continue,
-            Ok(Some(text)) if text.contains('\0') => {
-                Err("message contains a NUL character".to_owned())
-            }
-            Ok(Some(text)) => Ok(text),
+        let content = match filter_matches(&input, subscription) {
+            Ok(false) => continue,
+            Ok(true) => match &message {
+                Some(content) => content.clone(),
+                None => match message_for(delivery, &input) {
+                    Ok(content) => message.insert(content).clone(),
+                    Err(error) => return Evaluation::Retry(error),
+                },
+            },
             Err(EvalError::Unavailable(error)) => return Evaluation::Retry(error),
             Err(error) => Err(storable(&error.to_string())),
         };
@@ -82,8 +88,8 @@ pub fn evaluate(delivery: &ClaimedDelivery, subscriptions: &[Subscription]) -> E
     })
 }
 
-/// A program that compiled when its subscription was written can still fail
-/// to compile now; only a parser that could not start is worth a retry.
+/// A program that compiled when it was written can still fail to compile
+/// now; only a parser that could not start is worth a retry.
 fn compile_failure(error: CompileError) -> EvalError {
     match error {
         CompileError::Unavailable(error) => EvalError::Unavailable(error),
@@ -91,28 +97,34 @@ fn compile_failure(error: CompileError) -> EvalError {
     }
 }
 
-/// `None` when the filter does not match. Programs were checked when the
-/// subscription was written, so a compile error here is reported as a failed
-/// message rather than trusted away.
-fn render(
+/// Programs were checked when they were written, so a compile error here is
+/// reported as a failed message rather than trusted away.
+fn filter_matches(input: &Delivery, subscription: &Subscription) -> Result<bool, EvalError> {
+    match &subscription.filter {
+        Some(source) => compile_filter(source)
+            .map_err(compile_failure)?
+            .matches(input, &BUDGET),
+        None => Ok(true),
+    }
+}
+
+/// The message every matching subscription stores: the rendered text, or why
+/// rendering failed. `Err` is a reason to retry the whole delivery.
+fn message_for(
     delivery: &ClaimedDelivery,
     input: &Delivery,
-    subscription: &Subscription,
-) -> Result<Option<String>, EvalError> {
-    if let Some(source) = &subscription.filter {
-        if !compile_filter(source)
-            .map_err(compile_failure)?
-            .matches(input, &BUDGET)?
-        {
-            return Ok(None);
-        }
-    }
-    match &subscription.message_template {
-        Some(source) => compile_message_template(source)
-            .map_err(compile_failure)?
-            .render(input, &BUDGET)
-            .map(Some),
-        None => Ok(Some(default_message(delivery))),
+) -> Result<Result<String, String>, String> {
+    let rendered = match &delivery.message_expr {
+        Some(source) => compile_message_expr(source)
+            .map_err(compile_failure)
+            .and_then(|expr| expr.render(input, &BUDGET)),
+        None => Ok(default_message(delivery)),
+    };
+    match rendered {
+        Ok(text) if text.contains('\0') => Ok(Err("message contains a NUL character".to_owned())),
+        Ok(text) => Ok(Ok(text)),
+        Err(EvalError::Unavailable(error)) => Err(error),
+        Err(error) => Ok(Err(storable(&error.to_string()))),
     }
 }
 
@@ -218,8 +230,8 @@ async fn fan_out(
 mod tests {
     use super::*;
     use crate::store::{
-        DeliveryState, MemoryStore, MessageKey, Mutation, NewDelivery, Operation, Provider,
-        SubscriptionChange, SubscriptionStore, SubscriptionWrite,
+        DeliveryState, IntegrationConfig, MemoryStore, MessageKey, Mutation, NewDelivery,
+        Operation, Provider, SubscriptionChange, SubscriptionStore, SubscriptionWrite,
     };
     use chrono::TimeZone;
     use uuid::Uuid;
@@ -232,12 +244,26 @@ mod tests {
         t0() + Duration::seconds(1)
     }
 
-    async fn subscribe(
-        store: &MemoryStore,
-        integration_id: Uuid,
-        filter: Option<&str>,
-        message_template: Option<&str>,
-    ) -> Uuid {
+    async fn integration(store: &MemoryStore, message_expr: Option<&str>) -> Uuid {
+        let integration_id = Uuid::new_v4();
+        let operation = Operation {
+            operation_id: Uuid::new_v4(),
+            integration_id,
+            revision: 1,
+            mutation: Mutation::PutIntegration {
+                community_host: "acme.communities.example.org".to_owned(),
+                provider: Provider::Github,
+                config: IntegrationConfig {
+                    message_expr: message_expr.map(str::to_owned),
+                    ..IntegrationConfig::default()
+                },
+            },
+        };
+        store.apply(operation, t0()).await.unwrap();
+        integration_id
+    }
+
+    async fn subscribe(store: &MemoryStore, integration_id: Uuid, filter: Option<&str>) -> Uuid {
         let id = Uuid::new_v4();
         store
             .write_subscription(
@@ -248,7 +274,6 @@ mod tests {
                     change: SubscriptionChange::Put {
                         channel_id: Uuid::new_v4(),
                         filter: filter.map(str::to_owned),
-                        message_template: message_template.map(str::to_owned),
                     },
                 },
                 t0(),
@@ -286,50 +311,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliveries_fan_out_to_matching_subscriptions_only() {
+    async fn deliveries_fan_out_to_matching_subscriptions_with_the_integration_message() {
         let store = Arc::new(MemoryStore::default());
-        let integration_id = Uuid::new_v4();
-        store
-            .apply(
-                Operation {
-                    operation_id: Uuid::new_v4(),
-                    integration_id,
-                    revision: 1,
-                    mutation: Mutation::PutIntegration {
-                        community_host: "acme.communities.example.org".to_owned(),
-                        provider: Provider::Github,
-                    },
-                },
-                t0(),
-            )
-            .await
-            .unwrap();
-        let everything = subscribe(&store, integration_id, None, None).await;
-        let opened = subscribe(
+        let opened = Some(r#"payload.action == "opened""#);
+        let plain = integration(&store, None).await;
+        let everything = subscribe(&store, plain, None).await;
+        let closed = subscribe(&store, plain, Some(r#"payload.action == "closed""#)).await;
+        let broken = subscribe(&store, plain, Some("payload.missing == 1")).await;
+        let templated = integration(
             &store,
-            integration_id,
-            Some(r#"payload.action == "opened""#),
             Some(r#""PR #" + string(payload.number) + ": " + payload.title"#),
         )
         .await;
-        let closed = subscribe(
-            &store,
-            integration_id,
-            Some(r#"payload.action == "closed""#),
-            None,
-        )
-        .await;
-        let broken = subscribe(&store, integration_id, Some("payload.missing == 1"), None).await;
-        let unstorable =
-            subscribe(&store, integration_id, None, Some(r#""x" + payload.nul"#)).await;
-        deliver(
-            &store,
-            integration_id,
-            "d-1",
-            br#"{"action":"opened","number":7,"title":"Fix it","nul":"\u0000"}"#,
-        )
-        .await;
-        deliver(&store, integration_id, "d-2", b"not json").await;
+        let shared = [
+            subscribe(&store, templated, None).await,
+            subscribe(&store, templated, opened).await,
+        ];
+        let unstorable = integration(&store, Some(r#""x" + payload.nul"#)).await;
+        let nul = subscribe(&store, unstorable, opened).await;
+        let body = br#"{"action":"opened","number":7,"title":"Fix it","nul":"\u0000"}"#;
+        for integration_id in [plain, templated, unstorable] {
+            deliver(&store, integration_id, "d-1", body).await;
+        }
+        deliver(&store, plain, "d-2", b"not json").await;
 
         let fanout = Fanout {
             store: store.clone(),
@@ -337,41 +341,40 @@ mod tests {
             retry_max_age: Duration::hours(24),
             now: one_second_later,
         };
-        assert_eq!(fanout.run_once().await.unwrap(), 2);
+        assert_eq!(fanout.run_once().await.unwrap(), 4);
         assert_eq!(fanout.run_once().await.unwrap(), 0, "settled exactly once");
 
-        let delivery = store.delivery(integration_id, "d-1").unwrap();
+        let delivery = store.delivery(plain, "d-1").unwrap();
         assert_eq!(delivery.state, DeliveryState::Accepted);
         assert!(delivery.delivery.body.is_empty());
-        let key = |subscription_id| MessageKey {
-            integration_id,
-            delivery_id: "d-1".to_owned(),
-            subscription_id,
+        let message = |integration_id, subscription_id| {
+            store.message(&MessageKey {
+                integration_id,
+                delivery_id: "d-1".to_owned(),
+                subscription_id,
+            })
         };
-        let plain = store.message(&key(everything)).unwrap();
-        assert_eq!(plain.content, "github: pull_request.opened");
-        assert_eq!(plain.state, DeliveryState::Queued);
-        assert_eq!(plain.received_at, t0());
-        assert_eq!(
-            store.message(&key(opened)).unwrap().content,
-            "PR #7: Fix it"
-        );
-        assert!(store.message(&key(closed)).is_none());
-        let failed = store.message(&key(broken)).unwrap();
+        let default = message(plain, everything).unwrap();
+        assert_eq!(default.content, "github: pull_request.opened");
+        assert_eq!(default.state, DeliveryState::Queued);
+        assert_eq!(default.received_at, t0());
+        assert!(message(plain, closed).is_none());
+        let failed = message(plain, broken).unwrap();
         assert_eq!(failed.state, DeliveryState::Failed);
         assert!(failed.last_error.unwrap().contains("missing"));
-        let nul = store.message(&key(unstorable)).unwrap();
+        for subscription_id in shared {
+            let rendered = message(templated, subscription_id).unwrap();
+            assert_eq!(rendered.content, "PR #7: Fix it");
+            assert_eq!(rendered.state, DeliveryState::Queued);
+        }
+        let refused = message(unstorable, nul).unwrap();
+        assert_eq!(refused.state, DeliveryState::Failed);
         assert_eq!(
-            nul.state,
-            DeliveryState::Failed,
-            "only this subscription fails"
-        );
-        assert_eq!(
-            nul.last_error.as_deref(),
+            refused.last_error.as_deref(),
             Some("message contains a NUL character")
         );
 
-        let bad = store.delivery(integration_id, "d-2").unwrap();
+        let bad = store.delivery(plain, "d-2").unwrap();
         assert_eq!(bad.state, DeliveryState::Failed);
         assert_eq!(
             bad.last_error.as_deref(),

@@ -12,8 +12,7 @@ use sqlx::{postgres::PgRow, Row};
 use uuid::Uuid;
 
 const SUBSCRIPTION_COLUMNS: &str =
-    "id, integration_id, channel_id, filter, message_template, revision, \
-                                    deleted_at, created_at, updated_at";
+    "id, integration_id, channel_id, filter, revision, deleted_at, created_at, updated_at";
 
 fn subscription_from_row(row: PgRow) -> Result<Subscription, StoreError> {
     Ok(Subscription {
@@ -21,7 +20,6 @@ fn subscription_from_row(row: PgRow) -> Result<Subscription, StoreError> {
         integration_id: row.try_get("integration_id")?,
         channel_id: row.try_get("channel_id")?,
         filter: row.try_get("filter")?,
-        message_template: row.try_get("message_template")?,
         revision: row.try_get("revision")?,
         deleted_at: row.try_get("deleted_at")?,
         created_at: row.try_get("created_at")?,
@@ -78,13 +76,12 @@ impl SubscriptionStore for PostgresStore {
         // to move the row instead.
         let written = sqlx::query(
             "INSERT INTO webhook_gateway_subscriptions
-                 (id, integration_id, channel_id, filter, message_template, revision, deleted_at,
-                  created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 (id, integration_id, channel_id, filter, revision, deleted_at, created_at,
+                  updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (id) DO UPDATE SET
                  channel_id = EXCLUDED.channel_id,
                  filter = EXCLUDED.filter,
-                 message_template = EXCLUDED.message_template,
                  revision = EXCLUDED.revision,
                  deleted_at = EXCLUDED.deleted_at,
                  created_at = EXCLUDED.created_at,
@@ -95,7 +92,6 @@ impl SubscriptionStore for PostgresStore {
         .bind(next.integration_id)
         .bind(next.channel_id)
         .bind(&next.filter)
-        .bind(&next.message_template)
         .bind(next.revision)
         .bind(next.deleted_at)
         .bind(next.created_at)
@@ -380,7 +376,10 @@ mod postgres_tests {
     use crate::forwarder::Forwarder;
     use crate::relay_client::{LookupResult, RelayClient, SubmitResult};
     use crate::signer::GatewayKeySigner;
-    use crate::store::{DeliveryPage, Mutation, NewDelivery, Operation, Provider, Store};
+    use crate::store::{
+        DeliveryMode, DeliveryPage, IntegrationConfig, Mutation, NewDelivery, Operation, Provider,
+        Store,
+    };
     use nostr::{Event, Keys, NostrSigner, Url};
     use std::sync::{Arc, Mutex};
 
@@ -434,7 +433,6 @@ mod postgres_tests {
             change: SubscriptionChange::Put {
                 channel_id: channel,
                 filter: filter.map(str::to_owned),
-                message_template: None,
             },
         }
     }
@@ -451,7 +449,17 @@ mod postgres_tests {
         let store = Arc::new(PostgresStore::new(pool));
         let now = Utc::now();
         let (integration_id, other_integration) = (Uuid::new_v4(), Uuid::new_v4());
-        for id in [integration_id, other_integration] {
+        let configured = IntegrationConfig {
+            delivery_mode: DeliveryMode::CallerSelectsChannel,
+            channel_expr: Some("payload.channel_id".to_owned()),
+            message_expr: Some("payload.title".to_owned()),
+            message_data_expr: Some("{\"status\": payload.action}".to_owned()),
+            group_key_expr: Some("string(payload.number)".to_owned()),
+        };
+        for (id, config) in [
+            (integration_id, IntegrationConfig::default()),
+            (other_integration, configured.clone()),
+        ] {
             let operation = Operation {
                 operation_id: Uuid::new_v4(),
                 integration_id: id,
@@ -459,10 +467,13 @@ mod postgres_tests {
                 mutation: Mutation::PutIntegration {
                     community_host: "acme.communities.example.org".to_owned(),
                     provider: Provider::Github,
+                    config,
                 },
             };
             store.apply(operation, now).await.unwrap();
         }
+        let stored = store.integration(other_integration).await.unwrap().unwrap();
+        assert_eq!(stored.config, configured, "every config column round-trips");
 
         let (all, closed, channel) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         let write = put_sub(all, integration_id, 1, channel, None);

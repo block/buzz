@@ -1,9 +1,9 @@
-//! CEL programs for webhook subscriptions.
+//! CEL programs for webhook integrations and subscriptions.
 //!
-//! A subscription routes an integration's webhook deliveries into a channel.
-//! It holds a filter, a CEL expression that decides whether a delivery reaches
-//! the channel, and an optional message template, a CEL expression that renders the
-//! text the channel receives. Both read two variables:
+//! A subscription's filter decides whether a delivery reaches its channel.
+//! An integration's expressions pick the destination channel, render the
+//! message text and its structured data, and extract the key that groups
+//! related deliveries. Every program reads two variables:
 //!
 //! - `event`: `event.provider` and `event.type`;
 //! - `payload`: the provider's JSON body.
@@ -24,7 +24,7 @@ pub use eval::{Budget, Delivery, EvalError};
 use cel::common::ast::{EntryExpr, Expr, LiteralValue, MapExpr, StructExpr};
 use cel::{Env, IdedExpr};
 
-/// The largest filter or message template source accepted, in bytes.
+/// The largest filter or message expression source accepted, in bytes.
 pub const MAX_EXPRESSION_BYTES: usize = 4 * 1024;
 
 /// The deepest bracket and call nesting the parser accepts. Its default is
@@ -87,10 +87,12 @@ pub enum CompileError {
 }
 
 /// What a program must return.
-#[derive(Clone, Copy)]
-enum Returns {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Returns {
     Bool,
     String,
+    /// Any value that converts to JSON, such as a map.
+    Any,
 }
 
 /// A checked filter: a CEL expression that returns a boolean.
@@ -99,9 +101,9 @@ pub struct Filter {
     expression: IdedExpr,
 }
 
-/// A checked message template: a CEL expression that returns a string.
+/// A checked message expression: a CEL expression that returns a string.
 #[derive(Debug, Clone)]
-pub struct MessageTemplate {
+pub struct MessageExpr {
     expression: IdedExpr,
 }
 
@@ -112,7 +114,7 @@ impl Filter {
     }
 }
 
-impl MessageTemplate {
+impl MessageExpr {
     /// The parsed expression.
     pub fn expression(&self) -> &IdedExpr {
         &self.expression
@@ -124,9 +126,14 @@ pub fn compile_filter(source: &str) -> Result<Filter, CompileError> {
     compile(source, Returns::Bool).map(|expression| Filter { expression })
 }
 
-/// Check `source` as a message template.
-pub fn compile_message_template(source: &str) -> Result<MessageTemplate, CompileError> {
-    compile(source, Returns::String).map(|expression| MessageTemplate { expression })
+/// Check `source` as a message expression.
+pub fn compile_message_expr(source: &str) -> Result<MessageExpr, CompileError> {
+    compile(source, Returns::String).map(|expression| MessageExpr { expression })
+}
+
+/// Check `source` as a program returning `returns`, without keeping it.
+pub fn check_program(source: &str, returns: Returns) -> Result<(), CompileError> {
+    compile(source, returns).map(drop)
 }
 
 fn compile(source: &str, returns: Returns) -> Result<IdedExpr, CompileError> {
@@ -252,7 +259,7 @@ fn check_result(expr: &Expr, returns: Returns) -> Result<(), CompileError> {
     if wrong {
         return Err(CompileError::WrongResult(match returns {
             Returns::Bool => "a boolean",
-            Returns::String => "a string",
+            Returns::String | Returns::Any => "a string",
         }));
     }
     Ok(())
@@ -285,7 +292,7 @@ mod tests {
             r#"has(payload.issue) ? payload.issue.title : "no issue""#,
             r#""fixed""#,
         ] {
-            compile_message_template(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            compile_message_expr(source).unwrap_or_else(|error| panic!("{source}: {error}"));
         }
     }
 
@@ -335,7 +342,7 @@ mod tests {
         }
         for source in ["true", "[\"a\"]", "1", r#"{"a": "b"}"#] {
             assert_eq!(
-                compile_message_template(source).expect_err(source),
+                compile_message_expr(source).expect_err(source),
                 CompileError::WrongResult("a string"),
                 "{source}"
             );

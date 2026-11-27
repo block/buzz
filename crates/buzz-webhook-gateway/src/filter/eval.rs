@@ -4,7 +4,7 @@
 //! ([`MAX_EXPRESSION_BYTES`](super::MAX_EXPRESSION_BYTES) and the depth
 //! limit), its loops by the budget's iteration count and time, which the
 //! interpreter checks on every comprehension iteration, and a message
-//! template's result by the budget's output size. Without loops, a program's work is bounded by its
+//! expression's result by the budget's output size. Without loops, a program's work is bounded by its
 //! size and the payload's.
 //!
 //! The time limit also bounds memory: a program that copies the payload on
@@ -18,7 +18,7 @@ use std::time::Duration;
 use cel::objects::{Key, Map};
 use cel::{Context, Deadline, Env, ExecutionError, Interrupt, Value};
 
-use super::{Filter, MessageTemplate, PARSE_STACK_BYTES};
+use super::{Filter, MessageExpr, PARSE_STACK_BYTES};
 
 /// Why evaluating a program failed. Each is the program's fault, or its
 /// input's, except [`EvalError::Unavailable`].
@@ -92,8 +92,8 @@ impl Filter {
     }
 }
 
-impl MessageTemplate {
-    /// The message text this template renders for `delivery`.
+impl MessageExpr {
+    /// The message text this expression renders for `delivery`.
     pub fn render(&self, delivery: &Delivery, budget: &Budget) -> Result<String, EvalError> {
         match evaluate(self.expression(), delivery, budget)? {
             Value::String(text) if text.len() > budget.max_output_bytes => {
@@ -183,7 +183,7 @@ fn to_value(json: &serde_json::Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::{compile_filter, compile_message_template};
+    use crate::filter::{compile_filter, compile_message_expr};
     use serde_json::json;
 
     const BUDGET: Budget = Budget {
@@ -271,7 +271,7 @@ mod tests {
     fn messages_render_deliveries() {
         let delivery = delivery();
         let render = |source: &str, budget: &Budget| {
-            compile_message_template(source)
+            compile_message_expr(source)
                 .unwrap()
                 .render(&delivery, budget)
         };

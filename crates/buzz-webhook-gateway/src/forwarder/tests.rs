@@ -1,8 +1,8 @@
 use super::*;
 use crate::signer::GatewayKeySigner;
 use crate::store::{
-    DeliveryState, Evaluated, FanoutOutcome, MemoryStore, MessageKey, Mutation, NewDelivery,
-    NewMessage, Operation, Provider, SubscriptionStore,
+    DeliveryState, Evaluated, FanoutOutcome, IntegrationConfig, MemoryStore, MessageKey, Mutation,
+    NewDelivery, NewMessage, Operation, Provider, SubscriptionStore,
 };
 use async_trait::async_trait;
 use chrono::TimeZone;
@@ -189,6 +189,7 @@ async fn seeded_store() -> (Arc<MemoryStore>, MessageKey) {
                 mutation: Mutation::PutIntegration {
                     community_host: "acme.communities.example.org".to_owned(),
                     provider: Provider::Github,
+                    config: IntegrationConfig::default(),
                 },
             },
             t0(),

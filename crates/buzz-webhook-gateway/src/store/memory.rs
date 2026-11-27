@@ -285,6 +285,7 @@ impl Store for MemoryStore {
                 integration_id: key.0,
                 delivery_id: key.1.clone(),
                 provider: integration.provider,
+                message_expr: integration.config.message_expr,
                 event_type: row.delivery.event_type.clone(),
                 body: row.delivery.body.clone(),
                 received_at: row.delivery.received_at,

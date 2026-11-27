@@ -9,11 +9,12 @@
 //!
 //! Writes are idempotent by revision: each carries the revision it produces,
 //! a retry of the applied write returns 200 with the stored subscription, and
-//! an older revision gets 409 with the current one. Filter and message
-//! template programs are checked here so a typo fails the request, not every delivery.
-//! Deletion is a POST because NIP-98 signs no DELETE method.
+//! an older revision gets 409 with the current one. Filters are checked here
+//! so a typo fails the request, not every delivery. The message comes from
+//! the integration's message expression. Deletion is a POST because NIP-98
+//! signs no DELETE method.
+use super::programs::refuse_filter;
 use super::{authenticate, invalid, parse_body, store_error};
-use crate::filter::{compile_filter, compile_message_template, CompileError};
 use crate::http::{error, AppState};
 use crate::store::{SubscriptionChange, SubscriptionView, SubscriptionWrite, WriteOutcome};
 use axum::{
@@ -51,46 +52,12 @@ struct PutSubscriptionBody {
     channel_id: Uuid,
     #[serde(default)]
     filter: Option<String>,
-    #[serde(default)]
-    message_template: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeleteSubscriptionBody {
     revision: i64,
-}
-
-fn invalid_program(field: &'static str, e: CompileError) -> Response {
-    let body =
-        serde_json::json!({ "error": "invalid_program", "field": field, "message": e.to_string() });
-    (StatusCode::BAD_REQUEST, Json(body)).into_response()
-}
-
-/// Check both programs off the async runtime: the parser runs on a scoped
-/// thread with a large stack. `Some` is the response refusing the request.
-async fn refuse_programs(
-    filter: Option<String>,
-    message_template: Option<String>,
-) -> Option<Response> {
-    let checked = tokio::task::spawn_blocking(move || {
-        if let Some(source) = &filter {
-            compile_filter(source).map_err(|e| ("filter", e))?;
-        }
-        if let Some(source) = &message_template {
-            compile_message_template(source).map_err(|e| ("message_template", e))?;
-        }
-        Ok(())
-    })
-    .await;
-    match checked {
-        Ok(Ok(())) => None,
-        Ok(Err((_, CompileError::Unavailable(_)))) | Err(_) => Some(error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "temporarily_unavailable",
-        )),
-        Ok(Err((field, e))) => Some(invalid_program(field, e)),
-    }
 }
 
 fn write_response(outcome: WriteOutcome) -> Response {
@@ -134,9 +101,7 @@ async fn put_subscription(
         Ok(request) => request,
         Err(reject) => return reject.into_response(),
     };
-    if let Some(refusal) =
-        refuse_programs(request.filter.clone(), request.message_template.clone()).await
-    {
+    if let Some(refusal) = refuse_filter(request.filter.clone()).await {
         return refusal;
     }
     write(
@@ -148,7 +113,6 @@ async fn put_subscription(
             change: SubscriptionChange::Put {
                 channel_id: request.channel_id,
                 filter: request.filter,
-                message_template: request.message_template,
             },
         },
     )
@@ -255,7 +219,6 @@ mod tests {
             "revision": 1,
             "channel_id": channel,
             "filter": "payload.action == \"opened\"",
-            "message_template": "\"PR: \" + payload.title",
         });
         let (status, created) = call(&fx, &fx.relay, "PUT", &path, &path, Some(body.clone())).await;
         assert_eq!(status, StatusCode::OK, "{created}");
@@ -281,17 +244,13 @@ mod tests {
                 "filter",
                 json!({ "revision": 2, "channel_id": channel, "filter": "1" }),
             ),
-            (
-                "message_template",
-                json!({ "revision": 2, "channel_id": channel, "message_template": "true" }),
-            ),
         ] {
             let (status, refused) = call(&fx, &fx.relay, "PUT", &path, &path, Some(bad)).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
             assert_eq!(refused["error"], "invalid_program");
             assert_eq!(refused["field"], field);
         }
-        let unknown = json!({ "revision": 2, "channel_id": channel, "channel": "x" });
+        let unknown = json!({ "revision": 2, "channel_id": channel, "message_expr": "\"x\"" });
         let (status, _) = call(&fx, &fx.relay, "PUT", &path, &path, Some(unknown)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
 
