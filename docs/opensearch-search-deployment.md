@@ -100,9 +100,6 @@ across communities. After the fix, verify that the queue drains.
 
 ## Known gaps
 
-- **Deleted communities.** Deleting a community does not remove its
-  documents from the index. No search can return them, but their words stay
-  in the index.
 - **Postgres crash or failover.** The version sequence can hand out values
   again after a Postgres crash or the promotion of an asynchronous replica.
   Rows then stay queued until the sequence passes the versions the index
@@ -112,13 +109,26 @@ across communities. After the fix, verify that the queue drains.
 - **Writes applied late.** OpenSearch forgets a delete's version after 60
   seconds (`gc_deletes`), so an older write that lands later, such as a
   previous lease holder's bulk request, brings the deleted document back.
-- **Removed text on disk.** A removed document can no longer be found, but
-  its text stays in the index's files until OpenSearch merges them. The
-  relay does not force that merge.
+- **Removed text on disk.** After a community purge or a drain that removes
+  documents, a self-hosted or managed cluster is asked to expunge deleted
+  documents (`_forcemerge?only_expunge_deletes=true`); OpenSearch's
+  soft-delete retention still governs when segments are physically reclaimed.
+  On OpenSearch Serverless (`aoss`), `_forcemerge` is not exposed, so
+  removed text leaves storage when the service compacts segments.
 
-In the two cases before this one, a search can match text a message no longer has. Every
+In the first two cases, a search can match text a message no longer has. Every
 hit is re-read from Postgres before it is returned, so that text is never
 shown.
+
+## Community deletion
+
+When OpenSearch indexing is enabled, pass the same `BUZZ_OPENSEARCH_URL`
+(and basic-auth or AWS SigV4) environment variables to `buzz-admin deletions
+drain` / `run`. Community deletion fails closed if the database has a
+maintained search index and `BUZZ_OPENSEARCH_URL` is unset. During deletion,
+the executor scans and bulk-deletes the community's documents with monotonic
+versions, then verifies that zero documents remain (logging and counting
+`buzz_search_community_purge_remaining_total` if any do).
 
 ## Local run
 

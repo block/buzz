@@ -21,9 +21,9 @@ use opensearch::auth::Credentials;
 use opensearch::http::response::Response;
 use opensearch::http::transport::{SingleNodeConnectionPool, TransportBuilder};
 use opensearch::http::Url;
-use opensearch::indices::IndicesRefreshParts;
 use opensearch::indices::{
-    IndicesCreateParts, IndicesDeleteParts, IndicesExistsParts, IndicesGetSettingsParts,
+    IndicesCreateParts, IndicesDeleteParts, IndicesExistsParts, IndicesForcemergeParts,
+    IndicesGetSettingsParts, IndicesRefreshParts,
 };
 use opensearch::params::VersionType;
 use opensearch::{BulkOperation, BulkParts, OpenSearch, SearchParts};
@@ -129,12 +129,112 @@ pub struct AwsSigV4 {
     pub region: String,
 }
 
+impl OpenSearchConfig {
+    /// Parse OpenSearch connection settings from process environment variables.
+    ///
+    /// Reads `BUZZ_OPENSEARCH_URL`, `BUZZ_OPENSEARCH_USERNAME`,
+    /// `BUZZ_OPENSEARCH_PASSWORD`, `BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE`, and
+    /// `BUZZ_OPENSEARCH_AWS_REGION` (falling back to `AWS_REGION`, then
+    /// `AWS_DEFAULT_REGION`). Returns `Ok(None)` when `BUZZ_OPENSEARCH_URL` is
+    /// unset or empty.
+    pub fn from_env() -> Result<Option<Self>, String> {
+        Self::parse_env(|name| std::env::var(name).ok())
+    }
+
+    /// Parse OpenSearch connection settings from a custom environment lookup.
+    pub fn parse_env(get_env: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
+        let non_empty = |name: &str| {
+            get_env(name)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+        let url = non_empty("BUZZ_OPENSEARCH_URL");
+        let username = non_empty("BUZZ_OPENSEARCH_USERNAME");
+        let password = non_empty("BUZZ_OPENSEARCH_PASSWORD");
+        let service = non_empty("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE");
+        let explicit_region = non_empty("BUZZ_OPENSEARCH_AWS_REGION");
+        let aws_region = non_empty("AWS_REGION").or_else(|| non_empty("AWS_DEFAULT_REGION"));
+
+        let Some(raw_url) = url else {
+            if username.is_some() || password.is_some() {
+                return Err(
+                    "BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD need BUZZ_OPENSEARCH_URL"
+                        .into(),
+                );
+            }
+            if service.is_some() {
+                return Err("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE needs BUZZ_OPENSEARCH_URL".into());
+            }
+            if explicit_region.is_some() {
+                return Err(
+                    "BUZZ_OPENSEARCH_AWS_REGION needs BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE".into(),
+                );
+            }
+            return Ok(None);
+        };
+
+        let parsed = Url::parse(&raw_url)
+            .map_err(|e| format!("BUZZ_OPENSEARCH_URL is not a valid URL: {e}"))?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err("BUZZ_OPENSEARCH_URL must be an HTTP(S) URL without credentials, query, or fragment; set BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD for basic auth".into());
+        }
+
+        let basic_auth = match (username, password) {
+            (Some(username), Some(password)) => Some((username, password)),
+            (None, None) => None,
+            _ => {
+                return Err(
+                    "set both BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD, or neither"
+                        .into(),
+                );
+            }
+        };
+
+        let aws_sigv4 = match service {
+            None => {
+                if explicit_region.is_some() {
+                    return Err(
+                        "BUZZ_OPENSEARCH_AWS_REGION needs BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE".into(),
+                    );
+                }
+                None
+            }
+            Some(service) => {
+                if !matches!(service.as_str(), "es" | "aoss") {
+                    return Err("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE must be es (a managed domain) or aoss (a Serverless collection)".into());
+                }
+                if basic_auth.is_some() {
+                    return Err("set BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE or BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD, not both".into());
+                }
+                let Some(region) = explicit_region.or(aws_region) else {
+                    return Err("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE needs a region: set BUZZ_OPENSEARCH_AWS_REGION or AWS_REGION".into());
+                };
+                Some(AwsSigV4 { service, region })
+            }
+        };
+
+        Ok(Some(Self {
+            url: parsed.to_string(),
+            basic_auth,
+            aws_sigv4,
+            index_prefix: DEFAULT_INDEX_PREFIX.to_string(),
+        }))
+    }
+}
+
 /// The message index on one OpenSearch cluster.
 #[derive(Clone)]
 pub struct SearchIndex {
     client: OpenSearch,
     alias: String,
     index: String,
+    is_serverless: bool,
 }
 
 impl std::fmt::Debug for SearchIndex {
@@ -142,6 +242,7 @@ impl std::fmt::Debug for SearchIndex {
         f.debug_struct("SearchIndex")
             .field("alias", &self.alias)
             .field("index", &self.index)
+            .field("is_serverless", &self.is_serverless)
             .finish_non_exhaustive()
     }
 }
@@ -156,6 +257,10 @@ impl SearchIndex {
         if let Some((user, password)) = &config.basic_auth {
             transport = transport.auth(Credentials::Basic(user.clone(), password.clone()));
         }
+        let is_serverless = config
+            .aws_sigv4
+            .as_ref()
+            .is_some_and(|sigv4| sigv4.service == "aoss");
         if let Some(sigv4) = &config.aws_sigv4 {
             if config.basic_auth.is_some() {
                 return Err(SearchError::Engine(
@@ -178,7 +283,22 @@ impl SearchIndex {
             client: OpenSearch::new(transport),
             alias: format!("{}messages", config.index_prefix),
             index: format!("{}messages-v{MAPPING_VERSION}", config.index_prefix),
+            is_serverless,
         })
+    }
+
+    /// Whether this client targets an Amazon OpenSearch Serverless (`aoss`)
+    /// collection, which does not expose `_refresh` or `_forcemerge`.
+    pub fn is_serverless(&self) -> bool {
+        self.is_serverless
+    }
+
+    /// Verify the cluster is reachable and accepts our credentials before a
+    /// destructive community deletion fences the tenant. Both 200 (alias
+    /// exists) and 404 (not yet created) pass; auth and transport errors fail.
+    pub async fn preflight(&self) -> Result<(), SearchError> {
+        let _ = self.missing().await?;
+        Ok(())
     }
 
     /// Create the versioned index behind the alias unless the alias exists.
@@ -194,7 +314,7 @@ impl SearchIndex {
     /// Whether the cluster answers that neither the alias nor the versioned
     /// index exists. Any other answer is an error, so a cluster that fails
     /// or throttles a lookup is never taken for one that lost the index.
-    pub(crate) async fn missing(&self) -> Result<bool, SearchError> {
+    pub async fn missing(&self) -> Result<bool, SearchError> {
         if self.exists(&self.alias).await? {
             return Ok(false);
         }
@@ -512,6 +632,119 @@ impl SearchIndex {
             .collect::<Result<_, _>>()?;
         Ok(SearchResult { hits, page })
     }
+
+    /// Return up to `page_size` event IDs indexed for `community`, ordered
+    /// ascending by hex `event_id` and paginated via `search_after`.
+    ///
+    /// Uses `_search` + `search_after` instead of `_delete_by_query` so the
+    /// same purge path works on both self-hosted OpenSearch and Amazon
+    /// OpenSearch Serverless (`aoss`).
+    pub async fn list_community_event_ids(
+        &self,
+        community: CommunityId,
+        after: Option<[u8; 32]>,
+        page_size: usize,
+    ) -> Result<Vec<[u8; 32]>, SearchError> {
+        let mut body = json!({
+            "size": page_size.max(1),
+            "track_total_hits": false,
+            "_source": ["event_id"],
+            "query": { "term": { "community": community.as_uuid().to_string() } },
+            "sort": [{ "event_id": "asc" }]
+        });
+        if let Some(cursor) = after {
+            body["search_after"] = json!([hex::encode(cursor)]);
+        }
+        let response = self
+            .client
+            .search(SearchParts::Index(&[&self.alias]))
+            .body(body)
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let body = checked(response).await?;
+        if body["timed_out"] == true {
+            return Err(SearchError::Engine("community purge scan timed out".into()));
+        }
+        if body["_shards"]["failed"].as_u64().unwrap_or(0) > 0 {
+            return Err(SearchError::Engine(
+                "community purge scan shards failed".into(),
+            ));
+        }
+        let invalid = || SearchError::Engine("unexpected community purge hit shape".into());
+        body["hits"]["hits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|hit| {
+                let raw = hit["_source"]["event_id"].as_str().ok_or_else(invalid)?;
+                let bytes = hex::decode(raw).map_err(|_| invalid())?;
+                bytes.try_into().map_err(|_| invalid())
+            })
+            .collect()
+    }
+
+    /// Count indexed documents remaining for `community`. Returns `0` when
+    /// neither the alias nor the versioned index exists.
+    pub async fn count_community_documents(
+        &self,
+        community: CommunityId,
+    ) -> Result<u64, SearchError> {
+        if self.missing().await? {
+            return Ok(0);
+        }
+        let response = self
+            .client
+            .search(SearchParts::Index(&[&self.alias]))
+            .body(json!({
+                "size": 0,
+                "track_total_hits": true,
+                "query": { "term": { "community": community.as_uuid().to_string() } }
+            }))
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let body = checked(response).await?;
+        if body["timed_out"] == true {
+            return Err(SearchError::Engine(
+                "community purge count timed out".into(),
+            ));
+        }
+        if body["_shards"]["failed"].as_u64().unwrap_or(0) > 0 {
+            return Err(SearchError::Engine(
+                "community purge count shards failed".into(),
+            ));
+        }
+        body["hits"]["total"]["value"]
+            .as_u64()
+            .ok_or_else(|| SearchError::Engine("missing hit total in purge count".into()))
+    }
+
+    /// Ask a self-hosted or managed cluster to expunge deleted documents from
+    /// index segments (`_forcemerge?only_expunge_deletes=true`).
+    ///
+    /// Returns `Ok(false)` without making a request on Amazon OpenSearch
+    /// Serverless (`aoss`), which does not expose `_forcemerge`, or when the
+    /// index does not exist.
+    pub async fn expunge_deletes(&self) -> Result<bool, SearchError> {
+        if self.is_serverless || self.missing().await? {
+            return Ok(false);
+        }
+        let response = self
+            .client
+            .indices()
+            .forcemerge(IndicesForcemergeParts::Index(&[&self.alias]))
+            .only_expunge_deletes(true)
+            .request_timeout(BULK_TIMEOUT)
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let body = checked(response).await?;
+        if body["_shards"]["failed"].as_u64().unwrap_or(0) > 0 {
+            return Err(SearchError::Engine("expunge deletes shards failed".into()));
+        }
+        Ok(true)
+    }
 }
 
 /// Settings, mapping and alias of a new index.
@@ -792,5 +1025,78 @@ mod tests {
             request_ranges([4, 4, 4, 9, 1].into_iter(), 8),
             [0..2, 2..3, 3..4, 4..5]
         );
+    }
+
+    #[test]
+    fn parse_env_handles_unset_basic_auth_and_sigv4() {
+        let from_pairs = |pairs: &[(&str, &str)]| {
+            OpenSearchConfig::parse_env(|name| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_string())
+            })
+        };
+
+        assert!(from_pairs(&[]).expect("unset").is_none());
+
+        let basic = from_pairs(&[
+            ("BUZZ_OPENSEARCH_URL", "http://localhost:9200"),
+            ("BUZZ_OPENSEARCH_USERNAME", "admin"),
+            ("BUZZ_OPENSEARCH_PASSWORD", "secret"),
+        ])
+        .expect("basic auth")
+        .expect("some");
+        assert_eq!(basic.url, "http://localhost:9200/");
+        assert_eq!(basic.basic_auth, Some(("admin".into(), "secret".into())));
+        assert!(basic.aws_sigv4.is_none());
+        assert!(!SearchIndex::new(&basic).expect("index").is_serverless());
+
+        let aoss = from_pairs(&[
+            (
+                "BUZZ_OPENSEARCH_URL",
+                "https://example.us-west-2.aoss.amazonaws.com",
+            ),
+            ("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE", "aoss"),
+            ("AWS_REGION", "us-west-2"),
+        ])
+        .expect("aoss")
+        .expect("some");
+        assert_eq!(
+            aoss.aws_sigv4,
+            Some(AwsSigV4 {
+                service: "aoss".into(),
+                region: "us-west-2".into(),
+            })
+        );
+        assert!(SearchIndex::new(&aoss).expect("index").is_serverless());
+
+        let es = from_pairs(&[
+            (
+                "BUZZ_OPENSEARCH_URL",
+                "https://example.us-east-1.es.amazonaws.com",
+            ),
+            ("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE", "es"),
+            ("BUZZ_OPENSEARCH_AWS_REGION", "us-east-1"),
+        ])
+        .expect("es")
+        .expect("some");
+        assert!(!SearchIndex::new(&es).expect("index").is_serverless());
+
+        assert!(from_pairs(&[("BUZZ_OPENSEARCH_USERNAME", "admin")]).is_err());
+        assert!(from_pairs(&[("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE", "aoss")]).is_err());
+        assert!(from_pairs(&[
+            ("BUZZ_OPENSEARCH_URL", "https://example.org"),
+            ("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE", "aoss"),
+        ])
+        .is_err());
+        assert!(from_pairs(&[
+            ("BUZZ_OPENSEARCH_URL", "https://example.org"),
+            ("BUZZ_OPENSEARCH_USERNAME", "admin"),
+            ("BUZZ_OPENSEARCH_PASSWORD", "secret"),
+            ("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE", "aoss"),
+            ("AWS_REGION", "us-east-1"),
+        ])
+        .is_err());
     }
 }

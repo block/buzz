@@ -14,9 +14,11 @@ buzz-core = { workspace = true }
 buzz-db = { workspace = true }
 buzz-media = { workspace = true }
 buzz-pubsub = { workspace = true }
+buzz-search = { workspace = true }
 chrono = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 hex = { workspace = true }
+metrics = { workspace = true }
 nostr = { workspace = true }
 redis = { workspace = true }
 serde = { workspace = true }
@@ -24,6 +26,7 @@ serde_json = { workspace = true }
 sqlx = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]

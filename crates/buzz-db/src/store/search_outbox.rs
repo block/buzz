@@ -136,6 +136,26 @@ pub(crate) async fn index_maintained(conn: &mut sqlx::PgConnection) -> Result<bo
     .await?)
 }
 
+/// Whether an indexing relay has ever run against this database.
+///
+/// Used by out-of-band processes such as community deletion to fail closed
+/// when a search index is maintained but no OpenSearch address was configured.
+pub async fn is_index_maintained(pool: &PgPool) -> Result<bool> {
+    let mut conn = pool.acquire().await?;
+    index_maintained(&mut conn).await
+}
+
+/// Take the next monotonic external version from `search_index_version`.
+///
+/// Used when writing or deleting documents outside a normal outbox batch
+/// (such as whole-community purge) so late requests with older versions cannot
+/// overwrite newer deletes.
+pub async fn next_index_version(pool: &PgPool) -> Result<i64> {
+    Ok(sqlx::query_scalar("SELECT nextval('search_index_version')")
+        .fetch_one(pool)
+        .await?)
+}
+
 /// Queue the index change for an event this admitted transaction inserted,
 /// soft-deleted or otherwise changed: the event itself when it is
 /// searchable, or the message it edits when it is a message edit.
