@@ -125,7 +125,7 @@ drain` / `run`. Community deletion fails closed if the database has a
 maintained search index and `BUZZ_OPENSEARCH_URL` is unset. During deletion,
 the executor scans and bulk-deletes the community's documents with monotonic
 versions, then verifies that zero documents remain (on Serverless, after a
-60-second settle window and a second purge pass so late writes become
+90-second settle window and a second purge pass so late writes become
 searchable before counting). If any documents remain, the executor logs a
 warning, records the error on the deletion request, and retries.
 

@@ -1047,7 +1047,7 @@ impl Config {
             Some(region) if !region.trim().is_empty() => Some(region),
             _ => optional_utf8_env("AWS_DEFAULT_REGION")?,
         };
-        let opensearch = with_opensearch_aws_sigv4(
+        let opensearch = buzz_search::opensearch::OpenSearchConfig::with_aws_sigv4(
             opensearch,
             optional_utf8_env("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE")?,
             optional_utf8_env("BUZZ_OPENSEARCH_AWS_REGION")?,
@@ -1712,18 +1712,6 @@ fn parse_opensearch_config(
     Ok(config)
 }
 
-/// Add AWS SigV4 request signing to the OpenSearch settings.
-fn with_opensearch_aws_sigv4(
-    opensearch: Option<buzz_search::opensearch::OpenSearchConfig>,
-    service: Option<String>,
-    region: Option<String>,
-    aws_region: Option<String>,
-) -> Result<Option<buzz_search::opensearch::OpenSearchConfig>, String> {
-    buzz_search::opensearch::OpenSearchConfig::with_aws_sigv4(
-        opensearch, service, region, aws_region,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1808,10 +1796,14 @@ mod tests {
             config.and_then(|config| config.aws_sigv4)
         };
 
-        let unsigned =
-            with_opensearch_aws_sigv4(cluster(None, None), None, some(" "), some("us-east-1"));
+        let unsigned = buzz_search::opensearch::OpenSearchConfig::with_aws_sigv4(
+            cluster(None, None),
+            None,
+            some(" "),
+            some("us-east-1"),
+        );
         assert_eq!(signing(unsigned.unwrap()), None);
-        let basic = with_opensearch_aws_sigv4(
+        let basic = buzz_search::opensearch::OpenSearchConfig::with_aws_sigv4(
             cluster(some("relay"), some("secret")),
             None,
             None,
@@ -1823,8 +1815,12 @@ mod tests {
             ("aoss", some("eu-west-1"), some("us-east-1"), "eu-west-1"),
             ("es", None, some("us-east-1"), "us-east-1"),
         ] {
-            let signed =
-                with_opensearch_aws_sigv4(cluster(None, None), some(service), region, aws_region);
+            let signed = buzz_search::opensearch::OpenSearchConfig::with_aws_sigv4(
+                cluster(None, None),
+                some(service),
+                region,
+                aws_region,
+            );
             let signed = signing(signed.unwrap()).unwrap();
             assert_eq!(
                 (signed.service.as_str(), signed.region.as_str()),
@@ -1858,7 +1854,10 @@ mod tests {
             ),
         ] {
             assert!(
-                with_opensearch_aws_sigv4(opensearch, service, region, aws_region).is_err(),
+                buzz_search::opensearch::OpenSearchConfig::with_aws_sigv4(
+                    opensearch, service, region, aws_region
+                )
+                .is_err(),
                 "{why}"
             );
         }
