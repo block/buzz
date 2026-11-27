@@ -1062,7 +1062,10 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 108);
+        assert_eq!(migrations.len(), 109);
+        assert_eq!(migrations[108].version, 109);
+        assert!(strip_sql_comments(migrations[108].sql.as_str())
+            .contains("ADD COLUMN IF NOT EXISTS parked_at TIMESTAMPTZ;"));
         assert_eq!(migrations[107].version, 108);
         assert!(strip_sql_comments(migrations[107].sql.as_str())
             .contains("CREATE SEQUENCE search_index_version"));

@@ -13,7 +13,11 @@ CREATE TABLE search_outbox (
     event_id         BYTEA NOT NULL CHECK (length(event_id) = 32),
     event_created_at TIMESTAMPTZ NOT NULL,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    parked_at        TIMESTAMPTZ,
     PRIMARY KEY (community_id, id)
 );
 CREATE INDEX search_outbox_queue ON search_outbox (created_at);
 CREATE INDEX search_outbox_community_queue ON search_outbox (community_id, created_at);
+CREATE INDEX search_outbox_active_queue ON search_outbox (created_at) WHERE parked_at IS NULL;
+CREATE INDEX search_outbox_active_community_queue ON search_outbox (community_id, created_at) WHERE parked_at IS NULL;
+CREATE INDEX search_outbox_parked_queue ON search_outbox (parked_at) WHERE parked_at IS NOT NULL;
