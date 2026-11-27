@@ -13,7 +13,7 @@
 //! so a typo fails the request, not every delivery. The message comes from
 //! the integration's message expression. Deletion is a POST because NIP-98
 //! signs no DELETE method.
-use super::programs::refuse_filter;
+use super::cel_validator::refuse_filter;
 use super::{authenticate, invalid, parse_body, store_error};
 use crate::http::{error, AppState};
 use crate::store::{SubscriptionChange, SubscriptionView, SubscriptionWrite, WriteOutcome};

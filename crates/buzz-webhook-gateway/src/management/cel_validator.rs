@@ -1,4 +1,4 @@
-//! CEL programs checked when a management request writes them, so a typo
+//! Validates CEL expressions when a management request writes them, so a typo
 //! fails the request instead of every delivery.
 use crate::filter::{check_program, CompileError, Returns};
 use crate::http::error;

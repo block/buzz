@@ -15,10 +15,10 @@
 //! Every mutation carries a caller-chosen `operation_id` and the integration
 //! `revision` it produces, so a relay can retry blindly: a replay returns the
 //! original response and an out-of-date relay learns the current revision.
-mod programs;
+mod cel_validator;
 mod subscriptions;
 
-use programs::refuse_config;
+use cel_validator::refuse_config;
 
 use crate::http::{error, AppState};
 use crate::secrets::MAX_SECRET_BYTES;
