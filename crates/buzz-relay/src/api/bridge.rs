@@ -1511,16 +1511,22 @@ async fn submit_event_authed(
         auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
     };
 
-    // Typing indicators are ephemeral: broadcast to the channel, never stored.
+    // Typing indicators and observer frames are ephemeral: fanned out, never
+    // stored.
+    let event_id = event.id.to_hex();
+    let published = move |published: Result<(), IngestError>| {
+        published.map(|()| crate::handlers::ingest::IngestResult {
+            event_id,
+            accepted: true,
+            message: String::new(),
+        })
+    };
     let result = if is_typing {
-        let event_id = event.id.to_hex();
-        crate::handlers::event::publish_http_typing(state, tenant, event, pubkey)
-            .await
-            .map(|()| crate::handlers::ingest::IngestResult {
-                event_id,
-                accepted: true,
-                message: String::new(),
-            })
+        published(crate::handlers::event::publish_http_typing(state, tenant, event, pubkey).await)
+    } else if kind_u32 == buzz_core::kind::KIND_AGENT_OBSERVER_FRAME {
+        published(
+            crate::handlers::event::publish_http_agent_observer(state, tenant, event, pubkey).await,
+        )
     } else {
         crate::handlers::ingest::ingest_event(state, tenant, event, auth).await
     };

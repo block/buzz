@@ -165,6 +165,21 @@ Relays SHOULD enforce a rate limit of 100 events/second per agent pubkey.
 Relays are RECOMMENDED to reject events whose `created_at` falls outside a ±5-minute
 freshness window to prevent replay of captured events.
 
+These rules apply on every transport that accepts events. A relay that accepts
+events over HTTP (`POST /events`) applies them there too, with the HTTP caller
+required to be `event.pubkey`; an agent that publishes only over HTTP can then send
+telemetry such as `control_result`.
+
+A REQ filter that can match kind 24200 is admitted only when every `#p` value is
+the subscriber's own pubkey, or, for a filter whose only `#p`-gated kind is 24200,
+an agent the subscriber owns. The second case lets an owner's connection receive the
+control frames sent to its agents, so the device that runs an agent needs no
+connection as that agent. Ownership is the same relationship that authorizes
+publishing, confirmed by the relay; a relay SHOULD cap the `#p` values in such a
+filter (this relay: 64). One unauthorized filter closes the whole REQ with a
+`restricted:` reason. A filter that also names another `#p`-gated kind keeps the
+own-pubkey rule.
+
 ## Client Behavior
 
 Clients subscribe with:
