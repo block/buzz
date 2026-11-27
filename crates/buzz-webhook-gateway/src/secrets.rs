@@ -9,7 +9,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use std::collections::HashMap;
 use thiserror::Error;
 
-const AAD_PREFIX: &[u8] = b"buzz-ingress-secret-v1:";
+const AAD_PREFIX: &[u8] = b"buzz-webhook-secret-v1:";
 pub const MAX_SECRET_BYTES: usize = 1024;
 pub const MAX_CIPHERTEXT_BYTES: usize = 4096;
 
