@@ -122,13 +122,29 @@ provider is read at startup, so a change there takes a restart:
 BUZZ_FEATURE_FLAGS_PROVIDER=environment BUZZ_FEATURE_FLAG_SEARCH_BACKEND=1 just relay
 ```
 
-Prefix-mode searches, and searches that name a kind other than a message
-kind (people search) or no kinds, stay on Postgres at every value.
+Searches that name a kind other than a message kind (people search) or no
+kinds stay on Postgres at every value.
 
 The backends differ on edited messages: Postgres matches the text a message
-was stored with, and the index holds its latest edit. So shadow overlap
-drops for searches that touch edited messages, and moving to `2` changes
-their results.
+was stored with, and the index holds its latest edit. OpenSearch
+also matches words one or two typos away, when sorted by relevance. So shadow overlap drops for
+searches that touch edited messages or misspell a word, and moving to `2`
+changes their results. Prefix searches overlap less too: OpenSearch
+completes a last word from 2 characters where Postgres needs 3 (a shorter
+one finds nothing there), and the two rank prefix matches differently.
+
+A new message is searchable on OpenSearch only after the index refreshes:
+every 30 seconds on a self-hosted cluster, on its own schedule on
+Serverless. Postgres finds it as soon as it is stored.
+
+## Changing the mapping
+
+The index name carries its mapping version (`buzz-messages-v2`), and a relay
+never writes into an index of another version: if the alias `buzz-messages`
+points elsewhere, every indexing pass fails and the outbox grows. To move to
+a new version, keep `search.backend` at `0` and delete the old index. The
+relay creates the new index, clears the backfill progress and backfills
+every community again.
 
 If `buzz_search_index_rejected_total` rises, investigate the rejection and
 fix the cause. The relay retries rejected rows automatically. A sustained

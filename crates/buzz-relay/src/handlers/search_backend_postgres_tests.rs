@@ -878,25 +878,28 @@ async fn outbox_gauges_follow_a_paused_and_resumed_indexer() {
     .await;
 }
 
-/// Prefix mode, which OpenSearch does not serve yet, stays on Postgres at
-/// every value and is counted: shadow skips the comparison, and 2 serves it
-/// from Postgres. Not a fallback: OpenSearch is never tried.
-/// Mutation: route prefix searches like word searches → RED (the cluster is
-/// contacted, and at 2 the search fails).
+/// Prefix mode follows the flag like word searches: at 1 Postgres serves
+/// and OpenSearch shadows it, at 2 OpenSearch serves.
+/// Mutation: keep prefix searches on Postgres → RED (no shadow search at 1,
+/// and at 2 the OpenSearch-only word finds nothing).
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "requires Postgres and Redis"]
-async fn prefix_searches_stay_on_postgres_and_are_counted() {
+#[ignore = "requires Postgres, Redis and OpenSearch"]
+async fn prefix_searches_follow_the_flag() {
     let recorder = DebuggingRecorder::new();
     let _metrics = metrics::set_default_local_recorder(&recorder);
     let mut recorded = Recorded::new(&recorder);
-    let cluster = FakeCluster::start(Answer::Error).await;
-    let f = Fixture::new(cluster.index.clone(), Duration::from_secs(1)).await;
+    let f = Fixture::on_opensearch().await;
     let c = f.community().await;
-    let needle = word("prefixed");
-    let message = f.post(&c, c.private, &needle).await;
-    let query = buzz_search::SearchQuery {
+
+    // Postgres holds `pg_word`; the index holds the message under `os_word`.
+    // Both stay short enough for the index to keep their prefixes.
+    let pg_word = word("prefixpg")[..16].to_owned();
+    let os_word = word("prefixos")[..16].to_owned();
+    let message = f.post(&c, c.private, &pg_word).await;
+    f.index_as(&c, &message, &os_word, c.private).await;
+    let query = |word: &str| buzz_search::SearchQuery {
         community: c.tenant.community(),
-        q: needle[..12].to_owned(),
+        q: word[..12].to_owned(),
         channel_scope: buzz_search::ChannelScope::Channels(vec![c.private]),
         kinds: Some(vec![9]),
         authors: None,
@@ -907,37 +910,45 @@ async fn prefix_searches_stay_on_postgres_and_are_counted() {
         mode: buzz_search::SearchMode::Prefix,
         sort: buzz_search::SearchSort::Relevance,
     };
+    let found = |hits: buzz_search::SearchResult| {
+        hits.hits.iter().map(|hit| hit.event_id).collect::<Vec<_>>()
+    };
 
-    for (value, setting) in [(1, "shadow"), (2, "opensearch")] {
-        f.set_backend(value);
-        let hits = f.state.search.search(&query).await.expect("search");
-        assert_eq!(
-            hits.hits.iter().map(|hit| hit.event_id).collect::<Vec<_>>(),
-            vec![message.id.to_bytes()],
-            "{setting}"
-        );
-        recorded.collect();
-        assert_eq!(
-            recorded.counter(
-                "buzz_search_opensearch_skipped_total",
-                &[("setting", setting), ("reason", "unsupported_mode")]
-            ),
-            1,
-            "{setting}"
-        );
-    }
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(cluster.connections(), 0);
+    f.set_backend(1);
+    let hits = f
+        .state
+        .search
+        .search(&query(&pg_word))
+        .await
+        .expect("search");
+    assert_eq!(found(hits), vec![message.id.to_bytes()], "Postgres serves");
+    recorded.wait_for_shadows(1).await;
+    assert_eq!(recorded.requests("opensearch", "shadow", "zero_results"), 1);
+
+    f.set_backend(2);
+    let hits = f
+        .state
+        .search
+        .search(&query(&os_word))
+        .await
+        .expect("search");
+    assert_eq!(
+        found(hits),
+        vec![message.id.to_bytes()],
+        "OpenSearch serves"
+    );
+    recorded.collect();
+    assert_eq!(recorded.requests("opensearch", "primary", "hits"), 1);
+    f.delete().await;
 }
 
-/// The index holds only message kinds, so a search that names another kind,
-/// mixes one in, or names no kinds stays on Postgres at 1 and 2, is not
-/// shadowed, and counts as skipped with `unindexed_kinds`. That rule comes
-/// before the mode rule, so a people search (kind 0, in prefix mode as
-/// clients send it) counts there too. A message-kind search at 2 still
-/// reaches the cluster.
+/// The index holds only message kinds, so a search that names another kind
+/// (a people search for kind 0, in prefix mode as clients send it), mixes
+/// one in, or names no kinds stays on Postgres at 1 and 2, is not shadowed,
+/// and counts as skipped. A message-kind search at 2 still reaches the
+/// cluster.
 /// Mutation: drop the kind check from routing → RED (the cluster is
-/// contacted and fails the word searches at 2).
+/// contacted and fails the searches at 2).
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires Postgres and Redis"]
 async fn searches_of_unindexed_kinds_stay_on_postgres() {
@@ -959,10 +970,7 @@ async fn searches_of_unindexed_kinds_stay_on_postgres() {
         .expect("store the profile");
     let query = |kinds: Option<Vec<i32>>, mode: buzz_search::SearchMode| buzz_search::SearchQuery {
         community: c.tenant.community(),
-        q: match mode {
-            buzz_search::SearchMode::FullText => needle.clone(),
-            buzz_search::SearchMode::Prefix => needle[..12].to_owned(),
-        },
+        q: needle[..12].to_owned(),
         channel_scope: buzz_search::ChannelScope::ChannelsOrChannelLess(vec![c.private]),
         kinds,
         authors: None,
@@ -990,45 +998,33 @@ async fn searches_of_unindexed_kinds_stay_on_postgres() {
     };
     let mut both = vec![message.id.to_bytes(), profile.id.to_bytes()];
     both.sort();
-    let words = buzz_search::SearchMode::FullText;
     let prefix = buzz_search::SearchMode::Prefix;
 
     f.set_backend(2);
     assert_eq!(
-        found(query(Some(vec![0]), words)).await,
-        vec![profile.id.to_bytes()]
-    );
-    assert_eq!(found(query(Some(vec![9, 0]), words)).await, both);
-    assert_eq!(found(query(None, words)).await, both);
-    assert_eq!(
         found(query(Some(vec![0]), prefix)).await,
         vec![profile.id.to_bytes()]
     );
+    assert_eq!(found(query(Some(vec![9, 0]), prefix)).await, both);
+    assert_eq!(found(query(None, prefix)).await, both);
     f.set_backend(1);
-    assert_eq!(found(query(Some(vec![9, 0]), words)).await, both);
+    assert_eq!(found(query(Some(vec![9, 0]), prefix)).await, both);
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(cluster.connections(), 0, "OpenSearch was contacted");
     recorded.collect();
-    let skipped = |setting: &str, reason: &str| {
+    let skipped = |setting: &str| {
         recorded.counter(
             "buzz_search_opensearch_skipped_total",
-            &[("setting", setting), ("reason", reason)],
+            &[("setting", setting), ("reason", "unindexed_kinds")],
         )
     };
-    assert_eq!(
-        (
-            skipped("opensearch", "unindexed_kinds"),
-            skipped("shadow", "unindexed_kinds"),
-            skipped("opensearch", "unsupported_mode"),
-        ),
-        (4, 1, 0)
-    );
+    assert_eq!((skipped("opensearch"), skipped("shadow")), (3, 1));
 
     f.set_backend(2);
     f.state
         .search
-        .search(&query(Some(vec![9]), words))
+        .search(&query(Some(vec![9]), prefix))
         .await
         .expect_err("a message search at 2 goes to the failing cluster");
 }
