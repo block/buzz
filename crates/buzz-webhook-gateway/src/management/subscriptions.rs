@@ -247,7 +247,7 @@ mod tests {
         ] {
             let (status, refused) = call(&fx, &fx.relay, "PUT", &path, &path, Some(bad)).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
-            assert_eq!(refused["error"], "invalid_program");
+            assert_eq!(refused["error"], "invalid_expression");
             assert_eq!(refused["field"], field);
         }
         let unknown = json!({ "revision": 2, "channel_id": channel, "message_expr": "\"x\"" });

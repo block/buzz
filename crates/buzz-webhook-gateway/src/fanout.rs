@@ -14,7 +14,7 @@
 //!   only if those are still the live subscriptions (else due again now)
 //! ```
 //!
-//! CEL runs on a blocking thread: each program is parsed and evaluated on a
+//! CEL runs on a blocking thread: each expression is parsed and evaluated on a
 //! scoped thread with a large stack, and that must not stall the runtime.
 use crate::filter::{
     compile_filter, compile_message_expr, Budget, CompileError, Delivery, EvalError,
@@ -31,7 +31,7 @@ use tokio::task::JoinSet;
 const CLAIM_LEASE: Duration = Duration::seconds(60);
 const IDLE_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// The limits on each subscription program. A message is capped at the
+/// The limits on each subscription expression. A message is capped at the
 /// outbox column's 16 KiB.
 pub const BUDGET: Budget = Budget {
     max_iterations: 10_000,
@@ -88,7 +88,7 @@ pub fn evaluate(delivery: &ClaimedDelivery, subscriptions: &[Subscription]) -> E
     })
 }
 
-/// A program that compiled when it was written can still fail to compile
+/// An expression that compiled when it was written can still fail to compile
 /// now; only a parser that could not start is worth a retry.
 fn compile_failure(error: CompileError) -> EvalError {
     match error {
@@ -97,7 +97,7 @@ fn compile_failure(error: CompileError) -> EvalError {
     }
 }
 
-/// Programs were checked when they were written, so a compile error here is
+/// Expressions were checked when they were written, so a compile error here is
 /// reported as a failed message rather than trusted away.
 fn filter_matches(input: &Delivery, subscription: &Subscription) -> Result<bool, EvalError> {
     match &subscription.filter {

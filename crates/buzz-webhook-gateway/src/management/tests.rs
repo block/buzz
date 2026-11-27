@@ -240,7 +240,7 @@ async fn relay_creates_reads_and_idempotently_retries_an_integration() {
         }
         let (status, refused) = call(&fx, &fx.relay, "PUT", &path, &path, Some(body)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
-        assert_eq!(refused["error"], "invalid_program");
+        assert_eq!(refused["error"], "invalid_expression");
         assert_eq!(refused["field"], field, "{refused}");
     }
     let mut unknown_mode = put_body(Uuid::new_v4(), 3);

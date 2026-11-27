@@ -1,20 +1,20 @@
-//! CEL programs for webhook integrations and subscriptions.
+//! CEL expressions for webhook integrations and subscriptions.
 //!
 //! A subscription's filter decides whether a delivery reaches its channel.
 //! An integration's expressions pick the destination channel, render the
 //! message text and its structured data, and extract the key that groups
-//! related deliveries. Every program reads two variables:
+//! related deliveries. Every expression reads two variables:
 //!
 //! - `event`: `event.provider` and `event.type`;
 //! - `payload`: the provider's JSON body.
 //!
-//! The management API checks a program when it is configured, so a typo is refused
+//! The management API checks an expression when it is configured, so a typo is refused
 //! with the admin's request instead of failing every later delivery. CEL here is
 //! dynamically typed, so the check cannot prove the result type: it refuses a
-//! program whose result is a literal of the wrong type, and evaluation refuses
+//! expression whose result is a literal of the wrong type, and evaluation refuses
 //! any other wrong result.
 //!
-//! Fan-out then evaluates each program against a [`Delivery`] within a
+//! Fan-out then evaluates each expression against a [`Delivery`] within a
 //! [`Budget`].
 
 mod eval;
@@ -31,18 +31,18 @@ pub const MAX_EXPRESSION_BYTES: usize = 4 * 1024;
 /// 96, and each level costs it tens of kilobytes of stack.
 const MAX_NESTING: u16 = 32;
 
-/// The deepest syntax tree a program may have. Walking, evaluating and
+/// The deepest syntax tree an expression may have. Walking, evaluating and
 /// dropping a tree all recurse once per level, so this bounds the stack every
 /// later step needs. A field chain such as `payload.a.a.a…` is not limited by
 /// [`MAX_NESTING`].
 const MAX_DEPTH: usize = 64;
 
-/// The stack of the thread that parses a program. Parsing a source of
+/// The stack of the thread that parses an expression. Parsing a source of
 /// [`MAX_EXPRESSION_BYTES`] can need several megabytes, more than an async
 /// worker has. The memory is reserved, and only touched as it is used.
 const PARSE_STACK_BYTES: usize = 16 * 1024 * 1024;
 
-/// The variables a webhook program can read.
+/// The variables a webhook expression can read.
 pub const VARIABLES: [&str; 2] = ["event", "payload"];
 
 /// Type names, which CEL resolves like variables (`type(x) == int`).
@@ -59,7 +59,7 @@ const TYPE_NAMES: [&str; 10] = [
     "uint",
 ];
 
-/// Why a webhook program was refused.
+/// Why a webhook expression was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CompileError {
     /// The source is empty or only whitespace.
@@ -71,22 +71,22 @@ pub enum CompileError {
     /// The source is not valid CEL, or nests too deeply.
     #[error("{0}")]
     Syntax(String),
-    /// The program reads a variable other than [`VARIABLES`].
+    /// The expression reads a variable other than [`VARIABLES`].
     #[error("unknown variable `{0}`: use `event` or `payload`")]
     UnknownVariable(String),
-    /// The program calls a function the CEL standard library lacks.
+    /// The expression calls a function the CEL standard library lacks.
     #[error("unknown function `{0}`")]
     UnknownFunction(String),
-    /// The program's result is a literal of the wrong type.
+    /// The expression's result is a literal of the wrong type.
     #[error("expression must return {0}")]
     WrongResult(&'static str),
-    /// The thread that parses programs could not start. Not the program's
+    /// The thread that parses expressions could not start. Not the expression's
     /// fault.
     #[error("could not start the expression parser: {0}")]
     Unavailable(String),
 }
 
-/// What a program must return.
+/// What an expression must return.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Returns {
     Bool,
@@ -131,8 +131,8 @@ pub fn compile_message_expr(source: &str) -> Result<MessageExpr, CompileError> {
     compile(source, Returns::String).map(|expression| MessageExpr { expression })
 }
 
-/// Check `source` as a program returning `returns`, without keeping it.
-pub fn check_program(source: &str, returns: Returns) -> Result<(), CompileError> {
+/// Check `source` as an expression returning `returns`, without keeping it.
+pub fn check_expression(source: &str, returns: Returns) -> Result<(), CompileError> {
     compile(source, returns).map(drop)
 }
 
@@ -270,7 +270,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_programs_over_event_and_payload() {
+    fn accepts_expressions_over_event_and_payload() {
         let clauses = (1..=24)
             .map(|i| format!("payload.f{i} == {i}"))
             .collect::<Vec<_>>()
@@ -297,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_bad_programs() {
+    fn refuses_bad_expressions() {
         // Each of these needs more stack to parse than a test thread has.
         let nested = format!("{}true{}", "(".repeat(2000), ")".repeat(2000));
         let calls = format!("{}payload{} == 1", "size(".repeat(680), ")".repeat(680));
