@@ -1698,35 +1698,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "buzz-ingress-gateway"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "cel",
- "chrono",
- "hex",
- "hmac 0.13.0",
- "metrics",
- "metrics-exporter-prometheus",
- "nostr 0.44.7",
- "reqwest 0.13.4",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tower 0.5.3",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "buzz-media"
 version = "0.1.0"
 dependencies = [
@@ -2077,6 +2048,35 @@ dependencies = [
  "symphonia",
  "tempfile",
  "tokenizers",
+]
+
+[[package]]
+name = "buzz-webhook-gateway"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "cel",
+ "chrono",
+ "hex",
+ "hmac 0.13.0",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "nostr 0.44.7",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.5.3",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

@@ -1,0 +1,43 @@
+[package]
+name = "buzz-webhook-gateway"
+description = "Webhook webhook gateway that verifies provider deliveries and fans them out to Buzz channels"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "buzz_webhook_gateway"
+path = "src/lib.rs"
+
+[[bin]]
+name = "buzz-webhook-gateway"
+path = "src/main.rs"
+
+[dependencies]
+aes-gcm = "0.10"
+async-trait = "0.1"
+axum = { workspace = true }
+base64 = "0.22"
+cel = { version = "0.16", default-features = false, features = ["json", "regex"] }
+chrono = { workspace = true }
+hex = { workspace = true }
+hmac = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+nostr = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true }

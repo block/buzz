@@ -2622,15 +2622,15 @@ mod postgres_tests {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let this_file = manifest_dir.join("src/runtime/migration.rs");
         let crates_dir = manifest_dir.parent().expect("workspace crates dir");
-        // The push and ingress gateways migrate their own dedicated databases;
+        // The push and webhook gateways migrate their own dedicated databases;
         // they never hold relay tenant tables, so they are exempt from the
         // relay schema/destruction lock. The community_id check below keeps
         // that exemption honest.
         let gateway_exceptions = [
             crates_dir.join("buzz-push-gateway/src/postgres.rs"),
-            crates_dir.join("buzz-ingress-gateway/src/postgres.rs"),
+            crates_dir.join("buzz-webhook-gateway/src/postgres.rs"),
         ];
-        for gateway in ["buzz-push-gateway", "buzz-ingress-gateway"] {
+        for gateway in ["buzz-push-gateway", "buzz-webhook-gateway"] {
             let migrations = crates_dir.join(gateway).join("migrations");
             for entry in std::fs::read_dir(&migrations).expect("read gateway migrations") {
                 let path = entry.expect("read gateway migration entry").path();
