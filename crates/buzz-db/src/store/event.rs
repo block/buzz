@@ -877,6 +877,10 @@ fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q
             // Composite keyset cursor for stable pagination.
             // With ORDER BY created_at DESC, id ASC, "next page" means:
             //   created_at < cursor_ts OR (created_at = cursor_ts AND id > cursor_id)
+            // The redundant upper bound gives PostgreSQL an index range start
+            // instead of filtering every newer row at a deep cursor.
+            qb.push(format!(" AND {col_prefix}created_at <= "))
+                .push_bind(u);
             qb.push(format!(" AND ({col_prefix}created_at < "));
             qb.push_bind(u);
             qb.push(format!(" OR ({col_prefix}created_at = "));
@@ -1484,6 +1488,11 @@ fn push_artifact_d_tag_predicate(
 pub(crate) fn row_to_stored_event(row: sqlx::postgres::PgRow) -> Result<Option<StoredEvent>> {
     let id_bytes: Vec<u8> = row.try_get("id")?;
     let pubkey_bytes: Vec<u8> = row.try_get("pubkey")?;
+    // Bulk erasure retains an unsigned, hidden structural row. Never reconstruct
+    // or expose it as a signed event, even through including-deleted lookups.
+    if pubkey_bytes.is_empty() {
+        return Ok(None);
+    }
     let created_at: DateTime<Utc> = row.try_get("created_at")?;
     let kind_i32: i32 = row.try_get("kind")?;
     let tags_json: serde_json::Value = row.try_get("tags")?;
@@ -1688,7 +1697,10 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
 }
 
 // Preserve the public event-store deletion API after the focused extraction.
-pub(crate) use super::event_deletion::soft_delete_event_and_update_thread_in_tx;
+pub(crate) use super::event_deletion::{
+    is_nip_rs_event, remove_coordinate_versions_in_tx, soft_delete_event_and_update_thread_in_tx,
+    CoordinateRemoval,
+};
 pub use super::event_deletion::{
     soft_delete_by_coordinate, soft_delete_event_and_update_thread, DeletionTarget,
 };
@@ -1999,6 +2011,25 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
     crate::channel_members::guard_channel_roster_event(tx, kind_i32, channel_id, &tags_json)
         .await?;
 
+    // The relay resolves ancestry before opening this transaction. A bulk
+    // deletion may commit while that write waits for community admission.
+    // Recheck the resolved parent under the shared deletion lock so a stale
+    // resolution cannot insert a reply after its parent was physically erased.
+    if let Some(meta) = &thread_meta {
+        if let (Some(parent), Some(created)) = (meta.parent_event_id, meta.parent_event_created_at)
+        {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM events WHERE community_id=$1 AND id=$2 AND created_at=$3)")
+                .bind(community_id.as_uuid()).bind(parent).bind(created)
+                .fetch_one(tx.conn()).await?;
+            if !exists {
+                return Err(DbError::InvalidData(
+                    "reply parent disappeared before persistence".into(),
+                ));
+            }
+        }
+    }
+
     let result = sqlx::query(
         r#"
         INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before)
@@ -2036,6 +2067,15 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
         .await?;
 
         if let Some(ref meta) = thread_meta {
+            // The metadata rows below (the reply's and the parent and root
+            // stubs) all name this channel. The check runs first, so a missing
+            // channel fails the whole transaction, event insert included.
+            crate::store::reference_check::require_channel(
+                tx.conn(),
+                community_id,
+                meta.channel_id,
+            )
+            .await?;
             let broadcast_val: bool = meta.broadcast;
 
             let tm_result = sqlx::query(
@@ -2218,6 +2258,23 @@ pub async fn insert_event_with_thread_metadata(
     let result =
         insert_event_with_thread_metadata_tx(&mut tx, event, channel_id, thread_meta).await?;
     tx.commit().await?;
+    Ok(result)
+}
+
+/// The body of [`Db::insert_event_with_thread_metadata`] on a caller-owned
+/// transaction, for callers that commit related writes with the event. The
+/// caller owns commit or rollback.
+pub async fn insert_event_with_thread_metadata_in_transaction(
+    tx: &mut AdmittedTx,
+    event: &Event,
+    channel_id: Option<Uuid>,
+    thread_meta: Option<ThreadMetadataParams<'_>>,
+) -> Result<(StoredEvent, bool)> {
+    acquire_canvas_event_write_lock_if_needed(tx, event, channel_id).await?;
+    let result = insert_event_with_thread_metadata_tx(tx, event, channel_id, thread_meta).await?;
+    if result.1 {
+        crate::insert_mentions_in_transaction(tx, event, channel_id).await?;
+    }
     Ok(result)
 }
 
@@ -2607,7 +2664,7 @@ impl Db {
     ///
     /// Counts route on the BOUNDED arm only, never covered: the covered
     /// arm bounds insert-completeness but not deletion visibility (soft
-    /// deletes are UPDATEs outside the floor guard), and a count has no
+    /// deletes are UPDATEs outside the floor check), and a count has no
     /// downstream per-row re-filter to absorb extra rows — a silently
     /// inflated number for up to `FENCE_STALENESS` is a different product
     /// statement than a page briefly showing a deleted row. `Bounded` ties
@@ -2880,17 +2937,13 @@ impl Db {
         )
         .await?;
         tx.set_push_enqueue(self.push_enqueue.clone());
-        crate::event::acquire_canvas_event_write_lock_if_needed(&mut tx, event, channel_id).await?;
-        let result = crate::event::insert_event_with_thread_metadata_tx(
+        let result = crate::event::insert_event_with_thread_metadata_in_transaction(
             &mut tx,
             event,
             channel_id,
             thread_meta,
         )
         .await?;
-        if result.1 {
-            crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
-        }
         tx.commit().await?;
         Ok(result)
     }
@@ -2902,8 +2955,13 @@ impl Db {
     /// resending a deletion repairs a target an earlier write left live. Ingest
     /// accepts the resend only within its timestamp window, so this does not
     /// repair older rows.
-    /// Returns `(StoredEvent, was_inserted, deleted)`, where `deleted[i]`
-    /// tells whether `targets[i]` was soft-deleted by this call.
+    ///
+    /// A target that is pinned leaves its channel's NIP-PM pin list in the
+    /// same transaction; the list is re-signed with `relay_signer`.
+    ///
+    /// Returns `(StoredEvent, was_inserted, deleted, pin_lists)`, where
+    /// `deleted[i]` tells whether `targets[i]` was soft-deleted by this call
+    /// and `pin_lists` holds each pin list this call rewrote.
     #[datastore_span(name = "insert_deletion_event", system = "postgresql")]
     pub async fn insert_deletion_event(
         &self,
@@ -2912,7 +2970,8 @@ impl Db {
         channel_id: Option<Uuid>,
         thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
         targets: &[crate::event::DeletionTarget<'_>],
-    ) -> Result<(StoredEvent, bool, Vec<bool>)> {
+        relay_signer: &nostr::Keys,
+    ) -> Result<(StoredEvent, bool, Vec<bool>, Vec<StoredEvent>)> {
         let mut tx = crate::begin_community_event_write_transaction(
             &self.pool,
             community_id,
@@ -2931,8 +2990,9 @@ impl Db {
             crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
         }
         let mut deleted = Vec::with_capacity(targets.len());
+        let mut messages = Vec::new();
         for target in targets {
-            deleted.push(
+            let (was_deleted, channel_id) =
                 crate::event::soft_delete_event_and_update_thread_in_tx(
                     &mut tx,
                     target.event_id,
@@ -2940,11 +3000,14 @@ impl Db {
                     target.parent_event_id,
                     target.root_event_id,
                 )
-                .await?,
-            );
+                .await?;
+            deleted.push(was_deleted);
+            messages.extend(channel_id.map(|channel_id| (channel_id, target.event_id)));
         }
+        let pin_lists =
+            crate::pins::unpin_deleted_messages(&mut tx, &messages, relay_signer).await?;
         tx.commit().await?;
-        Ok((stored, inserted, deleted))
+        Ok((stored, inserted, deleted, pin_lists))
     }
 
     /// Soft-delete NIP-29 discovery events for a channel created by a specific relay pubkey.
@@ -4912,6 +4975,171 @@ mod postgres_tests {
             vec![newest[1].clone(), mid.clone(), oldest.clone()],
             "cursor page keeps the same-second sibling"
         );
+    }
+
+    /// A deep keyset page reads from the cursor, not from the channel head,
+    /// on both production history paths: `query_events_on` (`until` +
+    /// `before_id`) and the channel window. Paging the whole channel still
+    /// returns every row once, in order, across same-second ties.
+    ///
+    /// Without the redundant `created_at <= until` bound beside the keyset
+    /// `OR`, PostgreSQL walks the channel index from the newest row and
+    /// filters every row newer than the cursor, so the deep page reads about
+    /// as many rows as its depth.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn deep_keyset_pages_read_from_the_cursor() {
+        const ROWS: usize = 1_000;
+        const LIMIT: usize = 50;
+        const DEPTH: usize = 900;
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+        let author = Keys::generate();
+        // Two rows per second, so pages break inside same-second ties.
+        let start = Utc::now().timestamp() as u64 - 3_600;
+        let mut expected = Vec::with_capacity(ROWS);
+        for i in 0..ROWS {
+            let event = EventBuilder::new(Kind::Custom(9), format!("history {i}"))
+                .custom_created_at(nostr::Timestamp::from(start + (i / 2) as u64))
+                .sign_with_keys(&author)
+                .expect("sign");
+            crate::test_support::insert_historical_event(&pool, community, &event, channel).await;
+            expected.push(event);
+        }
+        expected.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| a.id.as_bytes().cmp(b.id.as_bytes()))
+        });
+        let expected: Vec<_> = expected.into_iter().map(|e| (e.created_at, e.id)).collect();
+        let all: Vec<_> = expected.iter().map(|(_, id)| *id).collect();
+        sqlx::query("ANALYZE events")
+            .execute(&pool)
+            .await
+            .expect("analyze");
+        let at = |ts: nostr::Timestamp| {
+            DateTime::from_timestamp(ts.as_secs() as i64, 0).expect("timestamp")
+        };
+        let query = |cursor: Option<&(nostr::Timestamp, nostr::EventId)>| EventQuery {
+            channel_id: Some(channel),
+            kinds: Some(vec![9]),
+            limit: Some(LIMIT as i64),
+            until: cursor.map(|(ts, _)| at(*ts)),
+            before_id: cursor.map(|(_, id)| id.as_bytes().to_vec()),
+            ..EventQuery::for_community(community)
+        };
+        let ids = |rows: Vec<StoredEvent>| rows.into_iter().map(|r| r.event.id).collect::<Vec<_>>();
+        let want = &all[DEPTH..DEPTH + LIMIT];
+        let cursor = expected[DEPTH - 1];
+        let window_cursor = Some((at(cursor.0), cursor.1.as_bytes().to_vec()));
+
+        // Rows the `events` partitions served to this session's scans since
+        // the last call, flushed so the counters include the last statement.
+        async fn rows_read(conn: &mut sqlx::PgConnection) -> i64 {
+            sqlx::query("SELECT pg_stat_force_next_flush()")
+                .execute(&mut *conn)
+                .await
+                .expect("flush statistics");
+            sqlx::query("SELECT pg_stat_clear_snapshot()")
+                .execute(&mut *conn)
+                .await
+                .expect("clear statistics snapshot");
+            sqlx::query_scalar(
+                "SELECT COALESCE(sum(s.seq_tup_read + COALESCE(s.idx_tup_fetch, 0)), 0)::bigint \
+                 FROM pg_stat_user_tables s JOIN pg_inherits i ON i.inhrelid = s.relid \
+                 WHERE i.inhparent = 'events'::regclass",
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .expect("events scan statistics")
+        }
+
+        // The deep page on a fresh session, so it runs with a custom plan.
+        // Sequential and bitmap scans are off so the planner takes the
+        // ordered index walk a large channel's LIMIT page uses; a small
+        // fixture otherwise reads the whole partition or a bitmap OR, which
+        // hides the missing range start.
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::Connection::clear_cached_statements(&mut *conn)
+            .await
+            .expect("clear prepared statements");
+        sqlx::raw_sql("SET enable_seqscan = off; SET enable_bitmapscan = off")
+            .execute(&mut *conn)
+            .await
+            .expect("pin the ordered index walk");
+        let before = rows_read(&mut conn).await;
+        let page = query_events_on(&mut conn, &query(Some(&cursor)), ReadDeadline::PerRead)
+            .await
+            .expect("deep events page");
+        let events_read = rows_read(&mut conn).await - before;
+        assert_eq!(ids(page), want, "deep events page");
+        let window = crate::thread::get_channel_window_on(
+            &mut conn,
+            community,
+            channel,
+            LIMIT as u32,
+            window_cursor,
+            Some(&[9]),
+            ReadDeadline::PerRead,
+        )
+        .await
+        .expect("deep window page");
+        let window_read = rows_read(&mut conn).await - before - events_read;
+        assert_eq!(
+            window
+                .rows
+                .into_iter()
+                .map(|r| r.stored_event.event.id)
+                .collect::<Vec<_>>(),
+            want,
+            "deep window page"
+        );
+        for (path, read) in [("events", events_read), ("window", window_read)] {
+            assert!(
+                read <= (3 * LIMIT) as i64,
+                "{path} page at depth {DEPTH} read {read} rows for {LIMIT}"
+            );
+        }
+        sqlx::raw_sql("RESET enable_seqscan; RESET enable_bitmapscan")
+            .execute(&mut *conn)
+            .await
+            .expect("reset planner settings");
+        drop(conn);
+
+        // Paging the whole channel returns every row once, in order.
+        let mut paged = Vec::new();
+        let mut cursor = None;
+        loop {
+            let rows = query_events(&pool, &query(cursor.as_ref()))
+                .await
+                .expect("events page");
+            let Some(last) = rows.last() else { break };
+            cursor = Some((last.event.created_at, last.event.id));
+            paged.extend(ids(rows));
+        }
+        assert_eq!(paged, all, "every row once, in order");
+        let mut paged = Vec::new();
+        let mut cursor = None;
+        loop {
+            let window = crate::thread::get_channel_window(
+                &pool,
+                community,
+                channel,
+                LIMIT as u32,
+                cursor,
+                Some(&[9]),
+            )
+            .await
+            .expect("window page");
+            paged.extend(window.rows.into_iter().map(|r| r.stored_event.event.id));
+            let Some(next) = window.next_cursor else {
+                break;
+            };
+            cursor = Some(next);
+        }
+        assert_eq!(paged, all, "every row once, in order");
     }
 
     #[tokio::test]
@@ -7026,7 +7254,14 @@ mod postgres_tests {
         .expect("install failure injection");
 
         let error = db
-            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+            .insert_deletion_event(
+                community,
+                &deletion,
+                Some(channel),
+                None,
+                &targets,
+                &nostr::Keys::generate(),
+            )
             .await
             .expect_err("a failed target soft-delete must fail the deletion");
         assert!(
@@ -7049,8 +7284,15 @@ mod postgres_tests {
             .execute(&pool)
             .await
             .expect("remove failure injection");
-        let (_, inserted, deleted) = db
-            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+        let (_, inserted, deleted, _) = db
+            .insert_deletion_event(
+                community,
+                &deletion,
+                Some(channel),
+                None,
+                &targets,
+                &nostr::Keys::generate(),
+            )
             .await
             .expect("resend after the failure clears");
         assert!(inserted, "the resend stores the deletion");
@@ -7088,8 +7330,15 @@ mod postgres_tests {
             root_event_id: None,
         }];
 
-        let (_, inserted, deleted) = db
-            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+        let (_, inserted, deleted, _) = db
+            .insert_deletion_event(
+                community,
+                &deletion,
+                Some(channel),
+                None,
+                &targets,
+                &nostr::Keys::generate(),
+            )
             .await
             .expect("resend the deletion");
         assert!(!inserted, "the deletion was already stored");
@@ -7104,8 +7353,15 @@ mod postgres_tests {
                 .is_some()
         );
 
-        let (_, inserted, deleted) = db
-            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+        let (_, inserted, deleted, _) = db
+            .insert_deletion_event(
+                community,
+                &deletion,
+                Some(channel),
+                None,
+                &targets,
+                &nostr::Keys::generate(),
+            )
             .await
             .expect("resend again");
         assert!(!inserted);

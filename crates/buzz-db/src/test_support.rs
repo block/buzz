@@ -184,8 +184,9 @@ fn drop_cluster_object(admin_url: &str, object: &str, statement: String) {
     eprintln!("warning: failed to drop {object}: {error}");
 }
 
-/// One-session fixture that bypasses ordinary write-fence triggers while
-/// retaining application admission. Communities are active, quiescing, fenced.
+/// One-session fixture with ordinary triggers disabled, so application
+/// admission is the only community write fence it exercises (as it is in
+/// production after migration 0090). Communities are active, quiescing, fenced.
 pub(crate) async fn admission_fixture() -> (crate::Db, [buzz_core::CommunityId; 3]) {
     use buzz_core::CommunityId;
     use uuid::Uuid;
@@ -222,13 +223,6 @@ pub(crate) async fn admission_fixture() -> (crate::Db, [buzz_core::CommunityId; 
         .await
         .expect("read replication role");
     assert_eq!(role, "replica");
-    // A raw write to the fenced tenant proves the DB backstop is bypassed.
-    sqlx::query("INSERT INTO users (community_id, pubkey) VALUES ($1, $2)")
-        .bind(communities[2].as_uuid())
-        .bind(vec![0xfe_u8; 32])
-        .execute(pool)
-        .await
-        .expect("raw fenced insert succeeds with triggers disabled");
     (db, communities)
 }
 
@@ -400,9 +394,8 @@ pub(crate) async fn insert_historical_event_with_thread_metadata(
 }
 
 /// Move a community fixture into a deletion lifecycle state the way the
-/// executor does: the tombstone trigger only accepts lifecycle changes from a
-/// transaction carrying the executor GUCs for that community, including its
-/// current fence generation.
+/// executor does. Retain transaction-scoped executor GUCs for older catalogs
+/// with a tombstone guard and fixtures that also write through universal fences.
 pub(crate) async fn set_deletion_state(pool: &sqlx::PgPool, id: uuid::Uuid, state: &str) {
     let mut tx = pool.begin().await.expect("begin lifecycle fixture");
     set_deletion_state_in_transaction(&mut tx, id, state).await;
@@ -446,7 +439,7 @@ pub(crate) async fn quiesce_community_for_tests(
 }
 
 /// Whether `error` is the community-admission rejection taken at transaction
-/// entry, as opposed to a later commit-time trigger rejection.
+/// entry, as opposed to a later database constraint rejection.
 pub(crate) fn is_admission_rejection(error: &crate::DbError) -> bool {
     matches!(error, crate::DbError::AccessDenied(message) if message.contains("write-fenced (quiescing)"))
 }
@@ -480,58 +473,6 @@ pub(crate) fn desired_state_schema_sql() -> String {
 /// `schema/` at the workspace root.
 pub(crate) fn desired_state_schema_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema")
-}
-
-/// Rewrite every `ON DELETE CASCADE`, `SET NULL` and `SET DEFAULT` foreign key
-/// in this test's database as `NO ACTION`: the schema the cascade retirement
-/// targets. Every trigger stays live, including the foreign-key checks and the
-/// community fence, so a delete path exercised afterwards must remove its
-/// children itself, in an order the remaining constraints accept.
-///
-/// Each PostgreSQL test process owns its database (`crates/buzz-db/TESTING.md`),
-/// so the rewrite does not reach other tests. It refuses any database whose
-/// name does not match the per-test wrapper's (`buzz_nt_` plus 24 hex digits),
-/// which excludes the run's `_desired` template. The name is the only check:
-/// a manually created database with that shape would pass.
-pub(crate) async fn retire_foreign_key_delete_actions(pool: &sqlx::PgPool) {
-    let database: String = sqlx::query_scalar("SELECT current_database()")
-        .fetch_one(pool)
-        .await
-        .expect("read current database");
-    assert!(
-        database
-            .strip_prefix("buzz_nt_")
-            .is_some_and(|hash| hash.len() == 24
-                && hash
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
-        "refusing to rewrite foreign keys in shared database {database}; \
-         run this test through scripts/postgres-test-run.sh"
-    );
-    sqlx::raw_sql(
-        r#"DO $$
-        DECLARE c record;
-        BEGIN
-          FOR c IN SELECT conrelid::regclass AS tbl, conname, pg_get_constraintdef(oid) AS def
-                   FROM pg_constraint
-                   WHERE contype = 'f' AND confdeltype IN ('c', 'n', 'd') AND conparentid = 0
-          LOOP
-            EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I, ADD CONSTRAINT %I %s',
-              c.tbl, c.conname, c.conname,
-              regexp_replace(c.def, ' ON DELETE (CASCADE|SET NULL|SET DEFAULT)( \([^)]*\))?', ''));
-          END LOOP;
-        END $$"#,
-    )
-    .execute(pool)
-    .await
-    .expect("retire foreign-key delete actions");
-    let remaining: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM pg_constraint WHERE contype = 'f' AND confdeltype IN ('c', 'n', 'd')",
-    )
-    .fetch_one(pool)
-    .await
-    .expect("count foreign-key delete actions");
-    assert_eq!(remaining, 0, "every foreign-key delete action is retired");
 }
 
 /// A single-connection pool whose session carries `application_name`, so
@@ -586,6 +527,20 @@ pub(crate) async fn wait_for_lock_wait(pool: &sqlx::PgPool, application_name: &s
     })
     .await
     .expect("session reached a lock wait");
+}
+
+/// Monthly `events` partitions (not their indexes) this backend holds a
+/// relation lock on right now.
+pub(crate) async fn locked_event_partitions(tx: &mut crate::AdmittedTx) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT c.relname::text FROM pg_locks l \
+         JOIN pg_class c ON c.oid = l.relation \
+         WHERE l.locktype = 'relation' AND l.pid = pg_backend_pid() \
+         AND c.relkind = 'r' AND c.relname LIKE 'events\\_p%' ORDER BY 1",
+    )
+    .fetch_all(tx.conn())
+    .await
+    .expect("observe partition locks")
 }
 
 /// Loopback TCP proxy that can pause the upstream database, like

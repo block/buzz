@@ -34,6 +34,7 @@ ChannelListSnapshot _snapshot([List<Channel>? channels]) => ChannelListSnapshot(
     for (final c in channels ?? [_channel]) c.toJson(),
   ],
   hiddenDmIds: const {'dm-2'},
+  verifiedHuddleIds: const {'huddle-room'},
 );
 
 void main() {
@@ -59,6 +60,7 @@ void main() {
     expect(channel.isArchived, isTrue);
     expect(channel.isEphemeral, isTrue);
     expect(restored.hiddenDmIds, {'dm-2'});
+    expect(restored.verifiedHuddleIds, {'huddle-room'});
   });
 
   test('scopes by identity and relay, folding websocket origins', () async {

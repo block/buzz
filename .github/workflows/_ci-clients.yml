@@ -8,6 +8,11 @@ on:
       mobile:
         required: true
         type: boolean
+      # Whether the change touches what the Mobile Swift Native lane builds.
+      mobile_native:
+        required: false
+        type: boolean
+        default: true
       lane:
         required: true
         type: string
@@ -162,9 +167,17 @@ jobs:
           test/shared/hosted/relay_auth_isolation_test.dart
           test/features/onboarding/hosted_app_gate_environment_test.dart
           test/features/settings/builderlab_account_row_test.dart
+          test/features/settings/settings_sign_out_test.dart
           test/features/onboarding/hosted_journeys_test.dart
+          test/features/onboarding/hosted_backup_consent_test.dart
           test/features/onboarding/onboarding_sign_out_test.dart
           test/features/onboarding/hosted_communities_test.dart
+          test/features/onboarding/account_community_entry_test.dart
+          test/features/onboarding/account_sync_recovery_test.dart
+          test/features/onboarding/known_communities_provider_test.dart
+          test/features/onboarding/known_community_sync_integration_test.dart
+          test/features/onboarding/known_community_sync_test.dart
+          test/shared/hosted/builderlab_account_test.dart
           test/features/pairing/pairing_hosted_handoff_test.dart
           test/shared/agents/remote_agents_test.dart
           test/features/agents
@@ -228,12 +241,10 @@ jobs:
     if: inputs.lane == 'mobile-swift' && inputs.mobile
     strategy:
       fail-fast: false
+      # The Native lane spends most of its time on a cold simulator build, so
+      # it runs only when the change touches what that build compiles.
       matrix:
-        include:
-          - name: Native
-            lane: native
-          - name: Release
-            lane: release
+        include: ${{ fromJSON(inputs.mobile_native && '[{"name":"Native","lane":"native"},{"name":"Release","lane":"release"}]' || '[{"name":"Release","lane":"release"}]') }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
@@ -268,6 +279,8 @@ jobs:
           /bin/bash scripts/test-mobile-pagination-accessibility.sh "$device"
           /bin/bash scripts/test-mobile-carousel.sh "$device"
           /bin/bash scripts/test-mobile-member-picker.sh "$device"
+          /bin/bash scripts/test-mobile-setting-menu.sh "$device"
+          /bin/bash scripts/test-mobile-create-channel-accessibility.sh "$device"
           if ! wait "$build"; then
             cat "$build_log"
             exit 1

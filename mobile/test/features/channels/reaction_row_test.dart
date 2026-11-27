@@ -13,6 +13,9 @@ import 'package:buzz/features/channels/channel_identity_names_provider.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/features/channels/message_long_press_region.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
+import 'package:buzz/shared/emoji/emoji_picker.dart';
+import 'package:buzz/shared/theme/theme_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/native_media_headers.dart';
@@ -22,6 +25,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'dart:convert';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/emoji/emoji_burst.dart';
+import 'package:buzz/shared/emoji/recent_emoji_provider.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
 import 'package:buzz/shared/emoji/emoji_data_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
@@ -35,6 +39,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart' show Override;
 
 import '../../helpers/widget_helpers.dart';
+import '../../helpers/test_assertion.dart';
 
 part 'reaction_row_test/combined_tests.dart';
 part 'reaction_row_test/shortcode_tests.dart';
@@ -152,9 +157,186 @@ class _RecordingReactionActions implements ChannelActions {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
+/// Reaction actions whose every publish fails with [error].
+class _FailingReactionActions implements ChannelActions {
+  _FailingReactionActions(this.error);
+
+  final Object error;
+
+  @override
+  Future<void> removeReaction(String eventId, String emoji) async =>
+      throw error;
+  @override
+  Future<void> addReaction(
+    String eventId,
+    String emoji, {
+    required String targetAuthor,
+  }) async => throw error;
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
 void main() {
   combinedReactionTests();
   shortcodeReactionTests();
+
+  testWidgets('a grouped removal that fails offline reports it once', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => reportReactionFailure(
+              context,
+              Future.wait([
+                Future<void>.error(RelayNotConnectedError()),
+                Future<void>.error(RelayNotConnectedError()),
+              ]),
+              adding: false,
+            ),
+            child: const Text('Remove'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Remove'));
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    expect(
+      find.text('Couldn’t remove reaction. No connection.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('an unexpected local failure still escapes after its notice', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final signerFailure = StateError('secp256k1_schnorrsig_sign32 failed');
+    final message = TimelineMessage(
+      id: 'message',
+      pubkey: _alice,
+      createdAt: 1,
+      content: '',
+      reactions: [_reaction()],
+    );
+    late VoidCallback toggle;
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          channelActionsProvider.overrideWithValue(
+            _FailingReactionActions(signerFailure),
+          ),
+        ],
+        child: Consumer(
+          builder: (context, ref, _) {
+            toggle = () => toggleReaction(
+              context,
+              ProviderScope.containerOf(context, listen: false),
+              message,
+              _fire,
+            );
+            return const SizedBox();
+          },
+        ),
+      ),
+    );
+    // The zone only starts the toggle, so the publish's uncaught error
+    // lands in it while nothing here awaits the zone itself.
+    final escaped = <Object>[];
+    runZonedGuarded(toggle, (error, _) => escaped.add(error));
+    await tester.pump();
+    expect(escaped, [signerFailure]);
+    expect(find.text('Couldn’t add reaction. Try again.'), findsOneWidget);
+  });
+
+  for (final (name, mine, error, notice) in [
+    (
+      'an offline add',
+      false,
+      RelayNotConnectedError(),
+      'Couldn’t add reaction. No connection.',
+    ),
+    (
+      'an offline remove',
+      true,
+      RelayNotConnectedError(),
+      'Couldn’t remove reaction. No connection.',
+    ),
+    (
+      'an add whose acknowledgement was lost',
+      false,
+      RelayAckLostError(),
+      'Reaction not confirmed. Connection lost.',
+    ),
+    (
+      'a remove whose acknowledgement was lost',
+      true,
+      RelayAckLostError(),
+      'Removal not confirmed. Connection lost.',
+    ),
+    (
+      'an add the relay already has',
+      false,
+      const RelayEventRejectedException('duplicate: reaction already exists'),
+      null,
+    ),
+  ]) {
+    testWidgets('$name reports ${notice ?? 'nothing'}', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final message = TimelineMessage(
+        id: 'message',
+        pubkey: _alice,
+        createdAt: 1,
+        content: '',
+        reactions: [
+          TimelineReaction(
+            emoji: _fire,
+            count: 1,
+            reactedByCurrentUser: mine,
+            currentUserReactionId: mine ? 'reaction' : null,
+            userPubkeys: const [_alice],
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            channelActionsProvider.overrideWithValue(
+              _FailingReactionActions(error),
+            ),
+          ],
+          child: Consumer(
+            builder: (context, ref, _) => TextButton(
+              onPressed: () => toggleReaction(
+                context,
+                ProviderScope.containerOf(context, listen: false),
+                message,
+                _fire,
+              ),
+              child: const Text('Toggle'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Toggle'));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      for (final text in [
+        'Couldn’t add reaction. No connection.',
+        'Couldn’t remove reaction. No connection.',
+        'Reaction not confirmed. Connection lost.',
+        'Removal not confirmed. Connection lost.',
+      ]) {
+        expect(find.text(text), text == notice ? findsOneWidget : findsNothing);
+      }
+    });
+  }
 
   testWidgets('removing the sole reaction closes the sheet', (tester) async {
     final reactions = ValueNotifier<List<TimelineReaction>>([
@@ -195,7 +377,8 @@ void main() {
         child: Consumer(
           builder: (context, ref, _) => TextButton(
             onPressed: () => toggleReaction(
-              ref,
+              context,
+              ProviderScope.containerOf(context, listen: false),
               TimelineMessage(
                 id: 'message',
                 pubkey: _alice,
@@ -451,7 +634,7 @@ void main() {
               ),
               '/api/goose/v1/buzz/identity/assertions' => http.Response(
                 jsonEncode({
-                  'assertion': 'token-${++issued}',
+                  'assertion': testAssertion('token-${++issued}'),
                   'nostr_pubkey': keys.public,
                   'expires_at': clock.millisecondsSinceEpoch ~/ 1000 + 120,
                 }),
@@ -467,7 +650,7 @@ void main() {
       addTearDown(auth.dispose);
       // The live socket's assertion, issued when the session connected.
       expect(await auth.headers(config), {
-        'Nostr-Federated-Identity': 'Bearer token-1',
+        'Nostr-Federated-Identity': 'Bearer ${testAssertion('token-1')}',
       });
       final payloads = <Map<Object?, Object?>>[];
       final reactionUpdates = <List<Object?>>[];
@@ -561,8 +744,14 @@ void main() {
       issuerGate.complete();
       await tester.pumpAndSettle();
       expect(issued, issuedBeforeSheet + 1);
-      expect(authOf(reactionUpdates.last.single), 'Bearer token-$issued');
-      expect(authOf(profileUpdates.last[_alice]), 'Bearer token-$issued');
+      expect(
+        authOf(reactionUpdates.last.single),
+        'Bearer ${testAssertion('token-$issued')}',
+      );
+      expect(
+        authOf(profileUpdates.last[_alice]),
+        'Bearer ${testAssertion('token-$issued')}',
+      );
       completion.complete(<String, Object?>{});
       await tester.pumpAndSettle();
 
@@ -576,7 +765,7 @@ void main() {
       expect(payloads, hasLength(2));
       expect(
         authOf((payloads.last['reactions'] as List).single),
-        'Bearer token-$issued',
+        'Bearer ${testAssertion('token-$issued')}',
       );
       expect(reactionUpdates, isEmpty);
       completion.complete(<String, Object?>{});

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -14,7 +15,6 @@ import '../emoji/emoji_data.dart';
 import '../emoji/emoji_data_provider.dart';
 import '../emoji/emoji_search.dart';
 import '../emoji/native_emoji_glyph.dart';
-import '../hosted/hosted_relay_auth.dart';
 import '../relay/relay.dart';
 import '../theme/theme.dart';
 import '../widgets/buzz_sheet_header.dart';
@@ -43,6 +43,14 @@ void showEmojiPicker({
   VoidCallback? onDismiss,
   bool nativeEmojiOnly = false,
 }) {
+  // A caller can open the picker from a context that outlived its widget, such
+  // as the message row behind the actions sheet after the timeline rebuilt it.
+  // There is nothing left to present on or react for, so complete the caller's
+  // lifecycle instead of throwing from the ancestor lookups below.
+  if (!context.mounted) {
+    onDismiss?.call();
+    return;
+  }
   if (defaultTargetPlatform == TargetPlatform.iOS) {
     unawaited(
       _presentIosEmojiPicker(

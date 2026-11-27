@@ -36,6 +36,8 @@ mod event_hydration;
 pub mod nip_fi_binding;
 /// Recent-first passes for newest-first `events` page reads.
 pub(crate) mod recent_pass;
+/// In-transaction parent checks for channel, user and relay-member references.
+pub(crate) mod reference_check;
 /// User-specific deletion submission and inventory preparation.
 pub mod user_deletion;
 /// Operator-global user restrictions and identity-lock primitives.
@@ -63,6 +65,8 @@ pub mod operator_listener;
 pub mod partition;
 /// Private signer-owned accessory read progress.
 pub mod personal_read;
+/// NIP-PM channel pin list persistence.
+pub mod pins;
 /// Buzz product-feedback sidecar persistence.
 pub mod product_feedback;
 /// Community-scoped push lease and durable wake-outbox persistence.
@@ -83,6 +87,12 @@ pub mod relay_operators;
 pub mod reminder;
 /// Replaceable-event persistence and coordinate locking.
 pub mod replaceable;
+/// Queuing events stored before the search index existed.
+pub mod search_backfill;
+/// The durable queue between event admission and the search index.
+pub mod search_outbox;
+#[cfg(test)]
+mod search_outbox_postgres_tests;
 /// Durable completed snapshots from the isolated media-storage worker.
 pub mod storage_accounting;
 /// Thread metadata persistence.
@@ -116,6 +126,9 @@ mod channel_name_postgres_tests;
 
 #[cfg(test)]
 mod admission_postgres_tests;
+
+#[cfg(test)]
+mod reference_check_postgres_tests;
 
 /// Durable NIP-FI verified-profile projection state.
 pub mod verified_profiles;

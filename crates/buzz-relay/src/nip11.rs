@@ -146,7 +146,8 @@ pub struct RelayLimitation {
     pub restricted_writes: bool,
     /// Whether the relay supports NIP-FI federated identity assertions.
     /// Advertised `true` in `Enforce` and `Shadow` mode, so clients attach
-    /// evidence; in `Shadow` the relay evaluates it without requiring it.
+    /// evidence; in `Shadow` the relay evaluates it, requiring it only for
+    /// communities stored Required or inside the enforce-percent cohort.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub federated_identity: bool,
     /// NIP-ER: how the relay delivers due reminders ("push" or "lazy").
@@ -268,6 +269,8 @@ impl RelayInfo {
             // without it ignores the tag beside `visibility`, so a client
             // checks this before opening a channel as unlisted.
             "buzz-unlisted-channels".to_string(),
+            // kind:9050 edits an existing Solo member's access.
+            "buzz-solo-member-role".to_string(),
         ];
         if scheduled_messages {
             supported_extensions.push("buzz-scheduled-messages-v1".to_string());
@@ -442,13 +445,13 @@ pub(crate) async fn nip11_document(
             community_id: *tenant.community().as_uuid(),
             mode: state.config.nip_fi.mode,
             required: false,
-            stored_required: false,
+            policy_required: false,
             mapped: true,
         }
     } else {
         crate::nip_fi_policy::resolve(state, &headers).await?
     };
-    if !state.config.nip_fi.mode.is_off() && policy.stored_required {
+    if !state.config.nip_fi.mode.is_off() && policy.policy_required {
         // Required implies a usable binding and verifier, not merely a bit.
         state
             .nip_fi_communities()
@@ -824,10 +827,10 @@ mod tests {
     }
 
     /// Clients refuse NIP-CL labels and system channels, newest-first
-    /// search, and unlisted channels unless the relay says it supports them,
-    /// so every document must advertise all three.
+    /// search, unlisted channels, and Solo role edits unless the relay says it
+    /// supports them, so every document must advertise these extensions.
     #[test]
-    fn advertises_nip_cl_search_sort_and_unlisted_extensions() {
+    fn advertises_channel_and_search_extensions() {
         let info = RelayInfo::build(
             None,
             None,
@@ -841,6 +844,7 @@ mod tests {
         assert!(extensions.contains(&"nip-cl".to_string()));
         assert!(extensions.contains(&"buzz-search-sort".to_string()));
         assert!(extensions.contains(&"buzz-unlisted-channels".to_string()));
+        assert!(extensions.contains(&"buzz-solo-member-role".to_string()));
     }
 
     /// NIP-WP → NIP-11 mirror: a set workspace icon is served in the standard

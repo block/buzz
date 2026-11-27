@@ -32,6 +32,39 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../helpers/widget_helpers.dart';
 
 void main() {
+  testWidgets('expanded iOS Search keeps its header X below the top edge', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(951, 669);
+    addTearDown(tester.view.reset);
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          searchProvider.overrideWith(
+            () => _FakeSearchNotifier(const SearchState.initial()),
+          ),
+          recentSearchesProvider.overrideWith(
+            () => _FakeRecentSearchesNotifier(const []),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final close = find.byKey(const Key('search-close'));
+    final field = find.byKey(const Key('search-field-container'));
+    expect(close, findsOneWidget);
+    expect(tester.getRect(close).top, Grid.twelve);
+    expect(tester.getRect(field).top, Grid.twelve);
+    expect(tester.getRect(close).right, lessThan(tester.getRect(field).left));
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets(
     'Search Close survives result selection without overlapping detail actions',
     (tester) async {
@@ -1222,6 +1255,7 @@ class _ChannelMetadataRelaySession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
     required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
   }) async {
     onStatusChanged(RelaySubscriptionStatus.ready);
     return () {};
@@ -1265,6 +1299,7 @@ class _FakeDmActions implements ChannelActions {
   Future<Channel> openDm({
     required List<String> pubkeys,
     bool waitForChannelList = true,
+    bool includeHistory = false,
   }) async {
     opened.add(pubkeys);
     waits.add(waitForChannelList);

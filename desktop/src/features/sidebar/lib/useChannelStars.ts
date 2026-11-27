@@ -14,6 +14,7 @@ import {
 } from "./channelStarsStorage";
 import { ChannelStarSyncManager } from "./channelStarsSync";
 import type { RemoteStars } from "./channelStarsSync";
+import { nextSidebarFlagTime } from "./sidebarFlagTime";
 import { useStaleReaderRecovery } from "./useStaleReaderRecovery";
 
 export function useChannelStars(
@@ -190,11 +191,11 @@ export function useChannelStars(
   const setStarState = React.useCallback(
     (channelId: string, starred: boolean) => {
       if (!pubkey) return;
-      const entry: ChannelStarEntry = {
-        starred,
-        updatedAt: Math.floor(Date.now() / 1000),
-      };
       setStore((prev) => {
+        const entry: ChannelStarEntry = {
+          starred,
+          updatedAt: nextSidebarFlagTime(prev.channels[channelId]?.updatedAt),
+        };
         const next = boundStarStore(
           {
             version: 1,

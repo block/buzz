@@ -15,9 +15,18 @@ dependencies:
   # nothing but emoji. Already present transitively via the Flutter SDK;
   # declared here because we import it directly.
   characters: ^1.4.0
+  # Fakeable time for presence release ages. Already present transitively via
+  # the Flutter SDK; declared here because we import it directly.
+  clock: ^1.1.2
   hooks_riverpod: ^3.0.3
   flutter_hooks: ^0.21.3
   http: ^1.4.0
+  # Native HTTP transports, NSURLSession on iOS and Cronet on Android: HTTP/2
+  # and native gzip. See lib/shared/http/app_http_client.dart.
+  cronet_http: ^1.10.1
+  cupertino_http: ^3.1.0
+  jni: ^1.1.0
+  objective_c: ^9.5.0
   crypto: ^3.0.7
   flutter_secure_storage: ^10.0.0
   flutter_svg: ^2.2.4
@@ -56,6 +65,8 @@ dependencies:
   flutter_cache_manager: ^3.5.0
   file: ^7.0.1
   path: ^1.9.1
+  sentry_flutter: ^10.5.0
+  sqlite3: 3.9.1
 
 dev_dependencies:
   leak_tracker: ^11.0.2
@@ -74,8 +85,6 @@ dev_dependencies:
   video_player_platform_interface: ^6.6.0
 
 flutter:
-  config:
-    enable-swift-package-manager: false
   uses-material-design: true
   shaders:
     - shaders/toast_island.frag

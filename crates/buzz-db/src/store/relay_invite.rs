@@ -31,8 +31,66 @@ use crate::relay_members::{write_nip43_membership_snapshot, MembershipWrite};
 use crate::{CommunityId, Db};
 
 mod claim_owner;
+mod manage;
 mod revocation;
+
+/// Test-only pause point in the invite claim, keyed by community so
+/// concurrent tests arm independent gates. Compiled out of non-test builds.
+#[cfg(test)]
+pub(crate) mod test_hook {
+    use std::collections::HashMap;
+    use std::sync::{Arc, LazyLock, Mutex};
+
+    use tokio::sync::{oneshot, Notify};
+
+    use crate::CommunityId;
+
+    struct Gate {
+        arrived: oneshot::Sender<()>,
+        release: Arc<Notify>,
+    }
+
+    static BEFORE_MEMBERSHIP_INSERT: LazyLock<Mutex<HashMap<CommunityId, Gate>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// Arm a one-shot pause for `community`'s next claim, just before its
+    /// membership INSERT. Await the receiver to know the claim got there;
+    /// `notify_one` on the release lets it continue.
+    pub(crate) fn arm_before_membership_insert(
+        community: CommunityId,
+    ) -> (oneshot::Receiver<()>, Arc<Notify>) {
+        let (arrived, rx) = oneshot::channel();
+        let release = Arc::new(Notify::new());
+        BEFORE_MEMBERSHIP_INSERT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                community,
+                Gate {
+                    arrived,
+                    release: release.clone(),
+                },
+            );
+        (rx, release)
+    }
+
+    pub(super) async fn before_membership_insert(community: CommunityId) {
+        let gate = BEFORE_MEMBERSHIP_INSERT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&community);
+        if let Some(gate) = gate {
+            let _ = gate.arrived.send(());
+            gate.release.notified().await;
+        }
+    }
+}
 pub use claim_owner::{claim_relay_membership_with_owner, MembershipClaimResult};
+use manage::lock_actor_role;
+pub use manage::{
+    list_relay_invites, revoke_relay_invite, InviteSelector, InviteStatus, InviteSummary,
+    RevokedInvite, MAX_INVITE_LIST_LIMIT,
+};
 pub(crate) use revocation::{revoke_banned_issuer_invites, revoke_restricted_agent_invites};
 
 /// Outcome of a v2 invite claim. Expected invalid/expired/exhausted states are
@@ -95,8 +153,8 @@ pub struct MintedInvite {
     /// The full v2 code string (`v2.<base64url secret>`). Returned to the caller
     /// exactly once; the database stores only the SHA-256 hash.
     pub code: String,
-    /// When the invite expires (UTC).
-    pub expires_at: DateTime<Utc>,
+    /// When the invite expires (UTC); `None` for an invite that never expires.
+    pub expires_at: Option<DateTime<Utc>>,
     /// `None` means unlimited; `Some(n)` means at most `n` uses.
     pub max_uses: Option<i32>,
     /// Remaining uses at mint time (equals `max_uses` when bounded, `None`
@@ -185,9 +243,9 @@ async fn mint(
     let expires_at = now + chrono::Duration::seconds(ttl_secs as i64);
 
     // Mint a v2 opaque invite inside the same lifecycle gate as every other
-    // community-scoped database write. The trigger remains the final backstop,
-    // but this typed guard keeps a quiescing community from surfacing as an
-    // opaque SQLSTATE/HTTP 500 at the API boundary.
+    // community-scoped database write. The app-side guard is the community
+    // fence: it holds the shared deletion lock and refuses quiescing writes
+    // before the insert.
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community,
@@ -195,18 +253,9 @@ async fn mint(
     )
     .await?;
     lock_admission(tx.conn(), community).await?;
-    if require_admin {
-        let role: Option<String> = sqlx::query_scalar(
-            "SELECT role FROM relay_members \
-             WHERE community_id = $1 AND pubkey = $2 FOR SHARE",
-        )
-        .bind(community.as_uuid())
-        .bind(created_by)
-        .fetch_optional(tx.conn())
-        .await?;
-        if !matches!(role.as_deref(), Some("owner" | "admin")) {
-            return Err(crate::DbError::InviteIssuerNotAdmin);
-        }
+    if require_admin && !manage::is_admin(lock_actor_role(tx.conn(), community, created_by).await?)
+    {
+        return Err(crate::DbError::InviteIssuerNotAdmin);
     }
     if principal_restricted(tx.conn(), community, created_by).await? {
         return Err(crate::DbError::InviteRestricted);
@@ -230,7 +279,7 @@ async fn mint(
 
     Ok(MintedInvite {
         code,
-        expires_at,
+        expires_at: Some(expires_at),
         max_uses,
         uses_remaining: max_uses,
         invite_id,
@@ -252,6 +301,33 @@ pub(crate) async fn lock_admission(
     )
     .bind(community.as_uuid())
     .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+/// Record that `pubkey` accepted `policy_version`, on the claim's transaction.
+///
+/// The member row is locked `FOR KEY SHARE` first (`NotFound` when it is gone),
+/// so a concurrent removal of the member, which locks it `FOR UPDATE` and then
+/// deletes the member's acceptances, either waits for this transaction and
+/// deletes the acceptance with the member, or commits first and this write
+/// fails. A membership `INSERT ... ON CONFLICT DO NOTHING` locks nothing when
+/// the member already exists, so it cannot stand in for this lock.
+async fn record_join_policy_acceptance(
+    conn: &mut sqlx::PgConnection,
+    community: CommunityId,
+    pubkey: &str,
+    policy_version: &str,
+) -> Result<()> {
+    crate::store::reference_check::require_relay_member(conn, community, pubkey).await?;
+    sqlx::query(
+        "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
+         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(policy_version)
+    .execute(conn)
     .await?;
     Ok(())
 }
@@ -518,8 +594,9 @@ pub async fn claim_relay_invite_with_owner(
     let invite_id: uuid::Uuid = invite.try_get("id")?;
     let max_uses: Option<i32> = invite.try_get("max_uses")?;
     let use_count: i32 = invite.try_get("use_count")?;
-    let expires_at: DateTime<Utc> = invite.try_get("expires_at")?;
-    if expires_at <= Utc::now() {
+    // `None` never expires; revocation and use limits still apply below.
+    let expires_at: Option<DateTime<Utc>> = invite.try_get("expires_at")?;
+    if expires_at.is_some_and(|at| at <= Utc::now()) {
         tx.rollback().await?;
         log_claim_outcome(
             community,
@@ -598,24 +675,21 @@ pub async fn claim_relay_invite_with_owner(
     }
 
     let uses_remaining = || max_uses.map(|mu| mu - use_count);
-    let existing =
-        sqlx::query("SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2")
-            .bind(community.as_uuid())
-            .bind(claimer_pubkey)
-            .fetch_optional(tx.conn())
-            .await?;
+    // `FOR KEY SHARE` holds the member row to commit. A removal locks it
+    // `FOR UPDATE` before it deletes the member's acceptances, so it either
+    // waits for this claim and then deletes the acceptance written below, or
+    // commits first and this read finds no member.
+    let existing = sqlx::query(
+        "SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2 FOR KEY SHARE",
+    )
+    .bind(community.as_uuid())
+    .bind(claimer_pubkey)
+    .fetch_optional(tx.conn())
+    .await?;
 
     if existing.is_some() {
         if let Some(version) = policy_version {
-            sqlx::query(
-                "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
-                 VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-            )
-            .bind(community.as_uuid())
-            .bind(claimer_pubkey)
-            .bind(version)
-            .execute(tx.conn())
-            .await?;
+            record_join_policy_acceptance(tx.conn(), community, claimer_pubkey, version).await?;
         }
         let owner =
             claim_owner::persist_claim_owner(tx.conn(), community, claimer_pubkey, verified_owner)
@@ -650,6 +724,11 @@ pub async fn claim_relay_invite_with_owner(
         return Ok(MembershipWrite::unchanged(ClaimOutcome::Exhausted.into()));
     }
 
+    // Test hook: pauses after the member lookup above found nothing, so a test
+    // can add the member before this insert and hit its conflict branch.
+    #[cfg(test)]
+    test_hook::before_membership_insert(community).await;
+
     let inserted = sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by, auto_join_pending) \
          VALUES ($1, $2, 'member', 'invite', gen_random_uuid()) \
@@ -663,15 +742,9 @@ pub async fn claim_relay_invite_with_owner(
         > 0;
 
     if let Some(version) = policy_version {
-        sqlx::query(
-            "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
-             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-        )
-        .bind(community.as_uuid())
-        .bind(claimer_pubkey)
-        .bind(version)
-        .execute(tx.conn())
-        .await?;
+        // When the insert above hit a conflict, the member row is another
+        // transaction's, which nothing here has locked yet.
+        record_join_policy_acceptance(tx.conn(), community, claimer_pubkey, version).await?;
     }
 
     if !inserted {
@@ -886,30 +959,12 @@ mod postgres_tests {
         }
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn mint_after_quiescing_returns_typed_fence_without_persisting() {
-        let scratch =
-            ScratchDb::create(&crate::test_support::database_url(), "relay_invite_fence").await;
-        let db = crate::Db::new(&crate::DbConfig {
-            database_url: scratch.url().to_owned(),
-            max_connections: 5,
-            min_connections: 0,
-            ..crate::DbConfig::default()
-        })
-        .await
-        .expect("connect invite deletion test DB");
-        db.migrate().await.expect("migrate invite deletion test DB");
-        let pool = db.pool.clone();
+    /// Move `community` on `host` into deletion quiescing, where every
+    /// community write is fenced.
+    pub(super) async fn quiesce(db: &crate::Db, host: &str, community: CommunityId) {
         let store = db.deletion_store();
-        let host = format!("relay-invite-fence-{}.example", Uuid::new_v4().simple());
-        let community = db
-            .ensure_configured_community(&host)
-            .await
-            .expect("create fenced invite community")
-            .id;
         let request = store
-            .submit(Some(&host), "owner", None, None)
+            .submit(Some(host), "owner", None, None)
             .await
             .expect("submit deletion request");
         let empty_digest = hex::encode(sha2::Sha256::digest([]));
@@ -956,6 +1011,30 @@ mod postgres_tests {
             .begin_quiescing(&claim.lease)
             .await
             .expect("begin quiescing");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn mint_after_quiescing_returns_typed_fence_without_persisting() {
+        let scratch =
+            ScratchDb::create(&crate::test_support::database_url(), "relay_invite_fence").await;
+        let db = crate::Db::new(&crate::DbConfig {
+            database_url: scratch.url().to_owned(),
+            max_connections: 5,
+            min_connections: 0,
+            ..crate::DbConfig::default()
+        })
+        .await
+        .expect("connect invite deletion test DB");
+        db.migrate().await.expect("migrate invite deletion test DB");
+        let pool = db.pool.clone();
+        let host = format!("relay-invite-fence-{}.example", Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create fenced invite community")
+            .id;
+        quiesce(&db, &host, community).await;
 
         let error = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
             .await
@@ -1342,3 +1421,6 @@ mod owner_admission_postgres_tests;
 
 #[cfg(test)]
 mod writer_protocol_postgres_tests;
+
+#[cfg(test)]
+mod manage_postgres_tests;

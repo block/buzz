@@ -10,6 +10,10 @@
 mod deletion;
 pub use deletion::WorkflowDeletionOutcome;
 
+#[cfg(test)]
+#[path = "workflow/reference_tests.rs"]
+mod reference_postgres_tests;
+
 use std::fmt;
 use std::str::FromStr;
 
@@ -21,6 +25,7 @@ use uuid::Uuid;
 use buzz_core::CommunityId;
 
 use crate::error::{DbError, Result};
+use crate::store::reference_check;
 use crate::Db;
 use buzz_datastore_tracing::datastore_span;
 
@@ -318,10 +323,31 @@ pub struct ApprovalRecord {
     pub created_at: DateTime<Utc>,
 }
 
+// -- Reference checks ---------------------------------------------------------
+//
+// Every workflow-table reference is checked in the writing transaction with the
+// shared helpers in `store/reference_check.rs`. A concurrent delete of the
+// parent (which locks it `FOR UPDATE` first, see `workflow/deletion.rs`) either
+// waits for this transaction or runs first and makes the check fail.
+
+/// Check the parents a `workflows` row references: its owner, then its channel.
+async fn require_workflow_parents(
+    conn: &mut sqlx::PgConnection,
+    community_id: CommunityId,
+    owner_pubkey: &[u8],
+    channel_id: Option<Uuid>,
+) -> Result<()> {
+    reference_check::require_user(conn, community_id, owner_pubkey, "workflow owner user").await?;
+    reference_check::require_optional_channel(conn, community_id, channel_id).await
+}
+
 // -- Workflow CRUD ------------------------------------------------------------
 
 /// Insert a new workflow record. Returns the new workflow's UUID.
 /// New workflows start as `active` and `enabled = TRUE`.
+///
+/// The owner (`users`) and the channel, when set, must exist in `community_id`;
+/// otherwise this returns [`DbError::NotFound`] and writes nothing.
 ///
 /// NOTE: see the cache-invalidation note on [`update_workflow`]. The relay's
 /// creation path is [`upsert_workflow`] via event ingest. (No current callers.)
@@ -342,6 +368,7 @@ pub async fn create_workflow(
     .await?;
     let id = Uuid::new_v4();
 
+    require_workflow_parents(tx.conn(), community_id, owner_pubkey, channel_id).await?;
     sqlx::query(
         r#"
         INSERT INTO workflows
@@ -368,6 +395,10 @@ pub async fn create_workflow(
 /// Updates are allowed only when the existing row has the same owner and
 /// channel. That keeps a learned workflow UUID from becoming a cross-user or
 /// cross-channel overwrite primitive while still making retries idempotent.
+///
+/// The owner (`users`) and the channel, when set, must exist in `community_id`
+/// or this returns [`DbError::NotFound`] and writes nothing. That check runs
+/// first, so a missing parent wins over the owner/channel mismatch rejection.
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert_workflow(
     pool: &PgPool,
@@ -385,6 +416,7 @@ pub async fn upsert_workflow(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    require_workflow_parents(tx.conn(), community_id, owner_pubkey, channel_id).await?;
     let row = sqlx::query(
         r#"
         INSERT INTO workflows
@@ -559,6 +591,13 @@ pub async fn list_all_enabled_workflows(pool: &PgPool) -> Result<Vec<WorkflowRec
 /// would fan a single claim across every community holding that UUID. Binding
 /// `(community_id, id)` confines the claim — and its `SELECT`/`INSERT` row — to
 /// exactly the intended tenant.
+///
+/// The `SELECT` locks the workflow row `FOR KEY SHARE`, the lock a foreign key
+/// check takes on insert. A workflow delete locks the row `FOR UPDATE` before it
+/// removes the workflow's fires, so a claim either commits first (and the delete
+/// removes its fire) or waits for the delete and then finds no workflow, so it
+/// inserts nothing and returns `None`. Without the lock the claim could insert
+/// after the delete removed the fires, leaving an orphan fire row.
 pub async fn claim_scheduled_workflow_fire(
     pool: &PgPool,
     community_id: CommunityId,
@@ -577,6 +616,7 @@ pub async fn claim_scheduled_workflow_fire(
         SELECT w.community_id, w.id, $3
         FROM workflows w
         WHERE w.community_id = $1 AND w.id = $2
+        FOR KEY SHARE OF w
         ON CONFLICT (community_id, workflow_id, scheduled_for) DO NOTHING
         RETURNING community_id, workflow_id, scheduled_for, claimed_at
         "#,
@@ -635,9 +675,9 @@ pub async fn latest_scheduled_workflow_fire(
 /// intentional: the schedule instant was claimed and must not duplicate later.
 ///
 /// Returns `false` when no unlinked claim matches, or the run is missing or
-/// belongs to another workflow. Workflow delete removes only its own fires
-/// before its runs, and the fire→run FK is NO ACTION, so a cross-workflow link
-/// would block that delete.
+/// belongs to another workflow. A link stays inside one workflow, so workflow
+/// delete, which removes that workflow's fires and runs together, never leaves
+/// a fire naming a deleted run.
 pub async fn attach_scheduled_workflow_run(
     pool: &PgPool,
     community_id: CommunityId,
@@ -909,6 +949,9 @@ pub async fn disable_workflows_for_owner_in_channel_on_conn(
 /// `trigger_context` is the serialized `TriggerContext` for this run. It is stored
 /// so that post-approval resume steps can restore the original trigger data and
 /// correctly resolve `{{trigger.*}}` template variables.
+///
+/// The workflow must exist in `community_id`; otherwise this returns
+/// [`DbError::NotFound`] and writes nothing.
 pub async fn create_workflow_run(
     pool: &PgPool,
     community_id: CommunityId,
@@ -925,6 +968,7 @@ pub async fn create_workflow_run(
     .await?;
     let id = Uuid::new_v4();
 
+    reference_check::require_workflow(tx.conn(), community_id, workflow_id).await?;
     sqlx::query(
         r#"
         INSERT INTO workflow_runs
@@ -1118,6 +1162,9 @@ pub struct CreateApprovalParams<'a> {
 ///
 /// The `token` parameter is the raw (plaintext) token. It is hashed with
 /// SHA-256 before storage so the DB never holds the raw value.
+///
+/// Both the workflow and the run must exist in `community_id`; otherwise this
+/// returns [`DbError::NotFound`] and writes nothing.
 pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) -> Result<()> {
     let CreateApprovalParams {
         community_id,
@@ -1137,6 +1184,8 @@ pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) ->
     )
     .await?;
 
+    reference_check::require_workflow(tx.conn(), community_id, workflow_id).await?;
+    reference_check::require_workflow_run(tx.conn(), community_id, run_id).await?;
     sqlx::query(
         r#"
         INSERT INTO workflow_approvals

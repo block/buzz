@@ -58,6 +58,10 @@ pub enum DbError {
     #[error("invitation issuer is not an owner or admin")]
     InviteIssuerNotAdmin,
 
+    /// The revoker is neither an owner or admin nor the invite's creator.
+    #[error("invite revoker is not an owner, admin or the invite's creator")]
+    InviteRevokeForbidden,
+
     /// A verified invitation owner conflicts with the recorded owner.
     #[error("invitation owner does not match the recorded owner")]
     InviteOwnerMismatch,

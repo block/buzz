@@ -103,10 +103,6 @@ async fn scheduled_overdue_dispatch_atomically_stores_message_and_sent_state() {
         .await
         .unwrap()
         .unwrap();
-    sqlx::query("SET LOCAL buzz.created_at_floor='960'")
-        .execute(claim.tx.as_mut().unwrap().conn())
-        .await
-        .unwrap();
     let (stored, inserted) = claim
         .persist(&db, &event, Some(channel), None)
         .await
@@ -287,7 +283,7 @@ async fn scheduled_writers_and_claims_honor_community_deletion_admission() {
         .await
         .unwrap()
         .iter()
-        .all(|(community, _, _, _)| *community != c));
+        .all(|candidate| candidate.community != c));
 }
 
 #[tokio::test]
@@ -370,4 +366,127 @@ async fn scheduled_replay_uses_committed_event_and_revision_after_delivery() {
         .scheduled_replayed(c, &owner, cancelled, None, &other)
         .await
         .unwrap());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn scheduled_defer_stops_at_the_retry_limit_and_releases_the_fence() {
+    let (db, _scratch, community, keys, channel) = fixture().await;
+    let now = chrono::Utc::now().timestamp();
+    let owner = keys.public_key().to_bytes();
+    let id = Uuid::new_v4();
+    let value = serde_json::to_value(queued_event(&keys, channel, now)).unwrap();
+    db.scheduled_mutate(community, &owner, id, None, Some(&value), now)
+        .await
+        .unwrap();
+
+    let candidate = db.scheduled_due(now).await.unwrap().remove(0);
+    db.scheduled_defer(&candidate, now).await.unwrap();
+    // A duplicate sweep must not burn another attempt while the row is backed off.
+    db.scheduled_defer(&candidate, now).await.unwrap();
+    let attempts: i32 = sqlx::query_scalar("SELECT attempts FROM scheduled_messages WHERE id=$1")
+        .bind(id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(attempts, 1);
+
+    sqlx::query(
+        "UPDATE scheduled_messages SET attempts=$2,send_at=$3,next_attempt_at=$4 WHERE id=$1",
+    )
+    .bind(id)
+    .bind(MAX_DELIVERY_ATTEMPTS - 1)
+    .bind(now - 7200)
+    .bind(now + 1)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let fence = crate::replica_fence::ReplicaFence::new();
+    let reserved = crate::replica_fence::probe_once(db.pool(), &fence)
+        .await
+        .unwrap();
+    assert_eq!(reserved.fence_wall.timestamp(), now - 7501);
+
+    let claim = db
+        .scheduled_claim(community, &owner, id, now + 1)
+        .await
+        .unwrap()
+        .unwrap();
+    claim
+        .finish("scheduled", Some("Temporary"), now + 1)
+        .await
+        .unwrap();
+    assert!(db.scheduled_due(now + 3600).await.unwrap().is_empty());
+    let item = db
+        .scheduled_list(community, &owner)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(item.status, "failed");
+    assert_eq!(item.error.as_deref(), Some(RETRY_EXHAUSTED));
+    let released = crate::replica_fence::probe_once(db.pool(), &fence)
+        .await
+        .unwrap();
+    assert!(released.fence_wall > reserved.fence_wall);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn scheduled_retention_keeps_live_rows_and_unexpired_replays() {
+    let (db, _scratch, community, keys, channel) = fixture().await;
+    let now = chrono::Utc::now().timestamp();
+    let owner = keys.public_key().to_bytes();
+    let pending = Uuid::new_v4();
+    let sent = Uuid::new_v4();
+    let cancelled = Uuid::new_v4();
+    let future_cancelled = Uuid::new_v4();
+    for (id, at) in [
+        (pending, now + 1),
+        (sent, now),
+        (cancelled, now + 2),
+        (future_cancelled, now + 86_400 * 90),
+    ] {
+        let value = serde_json::to_value(queued_event(&keys, channel, at)).unwrap();
+        db.scheduled_mutate(community, &owner, id, None, Some(&value), at)
+            .await
+            .unwrap();
+    }
+    db.scheduled_claim(community, &owner, sent, now)
+        .await
+        .unwrap()
+        .unwrap()
+        .finish("sent", None, now)
+        .await
+        .unwrap();
+    for id in [cancelled, future_cancelled] {
+        db.scheduled_mutate(community, &owner, id, Some(1), None, now)
+            .await
+            .unwrap();
+    }
+    db.scheduled_prune_completed().await.unwrap();
+    let retained: i64 = sqlx::query_scalar("SELECT count(*) FROM scheduled_messages")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(retained, 4);
+
+    // Simulate the passage of the retention window for just two rows.
+    sqlx::query(
+        "UPDATE scheduled_messages SET prune_at=now()-interval '1 second' WHERE id=ANY($1)",
+    )
+    .bind(&[sent, cancelled][..])
+    .execute(db.pool())
+    .await
+    .unwrap();
+    db.scheduled_prune_completed().await.unwrap();
+    let retained: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM scheduled_messages")
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(retained.len(), 2);
+    assert!(retained.contains(&pending));
+    assert!(retained.contains(&future_cancelled));
+    db.scheduled_mutate(community, &owner, future_cancelled, Some(1), None, now)
+        .await
+        .unwrap();
 }

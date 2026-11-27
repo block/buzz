@@ -467,7 +467,7 @@ All database access. Uses `sqlx::query()` (runtime, not compile-time macros) —
 | `channel.rs` | Channel CRUD, membership management, role enforcement (transactional) |
 | `feed.rs` | `query_mentions` (INNER JOIN event_mentions), `query_needs_action`, `query_activity` |
 | `workflow.rs` | Full workflow/run/approval CRUD; SHA-256 hashed approval tokens |
-| `partition.rs` | Monthly range partitioning for `events` and `delivery_log` tables: read-only catalog audit plus advisory-locked, time-bounded maintenance that creates uncovered months and advances an empty catch-all (`partition/maintenance.rs`) |
+| `partition.rs` | Monthly range partitioning for the `events` table: read-only catalog audit plus advisory-locked, time-bounded maintenance that creates uncovered months and advances an empty catch-all (`partition/maintenance.rs`) |
 | `dm.rs` | DM channel management |
 | `reaction.rs` | Reaction storage and retrieval |
 | `thread.rs` | Thread/reply tracking |
@@ -489,42 +489,41 @@ All database access. Uses `sqlx::query()` (runtime, not compile-time macros) —
 - Approval tokens: `create_approval` receives the raw token and hashes it internally with SHA-256.
 - DDL injection protection in partition manager: allowlist of table names + strict suffix/date validators.
 
-### Supported Writer Contract (transition state)
+### Supported Writer Contract
 
-The repository is moving toward a **supported-writer contract** where relay-owned
-write APIs provide the only supported mutation path for tenant data. The current
-shape is an explicit transition, not a flag day:
+Relay-owned write APIs provide the supported mutation path for tenant data:
 
-- **Trajectory:** converge from trigger/function/FK-enforced fencing toward
-  application-owned transaction protocols, while keeping existing DB backstops
-  in place until coverage and fleet gates are proven.
-- **Community fence (transition foundation):** runtime admission APIs now offer
-  one shared community deletion lock per transaction, while deletion lifecycle
-  transitions take the matching exclusive lock. A supported serving transaction
-  never spans communities. Serving leases use the same application admission.
-  Startup and deletion catalog validation tolerate the universal fence objects
-  being absent; inventories still record live fences for older executors.
-  Desired-state bootstraps install only explicitly declared legacy fences.
-  New tenant-owned tables rely on application admission, without a fence trigger.
-- **Replica floor (transition foundation):** runtime now provides a shared
-  replica-floor lock helper for compliant channel-event writers, and the writer
-  probe handshake takes the exclusive counterpart before sampling `S`, scanning
-  activity, and committing the heartbeat token last. `probe_once` remains the
-  sole token/fence-wall publication path; there is no separately persisted active
-  floor cutoff. Commit-time trigger+GUC enforcement remains authoritative for all
-  paths.
-- **Dual enforcement (current):** application-owned lock+precheck paths run in
-  front of the existing trigger/function enforcement; commit-time trigger checks
-  remain authoritative during this phase. Removing those backstops is a separate
-  gated migration, after every pod tolerates their absence and no rollback below
-  that version is expected.
+- **Community fence:** supported serving writers admit each tenant transaction
+  through the runtime API, which takes one shared community deletion lock and
+  checks active, undeleted state. Deletion lifecycle transitions take the
+  matching exclusive lock. A serving transaction never spans communities.
+  The universal per-table write-fence triggers and their functions have been
+  retired after writer coverage and fleet gates. New tenant-owned tables rely
+  on this admission alone.
+- **Replica floor:** supported channel-event insertions check `created_at`
+  against `clock_timestamp()` on their admitted transaction using the shared
+  960-second floor. The ordered heartbeat handshake and activity scan retain
+  the same fence-wall calculation. Migration 0089 retires only the deferred
+  floor trigger/function; writer connections no longer arm its GUC and probe
+  startup no longer requires those objects.
+- **Floor retirement deploy gate:** phase 1 must be deployed to every writer
+  pod/job, with no rollback expected, before applying the destructive contract.
+  Drain old connections/in-flight transactions, stop out-of-band writers, and
+  hold the replica breaker closed through the drop until replay catches up.
+  Already-running old pods do not reverify the trigger on each heartbeat.
+- **Single-table guards:** channel tenant binding, community lifecycle,
+  request/approval evidence and manifest chunks are owned by application writers.
+  Serving/deletion catalog validation tolerates the five legacy guards being
+  absent. Their contract migration is gated on the writer and catalog-expand
+  release (#8320) being deployed fleet-wide.
 - **Role separation:** relay/runtime code owns admission and lock protocols;
   operator maintenance/backfill workflows must either use those protocols or run
   under explicit reviewed procedures that keep routing fences closed.
 - **Unsupported shape:** direct owner SQL that bypasses supported transaction and
   lock protocols is not a supported write path.
-- **Fleet gates and reconciliation:** startup/fence probes verify guard catalog +
-  behavior, pgschema bootstraps run reconciliation, and lock/pool metrics remain
+- **Fleet gates and reconciliation:** retained guards keep their catalog and
+  behavior checks; heartbeat/epoch and activity checks still fail closed.
+  pgschema bootstraps run reconciliation, and lock/pool metrics remain
   the operational evidence path for rollout safety.
 
 The database end state (a declarative schema source, applied out of band at
@@ -744,7 +743,7 @@ pub struct ConnectionState {
 pub enum AuthState { Pending { challenge: String }, Authenticated(AuthContext), Failed }
 ```
 
-**Community FI admission:** Protected HTTP and root/audio WebSocket requests read the normalized Host's active authentication policy from the primary database. Stored `requires_nip_fi` OR global enforce requires FI; repair mode denies first. HTTP middleware shares one request-local policy read with handlers. Root NIP-11 and `/info` publish a no-store host-specific requirement and compatible capability fields. Policy lookup failure is unavailable, never optional. See [community auth upgrades](docs/community-auth-upgrades.md); completed activation additionally requires existing-session drain evidence.
+**Community FI admission:** Protected HTTP and root/audio WebSocket requests read the normalized Host's active authentication policy from the primary database. Stored `requires_nip_fi` OR global enforce requires FI, as does membership in the shadow-mode `BUZZ_NIP_FI_ENFORCE_PERCENT` cohort; repair mode denies first. HTTP middleware shares one request-local policy read with handlers. Root NIP-11 and `/info` publish a no-store host-specific requirement and compatible capability fields. Policy lookup failure is unavailable, never optional. See [community auth upgrades](docs/community-auth-upgrades.md); completed activation additionally requires existing-session drain evidence.
 
 **HTTP endpoints:**
 

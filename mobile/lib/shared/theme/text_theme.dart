@@ -12,6 +12,22 @@ const bodyExtraSmallTextStyle = TextStyle(
   letterSpacing: 0,
 );
 
+const bodyLargeTextStyle = TextStyle(
+  fontFamily: _fontFamily,
+  fontSize: 16,
+  fontWeight: FontWeight.w400,
+  height: 20 / 16,
+  letterSpacing: 0,
+);
+
+const titleMediumTextStyle = TextStyle(
+  fontFamily: _fontFamily,
+  fontSize: 20,
+  fontWeight: FontWeight.w500,
+  height: 1.3,
+  letterSpacing: 0,
+);
+
 const textTheme = TextTheme(
   displayLarge: TextStyle(
     fontFamily: _fontFamily,
@@ -62,13 +78,7 @@ const textTheme = TextTheme(
     height: 1.25,
     letterSpacing: 0,
   ),
-  titleMedium: TextStyle(
-    fontFamily: _fontFamily,
-    fontSize: 20,
-    fontWeight: FontWeight.w500,
-    height: 1.3,
-    letterSpacing: 0,
-  ),
+  titleMedium: titleMediumTextStyle,
   titleSmall: TextStyle(
     fontFamily: _fontFamily,
     fontSize: 16,
@@ -97,13 +107,7 @@ const textTheme = TextTheme(
     height: 1.2,
     letterSpacing: 0,
   ),
-  bodyLarge: TextStyle(
-    fontFamily: _fontFamily,
-    fontSize: 16,
-    fontWeight: FontWeight.w400,
-    height: 20 / 16,
-    letterSpacing: 0,
-  ),
+  bodyLarge: bodyLargeTextStyle,
   bodyMedium: TextStyle(
     fontFamily: _fontFamily,
     fontSize: 14,

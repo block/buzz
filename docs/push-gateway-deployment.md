@@ -1,6 +1,6 @@
 # Buzz Push Gateway deployment
 
-`buzz-push-gateway` is a standalone APNs last hop. Build it with `Dockerfile.push-gateway`; do not run it in the relay image or give relays APNs credentials.
+`buzz-push-gateway` is a standalone APNs and FCM last hop. Build it with `Dockerfile.push-gateway`; do not run it in the relay image or give relays APNs or FCM credentials.
 
 ## Network and health
 
@@ -30,6 +30,106 @@ cannot select or override that identity. Separate applications use separate
 gateway deployments and authority databases.
 
 See [Buzz push notes](buzz-push.md) for the current experimental contract.
+
+## Android (optional)
+
+The same gateway serves the app's Android installations through Firebase Cloud
+Messaging (FCM HTTP v1). Android is off unless all four settings below are present;
+a partial set fails startup. The platform of an installation is recorded only in
+gateway state, derived from the attestation type at enrollment. The relay never
+sees it.
+
+| Variable | Purpose |
+|---|---|
+| `BUZZ_PUSH_ANDROID_PACKAGE_NAME` | Exact Android application package, for example `com.example.buzz`. |
+| `BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS` | Comma-separated SHA-256 digests (64 hex characters each) of the app's accepted signing certificates. |
+| `BUZZ_PUSH_FCM_PROJECT_ID` | Firebase project that owns the app's registration tokens, for example `example-project`. |
+| `BUZZ_PUSH_FCM_CREDENTIALS_PATH` | Read-only mounted Google credential JSON the gateway uses to call FCM, dispatched on its `type`: `service_account` (a key file) or `external_account` (keyless, see below). Never commit it. |
+
+### Keyless FCM credentials
+
+Projects that forbid service account keys use Google workload identity
+federation from AWS. Point `BUZZ_PUSH_FCM_CREDENTIALS_PATH` at the standard
+`external_account` config for an AWS provider (`gcloud iam
+workload-identity-pools create-cred-config` writes it, with
+`--service-account` so it carries `service_account_impersonation_url`, which is
+required). Only the AWS credential source (`environment_id` `aws1`) is
+supported; the file's instance metadata fields are ignored.
+
+The pod also needs `AWS_REGION` (or `AWS_DEFAULT_REGION`) and one source of AWS
+credentials: IAM roles for service accounts (`AWS_ROLE_ARN` and
+`AWS_WEB_IDENTITY_TOKEN_FILE`), EKS Pod Identity
+(`AWS_CONTAINER_CREDENTIALS_FULL_URI` and optionally
+`AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`), or static `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`. If several are present, static
+keys win, then web identity, then Pod Identity. EC2
+instance metadata is not used. Startup validates the file and these settings but
+calls neither AWS nor Google. The first successful token mint is logged once,
+and every failed mint logs its hop and status. The pod must reach the regional
+STS endpoint and Google's STS and IAM Credentials APIs.
+
+The Helm chart supports IRSA as shipped: the EKS webhook injects the region and
+web identity settings. Pod Identity works in the gateway, but the chart neither
+sets `AWS_REGION` nor lets its NetworkPolicy reach the Pod Identity agent, so
+with that chart you must supply the region and an egress rule to
+`169.254.170.23/32` on TCP port 80 yourself.
+
+The wake is a high-priority, data-only FCM message with a compiled-in payload,
+one constant collapse key and a time to live taken from the delivery's expiry.
+After enrollment, an Android installation signs every call (delegate, revoke a
+delegation, rotate the endpoint, revoke the installation) with its attested
+Keystore key: an ECDSA P-256 signature over the same transcript bytes iOS
+signs, whose single-use challenge is its replay protection.
+
+### Key Attestation
+
+Enrollment is public, so an Android installation proves it is your app on real
+hardware before it can enroll. The gateway verifies the Key Attestation chain
+offline and accepts it only when all of these hold:
+
+- The chain ends at a configured Google attestation root and no certificate in
+  it is on Google's [status list](https://android.googleapis.com/attestation/status).
+  Google's [published hardware attestation roots](https://developer.android.com/privacy-and-security/security-key-attestation#root_certificate)
+  are built in, pinned by public key. A root change is a reviewed rollout: set
+  `BUZZ_PUSH_ANDROID_ATTESTATION_ROOTS_PATH` to a PEM bundle to replace the
+  built-in list before upgrading.
+- The attestation challenge equals the SHA-256 of the enrollment transcript.
+- The hardware-enforced properties (never the software-enforced ones) report a
+  locked bootloader and either a Verified boot state, or SelfSigned with a
+  verified boot key on your `BUZZ_PUSH_ANDROID_BOOT_KEY_DIGESTS` list. Unverified,
+  Failed, and SelfSigned with any other key are rejected.
+- Both security levels are TrustedEnvironment or StrongBox, and the key is a
+  generated, sign-only P-256 key.
+- The attested application id names exactly one package, the configured one,
+  with a configured signing digest. The operating system writes this value, so
+  it is trusted only as far as the boot state and boot key vouch for that
+  operating system.
+
+| Variable | Purpose |
+|---|---|
+| `BUZZ_PUSH_ANDROID_BOOT_KEY_DIGESTS` | Optional comma-separated SHA-256 digests (64 hex characters each) of verified boot keys accepted with a SelfSigned boot state. Empty by default, which accepts stock Android only. Add the published per-device keys of a custom operating system to support it, and update the list when new devices ship. |
+| `BUZZ_PUSH_ANDROID_ATTESTATION_ROOTS_PATH` | Optional PEM bundle that replaces the built-in Google roots. |
+| `BUZZ_PUSH_ANDROID_REVOCATION_GRACE_SECONDS` | How long the status list may go without a successful refresh before Android enrollment fails closed. Default `604800` (7 days), minimum `3600`. |
+| `BUZZ_PUSH_SIGNED_CALL_WINDOW_SECONDS`, `BUZZ_PUSH_SIGNED_CALL_MAX_CALLS` | Per-attested-key rate limit on signed installation calls (all platforms). Defaults `60` and `30`. Counters are per replica. |
+
+The gateway fetches the status list once at startup and then on Google's cache
+lifetime (between 5 minutes and 1 day), with a 30 second timeout, an 8 MiB size
+limit, and capped exponential backoff after failures. Enrollment never waits on
+a fetch: until the first fetch succeeds, or after the grace period passes
+without a refresh, Android enrollment is rejected. Allow outbound HTTPS to
+`android.googleapis.com`. Every certificate listed as REVOKED or SUSPENDED is
+rejected. Phones without hardware-backed attestation, with an unlocked
+bootloader, or running an operating system whose boot key you have not listed
+get no push; there is no software fallback.
+
+With the Helm chart, set `android.enabled=true` together with
+`android.packageName`, `android.signingCertDigests`, `android.fcmProjectId` and
+the Secret holding the Google credential JSON. `android.bootKeyDigests` and
+`android.revocationGraceSeconds` map to the settings above. To replace the
+built-in roots, name a Secret holding the PEM bundle in
+`android.attestationRoots.secretName` (and its key in `secretKey`); the chart
+mounts it and sets `BUZZ_PUSH_ANDROID_ATTESTATION_ROOTS_PATH`. Android is
+disabled by default.
 
 Optional endpoint quota policy variables are `BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS` (default `10`, max `86400`) and `BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES` (default `10`, max `10000`). These are Buzz policy hypotheses, not Apple-published limits; tune under load while retaining a hard ceiling.
 
@@ -87,7 +187,7 @@ that app identity; omitting it is not a push shutdown mechanism.
 
 The gateway's dedicated pool does not consume the relay-oriented `BUZZ_DB_LOCK_TIMEOUT_MS`, `BUZZ_DB_IDLE_TXN_TIMEOUT_MS`, or `BUZZ_DB_STATEMENT_TIMEOUT_MS` settings. Its session-timeout policy remains separate from the `buzz-db` writer policy and must be designed and rolled out independently.
 
-All replicas must share one PostgreSQL database. Delivery authority, replay admission, and endpoint quota reservation are transactional there, so replica count does not multiply the abuse ceiling. The gateway owns a scoped migration history under `crates/buzz-push-gateway/migrations`; it creates only the six `push_gateway_*` authority tables plus SQLx's migration-history table and never runs relay migrations.
+All replicas must share one PostgreSQL database. Delivery authority, replay admission, and endpoint quota reservation are transactional there, so replica count does not multiply the abuse ceiling. The gateway owns a scoped migration history under `crates/buzz-push-gateway/migrations`; it creates only the six `push_gateway_*` authority tables plus SQLx's migration-history table and never runs relay migrations. `crates/buzz-push-gateway/schema/` mirrors those migrations' end state as declarative desired-state DDL, one file per table; a parity test keeps their `public` tables, columns, table options, constraints, and indexes identical.
 
 The Helm chart runs a single pre-install/pre-upgrade migration Job using `migration.existingSecret`; that secret contains a DDL-capable `DATABASE_URL`. The URL MUST name a dedicated gateway database, not the relay database: SQLx stores its `_sqlx_migrations` history in `public`, so sharing a database would collide with another application's migration history. `migration.runtimeDatabaseRole` names an existing LOGIN role (the default is `buzz_push_gateway_runtime`) used by runtime `DATABASE_URL`. After scoped migrations, the Job revokes database `CREATE` from that role and schema `CREATE` from both `PUBLIC` and the role, then grants only database `CONNECT`, schema `USAGE`, and `SELECT, INSERT, UPDATE, DELETE` on the six gateway tables. The migration role must own the database/schema objects or otherwise be allowed to issue those grants; it is never provided to runtime replicas. Readiness rejects an empty/partial schema, missing DML, or a runtime role that retains database/schema `CREATE`. Helm waits for the migration hook before updating replicas, so rolling deployments never race unconditional startup migration. Readiness must be removed from load-balancer service endpoints before terminating a pod.
 
@@ -102,12 +202,15 @@ The gateway serves Prometheus metrics at `GET /metrics` on the **private health 
 | `push_gateway_apns_send_attempts_total` | counter | none | Entries into the concrete APNs HTTP send seam. Compare with terminal outcomes to detect work that never reached transport. |
 | `push_gateway_apns_deliveries_total` | counter | `outcome` = `accepted` \| `invalid_endpoint` \| `retry` \| `configuration_fault` \| `permanent_request_fault` | Terminal APNs send outcomes. |
 | `push_gateway_apns_delivery_seconds` | histogram | — | APNs send round-trip latency (seconds). |
-| `push_gateway_admissions_total` | counter | `result` = `admitted` \| `rejected` \| `unavailable` | Outcome at the `authorize_delivery` replay/quota fence. |
+| `push_gateway_fcm_send_attempts_total` | counter | none | Entries into the concrete FCM HTTP send seam. |
+| `push_gateway_fcm_deliveries_total` | counter | `outcome` (the same five classes as APNs) | Terminal FCM send outcomes. |
+| `push_gateway_fcm_delivery_seconds` | histogram | none | FCM send round-trip latency (seconds), including any access token refresh. |
+| `push_gateway_admissions_total` | counter | `result` = `admitted` \| `rejected` \| `unavailable` \| `in_flight` | Outcome at the `authorize_delivery` replay/quota fence. `in_flight` is a retry of a request id whose earlier attempt is still sending; it answers 503 retry. |
 | `push_gateway_delivery_errors_total` | counter | `class` (static) | Selected delivery-handler exit classes only (see note). |
 | `push_gateway_reaper_failures_total` | counter | — | Retention reaper sweep failures. |
 | `push_gateway_readiness_failures_total` | counter | `cause` = `not_accepting` \| `authority` | Readiness probe failures by cause. |
 
-`push_gateway_delivery_errors_total` is intentionally **narrow**: it counts only selected exit classes of the `/v1/deliveries/apns` handler. `class` ∈ `invalid_grant` (grant rejected at the admission seam, before a permit is issued), `rate_limited`, `temporarily_unavailable` (authority unavailable at the admission seam), `profile_mismatch`, `profile_disabled`, `token_custody` (endpoint-token open failure), `finish_failed` (detached disposition/join failure returned as 503). Request/auth/attestation/grant validation on the enrollment, delegation, rotation, and revocation handlers is **not** counted by this metric; it is a delivery-hot-path signal, not a total error rate across the API.
+`push_gateway_delivery_errors_total` is intentionally **narrow**: it counts only selected exit classes of the delivery handler (`/v1/deliveries` and its `/v1/deliveries/apns` alias). `class` ∈ `invalid_grant` (grant rejected at the admission seam, before a permit is issued), `rate_limited`, `temporarily_unavailable` (authority unavailable at the admission seam), `profile_mismatch`, `profile_disabled`, `token_custody` (endpoint-token open failure), `finish_failed` (a detached disposition/join failure, returned as 503, or a failed terminal finish, which still returns the provider's answer). Request/auth/attestation/grant validation on the enrollment, delegation, rotation, and revocation handlers is **not** counted by this metric; it is a delivery-hot-path signal, not a total error rate across the API.
 
 Scraping is **opt-in** and off by default, so the default chart render is unchanged and `8081` keeps no pod ingress. For prometheus-operator, set `podMonitor.enabled=true` and `networkPolicy.monitoring.enabled=true` with `networkPolicy.monitoring.namespaceSelector` / `podSelector` naming your scraper. For Datadog Autodiscovery, leave `podMonitor.enabled=false`, supply the OpenMetrics check through `podAnnotations`, and enable the same narrowly selected NetworkPolicy ingress:
 
@@ -155,8 +258,12 @@ Alerting rules ship as an opt-in prometheus-operator `PrometheusRule` (`promethe
 Relay push is an explicit deployment opt-in through `BUZZ_PUSH_ENABLED=true`;
 the established strict boolean parser rejects unknown values and the default is
 false. When enabled, `BUZZ_PUSH_GATEWAY_DELIVERY_URL` is required and must be an
-exact HTTP(S) `/v1/deliveries/apns` URL. Credentials, query and fragment are
-not accepted. The relay signs and sends the same configured URL. An absent or explicitly empty URL while
+exact HTTP(S) URL whose path is `/v1/deliveries/apns` or `/v1/deliveries`.
+Use `/v1/deliveries` only with a gateway that already serves it; the public
+gateway at `push.buzz.xyz` does not yet. A gateway that does not answer on the
+configured path (404 or 403) fails each delivery permanently, so the
+notification is dropped rather than retried.
+Credentials, query and fragment are not accepted. The relay signs and sends the same configured URL. An absent or explicitly empty URL while
 enabled is a startup error. Only an enabled relay
 advertises its host-scoped NIP-PL descriptor, accepts leases, and starts the
 matcher and delivery worker. Relays retain lease matching, authorization, durable
@@ -389,8 +496,10 @@ helm pull oci://ghcr.io/block/buzz/charts/buzz-push-gateway --version X.Y.Z
 
 The gateway verifies the signed method and delivery path using the NIP-98 event
 format, rather than matching the full incoming HTTP(S) request URL. The signed
-method must be `POST`; the signed URL path must be `/v1/deliveries/apns`, without
-query, fragment or credentials. Incoming request queries are rejected.
+method must be `POST`; the signed URL path must be the path of the route the
+request is sent to, `/v1/deliveries` or its `/v1/deliveries/apns` alias, without
+query, fragment or credentials. A request signed for one route is rejected on
+the other. Incoming request queries are rejected.
 Host and forwarding headers do not participate in delivery authentication.
 Event signatures, body hashes, timestamps, grant checks and replay protection
 remain enforced. No mobile App Attest audiences or relay activation settings change.

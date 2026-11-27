@@ -34,7 +34,8 @@ pub(super) async fn edit_message(
                 original.kind.as_u16()
             )));
         }
-        let builder = buzz_sdk::build_edit(channel, target, content)
+        let emoji = crate::commands::emoji::emoji_tags_for_content(client, content).await;
+        let builder = buzz_sdk::build_edit_with_tags(channel, target, content, &[], &emoji)
             .map_err(|e| CliError::Other(format!("build_edit failed: {e}")))?;
         let event = client.sign_event(builder).await?;
         let resp = client.submit_event(event).await?;
@@ -98,7 +99,8 @@ pub(super) async fn edit_message(
         ));
     }
     let created_at = now.max(head + 1);
-    let builder = buzz_sdk::build_edit_with_media(channel, target, content, &media)
+    let emoji = crate::commands::emoji::emoji_tags_for_content(client, content).await;
+    let builder = buzz_sdk::build_edit_with_tags(channel, target, content, &media, &emoji)
         .map_err(|e| CliError::Other(format!("build_edit failed: {e}")))?
         .custom_created_at(Timestamp::from(created_at));
     let event = client.sign_event(builder).await?;

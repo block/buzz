@@ -43,7 +43,7 @@ class BeeRefreshIndicator extends HookConsumerWidget {
   static const _loadingGap = 72.0;
   static const _beeVerticalAlignment = 0.75;
   static const _beeInitialScale = 0.6;
-  static const _beeRevealStartProgress = 0.18;
+  static const _beeRevealStartProgress = 0.40;
   static const _pupilStartBeyondArmDistance = 96.0;
   static const _pupilFullBeforeEmojiDistance = 8.0;
   static const _eyeEmojiSwapViewportFraction = 0.26;
@@ -197,7 +197,10 @@ class BeeRefreshIndicator extends HookConsumerWidget {
     }
 
     bool trackPull(ScrollNotification notification) {
-      if (notification.metrics.axis != Axis.vertical) return false;
+      if (notification.depth != 0 ||
+          notification.metrics.axis != Axis.vertical) {
+        return false;
+      }
 
       if (notification is! ScrollStartNotification &&
           notification.metrics.extentBefore == 0) {
@@ -207,12 +210,18 @@ class BeeRefreshIndicator extends HookConsumerWidget {
             (notification.metrics.minScrollExtent - notification.metrics.pixels)
                 .clamp(0.0, double.infinity)
                 .toDouble();
-        if (elasticPull > 0 || pullDistance.value > 0) {
+        if (notification is! OverscrollNotification &&
+            (elasticPull > 0 || pullDistance.value > 0)) {
           pullDistance.value = elasticPull;
           final nextProgress = (elasticPull / _triggerDistance).clamp(0.0, 1.0);
-          pullProgress.value = nextProgress;
-          if (nextProgress >= 1) beginExpressionTracking();
-        } else if (notification case OverscrollNotification()) {
+          if (notification is ScrollUpdateNotification &&
+              notification.dragDetails != null) {
+            pullProgress.value = nextProgress;
+            if (nextProgress >= 1) beginExpressionTracking();
+          }
+        } else if (notification is OverscrollNotification &&
+            notification.dragDetails != null &&
+            notification.overscroll < 0) {
           // Clamping physics does not expose a negative position, so build the
           // same progress from its overscroll deltas.
           final nextDistance =
@@ -287,7 +296,8 @@ class BeeRefreshIndicator extends HookConsumerWidget {
             .clamp(0.0, 1.0);
     final isVisible =
         status.value != null &&
-        (isLoading || dragRevealProgress > 0 || completionProgress > 0);
+        (isLoading ||
+            (activePointers.value.isNotEmpty && dragRevealProgress > 0));
     final retainedGap = _loadingGap * gapProgress;
     final visibleGap = pullDistance.value + retainedGap;
     final top = edgeOffset + (visibleGap - _beeHeight) * _beeVerticalAlignment;
@@ -333,6 +343,15 @@ class BeeRefreshIndicator extends HookConsumerWidget {
       clipBehavior: Clip.none,
       children: [
         RefreshIndicator.noSpinner(
+          // Momentum may carry a short drag past the top. Only a drag can
+          // arm refresh; once armed, Flutter handles the bounce and release.
+          notificationPredicate: (notification) =>
+              defaultScrollNotificationPredicate(notification) &&
+              !(status.value == RefreshIndicatorStatus.drag &&
+                  ((notification is ScrollUpdateNotification &&
+                          notification.dragDetails == null) ||
+                      (notification is OverscrollNotification &&
+                          notification.dragDetails == null))),
           onRefresh: onRefresh,
           onStatusChange: updateStatus,
           semanticsLabel: 'Pull to refresh',

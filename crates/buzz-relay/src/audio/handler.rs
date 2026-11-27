@@ -898,15 +898,31 @@ async fn run_active_audio_connection(
     crate::nip_fi_test_hooks::before_deny_set_check(tenant.community()).await;
     if let Some(assertion) = &nip_fi_assertion {
         if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
-            if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now()) {
+            if let Some(refusal) =
+                crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now())
+            {
                 warn!(
                     channel_id = %channel_id,
                     pubkey = %pubkey_hex,
-                    "NIP-FI deny-set hit at audio post-registration check — denying"
+                    class = ?refusal.class,
+                    "NIP-FI deny-set check refused audio post-registration — denying"
                 );
-                control.deny_nip_fi_enforce(crate::nip_fi_shadow::DENY_SET.by(Some(pubkey)));
-                auth_line.finish(AuthResult::Denied(crate::access::AuthReason::DenySet));
-                deny_audio_authorization(&mut ws_send, &control, &mut terminal_ctrl_rx).await;
+                control.deny_nip_fi_enforce(refusal.by(Some(pubkey)));
+                auth_line.finish(AuthResult::Denied(match refusal.class {
+                    buzz_auth::DenialClass::AuthorizationDenied => {
+                        crate::access::AuthReason::DenySet
+                    }
+                    _ => crate::access::AuthReason::AuthorizationUnavailable,
+                }));
+                exit_authorization_refusal(
+                    &mut ws_send,
+                    &control,
+                    &mut terminal_ctrl_rx,
+                    true,
+                    refusal.class,
+                    serde_json::Value::Null,
+                )
+                .await;
                 return;
             }
         }
@@ -1411,8 +1427,6 @@ async fn run_active_audio_connection(
         peer_id: None,
         room: Arc::clone(&room),
         audio_rooms: Arc::clone(&state.audio_rooms),
-        community: tenant.community(),
-        channel_id,
     };
 
     // Remote registration happens before ingress admission. The owner-assigned
@@ -2149,6 +2163,19 @@ async fn run_active_audio_connection(
     let remote_stream = guard.take_remote_stream();
     let _ = guard.take_peer_id(); // peer_id was taken for the commit path
 
+    // The owner installs lifecycle context before advertising owner readiness.
+    // Remote last-peer teardown must publish the same ending as a local exit.
+    if remote_session.is_none() {
+        let _ = room.end_handler.set(Arc::new(CommittedRoomEnd {
+            state: Arc::downgrade(&state),
+            tenant: tenant.clone(),
+            parent: parent_id_for_event,
+            participant: pubkey_hex.clone(),
+            generation: lifecycle_generation.clone(),
+            owner_generation,
+        }));
+    }
+
     // I1 mandated: transfer-after-commit-won. Now that the join is committed,
     // take the lease from the guard and install the registry renewer. Every
     // exit after this point is in the live runtime (no pre-commit resources
@@ -2249,6 +2276,14 @@ async fn run_active_audio_connection(
                     roster_revision,
                     &roster_ctrl_tx,
                 ) => {
+                    // The owner only says goodbye with Draining or
+                    // StaleGeneration, so SessionEnded here means the local
+                    // client's control sink closed: the client is leaving.
+                    // Unregister it, or the owner treats the bare stream end
+                    // as transport loss and keeps the Huddle open for rejoin.
+                    if matches!(cause, crate::audio::join::HuddleTeardownCause::SessionEnded) {
+                        crate::audio::join::send_clean_close(&mut stream, fenced, &pubkey).await;
+                    }
                     teardown_remote_huddle(cause, channel_id, &reader_cancel, &fence);
                 }
                 _ = reader_cancel.cancelled() => {
@@ -2401,46 +2436,20 @@ async fn run_active_audio_connection(
     )
     .await;
 
-    let room_emptied;
-    if should_auto_end {
-        info!(channel_id = %channel_id, "audio room empty — auto-ending huddle");
-
-        match state
-            .db
-            .archive_channel(tenant.community(), channel_id)
-            .await
-        {
-            Err(e) => {
-                warn!(channel_id = %channel_id, "auto-archive failed, huddle stays alive: {e}");
-                room.clear_ended();
-                room_emptied = false;
+    let room_emptied = if should_auto_end {
+        match room.end_handler.get() {
+            Some(handler) if handler.finish(&room, Some(&pubkey_hex)).await => {
+                state.audio_rooms.cleanup_ended_room(&room)
             }
-            Ok(()) => {
-                room_emptied = state
-                    .audio_rooms
-                    .cleanup_if_empty(tenant.community(), channel_id);
-
-                emit_participant_event(
-                    &state,
-                    &tenant,
-                    channel_id,
-                    parent_id_for_event,
-                    ParticipantLifecycle {
-                        kind: Kind::Custom(48103),
-                        participant_pubkey: &pubkey_hex,
-                        roster_revision: None,
-                        admission_id: None,
-                        generation: &lifecycle_generation,
-                    },
-                )
-                .await;
-            }
+            _ => false,
         }
+    } else if remote_session.is_some() {
+        state.audio_rooms.cleanup_ended_room(&room)
     } else {
-        room_emptied = state
-            .audio_rooms
-            .cleanup_if_empty(tenant.community(), channel_id);
-    }
+        // Another leaver owns finalization. Keep its ended admission gate
+        // installed while archival is in flight.
+        false
+    };
 
     // Owner path: release this room's lease when the room empties, so a new
     // owner can acquire and the renewer stops cleanly (silent, not owner-loss).
@@ -2459,6 +2468,95 @@ async fn run_active_audio_connection(
         pubkey = %pubkey_hex,
         "audio peer left"
     );
+}
+
+struct CommittedRoomEnd {
+    state: std::sync::Weak<AppState>,
+    tenant: TenantContext,
+    parent: Uuid,
+    participant: String,
+    generation: String,
+    owner_generation: Option<u64>,
+}
+
+#[async_trait::async_trait]
+impl crate::audio::room::RoomEndHandler for CommittedRoomEnd {
+    async fn finish(&self, room: &crate::audio::room::Room, participant: Option<&str>) -> bool {
+        let Some(state) = self.state.upgrade() else {
+            return true;
+        };
+        // Draining/retired owners release local resources but cannot end the
+        // shared call that another owner may already be serving.
+        if let Some(generation) = self.owner_generation {
+            if !state
+                .mesh()
+                .is_some_and(|mesh| mesh.owners.owns_generation(room.channel_id, generation))
+            {
+                return true;
+            }
+        }
+        match state
+            .db
+            .archive_channel_if(self.tenant.community(), room.channel_id, || async {
+                let Some(generation) = self.owner_generation else {
+                    return Ok(true);
+                };
+                let Some(mesh) = state.mesh() else {
+                    return Ok(false);
+                };
+                if !mesh.owners.owns_generation(room.channel_id, generation) {
+                    return Ok(false);
+                }
+                let fenced = buzz_relay_mesh::FencedHeader {
+                    session_id: room.channel_id,
+                    generation,
+                    owner_runtime_id: mesh.local_runtime_id,
+                };
+                let checked = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    mesh.effective_directory()
+                        .validate(self.tenant.community(), &fenced),
+                )
+                .await;
+                match checked {
+                    Ok(Ok(())) => Ok(mesh.owners.owns_generation(room.channel_id, generation)),
+                    Ok(Err(
+                        buzz_relay_mesh::MeshError::StaleGeneration { .. }
+                        | buzz_relay_mesh::MeshError::NoActiveLease { .. }
+                        | buzz_relay_mesh::MeshError::OwnerMismatch { .. }
+                        | buzz_relay_mesh::MeshError::FutureGeneration { .. },
+                    )) => Ok(false),
+                    _ => Err(buzz_db::DbError::AccessDenied(
+                        "Huddle ownership could not be verified".into(),
+                    )),
+                }
+            })
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return true,
+            Err(error) => {
+                warn!(channel_id = %room.channel_id, %error, "auto-archive failed, huddle stays alive");
+                room.clear_ended();
+                return false;
+            }
+        }
+        emit_participant_event(
+            &state,
+            &self.tenant,
+            room.channel_id,
+            self.parent,
+            ParticipantLifecycle {
+                kind: Kind::Custom(48103),
+                participant_pubkey: participant.unwrap_or(&self.participant),
+                roster_revision: None,
+                admission_id: None,
+                generation: &self.generation,
+            },
+        )
+        .await;
+        true
+    }
 }
 
 /// React to a non-owner huddle teardown signal read off the owner's control
@@ -2918,9 +3016,6 @@ struct HuddleAdmissionGuard {
     room: std::sync::Arc<crate::audio::room::Room>,
     /// Back-reference to the room manager for `cleanup_if_empty`.
     audio_rooms: std::sync::Arc<crate::audio::room::AudioRoomManager>,
-    /// Community + channel for `cleanup_if_empty`.
-    community: buzz_core::CommunityId,
-    channel_id: Uuid,
 }
 
 impl HuddleAdmissionGuard {
@@ -2958,6 +3053,7 @@ impl HuddleAdmissionGuard {
         {
             crate::audio::join::send_clean_close(stream, session.fenced(), session.pubkey()).await;
         }
+        let was_remote = self.remote_session.is_some();
         self.remote_session = None;
         self.remote_stream = None;
         // Remove the peer from the room.
@@ -2967,11 +3063,20 @@ impl HuddleAdmissionGuard {
         // avoid emitting a phantom `left` delta.
         // [Fix B: FI-TRACE-COMMIT-BEFORE-PUBLISH]
         if let Some(pid) = self.peer_id.take() {
-            self.room.remove_peer_silent(pid);
-            let cleaned = self
-                .audio_rooms
-                .cleanup_if_empty(self.community, self.channel_id);
-            return cleaned;
+            if was_remote {
+                self.room.remove_peer_silent(pid);
+                return self.audio_rooms.cleanup_ended_room(&self.room);
+            }
+            let (_, should_end) = self.room.remove_peer_silent_and_check_ended(pid);
+            if !should_end {
+                return false;
+            }
+            if let Some(handler) = self.room.end_handler.get() {
+                if !handler.finish(&self.room, None).await {
+                    return false;
+                }
+            }
+            return self.audio_rooms.cleanup_ended_room(&self.room);
         }
         false
     }
@@ -3004,9 +3109,6 @@ impl HuddleAdmissionGuard {
 
 /// Why [`check_membership_for_admission`] refused: the caller lacks the
 /// authority, or a dependency that decides it could not be read.
-const AGENT_DM_HUDDLE_REFUSED: &str =
-    "agents cannot join huddles in direct messages except with their owner";
-
 #[derive(Debug)]
 enum AdmissionRefusal {
     Denied(&'static str),
@@ -3206,20 +3308,6 @@ async fn check_membership_for_admission(
         return Err(AdmissionRefusal::Denied(
             "only members can join huddles in this channel",
         ));
-    }
-    for (scope_id, scope) in [(lifecycle_parent_id, write_scope), (channel_id, &channel)] {
-        if !crate::handlers::ingest::agent_dm_write_allowed(
-            tenant.community(),
-            state,
-            scope_id,
-            pubkey_bytes,
-            scope,
-        )
-        .await
-        .map_err(AdmissionRefusal::Dependency)?
-        {
-            return Err(AdmissionRefusal::Denied(AGENT_DM_HUDDLE_REFUSED));
-        }
     }
 
     // Fast path: already a member.
@@ -3503,11 +3591,23 @@ async fn commit_participant_join(
     // is held only for the duration of the join transaction (typically
     // sub-millisecond). See `lock_channel_archived_at_in_transaction` for why
     // the lock is `FOR NO KEY UPDATE` rather than `FOR UPDATE`.
-    let channel_archived = buzz_db::channel_members::lock_channel_archived_at_in_transaction(
+    let channel_archived = match buzz_db::channel_members::lock_channel_archived_at_in_transaction(
         membership.tx(),
         channel_id,
     )
-    .await?;
+    .await
+    {
+        Ok(archived_at) => archived_at,
+        // The channel row is gone (purged since the pre-join check). There is
+        // nothing to join and nothing to auto-add the joiner to: refuse like a
+        // joiner who lost their membership, before any write.
+        Err(buzz_db::DbError::ChannelNotFound(_)) => {
+            retire_shadow();
+            let _ = tx.rollback().await;
+            return Err(JoinCommitError::MembershipLost);
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     // Test hook: fires after the FOR UPDATE lock is acquired but before the
     // archived check / any write. A test can attempt a concurrent archive here
@@ -4814,6 +4914,40 @@ mod tests {
         );
     }
 
+    /// While the deny map restores, audio AUTH refuses as
+    /// `authorization unavailable` with a bare close, for a revoked key and
+    /// an unknown one, never `authorization denied`.
+    #[tokio::test]
+    async fn audio_restoring_deny_map_emits_authorization_unavailable() {
+        use tokio_tungstenite::tungstenite::Message;
+        let deadline = chrono::Utc::now() + chrono::Duration::hours(1);
+        let denied = nostr::Keys::generate();
+        for (state_key, signer) in [(Some(denied.public_key()), &denied), (None, &denied)] {
+            let state = audio_deny_state(state_key.as_ref()).await;
+            state
+                .nip_fi_deny_map
+                .as_deref()
+                .expect("deny map")
+                .begin_restore();
+            let assertion =
+                buzz_auth::VerifiedAssertion::for_test(Some(signer.public_key()), vec![deadline]);
+            let (wire, _) = run_audio_auth_wire(state, Some(assertion), signer, true).await;
+            assert_eq!(
+                wire.first(),
+                Some(&Message::Text(
+                    audio_denial(buzz_auth::DenialClass::AuthorizationUnavailable).into()
+                ))
+            );
+            assert!(
+                !wire.iter().any(|m| matches!(
+                    m,
+                    Message::Close(Some(f)) if f.code == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy
+                )),
+                "a bare close, never the 1008 of a revocation: {wire:?}"
+            );
+        }
+    }
+
     /// Records every frame the denial writer emits for a registered audio
     /// control, then lets a registry scan race it in `scan_first` order.
     async fn audio_denial_with_concurrent_scan(
@@ -4834,11 +4968,14 @@ mod tests {
 
         let mut wire = Vec::new();
         if scan_first {
-            assert_eq!(registry.disconnect_nip_fi("test-issuer", &key), 1);
+            assert_eq!(
+                registry.disconnect_nip_fi("test-issuer", &key, buzz_auth::DenyScope::WholeKey),
+                1
+            );
         }
         deny_audio_authorization(&mut wire, &control, &mut terminal_rx).await;
         if !scan_first {
-            registry.disconnect_nip_fi("test-issuer", &key);
+            registry.disconnect_nip_fi("test-issuer", &key, buzz_auth::DenyScope::WholeKey);
         }
         (wire, terminal_rx)
     }
@@ -6134,8 +6271,6 @@ mod tests {
             peer_id: None,
             room,
             audio_rooms,
-            community,
-            channel_id,
         };
 
         let _ = guard.release_before_commit().await; // pre-add-peer; owner_generation not set
@@ -6244,8 +6379,6 @@ mod tests {
             peer_id: None,
             room,
             audio_rooms,
-            community,
-            channel_id,
         };
 
         let _ = guard.release_before_commit().await; // pre-add-peer; owner_generation not set
@@ -6765,8 +6898,7 @@ mod tests {
 
         if let Some(key) = denied_key {
             let until = chrono::Utc::now() + chrono::Duration::seconds(3600);
-            let result =
-                deny_map.merge_cross_pod_deny("test-issuer", key, until, chrono::Utc::now());
+            let result = deny_map.merge_cross_pod_deny("test-issuer", key, until, chrono::Utc::now);
             assert!(
                 matches!(result, buzz_auth::CrossPodMergeResult::Merged),
                 "audio_deny_state: deny entry must be inserted for test setup"
@@ -7051,7 +7183,7 @@ mod tests {
     //   - `after_deny_set_check_passed` hook holds the handler AFTER the terminal
     //     sender is registered and the deny-set check has passed (so the direct
     //     map-denial branch is not what produces the frame).
-    //   - Test calls `registry.disconnect_nip_fi("test-issuer", &pubkey)` while the hook holds.
+    //   - Test calls `registry.disconnect_nip_fi("test-issuer", &pubkey, buzz_auth::DenyScope::WholeKey)` while the hook holds.
     //     `CommunityConnectionControl::disconnect_nip_fi` enqueues the denial frame
     //     on `terminal_frame_tx`, publishes `AuthorizationDenied`, then cancels.
     //   - Hook is released; handler observes cancellation, drains the denial
@@ -7215,9 +7347,11 @@ mod tests {
         // CommunityConnectionControl::disconnect_nip_fi enqueues the denial frame on
         // the registered terminal sender, publishes AuthorizationDenied, then cancels.
         let pubkey_bytes = key.public_key().to_bytes().to_vec();
-        let closed = state
-            .community_connections
-            .disconnect_nip_fi("test-issuer", &pubkey_bytes);
+        let closed = state.community_connections.disconnect_nip_fi(
+            "test-issuer",
+            &pubkey_bytes,
+            buzz_auth::DenyScope::WholeKey,
+        );
         assert_eq!(
             closed, 1,
             "W_admin_disconnect: registry scan must find exactly 1 audio session \
@@ -7293,13 +7427,34 @@ mod tests {
     //   B) Remove `set_terminal_frame_sender` entirely → same outcome as (A).
     #[tokio::test]
     async fn w_admin_disconnect_at_deny_check_delivers_payload_then_terminates() {
+        w_admin_disconnect_at_deny_check_body(false).await;
+    }
+
+    // Cutoff variants: the session registers through production
+    // `from_assertion` with a signed `iat` two minutes before registration.
+    // `iat == C` is seen by the scan, cancelled and never admitted;
+    // `iat == C + 0.5` is skipped, admitted and survives redelivery.
+    #[tokio::test]
+    async fn w_cutoff_disconnect_at_deny_check_cancels_old_token() {
+        w_admin_disconnect_at_deny_check_body(true).await;
+    }
+
+    async fn w_admin_disconnect_at_deny_check_body(cutoff: bool) {
         use buzz_auth::VerifiedAssertion;
         use chrono::{Duration, Utc};
         use std::sync::Arc;
 
         let key = nostr::Keys::generate();
         let deadline = Utc::now() + Duration::hours(1);
-        let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+        let c = Utc::now().timestamp() - 120;
+        let mut assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+        let mut scope = buzz_auth::DenyScope::WholeKey;
+        if cutoff {
+            // iat == C: on the revoked side of the cutoff.
+            assertion =
+                assertion.with_issued_at_for_test(chrono::DateTime::from_timestamp(c, 0).unwrap());
+            scope = buzz_auth::DenyScope::IssuedThrough(c);
+        }
 
         // State with deny map; key is absent (not denied) — the check must pass.
         let state = audio_deny_state(None).await;
@@ -7424,12 +7579,21 @@ mod tests {
 
         // Simulate admin-disconnect at the exact old-gap position.
         let pubkey_bytes = key.public_key().to_bytes().to_vec();
-        let closed = state
-            .community_connections
-            .disconnect_nip_fi("test-issuer", &pubkey_bytes);
+        if cutoff {
+            let entry = buzz_auth::DenyEntry {
+                until: Utc::now() + Duration::hours(1),
+                scope,
+            };
+            let deny_map = state.nip_fi_deny_map.as_ref().unwrap();
+            deny_map.merge_cross_pod_deny("test-issuer", &key.public_key(), entry, Utc::now);
+        }
+        let closed =
+            state
+                .community_connections
+                .disconnect_nip_fi("test-issuer", &pubkey_bytes, scope);
         assert_eq!(
             closed, 1,
-            "W_addc: registry scan must find exactly 1 audio session \
+            "W_addc: registry scan must find exactly the revoked-side audio session \
              (proves audio_post_auth_register ran before the hook)"
         );
 
@@ -8001,7 +8165,7 @@ mod tests {
         // Insert the deny entry — handler is between registration and check.
         let until = Utc::now() + Duration::seconds(3600);
         let merge =
-            deny_map_for_insert.merge_cross_pod_deny("test-issuer", &target, until, Utc::now());
+            deny_map_for_insert.merge_cross_pod_deny("test-issuer", &target, until, Utc::now);
         assert!(
             matches!(merge, buzz_auth::CrossPodMergeResult::Merged),
             "W_audio_deny_straddle: deny entry must be inserted during hook window"
@@ -8018,9 +8182,11 @@ mod tests {
         //   disconnect_nip_fi returns 0 (not yet registered) → assertion panics.
         //   Causally falsifies the registration-before-check invariant.
         let pubkey_bytes = target.to_bytes().to_vec();
-        let closed = state
-            .community_connections
-            .disconnect_nip_fi("test-issuer", &pubkey_bytes);
+        let closed = state.community_connections.disconnect_nip_fi(
+            "test-issuer",
+            &pubkey_bytes,
+            buzz_auth::DenyScope::WholeKey,
+        );
         assert_eq!(
             closed, 1,
             "W_audio_deny_straddle: close scan must find exactly 1 registered audio session \
@@ -8067,65 +8233,175 @@ mod tests {
     mod postgres_tests {
         use super::*;
 
+        /// iat > C straddling a cutoff at the deny check: the scan skips it, the
+        /// handler completes a real audio join, and redelivery never closes it.
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
-        async fn agent_joins_dm_huddles_only_with_its_owner() {
-            let state = audio_test_state_real_db()
+        async fn w_cutoff_disconnect_at_deny_check_keeps_fresh_token_across_redelivery() {
+            use buzz_auth::{DenyEntry, DenyScope, VerifiedAssertion};
+            use chrono::{Duration, Utc};
+            use std::sync::Arc;
+
+            let mut state = (*audio_test_state_real_db()
                 .await
-                .expect("postgres-ci provides a database");
-            let pool = state.db.pool().clone();
-            let (tenant, _parent_id, _member_key) = seed_audio_fixture(&pool).await;
+                .expect("W_cutoff: PostgreSQL must be available"))
+            .clone();
+            let deny_map = Arc::new(buzz_auth::NipFiDenyMap::new(
+                16,
+                vec![buzz_auth::IssuerCapacity {
+                    issuer: "test-issuer".to_owned(),
+                    capacity: 16,
+                }],
+            ));
+            state.nip_fi_deny_map = Some(Arc::clone(&deny_map));
+            let state = Arc::new(state);
+            let (tenant, channel_id, key) = seed_audio_fixture(&state.db.pool().clone()).await;
             let community = tenant.community();
-            let (owner, agent, stranger) = (
-                nostr::Keys::generate().public_key().to_bytes(),
-                nostr::Keys::generate().public_key().to_bytes(),
-                nostr::Keys::generate().public_key().to_bytes(),
+            let relay_url = format!("ws://{}", tenant.host());
+
+            let c = Utc::now().timestamp() - 120;
+            let scope = DenyScope::IssuedThrough(c);
+            let assertion = VerifiedAssertion::for_test(
+                Some(key.public_key()),
+                vec![Utc::now() + Duration::hours(1)],
+            )
+            .with_issued_at_for_test(chrono::DateTime::from_timestamp(c, 500_000_000).unwrap());
+
+            let conn_cancel = CancellationToken::new();
+            let control = crate::state::CommunityConnectionControl::new(conn_cancel.clone());
+            let _conn_guard = state.community_connections.register(
+                uuid::Uuid::new_v4(),
+                community,
+                control.clone(),
             );
-            for key in [&owner, &agent, &stranger] {
-                state
-                    .db
-                    .ensure_user(community, key)
-                    .await
-                    .expect("ensure user");
-            }
-            state
-                .db
-                .set_agent_owner_for_authorization(community, &agent, &owner)
+
+            let listener = TcpListener::bind("127.0.0.1:0")
                 .await
-                .expect("link agent owner");
-            let open_dm = |members: [&[u8; 32]; 2]| {
-                let state = state.clone();
-                let members: Vec<[u8; 32]> = members.iter().map(|k| **k).collect();
-                async move {
-                    let refs: Vec<&[u8]> = members.iter().map(|k| k.as_slice()).collect();
-                    state
-                        .db
-                        .open_dm(community, &refs, refs[0])
-                        .await
-                        .expect("open dm")
-                        .0
-                        .id
+                .expect("W_cutoff: bind");
+            let addr = listener.local_addr().expect("W_cutoff: addr");
+            let state_c = Arc::clone(&state);
+            let server = tokio::spawn(async move {
+                let app = Router::new().route(
+                    "/",
+                    get(move |ws: WebSocketUpgrade| async move {
+                        ws.on_upgrade(move |socket| {
+                            handle_active_audio_connection(
+                                socket,
+                                state_c,
+                                tenant,
+                                channel_id,
+                                control,
+                                Some(assertion),
+                                Utc::now(),
+                                None,
+                            )
+                        })
+                    }),
+                );
+                axum::serve(listener, app).await.expect("W_cutoff: server");
+            });
+
+            let (mut client, _) = connect_async(format!("ws://{addr}/"))
+                .await
+                .expect("W_cutoff: connect");
+            let (hook_arrived_rx, hook_release) =
+                crate::nip_fi_test_hooks::deny_set_check_hook::arm(community);
+
+            let challenge =
+                match tokio::time::timeout(std::time::Duration::from_secs(2), client.next())
+                    .await
+                    .expect("W_cutoff: challenge timeout")
+                    .expect("W_cutoff: challenge item")
+                    .expect("W_cutoff: challenge message")
+                {
+                    tokio_tungstenite::tungstenite::Message::Text(t) => {
+                        serde_json::from_str::<serde_json::Value>(&t)
+                            .expect("W_cutoff: challenge JSON")["challenge"]
+                            .as_str()
+                            .expect("W_cutoff: challenge field")
+                            .to_string()
+                    }
+                    other => panic!("W_cutoff: expected text challenge; got {other:?}"),
+                };
+            let auth_event = nostr::EventBuilder::new(nostr::Kind::Authentication, "")
+                .tag(nostr::Tag::parse(["relay", &relay_url]).unwrap())
+                .tag(nostr::Tag::parse(["challenge", &challenge]).unwrap())
+                .sign_with_keys(&key)
+                .unwrap();
+            let auth_msg = serde_json::json!({
+                "type": "auth",
+                "event": auth_event,
+                "parent_channel_id": null,
+                "protocol_version": 2,
+            })
+            .to_string();
+            client
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    auth_msg.into(),
+                ))
+                .await
+                .expect("W_cutoff: send auth");
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), hook_arrived_rx)
+                .await
+                .expect("W_cutoff: handler must reach before_deny_set_check within 5s")
+                .expect("W_cutoff: hook arrived channel closed");
+            let entry = DenyEntry {
+                until: Utc::now() + Duration::hours(1),
+                scope,
+            };
+            assert!(matches!(
+                deny_map.merge_cross_pod_deny("test-issuer", &key.public_key(), entry, Utc::now),
+                buzz_auth::CrossPodMergeResult::Merged
+            ));
+            let pubkey_bytes = key.public_key().to_bytes().to_vec();
+            assert_eq!(
+                state
+                    .community_connections
+                    .disconnect_nip_fi("test-issuer", &pubkey_bytes, scope),
+                0,
+                "W_cutoff: the scan must skip iat > C"
+            );
+            hook_release.notify_one();
+
+            // Sync point: the handler's own `joined` proves the audio join completed.
+            let joined = loop {
+                match tokio::time::timeout(std::time::Duration::from_secs(10), client.next())
+                    .await
+                    .expect("W_cutoff: `joined` must arrive within 10s")
+                    .expect("W_cutoff: stream closed before `joined`")
+                    .expect("W_cutoff: ws error")
+                {
+                    tokio_tungstenite::tungstenite::Message::Text(t) => break t.to_string(),
+                    _ => continue,
                 }
             };
-            let stranger_dm = open_dm([&agent, &stranger]).await;
-            let owner_dm = open_dm([&agent, &owner]).await;
+            let joined: serde_json::Value = serde_json::from_str(&joined).expect("W_cutoff: JSON");
+            assert_eq!(
+                joined["type"], "joined",
+                "W_cutoff: iat > C must join: {joined}"
+            );
+            assert_eq!(
+                joined["pubkey"].as_str(),
+                Some(key.public_key().to_hex().as_str())
+            );
 
-            assert!(matches!(
-                check_membership_for_admission(&state, &tenant, stranger_dm, &agent, None).await,
-                Err(AdmissionRefusal::Denied(AGENT_DM_HUDDLE_REFUSED))
-            ));
+            for _ in 0..3 {
+                assert_eq!(
+                    state.community_connections.disconnect_nip_fi(
+                        "test-issuer",
+                        &pubkey_bytes,
+                        scope
+                    ),
+                    0,
+                    "W_cutoff: redelivery must skip iat > C"
+                );
+            }
             assert!(
-                check_membership_for_admission(&state, &tenant, stranger_dm, &stranger, None)
-                    .await
-                    .is_ok(),
-                "a human still joins the DM huddle"
+                !conn_cancel.is_cancelled(),
+                "W_cutoff: iat > C must stay open after redelivery"
             );
-            assert!(
-                check_membership_for_admission(&state, &tenant, owner_dm, &agent, None)
-                    .await
-                    .is_ok(),
-                "an agent joins its owner-only DM huddle"
-            );
+            server.abort();
         }
 
         /// Joining a huddle is a write. For an ephemeral huddle the joiner
@@ -11220,6 +11496,8 @@ mod tests {
             let (fanout_rx, fanout_release) =
                 crate::nip_fi_test_hooks::audio_participant_fanout_hook::arm(community);
 
+            let finished = Arc::new(tokio::sync::Notify::new());
+            let completion = Arc::clone(&finished);
             let server = tokio::spawn(async move {
                 let app = axum::Router::new().route(
                     "/",
@@ -11229,6 +11507,7 @@ mod tests {
                         let assertion_i = assertion_c.clone();
                         let cancel_i = conn_cancel_c.clone();
                         move |ws: axum::extract::ws::WebSocketUpgrade| {
+                            let completion = Arc::clone(&completion);
                             let state_i = Arc::clone(&state_i);
                             let tenant_i = tenant_i.clone();
                             let assertion_i = assertion_i.clone();
@@ -11247,7 +11526,8 @@ mod tests {
                                         conn_time,
                                         None,
                                     )
-                                    .await
+                                    .await;
+                                    completion.notify_one();
                                 })
                             }
                         }
@@ -11329,9 +11609,22 @@ mod tests {
             // Release hook → commit_participant_join returns → session enters recv_loop.
             fanout_release.notify_one();
 
-            // Give the session a moment to enter recv_loop before we disconnect.
-            tokio::task::yield_now().await;
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            // Wait for the actual admission acknowledgement before leaving.
+            // Cancelling at the fan-out hook instead exercises failed admission,
+            // before the live room lifecycle has been installed.
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let message = client.next().await.expect("joined frame").unwrap();
+                    if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
+                        let payload: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        if payload["type"] == "joined" {
+                            break;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("client admitted before disconnect");
 
             // Trigger disconnect — cancelling conn_cancel signals the handler's
             // cancel token, which causes recv_loop, send_loop, and forward_loop to
@@ -11341,8 +11634,10 @@ mod tests {
             // Handler returns after teardown. Wait for the WS connection to close.
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), client.next()).await;
 
-            // Wait a moment for the handler to finish emitting 48102.
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            // Socket close precedes persistence. Await the real teardown.
+            tokio::time::timeout(std::time::Duration::from_secs(10), finished.notified())
+                .await
+                .expect("handler teardown completed");
 
             // Exactly one 48102 row must exist — the "committed join ⇒ exactly one leave" invariant.
             let row_48102: i64 = sqlx::query_scalar(
@@ -11360,6 +11655,23 @@ mod tests {
                 "CW10-full: exactly 1 48102 must be committed after a committed join + disconnect; found {row_48102}"
             );
 
+            // The owner-installed finalizer persists the ending, not just the
+            // empty audio map. Remote removal invokes this same finalizer.
+            assert!(state
+                .db
+                .get_channel(community, channel_id)
+                .await
+                .unwrap()
+                .archived_at
+                .is_some());
+            let endings: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM events WHERE community_id = $1 AND channel_id = $2 AND kind = 48103",
+            ).bind(community.as_uuid()).bind(channel_id).fetch_one(&pool).await.unwrap();
+            assert_eq!(
+                endings, 1,
+                "a committed empty room must publish exactly one ending"
+            );
+
             // Room must be cleaned up.
             let room_after = audio_rooms.get(community, channel_id);
             assert!(
@@ -11371,6 +11683,205 @@ mod tests {
 
             server.abort();
             let _ = server.await;
+        }
+
+        /// The last participant leaves through another relay after the owner's
+        /// local participant has left. A clean remote leave ends the Huddle
+        /// once, and releases the owner room and lease even when the creator
+        /// already archived the channel (the mobile end flow archives first).
+        ///
+        /// Mutation: drop the already-archived early return in
+        /// `Db::archive_channel_if` → the archived row keeps the room and
+        /// live registry entry → the `archived` row fails.
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        #[tokio::test]
+        async fn remote_last_leave_ends_huddle_and_releases_owner_resources() {
+            use crate::audio::join::{
+                decode_control, encode_control, send_clean_close, HuddleControlAcceptor,
+                HuddleControlMsg,
+            };
+            use buzz_relay_mesh::{Profile, StreamRole};
+
+            let redis_url =
+                std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+            for archived_first in [false, true] {
+                let state = audio_test_state_real_db_with(|config| {
+                    config.redis_url = redis_url.clone();
+                })
+                .await
+                .expect("postgres-ci provides an isolated database");
+                let (tenant, channel_id, local_key) = seed_audio_fixture(state.db.pool()).await;
+                let community = tenant.community();
+                let owners = Arc::new(HuddleOwnerRegistry::new());
+                let mut mesh =
+                    crate::mesh_boot::MeshHandle::for_test_only(Arc::clone(&owners)).await;
+                mesh.directory = crate::tunnel::directory::SessionDirectory::with_db(
+                    state.redis_pool.clone(),
+                    state.db.clone(),
+                );
+                let directory = Arc::new(mesh.directory.clone());
+                let owner_runtime_id = mesh.local_runtime_id;
+                state.mesh.set(mesh).map_err(|_| ()).expect("fresh mesh");
+
+                // Real local admission installs the production finalizer.
+                let (mut local, server) = open_admitted_audio_socket(
+                    &state,
+                    tenant.clone(),
+                    channel_id,
+                    &local_key,
+                    None,
+                )
+                .await;
+                let room = state
+                    .audio_rooms
+                    .get(community, channel_id)
+                    .expect("owner room");
+                assert!(room.end_handler.get().is_some());
+                let generation = owners.generation_for(channel_id).expect("owner lease");
+                let fenced = FencedHeader {
+                    session_id: channel_id,
+                    generation,
+                    owner_runtime_id,
+                };
+                let remote_runtime_id = RuntimeId([37; 32]);
+                let remote_pubkey = nostr::Keys::generate().public_key().to_hex();
+                let (owner_tx, ingress_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (ingress_tx, owner_rx) = tokio::sync::mpsc::unbounded_channel();
+                let owner_stream = MeshStream::new(
+                    Box::new(ChanHalfSend(owner_tx)),
+                    Box::new(ChanHalfRecv(owner_rx)),
+                );
+                let mut remote = MeshStream::new(
+                    Box::new(ChanHalfSend(ingress_tx)),
+                    Box::new(ChanHalfRecv(ingress_rx)),
+                );
+                let acceptor = HuddleControlAcceptor::new(
+                    Arc::clone(&state.audio_rooms),
+                    Arc::new(NoopDatagramTransport),
+                    Arc::clone(&directory),
+                    owner_runtime_id,
+                    Arc::clone(&owners),
+                );
+                let served = tokio::spawn(async move {
+                    acceptor
+                        .accept_inbound(
+                            remote_runtime_id,
+                            StreamHello {
+                                sender: remote_runtime_id,
+                                role: StreamRole::Session {
+                                    fenced,
+                                    profile: Profile::HuddleControl,
+                                },
+                            },
+                            owner_stream,
+                        )
+                        .await
+                });
+                remote
+                    .send_frame(MeshStreamFrame::Data {
+                        fenced,
+                        payload: encode_control(&HuddleControlMsg::RegisterPeerCommitPhase {
+                            community_id: *community.as_uuid(),
+                            pubkey: remote_pubkey.clone(),
+                            protocol_version: 1,
+                        })
+                        .unwrap(),
+                    })
+                    .await
+                    .unwrap();
+                let reply = tokio::time::timeout(Duration::from_secs(5), remote.recv_frame())
+                    .await
+                    .expect("registration completes")
+                    .unwrap()
+                    .unwrap();
+                assert!(matches!(reply, MeshStreamFrame::Data { payload, .. }
+                    if matches!(decode_control(&payload).unwrap(), HuddleControlMsg::PeerRegistered { .. })));
+                remote
+                    .send_frame(MeshStreamFrame::Data {
+                        fenced,
+                        payload: encode_control(&HuddleControlMsg::CommitConfirmed {
+                            pubkey: remote_pubkey.clone(),
+                        })
+                        .unwrap(),
+                    })
+                    .await
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while room.roster_snapshot().peers.len() != 2 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("remote committed before the owner's participant leaves");
+
+                local.close(None).await.unwrap();
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let leaves: i64 = sqlx::query_scalar(
+                            "SELECT COUNT(*) FROM events WHERE community_id = $1 AND channel_id = $2 AND kind = 48102",
+                        )
+                        .bind(community.as_uuid())
+                        .bind(channel_id)
+                        .fetch_one(state.db.pool())
+                        .await
+                        .unwrap();
+                        if room.peer_pubkeys().len() == 1 && leaves == 1 {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("local participant leaves first");
+                if archived_first {
+                    state
+                        .db
+                        .archive_channel(community, channel_id)
+                        .await
+                        .unwrap();
+                }
+                send_clean_close(&mut remote, fenced, &remote_pubkey).await;
+                tokio::time::timeout(Duration::from_secs(10), served)
+                    .await
+                    .expect("remote teardown finishes")
+                    .unwrap()
+                    .unwrap();
+
+                assert!(room.is_empty());
+                let endings: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM events WHERE community_id = $1 AND channel_id = $2 AND kind = 48103",
+                )
+                .bind(community.as_uuid())
+                .bind(channel_id)
+                .fetch_one(state.db.pool())
+                .await
+                .unwrap();
+                let retained = (
+                    state.audio_rooms.get(community, channel_id).is_some(),
+                    owners.owns_generation(channel_id, generation),
+                );
+                // Release before asserting so a failure leaves no live lease.
+                owners.release(channel_id, generation);
+                server.abort();
+                let _ = server.await;
+                assert_eq!(
+                    retained,
+                    (false, false),
+                    "archived_first={archived_first}: owner room or lease retained"
+                );
+                assert_eq!(
+                    endings,
+                    i64::from(!archived_first),
+                    "archived_first={archived_first}: the relay publishes one ending only when it archived"
+                );
+                assert!(state
+                    .db
+                    .get_channel(community, channel_id)
+                    .await
+                    .unwrap()
+                    .archived_at
+                    .is_some());
+            }
         }
 
         /// Answers the server's NIP-42 challenge with an audio `auth` message.
@@ -12067,6 +12578,7 @@ mod tests {
             });
             let update = tokio::spawn({
                 let pool = pool.clone();
+                let sender = member_key.public_key().to_bytes();
                 async move {
                     buzz_db::channel::update_channel(
                         &pool,
@@ -12076,6 +12588,7 @@ mod tests {
                             join_role: Some("guest".into()),
                             ..Default::default()
                         },
+                        &sender,
                     )
                     .await
                 }
@@ -16095,9 +16608,11 @@ mod tests {
 
             if issuer_first {
                 assert_eq!(
-                    state
-                        .community_connections
-                        .disconnect_nip_fi("test-issuer", &member_bytes),
+                    state.community_connections.disconnect_nip_fi(
+                        "test-issuer",
+                        &member_bytes,
+                        buzz_auth::DenyScope::WholeKey
+                    ),
                     1
                 );
             }

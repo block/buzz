@@ -13,6 +13,7 @@ use axum::{
     Json,
 };
 use buzz_core::TenantContext;
+use buzz_db::scheduled::ScheduledCandidate;
 use nostr::Event;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -251,53 +252,94 @@ pub async fn dispatch_due(state: &Arc<AppState>) -> buzz_db::Result<usize> {
     let now = chrono::Utc::now().timestamp();
     let due = state.db.scheduled_due(now).await?;
     let mut sent = 0;
-    for (community, host, owner, id) in due {
-        let Some(mut claim) = state.db.scheduled_claim(community, &owner, id, now).await? else {
-            continue;
-        };
-        let event: Event = match serde_json::from_value(claim.message.event.clone()) {
-            Ok(event) => event,
-            Err(_) => {
-                claim
-                    .finish(
-                        "failed",
-                        Some("Stored message is invalid. Cancel and recreate it."),
-                        now,
-                    )
-                    .await?;
-                continue;
+    for candidate in due {
+        let now = chrono::Utc::now().timestamp();
+        match dispatch_candidate(state, &candidate, now).await {
+            Ok(true) => sent += 1,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(community = %candidate.community, id = %candidate.id,
+                    error_kind = %error.kind(), "Scheduled message dispatch failed");
+                if let Err(error) = state.db.scheduled_defer(&candidate, now).await {
+                    tracing::warn!(community = %candidate.community, id = %candidate.id,
+                        error_kind = %error.kind(), "Could not defer scheduled message");
+                }
             }
-        };
-        let tenant = TenantContext::resolved(community, host);
-        let stored = state
-            .db
-            .get_event_by_id_including_deleted(community, &event.id.to_bytes())
-            .await?;
-        if stored.is_some() {
-            claim.finish("sent", None, now).await?;
-            sent += 1;
-            continue;
         }
-        let member = crate::api::relay_members::enforce_relay_membership(
-            state,
-            &tenant,
-            &owner,
-            None,
-            Some(now as u64),
-            None,
-        )
-        .await;
-        if let Err(refusal) = member {
-            if refusal.status().is_server_error() {
-                claim
-                    .finish(
-                        "scheduled",
-                        Some("Access check delayed; the relay will retry."),
-                        now,
-                    )
-                    .await?;
-                continue;
-            }
+    }
+    Ok(sent)
+}
+
+async fn dispatch_candidate(
+    state: &Arc<AppState>,
+    candidate: &ScheduledCandidate,
+    now: i64,
+) -> buzz_db::Result<bool> {
+    let community = candidate.community;
+    let owner = &candidate.owner;
+    let Some(mut claim) = state
+        .db
+        .scheduled_claim(community, owner, candidate.id, now)
+        .await?
+    else {
+        return Ok(false);
+    };
+    let event: Event = match serde_json::from_value(claim.message.event.clone()) {
+        Ok(event) => event,
+        Err(_) => {
+            claim
+                .finish(
+                    "failed",
+                    Some("Stored message is invalid. Cancel and recreate it."),
+                    now,
+                )
+                .await?;
+            return Ok(false);
+        }
+    };
+    let tenant = TenantContext::resolved(community, candidate.host.clone());
+    let stored = match state
+        .db
+        .get_event_by_id_including_deleted(community, &event.id.to_bytes())
+        .await
+    {
+        Ok(stored) => stored,
+        Err(error) => {
+            tracing::warn!(%community, id = %candidate.id,
+                error_kind = %error.kind(), "Could not check stored scheduled message");
+            claim
+                .finish(
+                    "scheduled",
+                    Some("Delivery delayed; the relay will retry."),
+                    now,
+                )
+                .await?;
+            return Ok(false);
+        }
+    };
+    if stored.is_some() {
+        claim.finish("sent", None, now).await?;
+        return Ok(true);
+    }
+    let member = crate::api::relay_members::enforce_relay_membership(
+        state,
+        &tenant,
+        owner,
+        None,
+        Some(now as u64),
+        None,
+    )
+    .await;
+    if let Err(refusal) = member {
+        if refusal.status().is_server_error() {
+            claim
+                .finish(
+                    "scheduled",
+                    Some("Access check delayed; the relay will retry."),
+                    now,
+                )
+                .await?;
+        } else {
             claim
                 .finish(
                     "failed",
@@ -305,43 +347,46 @@ pub async fn dispatch_due(state: &Arc<AppState>) -> buzz_db::Result<usize> {
                     now,
                 )
                 .await?;
-            continue;
         }
-        let outcome = crate::handlers::ingest::ingest_scheduled(
-            state,
-            &tenant,
-            &mut claim,
-            crate::handlers::ingest::IngestAuth::Http {
-                pubkey: event.pubkey,
-                scopes: buzz_auth::Scope::all_known(),
-                auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
-            },
-        )
-        .await;
-        match outcome {
-            Ok(result) if result.accepted => {
-                claim.finish("sent", None, now).await?;
-                sent += 1;
-            }
-            Err(crate::handlers::ingest::IngestError::Internal(_))
-            | Err(crate::handlers::ingest::IngestError::Ban {
-                refusal: crate::handlers::ingest::BanRefusal::Unavailable,
-                ..
-            }) => {
-                claim
-                    .finish(
-                        "scheduled",
-                        Some("Delivery delayed; the relay will retry."),
-                        now,
-                    )
-                    .await?;
-            }
-            _ => {
-                claim.finish("failed",Some("Delivery was refused. Review conversation access and message before retrying."),now).await?;
-            }
+        return Ok(false);
+    }
+    let outcome = crate::handlers::ingest::ingest_scheduled(
+        state,
+        &tenant,
+        &mut claim,
+        crate::handlers::ingest::IngestAuth::Http {
+            pubkey: event.pubkey,
+            scopes: buzz_auth::Scope::all_known(),
+            auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
+        },
+    )
+    .await;
+    match outcome {
+        Ok(result) if result.accepted => {
+            claim.finish("sent", None, now).await?;
+            Ok(true)
+        }
+        Err(crate::handlers::ingest::IngestError::Internal(_))
+        | Err(crate::handlers::ingest::IngestError::Ban {
+            refusal: crate::handlers::ingest::BanRefusal::Unavailable,
+            ..
+        }) => {
+            claim
+                .finish(
+                    "scheduled",
+                    Some("Delivery delayed; the relay will retry."),
+                    now,
+                )
+                .await?;
+            Ok(false)
+        }
+        _ => {
+            claim.finish(
+                "failed", Some("Delivery was refused. Review conversation access and message before retrying."), now,
+            ).await?;
+            Ok(false)
         }
     }
-    Ok(sent)
 }
 
 /// Run even when every client is closed. Row locks coordinate relay replicas.
@@ -352,10 +397,20 @@ pub async fn run(state: Arc<AppState>) {
     .await;
     let mut ticks = tokio::time::interval(std::time::Duration::from_secs(1));
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut cleanup = tokio::time::interval(std::time::Duration::from_secs(10));
+    cleanup.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        ticks.tick().await;
-        if dispatch_due(&state).await.is_err() {
-            tracing::warn!("Scheduled delivery sweep failed");
+        tokio::select! {
+            _ = ticks.tick() => {
+                if let Err(error) = dispatch_due(&state).await {
+                    tracing::warn!(error_kind = %error.kind(), "Scheduled delivery sweep failed");
+                }
+            }
+            _ = cleanup.tick() => {
+                if let Err(error) = state.db.scheduled_prune_completed().await {
+                    tracing::warn!(error_kind = %error.kind(), "Scheduled delivery retention sweep failed");
+                }
+            }
         }
     }
 }

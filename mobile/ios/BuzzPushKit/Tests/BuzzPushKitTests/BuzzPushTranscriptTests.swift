@@ -129,8 +129,9 @@ final class BuzzPushTranscriptTests: XCTestCase {
     }
 
     func testAllFixtureVectorsCovered() throws {
+        // enroll_android is Android-only; the Dart transcript test covers it.
         XCTAssertEqual(
-            Set(try Self.fixture().vectors.map(\.name)),
+            Set(try Self.fixture().vectors.map(\.name)).subtracting(["enroll_android"]),
             ["enroll", "delegate", "rotate_endpoint", "revoke_delegation", "revoke_installation"],
             "fixture gained or lost a vector; add/remove the matching known-answer test"
         )

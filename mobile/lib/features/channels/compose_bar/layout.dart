@@ -3,6 +3,8 @@ part of '../compose_bar.dart';
 class _ComposeBarLayout extends HookWidget {
   final GlobalKey surfaceKey;
   final Widget? voiceNoteRecorder;
+  final bool keyboardToolbar;
+  final VoidCallback? onTextTap;
   final List<_PendingAttachment> attachments;
   final ValueChanged<int> onRemoveAttachment;
   final String? uploadError;
@@ -12,6 +14,7 @@ class _ComposeBarLayout extends HookWidget {
   final EditableTextContextMenuBuilder contextMenuBuilder;
   final ValueChanged<KeyboardInsertedContent> onContentInserted;
   final VoidCallback onSend;
+  final KeyEventResult Function(FocusNode, KeyEvent) onKeyEvent;
   final String resolvedHint;
   final _AttachmentSurface attachmentSurface;
   final ValueChanged<BuildContext> onAttachmentTap;
@@ -25,6 +28,7 @@ class _ComposeBarLayout extends HookWidget {
   final VoidCallback onMention;
   final VoidCallback onChannel;
   final VoidCallback onEmoji;
+  final VoidCallback onVoiceNote;
   final VoidCallback onOpenFormatting;
   final bool canSend;
   final bool hasPendingUploads;
@@ -34,6 +38,8 @@ class _ComposeBarLayout extends HookWidget {
   const _ComposeBarLayout({
     required this.surfaceKey,
     required this.voiceNoteRecorder,
+    this.keyboardToolbar = false,
+    this.onTextTap,
     required this.attachments,
     required this.onRemoveAttachment,
     required this.uploadError,
@@ -43,6 +49,7 @@ class _ComposeBarLayout extends HookWidget {
     required this.contextMenuBuilder,
     required this.onContentInserted,
     required this.onSend,
+    required this.onKeyEvent,
     required this.resolvedHint,
     required this.attachmentSurface,
     required this.onAttachmentTap,
@@ -56,6 +63,7 @@ class _ComposeBarLayout extends HookWidget {
     required this.onMention,
     required this.onChannel,
     required this.onEmoji,
+    required this.onVoiceNote,
     required this.onOpenFormatting,
     required this.canSend,
     required this.hasPendingUploads,
@@ -89,10 +97,17 @@ class _ComposeBarLayout extends HookWidget {
     BuildContext context,
     Animation<double> recordingTransition,
   ) {
-    final trimmedDraft = controller.text.trim();
-    final collapsedText = trimmedDraft.isEmpty
-        ? resolvedHint
-        : trimmedDraft.replaceAll(RegExp(r'\s+'), ' ');
+    final hasDraft = controller.text.isNotEmpty;
+    final inactiveText = Text(
+      hasDraft ? controller.text : resolvedHint,
+      maxLines: hasDraft ? null : 1,
+      overflow: hasDraft ? TextOverflow.clip : TextOverflow.ellipsis,
+      style: messageBodyTextStyle.copyWith(
+        color: hasDraft
+            ? context.colors.onSurface
+            : context.colors.onSurfaceVariant,
+      ),
+    );
     final hasVoiceNoteAttachment = attachments.any(
       (attachment) => attachment.kind == _PendingAttachmentKind.voiceNote,
     );
@@ -116,7 +131,7 @@ class _ComposeBarLayout extends HookWidget {
             alignment: Alignment.centerLeft,
             child: Text(
               error,
-              style: context.textTheme.bodySmall?.copyWith(
+              style: messageCaptionTextStyle.copyWith(
                 color: context.colors.error,
               ),
             ),
@@ -125,7 +140,18 @@ class _ComposeBarLayout extends HookWidget {
         ],
         // Keep the default state out of the focus system entirely so
         // restored native focus cannot expand a newly opened channel.
-        if (isExpanded)
+        if (isExpanded && keyboardToolbar)
+          ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 28),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Expanded(child: _buildTextField(context)),
+                _IosEmptyComposerActions(onEmoji: onEmoji, enabled: !readOnly),
+              ],
+            ),
+          )
+        else if (isExpanded)
           resizeDuration == Duration.zero
               ? KeyedSubtree(
                   key: const ValueKey('composer-text-height-motion'),
@@ -139,113 +165,138 @@ class _ComposeBarLayout extends HookWidget {
                   child: _buildTextField(context),
                 )
         else
-          Row(
-            children: [
-              _AttachmentTrigger(
-                surface: attachmentSurface,
-                formattingOpen: false,
-                onTap: onAttachmentTap,
-              ),
-              const SizedBox(width: Grid.xxs),
-              Expanded(
-                child: Semantics(
-                  button: true,
-                  label: resolvedHint,
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: () => _runComposerAction(onExpand),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: Grid.half),
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text(
-                          collapsedText,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: context.textTheme.bodyLarge?.copyWith(
-                            color: trimmedDraft.isEmpty
-                                ? context.colors.onSurfaceVariant
-                                : context.colors.onSurface,
-                          ),
+          ConstrainedBox(
+            constraints: BoxConstraints(minHeight: keyboardToolbar ? 28 : 0),
+            child: Row(
+              children: [
+                if (!keyboardToolbar) ...[
+                  _AttachmentTrigger(
+                    surface: attachmentSurface,
+                    formattingOpen: false,
+                    onTap: onAttachmentTap,
+                  ),
+                  const SizedBox(width: Grid.xxs),
+                ],
+                Expanded(
+                  child: Semantics(
+                    button: true,
+                    label: resolvedHint,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => _runComposerAction(onExpand),
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(
+                          vertical: hasDraft
+                              ? Grid.half
+                              : keyboardToolbar
+                              ? 0
+                              : Grid.half,
+                          horizontal: keyboardToolbar || hasDraft
+                              ? Grid.half
+                              : 0,
+                        ),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: hasDraft
+                              ? ConstrainedBox(
+                                  constraints: BoxConstraints(
+                                    maxHeight:
+                                        MediaQuery.sizeOf(context).height / 2,
+                                  ),
+                                  child: SingleChildScrollView(
+                                    primary: false,
+                                    child: inactiveText,
+                                  ),
+                                )
+                              : inactiveText,
                         ),
                       ),
                     ),
                   ),
                 ),
-              ),
-              const SizedBox(width: Grid.xxs),
-              _SendButton(
-                isDisabled: !canSend || hasPendingUploads,
-                isSending: isSending,
-                onTap: onSend,
-              ),
-            ],
-          ),
-        _ExpandedComposerActionsMotion(
-          animation: expansionAnimation,
-          isExpanded: isExpanded,
-          child: Column(
-            children: [
-              const SizedBox(height: Grid.xxs),
-              Row(
-                children: [
-                  _AttachmentTrigger(
-                    surface: attachmentSurface,
-                    formattingOpen: formattingOpen,
-                    onTap: (triggerContext) {
-                      if (formattingOpen) {
-                        onCloseFormatting();
-                      } else {
-                        onAttachmentTap(triggerContext);
-                      }
-                    },
+                if (keyboardToolbar) ...[
+                  _IosEmptyComposerActions(
+                    onEmoji: onEmoji,
+                    enabled: !readOnly,
                   ),
-                  const SizedBox(width: Grid.half),
-                  Expanded(
-                    child: AnimatedSwitcher(
-                      duration: motionDuration,
-                      switchInCurve: Curves.easeOutCubic,
-                      switchOutCurve: Curves.easeInCubic,
-                      layoutBuilder: (currentChild, previousChildren) => Stack(
-                        alignment: Alignment.centerLeft,
-                        children: [...previousChildren, ?currentChild],
-                      ),
-                      child: formattingOpen
-                          ? _FormattingToolbar(onFormat: onFormat)
-                          : Row(
-                              key: const ValueKey('standard-actions'),
-                              children: [
-                                _ComposeAction(
-                                  icon: BuzzIcons.atSign,
-                                  onTap: onMention,
-                                ),
-                                _ComposeAction(
-                                  icon: BuzzIcons.hash,
-                                  onTap: onChannel,
-                                ),
-                                _ComposeAction(
-                                  icon: BuzzIcons.smilePlus,
-                                  onTap: onEmoji,
-                                ),
-                                _ComposeAction(
-                                  icon: BuzzIcons.aLargeSmall,
-                                  onTap: onOpenFormatting,
-                                ),
-                                const Spacer(),
-                                _SendButton(
-                                  isDisabled: !canSend || hasPendingUploads,
-                                  isSending: isSending,
-                                  onTap: onSend,
-                                ),
-                              ],
-                            ),
-                    ),
+                ] else ...[
+                  const SizedBox(width: Grid.xxs),
+                  _SendButton(
+                    isDisabled: !canSend || hasPendingUploads,
+                    isSending: isSending,
+                    onTap: onSend,
                   ),
                 ],
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
+        if (!keyboardToolbar)
+          _ExpandedComposerActionsMotion(
+            animation: expansionAnimation,
+            isExpanded: isExpanded,
+            child: Column(
+              children: [
+                const SizedBox(height: Grid.xxs),
+                Row(
+                  children: [
+                    _AttachmentTrigger(
+                      surface: attachmentSurface,
+                      formattingOpen: formattingOpen,
+                      onTap: (triggerContext) {
+                        if (formattingOpen) {
+                          onCloseFormatting();
+                        } else {
+                          onAttachmentTap(triggerContext);
+                        }
+                      },
+                    ),
+                    const SizedBox(width: Grid.half),
+                    Expanded(
+                      child: AnimatedSwitcher(
+                        duration: motionDuration,
+                        switchInCurve: Curves.easeOutCubic,
+                        switchOutCurve: Curves.easeInCubic,
+                        layoutBuilder: (currentChild, previousChildren) =>
+                            Stack(
+                              alignment: Alignment.centerLeft,
+                              children: [...previousChildren, ?currentChild],
+                            ),
+                        child: formattingOpen
+                            ? _FormattingToolbar(onFormat: onFormat)
+                            : Row(
+                                key: const ValueKey('standard-actions'),
+                                children: [
+                                  _ComposeAction(
+                                    icon: BuzzIcons.atSign,
+                                    onTap: onMention,
+                                  ),
+                                  _ComposeAction(
+                                    icon: BuzzIcons.hash,
+                                    onTap: onChannel,
+                                  ),
+                                  _ComposeAction(
+                                    icon: BuzzIcons.smilePlus,
+                                    onTap: onEmoji,
+                                  ),
+                                  _ComposeAction(
+                                    icon: BuzzIcons.aLargeSmall,
+                                    onTap: onOpenFormatting,
+                                  ),
+                                  const Spacer(),
+                                  _SendButton(
+                                    isDisabled: !canSend || hasPendingUploads,
+                                    isSending: isSending,
+                                    onTap: onSend,
+                                  ),
+                                ],
+                              ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
       ],
     );
     final contentMotionDuration = MediaQuery.disableAnimationsOf(context)
@@ -282,7 +333,12 @@ class _ComposeBarLayout extends HookWidget {
       child: content,
       builder: (context, child) {
         final progress = expansionAnimation.value.clamp(0.0, 1.0).toDouble();
-        final composerRadius = Radii.dialog + Grid.quarter * (1 - progress);
+        final usesCapsule =
+            !hasDraft && attachments.isEmpty && uploadError == null;
+        final composerRadius =
+            defaultTargetPlatform == TargetPlatform.iOS && usesCapsule
+            ? Radii.full
+            : Radii.dialog + Grid.quarter * (1 - progress);
         final radius = BorderRadius.lerp(
           BorderRadius.circular(composerRadius),
           BorderRadius.circular(Radii.full),
@@ -293,6 +349,11 @@ class _ComposeBarLayout extends HookWidget {
         final voiceNoteInsetProgress = hasVoiceNoteAttachment
             ? 1.0
             : recordingTransition.value;
+        // Both draft presentations include four points around the text.
+        final messageInsets =
+            (hasDraft || (!keyboardToolbar && isExpanded)) &&
+            voiceNoteRecorder == null &&
+            voiceNoteInsetProgress == 0;
         final composer = KeyedSubtree(
           key: surfaceKey,
           child: Container(
@@ -307,17 +368,30 @@ class _ComposeBarLayout extends HookWidget {
                 width: 1,
               ),
             ),
-            padding: EdgeInsets.all(
-              Grid.xxs + Grid.half * voiceNoteInsetProgress,
+            padding: EdgeInsets.symmetric(
+              horizontal:
+                  (messageInsets
+                      ? messageBubbleHorizontalInset - Grid.half - 1
+                      : Grid.xxs) +
+                  Grid.half * voiceNoteInsetProgress,
+              vertical:
+                  (messageInsets
+                      ? messageBubbleVerticalInset - Grid.half - 1
+                      : usesIosConcentricSurface
+                      ? 5
+                      : Grid.xxs) +
+                  Grid.half * voiceNoteInsetProgress,
             ),
             child: child,
           ),
         );
         if (!usesIosConcentricSurface) return composer;
-        return ConcentricSheetSurface(
+        final iosComposer = ConcentricSheetSurface(
           key: const ValueKey('composer-ios-concentric-surface'),
+          animateGeometry: true,
           enabled: true,
           usesGlass: true,
+          capsule: usesCapsule,
           color: context.colors.surfaceContainerHighest,
           padding: EdgeInsets.zero,
           providesSheetSurface: false,
@@ -325,17 +399,52 @@ class _ComposeBarLayout extends HookWidget {
           contentClipRadius: radius.topLeft.x,
           child: composer,
         );
+        if (voiceNoteRecorder != null || recordingTransition.value > 0.001) {
+          return iosComposer;
+        }
+        return _IosComposerControls(
+          showSend:
+              controller.text.isNotEmpty ||
+              attachments.isNotEmpty ||
+              hasPendingUploads ||
+              isSending,
+          isSending: isSending,
+          canSend: canSend && !hasPendingUploads && !readOnly,
+          enabled: !readOnly,
+          onAttachments: onAttachmentTap,
+          attachmentSurface: attachmentSurface,
+          onSend: onSend,
+          onVoiceNote: onVoiceNote,
+          child: iosComposer,
+        );
       },
     );
   }
 
   Widget _buildTextField(BuildContext context) {
+    return Actions(
+      actions: {
+        UndoTextIntent: _ComposerHistoryAction<UndoTextIntent>(controller),
+        RedoTextIntent: _ComposerHistoryAction<RedoTextIntent>(controller),
+      },
+      child: Focus(
+        canRequestFocus: false,
+        skipTraversal: true,
+        onKeyEvent: onKeyEvent,
+        child: _buildEditableField(context),
+      ),
+    );
+  }
+
+  Widget _buildEditableField(BuildContext context) {
     return TextField(
+      onTap: onTextTap,
       controller: controller,
       focusNode: focusNode,
       readOnly: readOnly,
       inputFormatters: [_ComposerChipEditingFormatter(controller)],
       keyboardType: TextInputType.multiline,
+      textCapitalization: TextCapitalization.sentences,
       textInputAction: TextInputAction.newline,
       contextMenuBuilder: contextMenuBuilder,
       // Flutter's Cupertino magnifier rebuilds its overlay on every
@@ -344,24 +453,26 @@ class _ComposeBarLayout extends HookWidget {
       magnifierConfiguration: defaultTargetPlatform == TargetPlatform.iOS
           ? TextMagnifierConfiguration.disabled
           : null,
+      stylusHandwritingEnabled: stylusHandwritingEnabledFor(controller.text),
       contentInsertionConfiguration: ContentInsertionConfiguration(
         allowedMimeTypes: _pastedImageMimeTypes,
         onContentInserted: onContentInserted,
       ),
       minLines: 1,
       maxLines: 5,
-      style: context.textTheme.bodyLarge,
+      style: messageBodyTextStyle,
       decoration: InputDecoration(
         hintText: resolvedHint,
-        hintStyle: context.textTheme.bodyLarge?.copyWith(
+        hintMaxLines: 1,
+        hintStyle: messageBodyTextStyle.copyWith(
           color: context.colors.onSurfaceVariant,
         ),
         border: InputBorder.none,
         enabledBorder: InputBorder.none,
         focusedBorder: InputBorder.none,
-        contentPadding: const EdgeInsets.symmetric(
+        contentPadding: EdgeInsets.symmetric(
           horizontal: Grid.half,
-          vertical: Grid.half,
+          vertical: keyboardToolbar && controller.text.isEmpty ? 0 : Grid.half,
         ),
         isDense: true,
       ),

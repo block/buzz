@@ -5,11 +5,13 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../community/community.dart';
+import '../relay/relay_provider.dart';
 import '../relay/relay_socket.dart';
 import '../storage/secure_storage.dart';
 import 'account_identity_store.dart';
 import 'community_entry_requirements.dart';
 import 'device_identity_source.dart';
+import '../diagnostics/diagnostic_reporter.dart';
 
 /// A self-hosted attempt keeps its key before any network operation. Retrying
 /// after a refused connection or process death never rotates that identity.
@@ -165,6 +167,7 @@ class SelfHostedEntry {
   static Future<void> probeRelay(
     Community community, [
     Map<String, String> headers = const {},
+    DiagnosticReporter diagnostics = const NoopDiagnosticReporter(),
   ]) async {
     final socket = RelaySocket(
       wsUrl: community.relayUrl,
@@ -175,6 +178,11 @@ class SelfHostedEntry {
     );
     try {
       socket.headers = headers;
+      // Until the joining identity is active, reports name another member.
+      socket.diagnostics = SignerDiagnosticReporter(
+        diagnostics,
+        signer: pubkeyFromNsec(community.nsec),
+      );
       await socket.connect().timeout(const Duration(seconds: 20));
       if (socket.state != SocketState.connected) {
         throw StateError('Community refused entry');

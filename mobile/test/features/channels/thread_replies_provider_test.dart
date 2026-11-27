@@ -47,14 +47,15 @@ class _FakeRelaySession extends RelaySessionNotifier {
   }
 }
 
-NostrEvent _reply(String id, int createdAt) => NostrEvent(
+NostrEvent _reply(String id, int createdAt, {String? ms}) => NostrEvent(
   id: id,
   pubkey: 'bob',
   createdAt: createdAt,
   kind: EventKind.streamMessage,
-  tags: const [
+  tags: [
     ['h', 'chan'],
     ['e', threadIdRoot, '', 'reply'],
+    if (ms != null) ['ms', ms],
   ],
   content: 'reply $id',
   sig: '',
@@ -79,7 +80,10 @@ void main() {
 
   test('an edit made before the thread opens folds into its reply', () async {
     final session = _FakeRelaySession()
-      ..replies = [_reply('r1', 1000), _edit('e1', 'r1', 'typo fixed', 1100)];
+      ..replies = [
+        _reply(threadIdR1, 1000),
+        _edit('e1', threadIdR1, 'typo fixed', 1100),
+      ];
     final container = ProviderContainer(
       overrides: [relaySessionProvider.overrideWith(() => session)],
     );
@@ -88,7 +92,10 @@ void main() {
     final events = await container.read(threadRepliesProvider(args).future);
     expect(session.filtersSeen.single.extensions['include_aux'], isTrue);
     final reply = formatTimeline(events).single;
-    expect((reply.id, reply.content, reply.edited), ('r1', 'typo fixed', true));
+    expect(
+      (reply.id, reply.content, reply.edited),
+      (threadIdR1, 'typo fixed', true),
+    );
   });
 
   test('aux events neither end a scan page nor move its cursor', () async {
@@ -316,13 +323,13 @@ void main() {
     return (container, fakeSession, subscription);
   }
 
-  test('thread replies keep desktop same-second id order', () {
+  test('thread replies merge by ms, retaining their equal-ms id order', () {
     expect(
       mergeThreadEvents(
-        [_reply('z', 1000)],
-        [_reply('a', 1000), _reply('m', 1000)],
+        [_reply('z', 1000, ms: '100')],
+        [_reply('a', 1000, ms: '900'), _reply('m', 1000, ms: '900')],
       ).map((event) => event.id),
-      ['a', 'm', 'z'],
+      ['z', 'a', 'm'],
     );
   });
 

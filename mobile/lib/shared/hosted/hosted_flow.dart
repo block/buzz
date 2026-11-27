@@ -22,6 +22,9 @@ import 'web_connect_binding.dart';
 import 'hosted_join_policy.dart';
 
 part 'hosted_flow_identity_recovery.dart';
+part 'hosted_flow_account_entry.dart';
+part 'hosted_flow_backup_consent.dart';
+part 'hosted_flow_intent.dart';
 
 enum HostedFlowStage {
   idle,
@@ -29,6 +32,7 @@ enum HostedFlowStage {
   signIn,
   chooseIdentity,
   setupIdentity,
+  confirmBackup,
   chooseCommunities,
   communityConflict,
   acceptPolicy,
@@ -139,12 +143,16 @@ class HostedFlow extends ChangeNotifier {
 
   String? requiredIdentityPubkey;
   String? _pairedPubkey;
+  ({String subject, String pubkey})? _pendingBackup;
+  String? _pendingImport;
+  String? get backupPubkey => _pendingBackup?.pubkey;
   SensitiveActionPolicy? pairedSensitiveActionPolicy;
   List<AddCommunityDeepLink> communities = const [];
   Set<String> selectedRelays = const {};
   String? landingRelay;
   final Set<String> _addedRelays = {};
   bool _addingCommunities = false;
+  bool _discoverOnly = false;
   String? _batchSubject;
   String? _conflictingRelay;
   String? _failedRelay;
@@ -180,6 +188,8 @@ class HostedFlow extends ChangeNotifier {
   int _generation = 0;
 
   int _nextGeneration() {
+    _pendingBackup = null;
+    _pendingImport = null;
     _failedRelay = null;
     _cancelPolicy();
     _cancelProfile();
@@ -276,6 +286,7 @@ class HostedFlow extends ChangeNotifier {
       final generation = _generation;
       _enqueue(() async {
         _importRequested = code.intent['import_identity'] == 'true';
+        _discoverOnly = code.intent['discover_only'] == 'true';
         reconnecting = code.intent['type'] == 'reconnect';
         accountOnly = reconnecting || code.intent['type'] == 'account';
         if (accountOnly) {
@@ -322,6 +333,7 @@ class HostedFlow extends ChangeNotifier {
         if (_disposed || generation != _generation) return;
         if (retained != null && _target == null) {
           _importRequested = retained['import_identity'] == 'true';
+          _discoverOnly = retained['discover_only'] == 'true';
           if (retained['type'] == 'reconnect') {
             reconnecting = true;
             accountOnly = true;
@@ -360,64 +372,21 @@ class HostedFlow extends ChangeNotifier {
   Map<String, String> get _accountIntent => {
     'type': 'account',
     if (_importRequested) 'import_identity': 'true',
+    if (_discoverOnly) 'discover_only': 'true',
   };
 
-  /// Explicit Connect completes identity setup and discovers joined communities.
-  /// Passive startup restore only checks the saved session.
+  /// Opens account sign-in, optional address discovery, or explicit reauthentication.
   Future<void> signInAccount({
     bool openBrowser = true,
     bool importIdentity = false,
-  }) {
-    if (_target != null ||
-        stage == HostedFlowStage.working ||
-        stage == HostedFlowStage.signIn) {
-      return Future.value();
-    }
-    final generation = openBrowser ? _nextGeneration() : _generation;
-    if (openBrowser) {
-      _importRequested = _importRequested || importIdentity;
-      reconnecting = false;
-      accountOnly = true;
-      _clearCommunityBatch();
-      _set(HostedFlowStage.working);
-    }
-    return _enqueue(() async {
-      if (!openBrowser) {
-        if (_target != null || stage != HostedFlowStage.idle) return;
-      }
-      if (openBrowser) {
-        await browser.retainIntent(_accountIntent);
-        if (_disposed || generation != _generation) return;
-      }
-      final restored = await account.restore();
-      if (_disposed || generation != _generation) return;
-      if (!openBrowser) {
-        // Mounting the welcome page must not create/bind/back up a key.
-        if (_importRequested && restored != null) {
-          final saved = await store.forSubject(restored.subject).read();
-          if (_disposed || generation != _generation) return;
-          if (saved != null) {
-            // Also repair intents saved before import completion was recorded.
-            _importRequested = false;
-            await browser.retainIntent(_accountIntent);
-            if (_disposed || generation != _generation) return;
-          }
-        }
-        if (_importRequested && restored != null) {
-          canCreateIdentity = false;
-          requiredIdentityPubkey = null;
-          _set(HostedFlowStage.setupIdentity);
-        } else {
-          _set(HostedFlowStage.idle);
-        }
-      } else if (restored != null) {
-        await _continue(generation);
-      } else {
-        _set(HostedFlowStage.signIn);
-        await browser.start(_accountIntent);
-      }
-    });
-  }
+    bool discoverOnly = false,
+    bool reauthenticate = false,
+  }) => _signInAccount(
+    openBrowser: openBrowser,
+    importIdentity: importIdentity,
+    discoverOnly: discoverOnly,
+    reauthenticate: reauthenticate,
+  );
 
   /// Securely retain the transferred identity before NIP-AB completion. Hosted
   /// admission still waits for account, binding and backup in the normal flow.
@@ -544,45 +513,13 @@ class HostedFlow extends ChangeNotifier {
     return _enqueue(() => _continue(generation, selectedPubkey: pubkey));
   }
 
-  /// Create explicitly from setup, or beside the saved identities offered.
-  Future<void> createIdentity() {
-    if ((_target == null && !accountOnly) ||
-        !canCreateIdentity ||
-        (stage != HostedFlowStage.setupIdentity &&
-            stage != HostedFlowStage.chooseIdentity)) {
-      return Future.value();
-    }
-    final offered = {for (final item in identityChoices) item.pubkey};
-    final generation = _nextGeneration();
-    _set(HostedFlowStage.working);
-    return _enqueue(
-      () => _continue(generation, createNew: true, offered: offered),
-    );
-  }
-
-  /// Import through the secure store, rechecking the account binding.
-  /// Errors propagate to the import sheet without discarding the setup choice.
-  Future<void> importIdentity(String nsec) {
-    final generation = _generation;
-    final subject = account.account?.subject;
-    if (stage != HostedFlowStage.setupIdentity || subject == null) {
-      throw AccountFailure.unavailable;
-    }
-    return _queue.run(() async {
-      bool current() =>
-          !_disposed &&
-          generation == _generation &&
-          account.account?.subject == subject;
-      if (!current()) throw AccountFailure.unavailable;
-      await identity.resolve(isCurrent: current, importNsec: nsec);
-    });
-  }
-
   Future<void> _continue(
     int generation, {
     String? selectedPubkey,
     bool createNew = false,
+    ({String subject, String pubkey})? approvedBackup,
     Set<String> offered = const {},
+    String? importNsec,
   }) async {
     final target = _target;
     final session = account.account;
@@ -599,16 +536,36 @@ class HostedFlow extends ChangeNotifier {
     final store = this.store.forSubject(session.subject);
     if (target != null && !_acceptTarget(target)) return;
     if (target == null && _batchSubject != session.subject) {
+      final discoverOnly = _discoverOnly;
       _clearCommunityBatch();
+      _discoverOnly = discoverOnly;
       _batchSubject = session.subject;
+    }
+    if (_discoverOnly &&
+        !_importRequested &&
+        !_addingCommunities &&
+        target == null) {
+      await _continueCommunities(generation, session.subject, '');
+      return;
     }
     final canSealBackup = await HpkeBackup.supportsSealing();
     if (_disposed || generation != _generation) return;
     var resolved = await identity.resolve(
       isCurrent: _isCurrent(generation),
       selectedPubkey: selectedPubkey ?? _pairedPubkey,
+      importNsec: importNsec,
+      canAdopt: (pubkey) =>
+          approvedBackup == (subject: session.subject, pubkey: pubkey),
     );
     if (_disposed || generation != _generation) return;
+    if (resolved.state == HostedIdentityState.needsConsent) {
+      _presentBackupConsent(
+        session.subject,
+        resolved.pubkey!,
+        importNsec: importNsec,
+      );
+      return;
+    }
     if (_importRequested &&
         {
           HostedIdentityState.ready,
@@ -643,34 +600,43 @@ class HostedFlow extends ChangeNotifier {
         isCurrent: _isCurrent(generation),
         createNew: true,
         offered: offered,
+        canAdopt: (pubkey) =>
+            approvedBackup == (subject: session.subject, pubkey: pubkey),
       );
+    }
+    if (_disposed || generation != _generation) return;
+    if (resolved.state == HostedIdentityState.needsConsent) {
+      _presentBackupConsent(session.subject, resolved.pubkey!);
+      return;
+    }
+    if (resolved.generated && resolved.pubkey != null) {
+      approvedBackup = (subject: session.subject, pubkey: resolved.pubkey!);
     }
     if (_pairedPubkey != null && resolved.pubkey != _pairedPubkey) {
       _set(HostedFlowStage.blocked, HostedFlowProblem.identityMismatch);
       return;
     }
+    if (target is NostrBindDeepLink &&
+        !await _allowBackup(
+          resolved,
+          session.subject,
+          generation,
+          canSealBackup,
+          approvedBackup: approvedBackup,
+        )) {
+      return;
+    }
     if (target is! NostrBindDeepLink) {
       for (var step = 0; step < 2; step++) {
         if (_disposed || generation != _generation) return;
-        if (!canSealBackup) {
-          final saved = await store.read();
-          if (_disposed || generation != _generation) return;
-          final needsNewBackup =
-              resolved.state == HostedIdentityState.needsSetup ||
-              resolved.state == HostedIdentityState.needsBackup ||
-              (resolved.state == HostedIdentityState.needsBinding &&
-                  !(saved?.hasBackupFor(
-                        backend: HostedEnvironment.origin.origin,
-                        subject: session.subject,
-                      ) ??
-                      false));
-          if (needsNewBackup) {
-            _set(
-              HostedFlowStage.blocked,
-              HostedFlowProblem.unsupportedPlatform,
-            );
-            return;
-          }
+        if (!await _allowBackup(
+          resolved,
+          session.subject,
+          generation,
+          canSealBackup,
+          approvedBackup: approvedBackup,
+        )) {
+          return;
         }
         if (resolved.state == HostedIdentityState.needsBinding &&
             resolved.pubkey != null) {
@@ -860,6 +826,7 @@ class HostedFlow extends ChangeNotifier {
       return Future.value();
     }
     _returnToAddedCommunity = returnToAddedCommunity || _returnToAddedCommunity;
+    _discoverOnly = false;
     _addingCommunities = true;
     final generation = _nextGeneration();
     _set(HostedFlowStage.working);
@@ -912,10 +879,14 @@ class HostedFlow extends ChangeNotifier {
         generation == _generation &&
         account.account?.subject == subject;
     if (!_addingCommunities) {
-      final listed = await loadKnownHostedCommunities(account);
+      final listed = await loadKnownAccountCommunities(account);
       if (!current()) return;
       communities = listed;
-      selectedRelays = Set.unmodifiable(listed.map((item) => item.relayUrl));
+      selectedRelays = Set.unmodifiable({
+        for (final item in listed)
+          if (HostedEnvironment.supportsRelay(Uri.parse(item.relayUrl)))
+            item.relayUrl,
+      });
       if (listed.isEmpty) {
         await leave(noCommunities: true);
         return;
@@ -1100,6 +1071,7 @@ class HostedFlow extends ChangeNotifier {
     _batchSubject = null;
     _conflictingRelay = null;
     _addingCommunities = false;
+    _discoverOnly = false;
     addingCommunityName = null;
   }
 
@@ -1118,9 +1090,22 @@ class HostedFlow extends ChangeNotifier {
     });
   }
 
-  Future<void> leave({bool noCommunities = false}) async {
+  /// Ends the account session for a sign-out that also removes this device's
+  /// communities. Unlike [signOutAccount] it publishes no stage while it runs,
+  /// so hosted setup never covers the screen that asked, and a failure throws
+  /// to the caller instead of blocking the flow.
+  Future<void> endAccountSession() async {
+    _abandon();
+    await browser.cancel();
+    await browser.clearIntent();
+    await account.clearLocalSession();
+    if (!_disposed && stage != HostedFlowStage.idle) {
+      _set(HostedFlowStage.idle);
+    }
+  }
+
+  void _abandon({bool noCommunities = false}) {
     _nextGeneration();
-    final generation = _generation;
     _target = null;
     _importRequested = false;
     _pairedPubkey = null;
@@ -1129,6 +1114,11 @@ class HostedFlow extends ChangeNotifier {
     accountOnly = false;
     _clearCommunityBatch();
     noCommunitiesToAdd = noCommunities;
+  }
+
+  Future<void> leave({bool noCommunities = false}) async {
+    _abandon(noCommunities: noCommunities);
+    final generation = _generation;
     try {
       await browser.cancel();
       if (_disposed || generation != _generation) return;
@@ -1139,46 +1129,6 @@ class HostedFlow extends ChangeNotifier {
         _set(HostedFlowStage.blocked, HostedFlowProblem.retry);
       }
     }
-  }
-
-  static Map<String, String> _encode(BuzzDeepLink target) {
-    if (target is HostedCreateCommunity) {
-      return {'type': 'create', 'name': target.name};
-    }
-    if (target is NostrBindDeepLink) return {'type': 'bind', ...target.fields};
-    if (target is AddCommunityDeepLink) {
-      return {'type': 'add', 'relay': target.relayUrl, 'name': target.name};
-    }
-    final invite = target as InviteDeepLink;
-    return {
-      'type': 'invite',
-      'relay': invite.relayUrl,
-      'code': invite.code,
-      if (invite.policyReceipt != null) 'policy_receipt': invite.policyReceipt!,
-    };
-  }
-
-  static BuzzDeepLink? _decode(Map<String, String> intent) {
-    if (intent['type'] == 'create') {
-      final name = intent['name'];
-      return name != null && HostedCreateCommunity.validName(name)
-          ? HostedCreateCommunity(name)
-          : null;
-    }
-    final fields = Map<String, String>.of(intent)
-      ..remove('type')
-      ..remove('import_identity')
-      ..remove('paired_pubkey')
-      ..remove('paired_protection');
-    final host = switch (intent['type']) {
-      'bind' => 'nostr-bind',
-      'add' => 'add-community',
-      'invite' => 'join',
-      _ => '',
-    };
-    return parseBuzzDeepLink(
-      Uri(scheme: 'buzz', host: host, queryParameters: fields),
-    );
   }
 
   @override

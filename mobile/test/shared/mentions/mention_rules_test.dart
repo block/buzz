@@ -3,10 +3,12 @@ import 'dart:io';
 
 import 'package:buzz/shared/mentions/mention_rules.dart';
 import 'package:buzz/shared/mentions/mention_tags.dart';
+import 'package:buzz/shared/mentions/name_match.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 // Portable fixtures, copied unchanged from buzz-app
-// src/bundled/mentions/mention-rules.fixtures.json (mention rules v1).
+// src/bundled/mentions/mention-rules.fixtures.json (mention rules v4).
+// Every case runs; none is skipped.
 final Map<String, dynamic> _fixtures =
     jsonDecode(
           File(
@@ -37,6 +39,7 @@ MentionChoice _choice(Map<String, dynamic> json) {
     agent: json['agent'] as bool? ?? false,
     owned: json['owned'] as bool? ?? false,
     managed: json['managed'] as bool? ?? false,
+    elsewhere: json['elsewhere'] as String?,
   );
 }
 
@@ -46,13 +49,31 @@ List<MentionChoice> _choices(Map<String, dynamic> fixture) => [
 ];
 
 void main() {
-  test('reads mention fixtures version 1', () {
-    expect(_fixtures['version'], 1);
-    for (final section in ['ranking', 'space', 'query', 'admission']) {
+  test('reads mention fixtures version 4', () {
+    expect(_fixtures['version'], 4);
+    final sections = ['matching', 'ranking', 'space', 'query', 'admission'];
+    for (final section in sections) {
       expect(_cases(section), isNotEmpty, reason: section);
     }
     expect(_tagCases('write'), isNotEmpty);
     expect(_tagCases('read'), isNotEmpty);
+    // Every fixture section above has a group below that runs each case.
+    expect(_fixtures.keys.where((key) => !key.startsWith(r'$')).toSet(), {
+      ...sections,
+      'version',
+      'tags',
+    });
+  });
+
+  group('matching fixtures', () {
+    for (final fixture in _cases('matching')) {
+      test(fixture['name'], () {
+        expect(
+          nameMatchTier(fixture['label'] as String, fixture['query'] as String),
+          fixture['expected'],
+        );
+      });
+    }
   });
 
   group('tag writer fixtures', () {

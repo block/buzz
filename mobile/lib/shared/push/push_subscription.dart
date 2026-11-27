@@ -350,6 +350,19 @@ class BuzzPushLeaseSubscriptionState {
     );
   }
 
+  /// Drops the pending tombstone of an opt-out the relay never received, so
+  /// push is on again as it was confirmed. The cursor stays, so the next
+  /// lease still outranks every generation already reserved.
+  BuzzPushLeaseSubscriptionState withoutPendingTombstone() {
+    if (pendingTombstoneGeneration == null) return this;
+    return BuzzPushLeaseSubscriptionState.desired(
+      desired: desired,
+      accepted: accepted,
+      acceptedGeneration: acceptedGeneration,
+      generationCursor: generationCursor,
+    );
+  }
+
   BuzzPushLeaseSubscriptionState withAcceptedTombstone(int generation) {
     if (generation != pendingTombstoneGeneration ||
         generation < (acceptedGeneration ?? 0)) {

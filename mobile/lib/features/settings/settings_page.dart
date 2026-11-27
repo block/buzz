@@ -18,9 +18,11 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/identity_transfer/nsec_export_sheet.dart';
 import '../../shared/clipboard_utils.dart';
+import '../../shared/diagnostics/diagnostic_reporter.dart';
+import '../../shared/widgets/confirmation_dialog.dart';
 import '../../shared/hosted/hosted_environment.dart';
-import '../../shared/hosted/organization_environment.dart';
-import '../../shared/hosted/organization_sign_out.dart';
+import '../../shared/hosted/sign_out.dart';
+import '../../shared/push/push_bridge.dart';
 import '../../shared/push/push_relay_capability_provider.dart';
 import '../../shared/push/push_bootstrap.dart';
 import '../../shared/relay/relay.dart';
@@ -41,6 +43,7 @@ part 'settings_page/status_section.dart';
 part 'settings_page/connection_section.dart';
 part 'settings_page/notifications_section.dart';
 part 'settings_page/builderlab_account_section.dart';
+part 'settings_page/diagnostics_section.dart';
 
 Widget _emptyProfileEditPage(BuildContext context) => const SizedBox.shrink();
 
@@ -246,21 +249,25 @@ class SettingsPage extends HookConsumerWidget {
                   ],
                   if (!wide && HostedEnvironment.enabled)
                     const _BuilderlabAccountSection(),
-                  // An internal build's only way out of its organization, rarely
-                  // needed, so it sits last.
-                  if (OrganizationEnvironment.enabled)
-                    AppListCard(
-                      verticalPadding: Grid.twelve,
-                      children: [
-                        AppListRow(
+                  if (ref.watch(diagnosticReporterProvider).reporting)
+                    const _DiagnosticsSection(),
+                  // Rarely needed, so it sits last.
+                  AppListCard(
+                    verticalPadding: Grid.twelve,
+                    children: [
+                      // Below Settings' own messenger, so a failure shows
+                      // here rather than on the page underneath.
+                      Builder(
+                        builder: (rowContext) => AppListRow(
                           key: const Key('settings-sign-out'),
                           icon: BuzzIcons.logOut,
                           title: 'Sign out',
                           titleColor: context.colors.error,
-                          onTap: () => confirmOrganizationSignOut(context, ref),
+                          onTap: () => confirmSignOut(rowContext, ref),
                         ),
-                      ],
-                    ),
+                      ),
+                    ],
+                  ),
                   if (packageInfo.hasData)
                     _VersionFooter(
                       version: packageInfo.data!.version,

@@ -5,9 +5,10 @@
 #[path = "scheduled/postgres_tests.rs"]
 mod postgres_tests;
 
-use buzz_core::CommunityId;
+use buzz_core::{CommunityId, StoredEvent};
 use serde::Serialize;
 use sqlx::Row;
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use crate::{
@@ -43,8 +44,24 @@ fn row_message(row: &sqlx::postgres::PgRow) -> Result<ScheduledMessage> {
     })
 }
 
+const MAX_DELIVERY_ATTEMPTS: i32 = 20;
+const RETRY_EXHAUSTED: &str = "Delivery failed after repeated attempts. Review and reschedule it.";
+
 fn conflict() -> DbError {
     DbError::InvalidData("scheduled-message-conflict".into())
+}
+
+/// A due item as last observed by the fleet scan.
+pub struct ScheduledCandidate {
+    /// The community that owns the queue row.
+    pub community: CommunityId,
+    /// The relay host for that community.
+    pub host: String,
+    /// The author's public key.
+    pub owner: Vec<u8>,
+    /// The owner's queue ID.
+    pub id: Uuid,
+    revision: i64,
 }
 
 /// Worker-owned admitted transaction. Dropping it rolls back the claim.
@@ -55,7 +72,6 @@ pub struct ScheduledDispatch {
     owner: Vec<u8>,
     /// Exact queued message.
     pub message: ScheduledMessage,
-    attempts: i32,
 }
 
 impl ScheduledDispatch {
@@ -65,37 +81,40 @@ impl ScheduledDispatch {
     }
     /// Commit delivery, a permanent refusal, or a bounded transient backoff.
     pub async fn finish(mut self, status: &str, error: Option<&str>, now: i64) -> Result<()> {
-        if !matches!(status, "sent" | "failed" | "scheduled") {
-            return Err(conflict());
-        }
-        let mut tx = if let Some(tx) = self.tx.take() {
-            tx
-        } else {
-            // Persistence failure rolls its transaction back. Reacquire only
-            // this unchanged pending revision to record retry state; a cancel,
-            // edit, or successful concurrent delivery must win unchanged.
-            if status != "scheduled" {
-                return Ok(());
+        let mut tx = match self.tx.take() {
+            Some(tx) => tx,
+            None if status == "scheduled" => {
+                // An ingest error may have dropped the claim. Record a retry
+                // only if no other worker or owner mutation has won since.
+                begin_community_write_transaction(
+                    &self.pool,
+                    self.community,
+                    WriterOperation::EventWrite,
+                )
+                .await?
             }
-            let mut tx = begin_community_write_transaction(
-                &self.pool,
-                self.community,
-                WriterOperation::EventWrite,
-            )
-            .await?;
-            let row = sqlx::query("SELECT attempts FROM scheduled_messages WHERE community_id=$1 AND owner=$2 AND id=$3 AND revision=$4 AND event=$5 AND status='scheduled' FOR UPDATE SKIP LOCKED")
-                .bind(self.community.as_uuid()).bind(&self.owner).bind(self.message.id)
-                .bind(self.message.revision).bind(&self.message.event).fetch_optional(tx.conn()).await?;
-            let Some(row) = row else {
-                return Ok(());
-            };
-            self.attempts = row.try_get("attempts")?;
-            tx
+            None => return Ok(()),
         };
-        let delay = 2_i64.pow((self.attempts as u32).min(8)).min(300);
-        sqlx::query("UPDATE scheduled_messages SET status=$4, error=$5, attempts=attempts+1, next_attempt_at=$6, updated_at=now() WHERE community_id=$1 AND owner=$2 AND id=$3")
-            .bind(self.community.as_uuid()).bind(&self.owner).bind(self.message.id).bind(status).bind(error).bind(now+delay)
-            .execute(tx.conn()).await?;
+        match status {
+            "sent" => mark_sent(&mut tx, &self.owner, self.message.id).await?,
+            "failed" => {
+                sqlx::query("UPDATE scheduled_messages SET status='failed', error=$4, updated_at=clock_timestamp() WHERE community_id=$1 AND owner=$2 AND id=$3")
+                    .bind(self.community.as_uuid()).bind(&self.owner).bind(self.message.id).bind(error)
+                    .execute(tx.conn()).await?;
+            }
+            "scheduled" => {
+                record_retry(
+                    &mut tx,
+                    &self.owner,
+                    self.message.id,
+                    self.message.revision,
+                    now,
+                    error,
+                )
+                .await?;
+            }
+            _ => return Err(conflict()),
+        }
         tx.commit().await
     }
 
@@ -108,25 +127,42 @@ impl ScheduledDispatch {
         event: &nostr::Event,
         channel: Option<Uuid>,
         thread: Option<crate::event::ThreadMetadataParams<'_>>,
-    ) -> Result<(buzz_core::StoredEvent, bool)> {
-        if event.kind.as_u16() != 9 || serde_json::to_value(event)? != self.message.event {
-            return Err(conflict());
+    ) -> Result<(StoredEvent, bool)> {
+        let (stored, inserted, ()) = self
+            .persist_with(db, event, async |tx| {
+                let (stored, inserted) =
+                    crate::event::insert_event_with_thread_metadata_in_transaction(
+                        tx, event, channel, thread,
+                    )
+                    .await?;
+                Ok::<_, DbError>((stored, inserted, ()))
+            })
+            .await?;
+        Ok((stored, inserted))
+    }
+
+    /// Run the ordinary event writer on the held claim, including its related
+    /// writes. The writer must return the exact stored message. Any error
+    /// drops the transaction so neither the message nor sent state commits.
+    pub async fn persist_with<T, E: From<DbError>>(
+        &mut self,
+        db: &Db,
+        event: &nostr::Event,
+        write: impl AsyncFnOnce(&mut AdmittedTx) -> std::result::Result<(StoredEvent, bool, T), E>,
+    ) -> std::result::Result<(StoredEvent, bool, T), E> {
+        if event.kind.as_u16() != 9
+            || serde_json::to_value(event).map_err(DbError::from)? != self.message.event
+        {
+            return Err(conflict().into());
         }
         let mut tx = self.tx.take().ok_or_else(conflict)?;
-        // Only this claim's approved old timestamp is permitted. The probe caps
-        // its wall below all pending reservations before publishing a heartbeat.
-        sqlx::query("SELECT set_config('buzz.created_at_floor', GREATEST(960,ceil(extract(epoch FROM clock_timestamp())-$1)+960)::bigint::text,true)")
-            .bind(event.created_at.as_secs() as i64).execute(tx.conn()).await?;
         tx.authorize_scheduled_event(event.id);
         tx.set_push_enqueue(db.push_enqueue.clone());
-        let result =
-            crate::event::insert_event_with_thread_metadata_tx(&mut tx, event, channel, thread)
-                .await?;
-        if result.1 {
-            crate::insert_mentions_in_transaction(&mut tx, event, channel).await?;
+        let result = write(&mut tx).await?;
+        if result.0.event.id != event.id {
+            return Err(conflict().into());
         }
-        sqlx::query("UPDATE scheduled_messages SET status='sent',error=NULL,updated_at=now() WHERE community_id=$1 AND owner=$2 AND id=$3")
-            .bind(self.community.as_uuid()).bind(&self.owner).bind(self.message.id).execute(tx.conn()).await?;
+        mark_sent(&mut tx, &self.owner, self.message.id).await?;
         tx.commit().await?;
         Ok(result)
     }
@@ -229,7 +265,10 @@ impl Db {
                 return Err(conflict());
             }
             validate_reservation(&mut tx, event, send_at).await?;
-            sqlx::query("UPDATE scheduled_messages SET revision=revision+1, event=COALESCE($4,event), event_id=COALESCE($5,event_id), send_at=CASE WHEN $4 IS NULL THEN send_at ELSE $6 END, next_attempt_at=$6, status=$7, error=NULL, attempts=0, updated_at=now() WHERE community_id=$1 AND owner=$2 AND id=$3")
+            sqlx::query("UPDATE scheduled_messages SET revision=revision+1, event=COALESCE($4,event), event_id=COALESCE($5,event_id), send_at=CASE WHEN $4 IS NULL THEN send_at ELSE $6 END, next_attempt_at=$6, status=$7, error=NULL, attempts=0,
+                updated_at=clock_timestamp(),
+                prune_at=CASE WHEN $7='cancelled' THEN GREATEST(clock_timestamp(), to_timestamp(send_at)) + interval '30 days' END
+                WHERE community_id=$1 AND owner=$2 AND id=$3")
                 .bind(community.as_uuid()).bind(owner).bind(id).bind(event).bind(event_id).bind(send_at)
                 .bind(if event.is_some() { "scheduled" } else { "cancelled" }).execute(tx.conn()).await?;
         } else {
@@ -252,22 +291,75 @@ impl Db {
     }
 
     /// Bounded fleet scan; each candidate is rechecked under admission and lock.
-    pub async fn scheduled_due(
-        &self,
-        now: i64,
-    ) -> Result<Vec<(CommunityId, String, Vec<u8>, Uuid)>> {
-        let rows = sqlx::query("SELECT s.community_id,c.host,s.owner,s.id FROM scheduled_messages s JOIN communities c ON c.id=s.community_id WHERE s.status='scheduled' AND s.next_attempt_at<=$1 AND c.deletion_state='active' ORDER BY s.next_attempt_at LIMIT 100")
+    pub async fn scheduled_due(&self, now: i64) -> Result<Vec<ScheduledCandidate>> {
+        let rows = sqlx::query("SELECT s.community_id,c.host,s.owner,s.id,s.revision FROM scheduled_messages s JOIN communities c ON c.id=s.community_id WHERE s.status='scheduled' AND s.next_attempt_at<=$1 AND c.deletion_state='active' AND c.deleted_at IS NULL ORDER BY s.next_attempt_at LIMIT 100")
             .bind(now).fetch_all(&self.pool).await?;
         rows.iter()
             .map(|r| {
-                Ok((
-                    CommunityId::from_uuid(r.try_get("community_id")?),
-                    r.try_get("host")?,
-                    r.try_get("owner")?,
-                    r.try_get("id")?,
-                ))
+                Ok(ScheduledCandidate {
+                    community: CommunityId::from_uuid(r.try_get("community_id")?),
+                    host: r.try_get("host")?,
+                    owner: r.try_get("owner")?,
+                    id: r.try_get("id")?,
+                    revision: r.try_get("revision")?,
+                })
             })
             .collect()
+    }
+
+    /// Back off a candidate whose dispatch failed outside a usable claim.
+    pub async fn scheduled_defer(&self, candidate: &ScheduledCandidate, now: i64) -> Result<()> {
+        let mut tx = begin_community_write_transaction(
+            &self.pool,
+            candidate.community,
+            WriterOperation::EventWrite,
+        )
+        .await?;
+        record_retry(
+            &mut tx,
+            &candidate.owner,
+            candidate.id,
+            candidate.revision,
+            now,
+            Some("Delivery delayed; the relay will retry."),
+        )
+        .await?;
+        tx.commit().await
+    }
+
+    /// Prune a bounded batch of expired terminal rows. Every delete rechecks
+    /// expiry under community admission, including when workers overlap.
+    pub async fn scheduled_prune_completed(&self) -> Result<()> {
+        let rows: Vec<(Uuid, Vec<u8>, Uuid)> = sqlx::query_as(
+            "SELECT s.community_id,s.owner,s.id FROM scheduled_messages s
+             JOIN communities c ON c.id=s.community_id
+             WHERE s.prune_at <= now() AND c.deletion_state='active' AND c.deleted_at IS NULL
+             ORDER BY s.prune_at LIMIT 100",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut communities = BTreeMap::<Uuid, (Vec<Vec<u8>>, Vec<Uuid>)>::new();
+        for (community, owner, id) in rows {
+            let (owners, ids) = communities.entry(community).or_default();
+            owners.push(owner);
+            ids.push(id);
+        }
+        for (community, (owners, ids)) in communities {
+            let result = async {
+                let mut tx = begin_community_write_transaction(
+                    &self.pool, CommunityId::from_uuid(community), WriterOperation::EventWrite,
+                ).await?;
+                sqlx::query("DELETE FROM scheduled_messages s USING unnest($2::bytea[], $3::uuid[]) AS expired(owner,id)
+                    WHERE s.community_id=$1 AND s.owner=expired.owner AND s.id=expired.id
+                      AND s.prune_at <= now()")
+                    .bind(community).bind(&owners).bind(&ids).execute(tx.conn()).await?;
+                tx.commit().await
+            }.await;
+            if let Err(error) = result {
+                tracing::warn!(%community, error_kind = %error.kind(), "Scheduled delivery retention batch failed");
+            }
+        }
+        Ok(())
     }
 
     /// Claim a due item on one worker. Other workers skip the held row.
@@ -286,7 +378,6 @@ impl Db {
         row.map(|r| {
             Ok(ScheduledDispatch {
                 message: row_message(&r)?,
-                attempts: r.try_get("attempts")?,
                 tx: Some(tx),
                 pool: self.pool.clone(),
                 community,
@@ -295,6 +386,57 @@ impl Db {
         })
         .transpose()
     }
+}
+
+async fn mark_sent(tx: &mut AdmittedTx, owner: &[u8], id: Uuid) -> Result<()> {
+    sqlx::query(
+        "UPDATE scheduled_messages
+        SET status='sent', error=NULL, updated_at=clock_timestamp(),
+            prune_at=GREATEST(clock_timestamp(), to_timestamp(send_at)) + interval '30 days'
+        WHERE community_id=$1 AND owner=$2 AND id=$3",
+    )
+    .bind(tx.community().as_uuid())
+    .bind(owner)
+    .bind(id)
+    .execute(tx.conn())
+    .await?;
+    Ok(())
+}
+
+async fn record_retry(
+    tx: &mut AdmittedTx,
+    owner: &[u8],
+    id: Uuid,
+    revision: i64,
+    now: i64,
+    error: Option<&str>,
+) -> Result<()> {
+    sqlx::query(
+        "WITH candidate AS (
+        SELECT attempts FROM scheduled_messages
+        WHERE community_id=$1 AND owner=$2 AND id=$3 AND revision=$4
+          AND status='scheduled' AND next_attempt_at <= $5
+        FOR UPDATE SKIP LOCKED
+    )
+    UPDATE scheduled_messages s
+    SET status=CASE WHEN candidate.attempts >= $6-1 THEN 'failed' ELSE 'scheduled' END,
+        error=CASE WHEN candidate.attempts >= $6-1 THEN $7 ELSE $8 END,
+        attempts=candidate.attempts+1,
+        next_attempt_at=$5+(1::bigint << LEAST(candidate.attempts, 8)),
+        updated_at=clock_timestamp()
+    FROM candidate WHERE s.community_id=$1 AND s.owner=$2 AND s.id=$3",
+    )
+    .bind(tx.community().as_uuid())
+    .bind(owner)
+    .bind(id)
+    .bind(revision)
+    .bind(now)
+    .bind(MAX_DELIVERY_ATTEMPTS)
+    .bind(RETRY_EXHAUSTED)
+    .bind(error)
+    .execute(tx.conn())
+    .await?;
+    Ok(())
 }
 
 // A new reservation must be newer than every previously proved fence wall.

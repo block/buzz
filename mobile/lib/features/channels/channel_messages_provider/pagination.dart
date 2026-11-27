@@ -1,8 +1,36 @@
 part of '../channel_messages_provider.dart';
 
+// Channel history keeps partial reply evidence; full threads stay route-scoped.
+const _maxCachedRepliesPerRoot = 256;
+const _maxCachedReplies = 2048;
+
 extension _ChannelHistoryPagination on ChannelMessagesNotifier {
+  Future<ChannelWindowPage> _fetchWindowPage(
+    RelaySessionNotifier session,
+    ChannelPageCursor? cursor,
+  ) async {
+    final events = await session.queryRelay([_channelWindowFilter(cursor)]);
+    return parseChannelWindowResponse(events, channelId, cursor);
+  }
+
+  NostrFilter _channelWindowFilter(ChannelPageCursor? cursor) => NostrFilter(
+    kinds: EventKind.channelWindowPageKinds,
+    tags: {
+      '#h': [channelId],
+    },
+    limit: 50,
+    until: cursor?.createdAt,
+    extensions: {
+      'top_level': true,
+      'include_summaries': true,
+      'include_aux': true,
+      if (cursor != null) 'before_id': cursor.eventId,
+    },
+  );
+
   Future<bool> _fetchOlder() async {
-    if (_reachedOldest || _initInFlight) return false;
+    if (_reachedOldest || _initInFlight || _accessDenial != null) return false;
+    final initVersion = _initVersion;
 
     final session = _summarySession;
     if (_usingChannelWindow) {
@@ -14,6 +42,7 @@ extension _ChannelHistoryPagination on ChannelMessagesNotifier {
       try {
         final pageVersion = ++_threadQuerySerial;
         final page = await _fetchWindowPage(session, cursor);
+        if (!_isCurrentInit(initVersion)) return false;
         _windowStore = appendOlderChannelWindow(_windowStore, page);
         _reconcilePageSummaries(page, pageVersion);
         _reachedOldest = !channelWindowHasMore(_windowStore);
@@ -39,24 +68,19 @@ extension _ChannelHistoryPagination on ChannelMessagesNotifier {
         channelId,
         limit: 100,
         until: oldest.createdAt,
-        beforeId: oldest.id,
+        beforeId: oldest.eventId,
       ),
     );
+    if (!_isCurrentInit(initVersion)) return false;
     if (older.isEmpty) {
       _reachedOldest = true;
       return false;
     }
     final preceding =
-        older
-            .where(
-              (event) =>
-                  compareChannelTimelineEventsChronologically(event, oldest) <
-                  0,
-            )
-            .toList()
+        older.where((event) => isOlderThanChannelCursor(event, oldest)).toList()
           ..sort(compareChannelTimelineEventsChronologically);
     if (preceding.isEmpty) return false;
-    _legacyHistoryCursor = preceding.first;
+    _legacyHistoryCursor = _nextCursor(preceding, oldest, 'Channel history');
     final currentIds = _historyState.value?.map((e) => e.id).toSet() ?? {};
     final deduped = preceding.where((e) => !currentIds.contains(e.id)).toList();
     // Advance even when a page consists entirely of previously retained rows.

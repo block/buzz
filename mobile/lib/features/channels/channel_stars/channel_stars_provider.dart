@@ -1,4 +1,3 @@
-import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../../shared/relay/relay.dart';
@@ -22,12 +21,15 @@ class ChannelStarsState {
 }
 
 class ChannelStarsNotifier extends Notifier<ChannelStarsState> {
+  ChannelStarsNotifier([this.kind = ChannelFlagKind.stars]);
+  final ChannelFlagKind kind;
+
   ChannelStarsManager? _manager;
   bool _isInitialized = false;
 
   @override
   ChannelStarsState build() {
-    _manager?.dispose(flushPending: false);
+    _manager?.dispose();
     _manager = null;
     _isInitialized = false;
 
@@ -55,6 +57,7 @@ class ChannelStarsNotifier extends Notifier<ChannelStarsState> {
 
     late final ChannelStarsManager manager;
     manager = ChannelStarsManager(
+      kind: kind,
       pubkey: pubkey,
       relayUrl: relayConfig.baseUrl,
       prefs: prefs,
@@ -67,8 +70,8 @@ class ChannelStarsNotifier extends Notifier<ChannelStarsState> {
     _manager = manager;
 
     // Resume re-read catches an EVENT a healthy socket never delivered.
-    ref.listen(appLifecycleProvider, (_, next) {
-      if (next == AppLifecycleState.resumed) manager.refreshFromRelay();
+    ref.listen(appForegroundProvider, (_, foreground) {
+      if (foreground) manager.refreshFromRelay();
     });
 
     ref.onDispose(() {
@@ -88,6 +91,10 @@ class ChannelStarsNotifier extends Notifier<ChannelStarsState> {
     return ChannelStarsState(isReady: false, store: manager.store, version: 1);
   }
 
+  void setEnabled(String channelId, bool enabled) {
+    enabled ? starChannel(channelId) : unstarChannel(channelId);
+  }
+
   void starChannel(String channelId) => _manager?.starChannel(channelId);
 
   void unstarChannel(String channelId) => _manager?.unstarChannel(channelId);
@@ -105,6 +112,11 @@ class ChannelStarsNotifier extends Notifier<ChannelStarsState> {
 final channelStarsProvider =
     NotifierProvider<ChannelStarsNotifier, ChannelStarsState>(
       ChannelStarsNotifier.new,
+    );
+
+final channelPinsProvider =
+    NotifierProvider<ChannelStarsNotifier, ChannelStarsState>(
+      () => ChannelStarsNotifier(ChannelFlagKind.pins),
     );
 
 /// Identity-scoped crypto survives connection status changes. A community or

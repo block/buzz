@@ -34,7 +34,7 @@ One event log. One search index. Three lenses.
 
 ## Access
 
-The relay enforces all access control. Channel membership is the only gate.
+The relay enforces all access control. Membership gates collaboration. For governed repos, policy gates changes and owners and admins keep the record. See [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md) for how a community governs changes to its code.
 
 | Type | Visibility | Join | Create |
 |------|-----------|------|--------|
@@ -156,7 +156,7 @@ The relay hosts git repos. Smart HTTP — standard `git clone`, `git push`, noth
 
 Branches are channels. Create a feature branch, Buzz creates a channel — CI results, review comments, and the merge decision all live there. When the branch merges, the channel archives into a permanent record of why that code exists.
 
-See [VISION_PROJECTS.md](VISION_PROJECTS.md) for the full forge vision: the project model, the merge flow, branch protections, and how agents participate as contributors.
+See [VISION_PROJECTS.md](VISION_PROJECTS.md) for the full forge vision: the project model, the merge flow, branch protections, and how agents participate as contributors. See [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md) for who may change code, what proof it takes, and what record it leaves.
 
 ---
 

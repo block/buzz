@@ -181,6 +181,7 @@ class _Relay extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String)? onClosed,
     required void Function(RelaySubscriptionStatus) onStatusChanged,
+    bool resumeSince = true,
   }) async {
     subscriptions++;
     if (failSubscribe) throw StateError('unavailable');

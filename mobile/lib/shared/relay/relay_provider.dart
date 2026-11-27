@@ -1,4 +1,5 @@
 import 'package:buzz/shared/crypto/event_signing.dart';
+import 'package:buzz/shared/http/app_http_client.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -31,6 +32,11 @@ class RelayConfig {
   /// was canonicalized stay reachable — see [readMigratedPref]. Never use it
   /// for network I/O; [baseUrl] and [wsUrl] are the addresses to connect to.
   String get storedOrigin => _baseUrl;
+
+  /// Whether [other] signs as the same account on the same relay, so work
+  /// started under one config can still be sent under the other.
+  bool isSameCommunity(RelayConfig other) =>
+      baseUrl == other.baseUrl && nsec == other.nsec;
 
   /// Relay origin as an HTTP(S) URL.
   ///
@@ -151,7 +157,9 @@ final relayClientProvider = Provider<RelayClient>((ref) {
   final config = ref.watch(relayConfigProvider);
   final client = RelayClient(
     baseUrl: config.baseUrl,
-    httpClient: ref.watch(hostedHttpClientFactoryProvider)(),
+    httpClient: ref.watch(hostedHttpClientFactoryProvider)(
+      traffic: HttpTraffic.media,
+    ),
   );
   ref.onDispose(client.dispose);
   return client;

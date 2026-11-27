@@ -1,10 +1,22 @@
+import 'package:buzz/features/channels/huddle_lifecycle_provider.dart';
+import 'package:buzz/features/channels/me/me_messages_provider.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+import 'package:buzz/shared/widgets/native_conversation_menu.dart';
+import 'package:buzz/features/channels/channel_filter/channel_filter_activity.dart';
+import 'package:buzz/features/channels/channel_filter/channel_filter_manager.dart';
+import 'package:buzz/features/channels/channel_filter/channel_filter_provider.dart';
+import 'package:buzz/features/channels/channel_sort/channel_sort_manager.dart';
 import 'dart:convert';
+
 import 'package:image_picker/image_picker.dart';
 import 'package:buzz/features/home/home_screen_shortcut_host.dart';
 import 'package:buzz/shared/shortcuts/home_screen_shortcuts.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
+
 import 'dart:async';
+
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:buzz/shared/me/me_chat_creation.dart';
 import 'package:buzz/shared/me/default_agent.dart';
@@ -23,12 +35,58 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
+import 'package:buzz/features/home/home_page.dart';
+import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/app_list.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
+
+class _MenuReadState extends ReadStateNotifier {
+  _MenuReadState(this.actions);
+  final List<String> actions;
+  @override
+  ReadStateState build() => const ReadStateState.inert();
+  @override
+  bool markContextUnread(
+    String contextId, {
+    required String channelId,
+    String? threadRootId,
+    bool channelCatchUp = false,
+  }) {
+    actions.add('unread $channelId');
+    return true;
+  }
+}
+
+class _MenuChannelActions extends ChannelActions {
+  _MenuChannelActions(Ref ref, this.actions)
+    : super(
+        ref: ref,
+        session: ref.read(relaySessionProvider.notifier),
+        currentPubkey: 'owner',
+        signedEventRelay: SignedEventRelay(
+          session: ref.read(relaySessionProvider.notifier),
+          nsec: null,
+        ),
+      );
+  final List<String> actions;
+  @override
+  Future<void> updateChannel({
+    required String channelId,
+    String? name,
+    String? description,
+  }) async {
+    actions.add('rename $channelId');
+  }
+
+  @override
+  Future<void> archiveChannel(String channelId) async {
+    actions.add('archive $channelId');
+  }
+}
 
 class _CachedProfiles extends UserCacheNotifier {
   _CachedProfiles(this.profiles);
@@ -96,28 +154,123 @@ class FakeChannels extends ChannelsNotifier {
 class LabeledChannels extends ChannelsNotifier {
   @override
   Future<List<Channel>> build() async => [
-    for (final (id, name, owner, member) in [
-      ('filed', 'Filed labeled chat', 'owner', true),
-      ('loose', 'Unfiled labeled chat', 'owner', true),
-      ('shared', 'Someone else chat', 'other', true),
-      ('hidden', 'Inaccessible labeled chat', 'owner', false),
+    for (final (id, name, owner, member, archived) in [
+      ('filed', 'Filed labeled chat', 'owner', true, false),
+      ('loose', 'Unfiled labeled chat', 'owner', true, false),
+      ('shared', 'Someone else chat', 'other', true, false),
+      ('open-owner', 'Open owner Solo', 'owner', true, false),
+      ('open-shared', 'Open shared Solo', 'other', true, false),
+      ('agent-created', 'Agent-created chat', 'agent', true, false),
+      ('hidden', 'Inaccessible labeled chat', 'owner', false, false),
+      ('archived', 'Archived labeled chat', 'other', true, true),
     ])
       Channel(
         id: id,
         name: name,
         channelType: 'stream',
-        visibility: 'private',
+        visibility: id.startsWith('open-') ? 'open' : 'private',
         labels: const ['buzz.solo'],
         description: '',
         createdBy: owner,
         createdAt: DateTime(2026),
         memberCount: 2,
         isMember: member,
+        archivedAt: archived ? DateTime(2026) : null,
       ),
   ];
 }
 
 void main() {
+  testWidgets('Solo workspace activity window leaves unfiled chats visible', (
+    tester,
+  ) async {
+    final keys = nostr.Keys.generate();
+    const coordinate = 'solo-channel-filter';
+    var history = <NostrEvent>[];
+    final manager = ChannelFilterManager(
+      coordinate: coordinate,
+      pubkey: keys.public,
+      crypto: ChannelSortCrypto(keys.nsec, keys.public),
+      fetch: () async => history,
+      publish: (content, at) async {
+        history = [
+          NostrEvent.fromJson(
+            nostr.Event.from(
+              kind: EventKind.readState,
+              tags: const [
+                ['d', coordinate],
+              ],
+              content: content,
+              createdAt: at,
+              secretKey: nostr.Nip19.decode(payload: keys.nsec).data,
+              verify: false,
+            ).toMap(),
+          ),
+        ];
+      },
+      cache: (_) {},
+    );
+    addTearDown(manager.dispose);
+    await manager.refresh();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
+          myPubkeyProvider.overrideWithValue('owner'),
+          channelsProvider.overrideWith(LabeledChannels.new),
+          soloFilterProvider.overrideWithValue(manager),
+          channelFilterActivityProvider('filed').overrideWith(
+            (ref) => AsyncData(
+              DateTime.now()
+                      .subtract(const Duration(days: 8))
+                      .millisecondsSinceEpoch ~/
+                  1000,
+            ),
+          ),
+          meGroupsProvider.overrideWith(
+            (ref) => Stream.value(
+              const MeGroups(
+                groups: [
+                  {
+                    'id': 'project',
+                    'name': 'App work',
+                    'defaultTemplateId': '',
+                  },
+                ],
+                assignments: {'filed': 'project'},
+              ),
+            ),
+          ),
+        ],
+        child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Filed labeled chat'), findsOneWidget);
+    await tester.tap(find.byTooltip('App work options'));
+    await tester.pumpAndSettle();
+    expect(find.text('Sort'), findsOneWidget);
+    await tester.tap(find.text('View'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Active'));
+    await tester.pumpAndSettle();
+    expect(find.text('Show'), findsNothing);
+    await tester.tap(find.text('Active in the past'));
+    await tester.pumpAndSettle();
+    for (final label in ['1 day', '7 days', '30 days', '90 days']) {
+      expect(find.widgetWithText(MenuItemButton, label), findsOneWidget);
+    }
+    await tester.ensureVisible(find.text('7 days'));
+    await tester.tap(find.text('7 days'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Apply changes'));
+    await tester.pumpAndSettle();
+    expect(history, hasLength(1));
+    expect(find.text('Filed labeled chat'), findsNothing);
+    expect(find.text('Unfiled labeled chat'), findsOneWidget);
+    expect(find.bySemanticsLabel('See all App work'), findsOneWidget);
+  });
+
   testWidgets('label-only desktop chats appear in projects and unfiled chats', (
     tester,
   ) async {
@@ -148,17 +301,42 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Filed labeled chat'), findsOneWidget);
     expect(find.text('Unfiled labeled chat'), findsOneWidget);
-    expect(find.text('Someone else chat'), findsNothing);
+    expect(find.text('Someone else chat'), findsOneWidget);
+    expect(find.text('Open owner Solo'), findsOneWidget);
+    expect(find.text('Open shared Solo'), findsOneWidget);
+    expect(find.text('Agent-created chat'), findsOneWidget);
     expect(find.text('Inaccessible labeled chat'), findsNothing);
+    expect(find.text('Archived labeled chat'), findsNothing);
     expect(find.text('A place to work with your agents'), findsNothing);
   });
 
-  testWidgets('long-pressing a chat opens its details as a sheet', (
+  testWidgets('long-pressing a Solo offers its actions in a popover', (
     tester,
   ) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final pane = ConversationPaneController()
+      ..open('loose', (_) => const SizedBox());
+    final actions = <String>[];
+    var communityActions = actions;
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          meSyncProvider.overrideWithValue(
+            MeSync(
+              _UnavailableRelay(),
+              RelayConfig(
+                baseUrl: 'https://relay.test',
+                nsec: nostr.Keys.generate().nsec,
+              ),
+              prefs: prefs,
+            ),
+          ),
+          savedPrefsProvider.overrideWithValue(prefs),
+          readStateProvider.overrideWith(() => _MenuReadState(actions)),
+          channelActionsProvider.overrideWith(
+            (ref) => _MenuChannelActions(ref, communityActions),
+          ),
           defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
           myPubkeyProvider.overrideWithValue('owner'),
           currentPubkeyProvider.overrideWith((ref) => 'owner'),
@@ -179,7 +357,10 @@ void main() {
             (ref) => Stream.value(const MeGroups(groups: [], assignments: {})),
           ),
         ],
-        child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: ConversationPaneScope(controller: pane, child: const MePage()),
+        ),
       ),
     );
     await tester.pumpAndSettle();
@@ -187,30 +368,78 @@ void main() {
     await tester.longPress(find.text('Unfiled labeled chat'));
     await tester.pumpAndSettle();
 
-    expect(find.byType(BottomSheet), findsOneWidget);
-    expect(
-      find.descendant(
-        of: find.byType(BottomSheet),
-        matching: find.byKey(const ValueKey('channel-details-page-list')),
-      ),
-      findsOneWidget,
-    );
-    expect(
-      find.descendant(
-        of: find.byType(BottomSheet),
-        matching: find.text('Unfiled labeled chat'),
-      ),
-      findsOneWidget,
-    );
-
-    await tester.drag(
-      find.byKey(const ValueKey('channel-details-page-list')),
-      const Offset(0, -600),
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('Leave channel'), findsOneWidget);
-    // Solo chats move between Solo workspaces, not channel sections.
+    expect(find.byType(BottomSheet), findsNothing);
+    expect(find.text('Rename'), findsOneWidget);
+    expect(find.text('Archive'), findsOneWidget);
+    expect(find.text('Change workspace'), findsOneWidget);
+    expect(find.text('Share'), findsNothing);
     expect(find.text('Move to section…'), findsNothing);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(MePage)),
+      listen: false,
+    );
+    expect(container.exists(meMessagesProvider('loose')), isFalse);
+    expect(container.exists(huddleLifecycleProvider('loose')), isFalse);
+    await tester.tap(find.text('Archive'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Archive'));
+    await tester.pumpAndSettle();
+    expect(actions, ['archive loose']);
+    expect(pane.selectedId, isNull);
+    pane.open('loose', (_) => const SizedBox());
+    await tester.pumpAndSettle();
+    final row = tester.widget<IosConversationMenuRow>(
+      find.ancestor(
+        of: find.text('Unfiled labeled chat'),
+        matching: find.byType(IosConversationMenuRow),
+      ),
+    );
+    const bridge = MethodChannel('test/solo-context-menu');
+    List<String>? updatedLabels;
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(bridge, (call) async {
+      if (call.method == 'update') {
+        updatedLabels = List<String>.from(call.arguments as List);
+      }
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(bridge, null));
+    final nativeMenu = ConversationMenuSession(bridge: bridge);
+    row.onMenu(nativeMenu);
+    await tester.pumpAndSettle();
+    expect(updatedLabels ?? await nativeMenu.labels.future, [
+      'Mark unread',
+      'Pin',
+      'Star',
+      'Rename',
+      'Change workspace',
+      'Archive',
+    ]);
+    expect(find.text('Mark unread'), findsNothing);
+    nativeMenu.close('Mark unread');
+    await tester.pumpAndSettle();
+    expect(actions.last, 'unread loose');
+    expect(pane.selectedId, isNull);
+
+    await tester.longPress(find.text('Unfiled labeled chat'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Rename'));
+    await tester.pumpAndSettle();
+    communityActions = <String>[];
+    container.invalidate(channelActionsProvider);
+    await tester.enterText(find.byType(TextField).last, 'New name');
+    await tester.pump();
+    await tester.tap(find.text('Save').last);
+    await tester.pumpAndSettle();
+    expect(actions.last, 'rename loose');
+    expect(communityActions, isEmpty);
+
+    await tester.longPress(find.text('Open shared Solo'));
+    await tester.pumpAndSettle();
+    expect(find.text('Move to section…'), findsOneWidget);
+    expect(find.text('Change workspace'), findsNothing);
+    expect(find.text('Archive'), findsNothing);
   });
 
   testWidgets('empty workspace stays centered behind the New chat keyboard', (
@@ -827,4 +1056,82 @@ void main() {
     expect(find.text('Try again'), findsOneWidget);
     expect(find.text('A place to work with your agents'), findsNothing);
   });
+
+  for (final failed in [true, false]) {
+    testWidgets('shared Solo chats stay listed while preferences '
+        '${failed ? 'fail' : 'load'}', (tester) async {
+      // Keep both sections on screen while the preferences error is visible.
+      await tester.binding.setSurfaceSize(const Size(420, 1000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final pending = StreamController<MeGroups>();
+      addTearDown(() => unawaited(pending.close()));
+      await tester.pumpWidget(
+        ProviderScope(
+          retry: (_, _) => null,
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            myPubkeyProvider.overrideWithValue('viewer'),
+            channelsProvider.overrideWith(_SharedAndOrdinary.new),
+            meGroupsProvider.overrideWith(
+              (ref) => failed
+                  ? Stream<MeGroups>.error(StateError('offline'))
+                  : pending.stream,
+            ),
+            defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
+            meAssistantsProvider.overrideWith((ref) async => []),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: HomePage(
+              settingsPageBuilder: (_) => const SizedBox(),
+              onAgents: (_) {},
+              defaultAgentBuilder: (_) => const SizedBox(),
+              openBestieConversation: (_, _, _) async {},
+              mePageBuilder: (_, chat, workspace) => MePage(
+                sliver: true,
+                newChatAction: chat,
+                newWorkspaceAction: workspace,
+              ),
+            ),
+          ),
+        ),
+      );
+      for (var i = 0; i < 10; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      expect(find.text('Normal team conversation'), findsOneWidget);
+      expect(find.text('Shared Solo conversation'), findsOneWidget);
+      expect(
+        find.text('Couldn’t load your chats and projects.'),
+        failed ? findsOneWidget : findsNothing,
+      );
+      expect(
+        find.byType(BuzzLoadingIndicator),
+        failed ? findsNothing : findsOneWidget,
+      );
+      expect(find.text('No chats yet'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+}
+
+class _SharedAndOrdinary extends ChannelsNotifier {
+  @override
+  Future<List<Channel>> build() async => [
+    for (final shared in [false, true])
+      Channel(
+        id: shared ? 'shared' : 'ordinary',
+        name: shared ? 'Shared Solo conversation' : 'Normal team conversation',
+        channelType: 'stream',
+        visibility: 'private',
+        labels: shared ? const ['buzz.solo'] : const [],
+        description: '',
+        createdBy: 'other',
+        createdAt: DateTime(2026),
+        memberCount: 2,
+        isMember: true,
+      ),
+  ];
 }

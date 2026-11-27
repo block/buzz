@@ -21,6 +21,7 @@ import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_flow.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/organization_sign_in.dart';
+import 'package:buzz/shared/relay/media_upload.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:buzz/shared/relay/relay_session.dart';
 import 'package:buzz/shared/relay/relay_socket.dart';
@@ -35,6 +36,7 @@ import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import 'widget_helpers.dart';
+import 'test_assertion.dart';
 
 /// Synthetic REST/relay boundaries with the production flow factory, account,
 /// identity, admission, auth and storage. No admission/persistence is simulated.
@@ -53,6 +55,7 @@ class HostedJourneyFixture {
   String? refusedSelfHostedPubkey;
   final profileWrites = <String>[];
   final profileAvatars = <String?>[];
+  int avatarUploads = 0;
   final recoveryScopes = <InviteJoinRecoveryScope>[];
   final rows = <Map<String, dynamic>>[];
   final cloudKeys = <nostr.Keys>[];
@@ -81,8 +84,12 @@ class HostedJourneyFixture {
   int discoveries = 0;
   bool expiredSession = false;
   bool denyAssertion = false;
+
+  /// The `Date` the issuer's refusal carries, when [denyAssertion] is set.
+  DateTime? denialDate;
   bool refuseUpgrade = false;
   String subject = 'journey-owner';
+  String? accountEmail = 'owner@example.com';
 
   /// An organization realm, as an internal build's BUZZ_BUILDERLAB_URL and
   /// BUZZ_BUILDERLAB_RELAYS configure. Enable before [mount].
@@ -158,6 +165,7 @@ class HostedJourneyFixture {
       if (expiredSession) return http.Response('{}', 401);
       result = {
         'subject': subject,
+        'email': accountEmail,
         'expires_at': expiry,
         'account_status': needsAccountSetup
             ? 'ACCOUNT_STATUS_NEEDS_DETAILS'
@@ -173,14 +181,18 @@ class HostedJourneyFixture {
     } else if (path.endsWith('/identity/assertions')) {
       await beforeAssertionReturn?.call();
       if (expiredSession) return http.Response('{}', 401);
-      if (denyAssertion) return http.Response('{}', 403);
+      if (denyAssertion) {
+        final date = denialDate;
+        final headers = {if (date != null) 'date': HttpDate.format(date)};
+        return http.Response('{}', 403, headers: headers);
+      }
       final body = jsonDecode(request.body) as Map;
       if (bound != null && body['nostr_pubkey'] != bound) {
         return http.Response('{}', 403);
       }
       bound ??= body['nostr_pubkey'] as String;
       result = {
-        'assertion': 'synthetic-assertion',
+        'assertion': testAssertion('synthetic-assertion'),
         'nostr_pubkey': bound,
         'expires_at':
             assertionNow
@@ -199,7 +211,9 @@ class HostedJourneyFixture {
           HostedEnvironment.requiresAuth(request.url.host)) {
         expect(
           request.headers['Nostr-Federated-Identity'],
-          nipFiRequired == true ? 'Bearer synthetic-assertion' : isNull,
+          nipFiRequired == true
+              ? 'Bearer ${testAssertion('synthetic-assertion')}'
+              : isNull,
         );
         expect(request.headers.containsKey('X-BB-Session-Credential'), isFalse);
       }
@@ -369,7 +383,7 @@ class HostedJourneyFixture {
       }
       organizationBound ??= body['nostr_pubkey'] as String;
       result = {
-        'assertion': 'organization-assertion',
+        'assertion': testAssertion('organization-assertion'),
         'nostr_pubkey': organizationBound,
         'expires_at':
             assertionNow
@@ -439,6 +453,11 @@ class HostedJourneyFixture {
         disableAnimations: true,
         overrides: [
           hostedFlowProvider.overrideWith(createFlow),
+          mediaUploadServiceProvider.overrideWith((ref) {
+            final uploads = _Uploads(this);
+            ref.onDispose(uploads.dispose);
+            return uploads;
+          }),
           if (pairingValidator != null || pairingSocketFactory != null)
             pairingProvider.overrideWith(
               () => PairingNotifier(
@@ -686,6 +705,35 @@ class _Profile extends ProfileNotifier {
   }
 }
 
+// Replace media transport so a setup avatar draft uploads without a relay.
+final class _Uploads extends MediaUploadService {
+  _Uploads(this.fixture)
+    : super(
+        baseUrl: 'https://media.example',
+        nsec: null,
+        pickGalleryImage: () async => null,
+        pickGalleryVideo: () async => null,
+      );
+  final HostedJourneyFixture fixture;
+
+  @override
+  Future<BlobDescriptor> uploadBytes(
+    Uint8List bytes, {
+    required String mimeType,
+    ValueChanged<double>? onProgress,
+    UploadCancellationToken? cancellationToken,
+  }) async {
+    fixture.avatarUploads++;
+    return BlobDescriptor(
+      url: 'https://media.example/avatar.png',
+      sha256: 'avatar',
+      size: bytes.length,
+      type: mimeType,
+      uploaded: 1,
+    );
+  }
+}
+
 // This boundary proves pending-flag/retry ownership, not relay memberships.
 class _Recovery implements InviteJoinRecovery {
   _Recovery(this.fixture, this.scope);
@@ -742,10 +790,10 @@ class _RelaySocket extends RelaySocket {
       fixture.organizationEnabled &&
               host == HostedJourneyFixture.organizationRelayHost
           // Signed out connects without one and lets the relay decide.
-          ? anyOf(isNull, 'Bearer organization-assertion')
+          ? anyOf(isNull, 'Bearer ${testAssertion('organization-assertion')}')
           : HostedEnvironment.requiresAuth(host) &&
                 fixture.nipFiRequired != false
-          ? 'Bearer synthetic-assertion'
+          ? 'Bearer ${testAssertion('synthetic-assertion')}'
           : isNull,
     );
     if (fixture.refuseUpgrade) {

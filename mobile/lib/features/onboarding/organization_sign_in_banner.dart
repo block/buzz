@@ -5,6 +5,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/hosted/builderlab_account.dart';
+import '../../shared/hosted/clock_hint.dart';
 import '../../shared/hosted/hosted_relay_auth.dart';
 import '../../shared/hosted/organization_sign_in.dart';
 import '../../shared/relay/relay_provider.dart';
@@ -40,16 +41,19 @@ class OrganizationSignInBanner extends HookConsumerWidget {
         actionLabel = 'Cancel';
         onAction = () => unawaited(signIn.cancel());
       case OrganizationSessionStatus.signedOut:
-        message = signIn.failure == null
-            ? "It looks like you're signed out."
-            : 'Sign in failed. Try again.';
+        message = switch (signIn.failureCode) {
+          null => "It looks like you're signed out.",
+          final code => 'Sign in failed ($code). Try again.',
+        };
         actionLabel = 'Sign in';
         onAction = () => unawaited(signIn.signIn());
       case OrganizationSessionStatus.signedIn:
         final denied = relayFailure == AccountFailure.denied;
-        message = denied
-            ? 'Denied access to this community.'
-            : 'Could not connect.';
+        final clockHint = denied ? auth.failureClockHint : null;
+        message = [
+          denied ? 'Denied access to this community.' : 'Could not connect.',
+          if (clockHint != null) clockHintText(clockHint),
+        ].join('\n');
         actionLabel = 'Retry';
         onAction = () =>
             unawaited(ref.read(relaySessionProvider.notifier).reconnect());

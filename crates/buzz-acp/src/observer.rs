@@ -16,6 +16,8 @@ use serde::Serialize;
 use tokio::sync::broadcast;
 
 #[cfg(test)]
+mod packing_tests;
+#[cfg(test)]
 mod perf_tests;
 #[cfg(test)]
 mod tests;

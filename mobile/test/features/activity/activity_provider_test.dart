@@ -40,6 +40,8 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
 
+  void setStatus(SessionState next) => state = next;
+
   @override
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
@@ -304,6 +306,48 @@ void main() {
 
     expect(session.dmQueries, isEmpty);
   });
+
+  test(
+    'reads the feed once per reconnect, not once per socket state',
+    () async {
+      final session = _RecordingSessionNotifier()
+        ..seed(_mentionEvent('mention', 1_700_000_001));
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          myPubkeyProvider.overrideWithValue('me_pk'),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FixedChannelsNotifier(const <Channel>[]),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final sub = container.listen(activityProvider, (_, _) {});
+      addTearDown(sub.close);
+
+      await container.read(channelsProvider.future);
+      await container.read(activityProvider.future);
+      await Future<void>.delayed(Duration.zero);
+      await container.read(activityProvider.future);
+      final settled = session.mentionFetchCount;
+
+      // Like a resume after the background grace period.
+      for (final next in const [
+        SessionState(status: SessionStatus.disconnected),
+        SessionState(status: SessionStatus.reconnecting),
+        SessionState(status: SessionStatus.reconnecting, reconnectAttempt: 1),
+        SessionState(status: SessionStatus.connected),
+      ]) {
+        session.setStatus(next);
+        await Future<void>.delayed(Duration.zero);
+      }
+      final feed = await container.read(activityProvider.future);
+
+      expect(session.mentionFetchCount, settled + 1);
+      expect(feed.mentions.map((item) => item.id), ['mention']);
+    },
+  );
 
   test('falls back to websocket history when the HTTP batch fails', () async {
     final session = _RecordingSessionNotifier()
@@ -618,7 +662,12 @@ void main() {
 
       await container.read(channelsProvider.future);
       await container.read(activityProvider.future);
-      await Future<void>.delayed(const Duration(milliseconds: 10));
+      await _waitFor(
+        () => session._subscriptions.any(
+          (subscription) =>
+              subscription.filter.tags['#p']?.contains('me_pk') == true,
+        ),
+      );
       expect(container.read(inboxItemsProvider), isEmpty);
 
       session.emit(
@@ -635,7 +684,11 @@ void main() {
           sig: '',
         ),
       );
-      await Future<void>.delayed(const Duration(milliseconds: 100));
+      await _waitFor(
+        () => container
+            .read(inboxItemsProvider)
+            .any((item) => item.id == 'live-mention'),
+      );
 
       expect(container.read(inboxItemsProvider).single.id, 'live-mention');
     },

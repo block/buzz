@@ -22,7 +22,7 @@ private final class SettingMenuMessenger: NSObject, FlutterBinaryMessenger {
 
 @main
 struct SettingMenuSelectionTests {
-  @MainActor static func main() {
+  @MainActor static func main() async {
     let merging = MergingNavigationGlass(frame: CGRect(x: 0, y: 0, width: 256, height: 56))
     merging.layoutIfNeeded()
     UIView.setAnimationsEnabled(false)
@@ -37,6 +37,22 @@ struct SettingMenuSelectionTests {
     precondition(merging.rightSurface.transform == .identity)
     precondition(merging.leftSurface.alpha == 1 && merging.rightSurface.alpha == 1)
     UIView.setAnimationsEnabled(true)
+
+    let aligned = NavigationGlassButtonPlatformView(
+      frame: CGRect(x: 0, y: 0, width: 44, height: 44),
+      viewIdentifier: 22,
+      arguments: ["plain": true, "icon": "more", "iconSize": 14,
+                   "buttonCenterX": 34, "controlWidth": 20, "controlSize": 44,
+                   "hitTargetWidth": 44, "hitTargetHeight": 44],
+      messenger: SettingMenuMessenger()
+    )
+    let alignedButton = aligned.view().subviews.compactMap { $0 as? NavigationGlassButton }.first!
+    aligned.view().layoutIfNeeded()
+    precondition(alignedButton.center.x == 34)
+    for x in [CGFloat(1), 22, 43] {
+      let point = alignedButton.convert(CGPoint(x: x, y: 22), from: aligned.view())
+      precondition(alignedButton.point(inside: point, with: nil))
+    }
 
     for deferred in [false, true] {
       let messenger = SettingMenuMessenger()
@@ -65,12 +81,17 @@ struct SettingMenuSelectionTests {
       // Invoke the actual menu UIAction through UIKit, without synthesizing a
       // Flutter method-channel message or depending on dismissal callback order.
       let selection = UIButton(primaryAction: choices[0])
+      let interaction = UIContextMenuInteraction(delegate: button)
+      let configuration = UIContextMenuConfiguration(identifier: nil, previewProvider: nil, actionProvider: nil)
+      button.contextMenuInteraction(interaction, willDisplayMenuFor: configuration, animator: nil)
       selection.sendActions(for: .touchUpInside)
       precondition(messenger.selections == (deferred ? [] : [0]))
       if deferred {
-        precondition(button.pendingMenuAction != nil)
-        button.pendingMenuAction?()
-        button.pendingMenuAction = nil
+        button.contextMenuInteraction(interaction, willEndFor: configuration, animator: nil)
+        // The no-animator dismissal queues delivery on the main dispatch queue.
+        await withCheckedContinuation { continuation in
+          DispatchQueue.main.async { continuation.resume() }
+        }
         precondition(messenger.selections == [0])
       }
     }
@@ -78,21 +99,21 @@ struct SettingMenuSelectionTests {
     let grouped = NavigationGlassButtonPlatformView(
       frame: CGRect(x: 0, y: 0, width: 112, height: 56),
       viewIdentifier: 2,
-      arguments: ["deferMenuActions": false, "menu": [
-        ["id": 0, "label": "New chat", "sectionTitle": "Solo", "enabled": true],
-        ["id": 1, "label": "New workspace", "enabled": true],
-        ["id": 2, "label": "New DM", "sectionTitle": "Team", "dividerBefore": true, "enabled": true],
-        ["id": 3, "label": "New channel", "enabled": true],
+      arguments: ["deferMenuActions": false, "fixedMenuOrder": true, "menu": [
+        ["id": 0, "label": "New chat", "symbol": "message.circle", "enabled": true],
+        ["id": 1, "label": "New channel", "symbol": "number", "enabled": true],
+        ["id": 2, "label": "New DM", "symbol": "person.circle", "enabled": true],
+        ["id": 3, "label": "New workspace", "symbol": "folder", "dividerBefore": true, "enabled": true],
       ]], messenger: messenger
     )
     let button = grouped.view().subviews.compactMap { $0 as? NavigationGlassButton }.first!
     precondition(button.preferredMenuElementOrder == .fixed)
     let groups = button.menu!.children.compactMap { $0 as? UIMenu }
-    precondition(groups.map(\.title) == ["Solo", "Team"])
-    precondition(groups.map { $0.children.count } == [2, 2])
-    let teamAction = groups[1].children[0] as! UIAction
-    UIButton(primaryAction: teamAction).sendActions(for: .touchUpInside)
-    precondition(messenger.selections == [2])
+    precondition(groups.map(\.title) == ["", ""])
+    precondition(groups.map { $0.children.count } == [3, 1])
+    let workspaceAction = groups[1].children[0] as! UIAction
+    UIButton(primaryAction: workspaceAction).sendActions(for: .touchUpInside)
+    precondition(messenger.selections == [3])
     print("Native setting menu selection checks passed")
   }
 }

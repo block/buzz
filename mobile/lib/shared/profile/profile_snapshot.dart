@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../relay/nostr_models.dart';
 import '../relay/relay_provider.dart' show RelayConfig;
 import '../theme/community_theme_preference.dart';
 import '../theme/theme_provider.dart';
@@ -38,6 +39,10 @@ class ProfileSnapshotToken {
 /// The data is a cache derived from relay kind:0 events: unreadable,
 /// unsupported or oversized data is discarded rather than migrated. Restored
 /// profiles are revalidated against the relay on first use each session.
+/// A profile with an owner attestation is stored as its signed event, when it
+/// fits, so the owner can be verified again offline; the display fields are
+/// read from it on restore. Entries without it still supply names and
+/// avatars.
 class ProfileSnapshotStorage {
   ProfileSnapshotStorage(this._prefs);
 
@@ -74,7 +79,7 @@ class ProfileSnapshotStorage {
         throw const FormatException('count');
       }
       return [
-        for (final entry in profiles) _decode(entry as Map<String, dynamic>),
+        for (final entry in profiles) ?_decode(entry as Map<String, dynamic>),
       ];
     } catch (_) {
       // Unusable cache: drop it without retiring the live writer.
@@ -103,8 +108,15 @@ class ProfileSnapshotStorage {
     var bytes = 32;
     for (final profile in newestFirst) {
       if (entries.length == maxProfileSnapshotProfiles) break;
-      final entry = jsonEncode(_encode(profile));
-      final entryBytes = utf8.encode(entry).length;
+      var entry = jsonEncode(_encode(profile));
+      var entryBytes = utf8.encode(entry).length;
+      if (entryBytes > maxProfileSnapshotEntryBytes &&
+          profile.profile.ownerEvidence != null) {
+        // The name and avatar may still fit without the signed copy; the
+        // owner stays unverified until the profile is fetched again.
+        entry = jsonEncode(_encode(profile, evidence: false));
+        entryBytes = utf8.encode(entry).length;
+      }
       if (entryBytes > maxProfileSnapshotEntryBytes) continue;
       if (bytes + entryBytes + 1 > maxProfileSnapshotBytes) break;
       bytes += entryBytes + 1;
@@ -140,8 +152,16 @@ class ProfileSnapshotStorage {
     }
   }
 
-  static Map<String, Object?> _encode(ParsedProfileEvent parsed) {
+  static Map<String, Object?> _encode(
+    ParsedProfileEvent parsed, {
+    bool evidence = true,
+  }) {
     final profile = parsed.profile;
+    final signed = profile.ownerEvidence;
+    // The signed event holds the display fields, so they are not repeated.
+    if (evidence && signed != null && signed.id == parsed.eventId) {
+      return {'owner': ?profile.ownerPubkey, 'signed': signed.toJson()};
+    }
     return {
       'pubkey': profile.pubkey,
       'event_id': parsed.eventId,
@@ -154,18 +174,80 @@ class ProfileSnapshotStorage {
     };
   }
 
-  static ParsedProfileEvent _decode(Map<String, dynamic> json) => (
-    profile: UserProfile(
-      pubkey: (json['pubkey'] as String).toLowerCase(),
-      displayName: json['display_name'] as String?,
-      avatarUrl: json['avatar_url'] as String?,
-      about: json['about'] as String?,
-      nip05Handle: json['nip05'] as String?,
-      ownerPubkey: json['owner'] as String?,
-    ),
-    createdAt: json['created_at'] as int,
-    eventId: json['event_id'] as String,
-  );
+  /// Null drops an attested entry whose signed event is unusable.
+  static ParsedProfileEvent? _decode(Map<String, dynamic> json) {
+    if (!json.containsKey('pubkey')) return _decodeSigned(json);
+    final pubkey = (json['pubkey'] as String).toLowerCase();
+    final createdAt = json['created_at'] as int;
+    final eventId = json['event_id'] as String;
+    return (
+      profile: UserProfile(
+        pubkey: pubkey,
+        displayName: json['display_name'] as String?,
+        avatarUrl: json['avatar_url'] as String?,
+        about: json['about'] as String?,
+        nip05Handle: json['nip05'] as String?,
+        ownerPubkey: json['owner'] as String?,
+        ownerEvidence: _decodeEvidence(
+          json['signed'],
+          pubkey: pubkey,
+          createdAt: createdAt,
+          eventId: eventId,
+        ),
+      ),
+      createdAt: createdAt,
+      eventId: eventId,
+    );
+  }
+
+  /// An entry stored as its signed event. Its display fields are read from
+  /// the event without verifying it; owner checks verify it when needed.
+  static ParsedProfileEvent? _decodeSigned(Map<String, dynamic> json) {
+    final event = _signedProfile(json['signed']);
+    if (event == null) return null;
+    final data = ProfileData.fromEvent(event);
+    return (
+      profile: UserProfile(
+        pubkey: event.pubkey.toLowerCase(),
+        displayName: data.displayName,
+        avatarUrl: data.avatarUrl,
+        about: data.about,
+        nip05Handle: data.nip05,
+        ownerPubkey: json['owner'] as String?,
+        ownerEvidence: event,
+      ),
+      createdAt: event.createdAt,
+      eventId: event.id,
+    );
+  }
+
+  /// The stored signed profile, only when it is this entry's own event.
+  /// Anything else is dropped without discarding the entry's name.
+  static NostrEvent? _decodeEvidence(
+    Object? json, {
+    required String pubkey,
+    required int createdAt,
+    required String eventId,
+  }) {
+    final event = _signedProfile(json);
+    return event != null &&
+            event.pubkey.toLowerCase() == pubkey &&
+            event.createdAt == createdAt &&
+            event.id == eventId
+        ? event
+        : null;
+  }
+
+  /// A stored kind:0 that carries an owner attestation, else null.
+  static NostrEvent? _signedProfile(Object? json) {
+    if (json is! Map<String, dynamic>) return null;
+    try {
+      final event = NostrEvent.fromJson(json);
+      return event.kind == 0 && carriesOwnerAttestation(event) ? event : null;
+    } on TypeError {
+      return null;
+    }
+  }
 }
 
 /// The app's profile snapshot storage, or null where preferences were never

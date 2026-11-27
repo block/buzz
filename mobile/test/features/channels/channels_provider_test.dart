@@ -2,38 +2,59 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:ui' as ui;
 
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/features/activity/activity_page.dart';
+import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart';
+import 'package:buzz/shared/channels/open_channel_directory_storage.dart';
+import 'package:buzz/shared/channels/saved_message_store.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart';
+import 'package:buzz/features/channels/channel_unread.dart';
+import 'package:buzz/features/channels/channel_filter/channel_filter_activity.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/saved_channel_page.dart';
+import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
+import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
+import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/activity/activity_provider.dart';
 import 'package:buzz/features/activity/inbox_item.dart';
 import 'package:buzz/features/activity/inbox_read_state.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 part 'channels_provider_live_cases.dart';
+part 'channels_provider_huddle_cases.dart';
 part 'channels_provider_deletion_cases.dart';
 part 'channels_provider_terminal_cases.dart';
 part 'channels_provider_readiness_cases.dart';
 part 'channels_provider_request_path_cases.dart';
 part 'channels_provider_activity_cases.dart';
 part 'channels_provider_join_cases.dart';
+part 'channels_provider_follow_cases.dart';
+part 'channels_provider_saved_directory_cases.dart';
+part 'channels_provider_thread_interest_cases.dart';
+part 'channels_provider_unread_revision_cases.dart';
 
 /// Tests for [ChannelsNotifier] in the pure-Nostr world.
 ///
@@ -48,12 +69,154 @@ part 'channels_provider_join_cases.dart';
 /// records [subscribe] calls so we can assert filter shapes and emit live
 /// events on demand.
 void main() {
+  _huddleNavigationCases();
   _unreadReadinessCases();
   _unreadDeletionCases();
+  _unreadRevisionCases();
   _requestPathCases();
   _threadActivityCases();
   _confirmedJoinCases();
+  _threadFollowCases();
+  _savedDirectoryCases();
+  _threadInterestCases();
   const myPk = 'me';
+
+  test('unread readiness does not wait on activity signature checks', () async {
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final mention = _signedPost(
+      now - 5,
+      content: 'mention',
+      key: _aliceKey,
+      tags: [
+        ['p', _activityPk],
+      ],
+    );
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, _activityPk)],
+      metadata: [_meta(id: _channelA, name: 'general')],
+      recentMessages: [mention],
+    )..pauseNextUnreadCatchUpQuery();
+    final container = _buildContainer(
+      session: session,
+      overrides: [_testPubkeyProvider.overrideWith(_ActivityPubkey.new)],
+    );
+    addTearDown(container.dispose);
+    await container.read(channelsProvider.future);
+    final notifier = container.read(channelsProvider.notifier);
+    await session.nextUnreadCatchUpQueryStarted;
+    final prior = debugRunActivityChecks;
+    final started = Completer<void>();
+    final release = Completer<void>();
+    debugRunActivityChecks = (checks) async {
+      started.complete();
+      await release.future;
+      return checks();
+    };
+    try {
+      var ready = false;
+      final presentation = notifier.waitForUnreadCatchUp().then(
+        (_) => ready = true,
+      );
+      session.resumePausedUnreadCatchUpQuery();
+      await started.future;
+      await _settle();
+      final readyDuringCheck = ready;
+      final unreadDuringCheck =
+          notifier.observedUnreadEventsByChannel[_channelA]?.containsKey(
+            mention.id,
+          ) ??
+          false;
+      release.complete();
+      await presentation;
+      expect(
+        notifier.observedUnreadEventsByChannel[_channelA]?.keys,
+        contains(mention.id),
+      );
+      expect((readyDuringCheck, unreadDuringCheck), (true, true));
+    } finally {
+      debugRunActivityChecks = prior;
+      if (!release.isCompleted) release.complete();
+    }
+  });
+
+  test(
+    'a list read cannot restore a latest post deleted during its signature checks',
+    () async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final old = _signedPost(now - 10 * 86400, content: 'old');
+      final newest = _signedPost(now - 5, content: 'newest');
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, _activityPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        recentMessages: [old, newest],
+        enforceHistoryLimits: true,
+      );
+      final container = _buildContainer(
+        session: session,
+        overrides: [
+          _testPubkeyProvider.overrideWith(_ActivityPubkey.new),
+          readStateProvider.overrideWith(_ActivityReadState.new),
+        ],
+      );
+      addTearDown(container.dispose);
+      container.listen(channelFilterActivityProvider(_channelA), (_, _) {});
+      await container.read(channelsProvider.future);
+      final notifier = container.read(channelsProvider.notifier);
+      await notifier.waitForUnreadCatchUp();
+      expect(notifier.activityFor(_channelA).at, newest.createdAt);
+      (container.read(readStateProvider.notifier) as _ActivityReadState)
+          .markReadThrough(_channelA, now);
+      final prior = debugRunActivityChecks;
+      final started = Completer<void>();
+      final release = Completer<void>();
+      debugRunActivityChecks = (checks) async {
+        final result = checks();
+        if (!started.isCompleted) {
+          started.complete();
+          await release.future;
+        }
+        return result;
+      };
+      try {
+        final refreshing = notifier.refresh();
+        await started.future;
+        final before = session.queryBatches.length;
+        final deletion = NostrEvent.fromJson(
+          signNostrEvent(
+            kind: EventKind.deletion,
+            content: '',
+            secretKey: _activityKey,
+            createdAt: now - 1,
+            tags: [
+              ['h', _channelA],
+              ['e', newest.id],
+            ],
+          ).toMap(),
+        );
+        session.recentMessages = [old, deletion];
+        session.emit(deletion);
+        await _waitUntil(() => !notifier.activityFor(_channelA).known);
+        expect(session.queryBatches.length, before);
+        release.complete();
+        await refreshing;
+        await notifier.waitForUnreadCatchUp();
+        final afterRefresh = notifier.activityFor(_channelA);
+        final beforeReconnect = session.queryBatches.length;
+        session.setStatus(SessionStatus.reconnecting);
+        session.setStatus(SessionStatus.connected);
+        await _waitUntil(() => session.queryBatches.length > beforeReconnect);
+        await notifier.waitForUnreadCatchUp();
+        final afterReconnect = notifier.activityFor(_channelA);
+        expect(
+          [afterRefresh.at, afterReconnect.at],
+          [isNot(newest.createdAt), old.createdAt],
+        );
+      } finally {
+        debugRunActivityChecks = prior;
+        if (!release.isCompleted) release.complete();
+      }
+    },
+  );
 
   test(
     'discovers open channels for a user with zero channel memberships',
@@ -83,26 +246,181 @@ void main() {
     },
   );
 
-  test('ensureDirectoryLoaded reads again once older than maxAge', () async {
-    final session = _FakeRelaySession(
-      memberships: const [],
-      metadata: [_meta(id: _channelA, name: 'general')],
-    );
-    final container = _buildContainer(session: session);
-    addTearDown(container.dispose);
-    await container.read(channelsProvider.future);
-    final channels = container.read(channelsProvider.notifier);
+  test(
+    'the saved directory serves readers across launches and stays current',
+    () async {
+      final root = await Directory.systemTemp.createTemp('saved-directory');
+      addTearDown(() => root.delete(recursive: true));
+      final file = File('${root.path}/directory.json');
+      var now = DateTime.utc(2026, 1, 1);
+      var session = _FakeRelaySession(
+        memberships: const [],
+        metadata: [_meta(id: _channelA, name: 'general', createdAt: 100)],
+      );
+      final sessions = [session];
+      ProviderContainer launch() {
+        final container = _buildContainer(
+          session: session,
+          overrides: [
+            openChannelDirectoryStorageProvider.overrideWithValue(
+              OpenChannelDirectoryStorage(Future.value(file)),
+            ),
+            channelDirectoryClockProvider.overrideWithValue(() => now),
+          ],
+        );
+        addTearDown(container.dispose);
+        return container;
+      }
 
-    await channels.ensureDirectoryLoaded();
-    final reads = session.directoryQueryFilters.length;
-    expect(reads, isPositive);
-    // A loaded directory serves later calls until it is older than maxAge.
-    await channels.ensureDirectoryLoaded();
-    await channels.ensureDirectoryLoaded(maxAge: const Duration(hours: 1));
-    expect(session.directoryQueryFilters, hasLength(reads));
-    await channels.ensureDirectoryLoaded(maxAge: Duration.zero);
-    expect(session.directoryQueryFilters, hasLength(reads * 2));
-  });
+      // The first page of each read; a read pages on with `until`.
+      List<int?> reads() => [
+        for (final session in sessions)
+          for (final filter in session.directoryQueryFilters)
+            if (filter.until == null) filter.since,
+      ];
+      List<String> names(ProviderContainer container) => [
+        for (final channel in container.read(channelsProvider).requireValue)
+          channel.name,
+      ];
+      // Saving runs behind the list update, on real file I/O.
+      Future<void> expectSaved(List<String> expected) async {
+        List<String> saved() {
+          if (!file.existsSync()) return const [];
+          final json = jsonDecode(file.readAsStringSync()) as Map;
+          return [
+            for (final meta in (json['metas'] as List).cast<Map>())
+              for (final tag in (meta['tags'] as List).cast<List>())
+                if (tag.first == 'name') tag[1] as String,
+          ]..sort();
+        }
+
+        for (var i = 0; i < 200 && !listEquals(saved(), expected); i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+        expect(saved(), expected);
+      }
+
+      // The first reader reads the whole directory and saves it.
+      var container = launch();
+      await container.read(channelsProvider.future);
+      var channels = container.read(channelsProvider.notifier);
+      await channels.ensureDirectoryLoaded();
+      await _settle();
+      expect(reads(), [null]);
+      expect(names(container), ['general']);
+      await expectSaved(['general']);
+      expect(await file.readAsString(), isNot(contains('"sig"')));
+
+      // More readers within a minute ask the relay nothing.
+      await channels.ensureDirectoryLoaded();
+      await _settle();
+      expect(reads(), [null]);
+
+      // A minute on, a reader asks only for changes, from a minute before the
+      // newest saved one: a rename and a new channel.
+      now = now.add(const Duration(minutes: 1));
+      session.metadata = [
+        _meta(id: _channelA, name: 'general-chat', createdAt: 150),
+        _meta(id: _channelB, name: 'fresh', createdAt: 200),
+      ];
+      await channels.ensureDirectoryLoaded();
+      await _settle();
+      expect(reads().last, 100 - 60);
+      expect(names(container), unorderedEquals(['general-chat', 'fresh']));
+      await expectSaved(['fresh', 'general-chat']);
+
+      // A catch-up that brings back only held events (the overlap always
+      // returns the newest) neither rebuilds the list nor rewrites the file.
+      final list = container.read(channelsProvider).requireValue;
+      final stamp = DateTime(2020);
+      file.setLastModifiedSync(stamp);
+      now = now.add(const Duration(minutes: 1));
+      await channels.ensureDirectoryLoaded();
+      await _settle();
+      expect(reads().last, 200 - 60);
+      expect(
+        identical(container.read(channelsProvider).requireValue, list),
+        isTrue,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(file.lastModifiedSync(), stamp);
+
+      // After a relaunch the saved copy serves at once; the relay is asked only
+      // for changes since the newest saved one.
+      container.dispose();
+      now = now.add(const Duration(minutes: 5));
+      session = _FakeRelaySession(
+        memberships: const [],
+        metadata: session.metadata,
+      );
+      sessions.add(session);
+      container = launch();
+      await container.read(channelsProvider.future);
+      channels = container.read(channelsProvider.notifier);
+      final before = reads().length;
+      await channels.ensureDirectoryLoaded();
+      expect(names(container), unorderedEquals(['general-chat', 'fresh']));
+      await _settle();
+      expect(reads().skip(before), [200 - 60]);
+
+      // A channel that turned private is never in a catch-up, so it stays
+      // until the daily full read, which replaces the saved copy.
+      session.metadata = [
+        _meta(id: _channelA, name: 'general-chat', createdAt: 150),
+      ];
+      now = now.add(const Duration(minutes: 1));
+      await channels.ensureDirectoryLoaded();
+      await _settle();
+      expect(names(container), unorderedEquals(['general-chat', 'fresh']));
+      now = now.add(savedDirectoryFullReadAge);
+      // A full read slower than the check interval is shared, not displaced:
+      // a reader opening a minute later asks the relay nothing more.
+      session.pauseNextDirectoryQuery();
+      await channels.ensureDirectoryLoaded();
+      await session.nextDirectoryQueryStarted;
+      final held = reads().length;
+      now = now.add(const Duration(minutes: 2));
+      await channels.ensureDirectoryLoaded();
+      await _settle();
+      expect(reads().length, held);
+      session.resumePausedDirectoryQuery();
+      await _settle();
+      expect(reads().last, isNull);
+      expect(names(container), ['general-chat']);
+      await expectSaved(['general-chat']);
+      // The quiet reads never showed search a loading state.
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.loaded,
+      );
+
+      // Opening a channel the relay no longer serves drops it at once, and a
+      // read already in flight, whose response predates the drop, does not
+      // bring it back.
+      now = now.add(const Duration(minutes: 1));
+      session.metadata = [
+        _meta(id: _channelA, name: 'general-chat', createdAt: 150),
+        _meta(id: _channelB, name: 'late', createdAt: 300),
+      ];
+      session.pauseNextDirectoryQuery();
+      await channels.ensureDirectoryLoaded();
+      await session.nextDirectoryQueryStarted;
+      session.metadata = [];
+      await expectLater(
+        container.read(channelDetailsProvider(_channelA).future),
+        throwsException,
+      );
+      await _settle();
+      expect(names(container), isEmpty);
+      session.resumePausedDirectoryQuery();
+      await _settle();
+      // The shared full read advanced the full-read age, so this was a
+      // catch-up from the newest saved change.
+      expect(reads().last, 150 - 60);
+      expect(names(container), ['late']);
+      await expectSaved(['late']);
+    },
+  );
 
   test(
     'ensureDirectoryLoaded reads again after the community switches away and back',
@@ -116,11 +434,8 @@ void main() {
       await container.read(channelsProvider.future);
       final config = container.read(relayConfigProvider.notifier);
       final communityA = container.read(relayConfigProvider).baseUrl;
-      const maxAge = Duration(hours: 1);
 
-      await container
-          .read(channelsProvider.notifier)
-          .ensureDirectoryLoaded(maxAge: maxAge);
+      await container.read(channelsProvider.notifier).ensureDirectoryLoaded();
       expect(container.read(channelsProvider).requireValue.map((c) => c.id), [
         _channelA,
       ]);
@@ -133,15 +448,119 @@ void main() {
       await container.read(channelsProvider.future);
       final reads = session.directoryQueryFilters.length;
 
-      await container
-          .read(channelsProvider.notifier)
-          .ensureDirectoryLoaded(maxAge: maxAge);
+      await container.read(channelsProvider.notifier).ensureDirectoryLoaded();
       expect(session.directoryQueryFilters.length, greaterThan(reads));
       expect(container.read(channelsProvider).requireValue.map((c) => c.id), [
         _channelA,
       ]);
     },
   );
+
+  test('a directory load keeps latest-message times', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [
+        _meta(id: _channelA, name: 'general'),
+        _meta(id: _channelB, name: 'discoverable'),
+      ],
+      recentMessages: [_signedPost(30)],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+    bool isLatest(List<NostrFilter> batch) =>
+        batch.isNotEmpty &&
+        batch.every(
+          (filter) =>
+              filter.since == null &&
+              filter.tags.containsKey('#h') &&
+              (filter.limit == 1 || filter.limit == 20),
+        );
+    await container.read(channelsProvider.future);
+    await _settle();
+    final latestReads = session.queryBatches.where(isLatest).length;
+    expect(latestReads, isPositive);
+
+    await container.read(channelsProvider.notifier).retryDirectory();
+    await _settle();
+
+    expect(session.queryBatches.where(isLatest), hasLength(latestReads));
+    final channels = container.read(channelsProvider).requireValue;
+    expect(channels.map((channel) => channel.id), [_channelB, _channelA]);
+    expect(
+      channels.firstWhere((channel) => channel.id == _channelA).lastMessageAt,
+      DateTime.fromMillisecondsSinceEpoch(30 * 1000, isUtc: true),
+    );
+  });
+
+  for (final deadlineFirst in [false, true]) {
+    _testWithClock('a directory load dates newly listed DMs'
+        '${deadlineFirst ? ' after a latest-message deadline' : ''}', (clock) {
+      NostrEvent message(String channelId, int at, String author) => NostrEvent(
+        id: '$channelId-$at',
+        pubkey: author,
+        createdAt: at,
+        kind: EventKind.streamMessageV2,
+        tags: [
+          ['h', channelId],
+        ],
+        content: 'hello',
+        sig: 'sig',
+      );
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [
+          _meta(id: _channelA, name: 'Alice', channelType: 'dm'),
+          _meta(id: _channelB, name: 'Bob', channelType: 'dm'),
+        ],
+        recentMessages: [message(_channelA, 30, 'alice')],
+        enforceHistoryLimits: true,
+      );
+      final container = _buildContainer(session: session);
+      container.listen(channelsProvider, (_, _) {});
+      clock.flushMicrotasks();
+      DateTime? latest(String id) => container
+          .read(channelsProvider)
+          .requireValue
+          .singleWhere((channel) => channel.id == id)
+          .lastMessageAt;
+
+      // Another device opened DM B with an outgoing message, which unread
+      // catch-up skips. Search's directory load discovers B first.
+      session.memberships = [
+        _membership(_channelA, myPk),
+        _membership(_channelB, myPk),
+      ];
+      session.recentMessages = [
+        message(_channelA, 30, 'alice'),
+        message(_channelB, 40, myPk),
+      ];
+      if (deadlineFirst) {
+        session.latestBatchError = RelayException(
+          503,
+          '{"error":"query timed out"}',
+        );
+      }
+      container.read(channelsProvider.notifier).retryDirectory();
+      clock.flushMicrotasks();
+      if (deadlineFirst) {
+        expect(latest(_channelB), isNull);
+        // The retry after the deadline reads the whole list again.
+        session.latestBatchError = null;
+        clock.elapse(const Duration(seconds: 10));
+      }
+
+      expect(
+        latest(_channelB),
+        DateTime.fromMillisecondsSinceEpoch(40 * 1000, isUtc: true),
+      );
+      expect(
+        latest(_channelA),
+        DateTime.fromMillisecondsSinceEpoch(30 * 1000, isUtc: true),
+      );
+      container.dispose();
+      clock.elapse(const Duration(minutes: 10));
+    });
+  }
 
   test('a directory load during the first channel load waits for it', () async {
     final session = _FakeRelaySession(
@@ -162,7 +581,7 @@ void main() {
     await session.nextMemberMetadataQueryStarted;
     final directory = container
         .read(channelsProvider.notifier)
-        .ensureDirectoryLoaded(maxAge: const Duration(seconds: 30));
+        .ensureDirectoryLoaded();
     await _settle();
 
     // The first load's reply arrives last. It must not replace the list.
@@ -1790,6 +2209,282 @@ void main() {
     expect(session.metadataPageRequestCount, initialDirectoryRequests);
   });
 
+  group('search directory load on a loaded list', () {
+    const channelC = '33333333-3333-4333-8333-333333333333';
+
+    Future<ProviderContainer> loaded(_FakeRelaySession session) async {
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      // Let the first load's detached unread catch-up finish.
+      await _settle();
+      return container;
+    }
+
+    List<String> listedIds(ProviderContainer container) => container
+        .read(channelsProvider)
+        .requireValue
+        .map((channel) => channel.id)
+        .toList();
+
+    test('reads only the directory and keeps joined channels', () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(id: _channelB, name: 'discoverable'),
+        ],
+      );
+      final container = await loaded(session);
+      final joined = container.read(channelsProvider).requireValue.single;
+      final memberships = session.membershipRequestCount;
+      final histories = session.historyFilters.length;
+      final batches = session.queryBatches.length;
+
+      session.metadata = [
+        _meta(id: _channelA, name: 'general'),
+        _meta(
+          id: _channelB,
+          name: 'discoverable',
+          visibility: 'private',
+          createdAt: 2,
+        ),
+        _meta(id: channelC, name: 'new-open'),
+      ];
+      await container
+          .read(channelsProvider.notifier)
+          .retryDirectory(directoryOnly: true);
+
+      // No roster, member metadata, hidden-DM, Huddle or message reads.
+      expect(session.membershipRequestCount, memberships);
+      expect(session.historyFilters, hasLength(histories));
+      expect(session.queryBatches, hasLength(batches));
+      expect(session.directoryQueryFilters, isNotEmpty);
+      expect(listedIds(container), unorderedEquals([_channelA, channelC]));
+      final listed = container.read(channelsProvider).requireValue;
+      expect(listed.firstWhere((c) => c.id == _channelA), same(joined));
+      expect(listed.firstWhere((c) => c.id == channelC).isMember, isFalse);
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.loaded,
+      );
+    });
+
+    test('a membership refresh during the load is kept', () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(id: _channelB, name: 'discoverable'),
+          _meta(id: _channelD, name: 'joined-elsewhere'),
+        ],
+      );
+      final container = await loaded(session);
+
+      session.pauseNextDirectoryQuery();
+      final directory = container
+          .read(channelsProvider.notifier)
+          .retryDirectory(directoryOnly: true);
+      await session.nextDirectoryQueryStarted;
+
+      // Joining on another device lands while the directory is in flight.
+      session.memberships = [
+        _membership(_channelA, myPk),
+        _membership(_channelD, myPk),
+      ];
+      await container.read(channelsProvider.notifier).refresh();
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.loading,
+      );
+
+      session.resumePausedDirectoryQuery();
+      await directory;
+      await _settle();
+
+      final listed = container.read(channelsProvider).requireValue;
+      expect(
+        listed.map((c) => c.id),
+        unorderedEquals([_channelA, _channelB, _channelD]),
+      );
+      expect(listed.firstWhere((c) => c.id == _channelD).isMember, isTrue);
+      expect(listed.firstWhere((c) => c.id == _channelB).isMember, isFalse);
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.loaded,
+      );
+    });
+
+    test(
+      'a refresh that merged the directory before it landed keeps it',
+      () async {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [
+            _meta(id: _channelA, name: 'general'),
+            _meta(id: _channelB, name: 'discoverable'),
+          ],
+        );
+        final container = await loaded(session);
+
+        // The refresh merges the directory it has (none) and then waits for
+        // its latest messages while the search load completes.
+        final gate = Completer<void>();
+        session.latestBatchGate = gate;
+        final refresh = container.read(channelsProvider.notifier).refresh();
+        await _waitUntil(() => session.latestBatchGate == null);
+        await container
+            .read(channelsProvider.notifier)
+            .retryDirectory(directoryOnly: true);
+        expect(listedIds(container), unorderedEquals([_channelA, _channelB]));
+
+        gate.complete();
+        await refresh;
+
+        expect(listedIds(container), unorderedEquals([_channelA, _channelB]));
+      },
+    );
+
+    test('a community switch discards the response', () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(id: _channelB, name: 'community-a-open'),
+        ],
+      );
+      final container = await loaded(session);
+      final communityB = channelDirectoryScope(
+        'https://community-b.example',
+        container.read(myPubkeyProvider),
+      );
+
+      session.pauseNextDirectoryQuery();
+      final directory = container
+          .read(channelsProvider.notifier)
+          .retryDirectory(directoryOnly: true);
+      await session.nextDirectoryQueryStarted;
+
+      session.memberships = [_membership(_channelD, myPk)];
+      session.metadata = [_meta(id: _channelD, name: 'community-b-general')];
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://community-b.example');
+      await container.read(channelsProvider.future);
+
+      session.resumePausedDirectoryQuery();
+      await directory;
+      await _settle();
+
+      expect(listedIds(container), [_channelD]);
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).scope,
+        isNot(communityB),
+      );
+    });
+
+    test(
+      'returning to a community during a discarded load loads again',
+      () async {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [
+            _meta(id: _channelA, name: 'general'),
+            _meta(id: _channelB, name: 'community-a-open'),
+          ],
+        );
+        final container = await loaded(session);
+        final communityA = container.read(relayConfigProvider).baseUrl;
+
+        session.pauseNextDirectoryQuery();
+        final directory = container
+            .read(channelsProvider.notifier)
+            .retryDirectory(directoryOnly: true);
+        await session.nextDirectoryQueryStarted;
+
+        container
+            .read(relayConfigProvider.notifier)
+            .update(baseUrl: 'https://community-b.example');
+        await container.read(channelsProvider.future);
+        container
+            .read(relayConfigProvider.notifier)
+            .update(baseUrl: communityA);
+        await container.read(channelsProvider.future);
+        await _settle();
+        final directoryQueries = session.directoryQueryFilters.length;
+        await container
+            .read(channelsProvider.notifier)
+            .retryDirectory(directoryOnly: true);
+
+        expect(
+          session.directoryQueryFilters.length,
+          greaterThan(directoryQueries),
+        );
+        expect(
+          container.read(channelDirectoryLoadStatusProvider).status,
+          ChannelDirectoryLoadStatus.loaded,
+        );
+
+        // The old request ending later leaves the newer load's status alone.
+        session.resumePausedDirectoryQuery();
+        await directory;
+        await _settle();
+        expect(
+          container.read(channelDirectoryLoadStatusProvider).status,
+          ChannelDirectoryLoadStatus.loaded,
+        );
+      },
+    );
+
+    test(
+      'returning to a community after a discarded load loads again',
+      () async {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [
+            _meta(id: _channelA, name: 'general'),
+            _meta(id: _channelB, name: 'community-a-open'),
+          ],
+        );
+        final container = await loaded(session);
+        final communityA = container.read(relayConfigProvider).baseUrl;
+
+        session.pauseNextDirectoryQuery();
+        final directory = container
+            .read(channelsProvider.notifier)
+            .retryDirectory(directoryOnly: true);
+        await session.nextDirectoryQueryStarted;
+
+        container
+            .read(relayConfigProvider.notifier)
+            .update(baseUrl: 'https://community-b.example');
+        await container.read(channelsProvider.future);
+        session.resumePausedDirectoryQuery();
+        await directory;
+        await _settle();
+
+        container
+            .read(relayConfigProvider.notifier)
+            .update(baseUrl: communityA);
+        await container.read(channelsProvider.future);
+        await _settle();
+        final directoryQueries = session.directoryQueryFilters.length;
+        await container
+            .read(channelsProvider.notifier)
+            .retryDirectory(directoryOnly: true);
+
+        expect(
+          session.directoryQueryFilters.length,
+          greaterThan(directoryQueries),
+        );
+        expect(
+          container.read(channelDirectoryLoadStatusProvider).status,
+          ChannelDirectoryLoadStatus.loaded,
+        );
+      },
+    );
+  });
+
   test('membership refresh does not refetch a loaded directory', () async {
     final session = _FakeRelaySession(
       memberships: [_membership(_channelA, myPk)],
@@ -1927,6 +2622,846 @@ void main() {
     expect(members.map((member) => member.pubkey), [myPk, 'alice']);
     expect(members.every((member) => member.joinedAt == joinedAt), isTrue);
   });
+
+  test(
+    'Active filter activity comes from the list reads and live delivery alone',
+    () async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      NostrEvent message(String id, int at, {String channel = _channelA}) =>
+          _signedPost(at, channel: channel, content: id);
+      final session = _FakeRelaySession(
+        memberships: [
+          _membership(_channelA, _activityPk),
+          _membership(_channelB, _activityPk),
+        ],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(id: _channelB, name: 'quiet'),
+        ],
+        // Self-authored activity counts; a future-dated head counts as now.
+        recentMessages: [
+          message('mine', now - 100),
+          message('ahead', now + 900, channel: _channelB),
+        ],
+      );
+      final container = _buildContainer(
+        session: session,
+        overrides: [_testPubkeyProvider.overrideWith(_ActivityPubkey.new)],
+      );
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      await _settle();
+      AsyncValue<int?> activity(String id) =>
+          container.read(channelFilterActivityProvider(id));
+      final listeners = [
+        for (final id in [_channelA, _channelB])
+          container.listen(channelFilterActivityProvider(id), (_, _) {}),
+      ];
+      addTearDown(() {
+        for (final listener in listeners) {
+          listener.close();
+        }
+      });
+      final reads = (
+        session.historyFilters.length,
+        session.queryBatches.length,
+      );
+      final before = container
+          .read(channelsProvider)
+          .requireValue
+          .singleWhere((channel) => channel.id == _channelA)
+          .lastMessageAt;
+      expect(activity(_channelA).value, now - 100);
+      expect(activity(_channelB).value, inInclusiveRange(now, now + 60));
+
+      session.emit(message('live', now - 10));
+      // A message whose signature fails verification is not activity.
+      session.emit(
+        NostrEvent.fromJson({
+          ...message('forged', now - 1).toJson(),
+          'sig': 'f' * 128,
+        }),
+      );
+      await _settle();
+      expect(activity(_channelA).value, now - 10);
+      // Activity leaves unread and sort time alone, and costs no relay reads.
+      expect(
+        container
+            .read(channelsProvider)
+            .requireValue
+            .singleWhere((channel) => channel.id == _channelA)
+            .lastMessageAt,
+        before,
+      );
+      expect((
+        session.historyFilters.length,
+        session.queryBatches.length,
+      ), reads);
+
+      // A reconnect reads only new channels' latest messages; the unread
+      // catch-up it already sends covers listed ones.
+      session.recentMessages = [
+        ...session.recentMessages,
+        message('missed', now - 5),
+      ];
+      final batches = session.queryBatches.length;
+      session.setStatus(SessionStatus.reconnecting);
+      session.setStatus(SessionStatus.connected);
+      await _waitUntil(
+        () => session.queryBatches
+            .skip(batches)
+            .any((batch) => batch.every((filter) => filter.since != null)),
+      );
+      await _settle();
+      expect(activity(_channelA).value, now - 5);
+
+      // A list read that never answered leaves activity unknown, not empty.
+      final failed = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+      )..latestBatchError = RelayException(503, '{"error":"query timed out"}');
+      final cold = _buildContainer(session: failed);
+      addTearDown(cold.dispose);
+      await cold.read(channelsProvider.future);
+      await _settle();
+      expect(
+        cold.read(channelFilterActivityProvider(_channelA)).isLoading,
+        isTrue,
+      );
+      // A live post that fails verification leaves it unknown; one that
+      // passes makes it known.
+      failed.emit(
+        NostrEvent.fromJson({
+          ...message('forged live', now - 30).toJson(),
+          'sig': 'f' * 128,
+        }),
+      );
+      await _settle();
+      expect(cold.read(channelsProvider.notifier).activityFor(_channelA), (
+        known: false,
+        at: null,
+      ));
+      failed.emit(message('live', now - 40));
+      await _settle();
+      expect(cold.read(channelsProvider.notifier).activityFor(_channelA), (
+        known: true,
+        at: now - 40,
+      ));
+
+      // So does a read whose only post fails verification, and the next
+      // list read asks for that channel again while an Active section shows
+      // it.
+      final forged = NostrEvent.fromJson({
+        ...message('forged', now - 60).toJson(),
+        'sig': 'f' * 128,
+      });
+      final unverified = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        recentMessages: [forged],
+      );
+      final retried = _buildContainer(session: unverified);
+      addTearDown(retried.dispose);
+      retried.listen(channelFilterActivityProvider(_channelA), (_, _) {});
+      await retried.read(channelsProvider.future);
+      await _settle();
+      final retriedNotifier = retried.read(channelsProvider.notifier);
+      expect(retriedNotifier.activityFor(_channelA).known, isFalse);
+      unverified.recentMessages = [message('signed', now - 60)];
+      unverified.setStatus(SessionStatus.reconnecting);
+      unverified.setStatus(SessionStatus.connected);
+      await _waitUntil(() => retriedNotifier.activityFor(_channelA).known);
+      expect(retriedNotifier.activityFor(_channelA).at, now - 60);
+
+      // A covered channel with no messages is known to be empty.
+      final empty = _buildContainer(
+        session: _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [_meta(id: _channelA, name: 'general')],
+        ),
+      );
+      addTearDown(empty.dispose);
+      await empty.read(channelsProvider.future);
+      await _settle();
+      expect(empty.read(channelsProvider.notifier).activityFor(_channelA), (
+        known: true,
+        at: null,
+      ));
+    },
+  );
+
+  test('a catch-up whose newest post fails verification leaves activity '
+      'unknown rather than counting an older unchecked post', () async {
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final old = _signedPost(now - 10 * 86400);
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, _activityPk)],
+      metadata: [_meta(id: _channelA, name: 'general')],
+      recentMessages: [old],
+      enforceHistoryLimits: true,
+    );
+    final container = _buildContainer(
+      session: session,
+      overrides: [
+        _testPubkeyProvider.overrideWith(_ActivityPubkey.new),
+        readStateProvider.overrideWith(_ActivityReadState.new),
+      ],
+    );
+    addTearDown(container.dispose);
+    final listening = container.listen(
+      channelFilterActivityProvider(_channelA),
+      (_, _) {},
+    );
+    addTearDown(listening.close);
+    await container.read(channelsProvider.future);
+    final notifier = container.read(channelsProvider.notifier);
+    await notifier.waitForUnreadCatchUp();
+    expect(notifier.activityFor(_channelA), (known: true, at: old.createdAt));
+
+    session.recentMessages = [
+      old,
+      _signedPost(now - 60),
+      NostrEvent.fromJson({
+        ..._signedPost(now - 30).toJson(),
+        'sig': 'f' * 128,
+      }),
+    ];
+    final batches = session.queryBatches.length;
+    session.setStatus(SessionStatus.reconnecting);
+    session.setStatus(SessionStatus.connected);
+    await _waitUntil(
+      () => session.queryBatches
+          .skip(batches)
+          .any((batch) => batch.every((filter) => filter.since != null)),
+    );
+    await notifier.waitForUnreadCatchUp();
+    await _waitUntil(() => !notifier.activityFor(_channelA).known);
+  });
+
+  test('Active filter activity survives rebuilds, read gaps, failed catch-ups '
+      'and deletions', () async {
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    NostrEvent message(String id, int at) => _signedPost(at, content: id);
+    final old = message('old', now - 10 * 86400);
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, _activityPk)],
+      metadata: [_meta(id: _channelA, name: 'general')],
+      recentMessages: [old],
+      enforceHistoryLimits: true,
+    );
+    final savedDir = await Directory.systemTemp.createTemp('active-saved');
+    addTearDown(() => savedDir.delete(recursive: true));
+    final container = _buildContainer(
+      session: session,
+      overrides: [
+        readStateProvider.overrideWith(_ActivityReadState.new),
+        _testPubkeyProvider.overrideWith(_ActivityPubkey.new),
+        savedMessageScopeProvider.overrideWithValue((
+          communityId: 'community',
+          pubkey: _activityPk,
+        )),
+        savedMessageStoreProvider.overrideWith(
+          (ref) => SavedMessageStore(
+            root: () async => savedDir,
+            diagnostics: const NoopDiagnosticReporter(),
+          ),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(channelsProvider.future);
+    final notifier = container.read(channelsProvider.notifier);
+    await notifier.waitForUnreadCatchUp();
+    expect(notifier.activityFor(_channelA), (known: true, at: old.createdAt));
+    // An Active section shows the channel, so its activity gaps are read.
+    var shown = container.listen(
+      channelFilterActivityProvider(_channelA),
+      (_, _) {},
+    );
+    addTearDown(() => shown.close());
+
+    // Rebuilding in the same community, as creating a Solo chat does,
+    // reuses the list without re-reading it; its activity stays.
+    container.invalidate(channelsProvider);
+    await container.read(channelsProvider.future);
+    await notifier.waitForUnreadCatchUp();
+    expect(notifier.activityFor(_channelA), (known: true, at: old.createdAt));
+
+    Future<void> reconnect() async {
+      final batches = session.queryBatches.length;
+      session.setStatus(SessionStatus.reconnecting);
+      session.setStatus(SessionStatus.connected);
+      await _waitUntil(
+        () => session.queryBatches
+            .skip(batches)
+            .any((batch) => batch.every((filter) => filter.since != null)),
+      );
+      await notifier.waitForUnreadCatchUp();
+      await _settle();
+    }
+
+    // A post that arrived while disconnected and was read on another
+    // device is older than the read marker the catch-up starts after.
+    final offline = message('offline', now - 30);
+    session.recentMessages = [old, offline];
+    (container.read(readStateProvider.notifier) as _ActivityReadState)
+        .markReadThrough(_channelA, now - 15);
+    await reconnect();
+    expect(notifier.activityFor(_channelA).at, offline.createdAt);
+
+    // An unread post newer than the gap makes reading the gap moot, so a
+    // failing gap read is never sent.
+    final mention = _signedPost(
+      now - 5,
+      content: 'hey',
+      key: _aliceKey,
+      tags: [
+        ['p', _activityPk],
+      ],
+    );
+    session.recentMessages = [old, offline, mention];
+    (container.read(readStateProvider.notifier) as _ActivityReadState)
+        .markReadThrough(_channelA, now - 8);
+    session.gapBatchError = RelayException(503, '{"error":"query timed out"}');
+    await reconnect();
+    expect(notifier.activityFor(_channelA), (
+      known: true,
+      at: mention.createdAt,
+    ));
+    expect(
+      notifier.observedUnreadEventsByChannel[_channelA]?.keys,
+      contains(mention.id),
+    );
+
+    // A failed gap read with nothing newer leaves activity unknown.
+    (container.read(readStateProvider.notifier) as _ActivityReadState)
+        .markReadThrough(_channelA, now - 3);
+    await reconnect();
+    await _waitUntil(() => !notifier.activityFor(_channelA).known);
+    session.gapBatchError = null;
+    session.recentMessages = [old, offline];
+
+    // A failed catch-up leaves activity unknown until one succeeds.
+    session.messageBatchError = RelayException(
+      503,
+      '{"error":"query timed out"}',
+    );
+    await reconnect();
+    expect(notifier.activityFor(_channelA).known, isFalse);
+    session.messageBatchError = null;
+    await notifier.refresh();
+    await notifier.waitForUnreadCatchUp();
+    await _waitUntil(() => notifier.activityFor(_channelA).known);
+    expect(notifier.activityFor(_channelA), (
+      known: true,
+      at: offline.createdAt,
+    ));
+
+    // A channel with a gap to read is unknown until that read answers. A pull
+    // to refresh drops the answer, and one that then fails starts no new
+    // catch-up, so the channel stays unknown rather than settling on activity
+    // the gap could hide. The pull can land while the unread request or the
+    // gap read is in flight.
+    for (final parkUnread in [true, false]) {
+      session.recentMessages = [old, offline];
+      await notifier.refresh();
+      await notifier.waitForUnreadCatchUp();
+      await _waitUntil(() => notifier.activityFor(_channelA).known);
+      session.recentMessages = [old, offline, message('parked', now - 25)];
+      final gapGate = Completer<void>();
+      if (parkUnread) {
+        session.pauseNextUnreadCatchUpQuery();
+        final sent = session.nextUnreadCatchUpQueryStarted;
+        session.setStatus(SessionStatus.reconnecting);
+        session.setStatus(SessionStatus.connected);
+        await sent;
+      } else {
+        session.gapBatchGate = gapGate;
+        await reconnect();
+        await _waitUntil(() => session.gapBatchGate == null);
+      }
+      expect(notifier.activityFor(_channelA).known, isFalse);
+      session
+        ..pauseNextMemberMetadataQuery()
+        ..failClaimedMemberMetadataQuery = true;
+      final failing = notifier.refresh();
+      await session.nextMemberMetadataQueryStarted;
+      parkUnread
+          ? session.resumePausedUnreadCatchUpQuery()
+          : gapGate.complete();
+      await _settle();
+      session.resumePausedMemberMetadataQuery();
+      await failing;
+      session.failClaimedMemberMetadataQuery = false;
+      await _settle();
+      expect(notifier.activityFor(_channelA).known, isFalse);
+    }
+
+    // A rebuild while disconnected resets the unread cursor, so the next
+    // catch-up starts after the read marker; the post read meanwhile on
+    // another device still counts.
+    final missed = message('missed', now - 20);
+    session.recentMessages = [old, offline, missed];
+    session.setStatus(SessionStatus.reconnecting);
+    container.invalidate(channelsProvider);
+    final rebuilt = container.read(channelsProvider.future);
+    (container.read(readStateProvider.notifier) as _ActivityReadState)
+        .markReadThrough(_channelA, now - 12);
+    await reconnect();
+    await rebuilt;
+    expect(notifier.activityFor(_channelA), (
+      known: true,
+      at: missed.createdAt,
+    ));
+
+    // Pull to refresh drops a deleted latest post.
+    session.recentMessages = [old];
+    await notifier.refresh();
+    await notifier.waitForUnreadCatchUp();
+    expect(notifier.activityFor(_channelA).at, old.createdAt);
+
+    // A post that arrives while that read is out is newer than its answer.
+    final gate = Completer<void>();
+    session.latestBatchGate = gate;
+    final refreshing = notifier.refresh();
+    await _waitUntil(() => session.latestBatchGate == null);
+    final live = message('live', now - 2);
+    session.emit(live);
+    await _settle();
+    gate.complete();
+    await refreshing;
+    expect(notifier.activityFor(_channelA).at, live.createdAt);
+
+    // Deleting the latest post forgets the channel's activity until the next
+    // list read re-reads it.
+    NostrEvent deletionOf(NostrEvent post, {int? at}) => NostrEvent.fromJson(
+      signNostrEvent(
+        kind: EventKind.deletion,
+        content: '',
+        secretKey: _activityKey,
+        createdAt: at,
+        tags: [
+          ['h', _channelA],
+          ['e', post.id],
+        ],
+      ).toMap(),
+    );
+    session.recentMessages = [old];
+    session.emit(deletionOf(live));
+    await _waitUntil(() => !notifier.activityFor(_channelA).known);
+    await reconnect();
+    expect(notifier.activityFor(_channelA), (known: true, at: old.createdAt));
+
+    // So does a deletion made while offline, which the catch-up returns.
+    final gone = message('gone', now - 4);
+    session.emit(gone);
+    await _waitUntil(
+      () => notifier.activityFor(_channelA).at == gone.createdAt,
+    );
+    session.recentMessages = [old, deletionOf(gone)];
+    await reconnect();
+    expect(notifier.activityFor(_channelA).known, isFalse);
+    session.recentMessages = [old];
+    await reconnect();
+    expect(notifier.activityFor(_channelA), (known: true, at: old.createdAt));
+
+    // A gap read answers with its newest post. When the catch-up found that
+    // post deleted, an older one in the gap may survive, so the channel stays
+    // unknown.
+    final kept = message('kept', now - 8);
+    session.emit(kept);
+    await _waitUntil(
+      () => notifier.activityFor(_channelA).at == kept.createdAt,
+    );
+    final older = message('older', now - 7);
+    final deletedInGap = message('deletedInGap', now - 6);
+    session.recentMessages = [
+      old,
+      kept,
+      older,
+      deletedInGap,
+      deletionOf(deletedInGap),
+    ];
+    (container.read(readStateProvider.notifier) as _ActivityReadState)
+        .markReadThrough(_channelA, now - 4);
+    await reconnect();
+    expect(notifier.activityFor(_channelA).known, isFalse);
+    session.recentMessages = [old, kept, older];
+    await reconnect();
+    expect(notifier.activityFor(_channelA), (known: true, at: older.createdAt));
+
+    // So does a gap read whose signature checks fail to run.
+    final unchecked = message('unchecked', now - 5);
+    session.recentMessages = [old, kept, older, unchecked];
+    final checks = debugRunActivityChecks;
+    debugRunActivityChecks = (run) async {
+      final verified = await checks(run);
+      if (verified.contains(unchecked.id)) throw StateError('checks failed');
+      return verified;
+    };
+    try {
+      await reconnect();
+      expect(notifier.activityFor(_channelA).known, isFalse);
+    } finally {
+      debugRunActivityChecks = checks;
+    }
+    await reconnect();
+    expect(notifier.activityFor(_channelA), (
+      known: true,
+      at: unchecked.createdAt,
+    ));
+
+    // A deletion made while offline counts even when the read marker has
+    // since moved past it on another device.
+    final gone2 = message('gone2', now - 4);
+    session.emit(gone2);
+    await _waitUntil(
+      () => notifier.activityFor(_channelA).at == gone2.createdAt,
+    );
+    session.recentMessages = [old, unchecked, deletionOf(gone2, at: now - 3)];
+    (container.read(readStateProvider.notifier) as _ActivityReadState)
+        .markReadThrough(_channelA, now - 2);
+    await reconnect();
+    expect(notifier.activityFor(_channelA).known, isFalse);
+    session.recentMessages = [old, unchecked];
+    await reconnect();
+    expect(notifier.activityFor(_channelA), (
+      known: true,
+      at: unchecked.createdAt,
+    ));
+
+    // A newer post in the gap replaces the deleted one, so the channel stays
+    // known.
+    final gone3 = message('gone3', now - 4);
+    session.emit(gone3);
+    await _waitUntil(
+      () => notifier.activityFor(_channelA).at == gone3.createdAt,
+    );
+    final after = message('after', now - 3);
+    session.recentMessages = [
+      old,
+      unchecked,
+      after,
+      deletionOf(gone3, at: now - 3),
+    ];
+    await reconnect();
+    expect(notifier.activityFor(_channelA), (known: true, at: after.createdAt));
+
+    // So does a deletion in the same second as the latest post the read
+    // marker sits on.
+    final boundary = message('boundary', now - 1);
+    session.emit(boundary);
+    await _waitUntil(
+      () => notifier.activityFor(_channelA).at == boundary.createdAt,
+    );
+    session.recentMessages = [
+      old,
+      unchecked,
+      after,
+      deletionOf(boundary, at: now - 1),
+    ];
+    (container.read(readStateProvider.notifier) as _ActivityReadState)
+        .markReadThrough(_channelA, now - 1);
+    // The earlier second it reads only serves the Active head: another post's
+    // deletion there is not new, so a page being saved meanwhile still is.
+    final regular = session.recentMessages;
+    session.recentMessages = [
+      old,
+      unchecked,
+      after,
+      deletionOf(older, at: now - 1),
+    ];
+    final store = container.read(savedMessageStoreProvider);
+    final page = (channelId: _channelA, rootId: '');
+    final ticket = store.capture(
+      container.read(savedMessageScopeProvider)!,
+      page,
+    );
+    await reconnect();
+    expect(store.isCurrent(ticket), isTrue);
+    expect(notifier.activityFor(_channelA), (
+      known: true,
+      at: boundary.createdAt,
+    ));
+    session.recentMessages = regular;
+    await reconnect();
+    expect(notifier.activityFor(_channelA).known, isFalse);
+    session.recentMessages = [old, unchecked, after];
+    await reconnect();
+    expect(notifier.activityFor(_channelA), (known: true, at: after.createdAt));
+
+    // A channel no Active section shows skips its gap read, and reads as
+    // unknown until a catch-up while it is shown.
+    shown.close();
+    await _settle();
+    final hidden = message('hidden', now - 3);
+    session.recentMessages = [old, hidden];
+    (container.read(readStateProvider.notifier) as _ActivityReadState)
+        .markReadThrough(_channelA, now - 1);
+    final gapReads = session.queryBatches.where(_isGapBatch).length;
+    await reconnect();
+    expect(session.queryBatches.where(_isGapBatch), hasLength(gapReads));
+    expect(notifier.activityFor(_channelA).known, isFalse);
+    shown = container.listen(
+      channelFilterActivityProvider(_channelA),
+      (_, _) {},
+    );
+    await reconnect();
+    await _waitUntil(
+      () => notifier.activityFor(_channelA).at == hidden.createdAt,
+    );
+
+    // So does a catch-up that fails before it sends anything.
+    final readState =
+        container.read(readStateProvider.notifier) as _ActivityReadState;
+    readState.unavailable = true;
+    container.invalidate(readStateProvider);
+    session.setStatus(SessionStatus.reconnecting);
+    session.setStatus(SessionStatus.connected);
+    await _waitUntil(() => !notifier.activityFor(_channelA).known);
+  });
+
+  for (final (catchUp, before) in [
+    (true, true),
+    (true, false),
+    (false, false),
+  ]) {
+    test(
+      'a latest post deleted during signature checks leaves no stale activity '
+      '(catch-up: $catchUp, deleted before the read: $before)',
+      () async {
+        final configured = debugRunActivityChecks;
+        addTearDown(() => debugRunActivityChecks = configured);
+        debugRunActivityChecks = (checks) => Isolate.run(checks);
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final old = _signedPost(now - 10 * 86400);
+        final middle = _signedPost(now - 90);
+        final head = _signedPost(now - 60);
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, _activityPk)],
+          metadata: [_meta(id: _channelA, name: 'general')],
+          recentMessages: [old],
+          enforceHistoryLimits: true,
+        );
+        final container = _buildContainer(
+          session: session,
+          overrides: [
+            _testPubkeyProvider.overrideWith(_ActivityPubkey.new),
+            readStateProvider.overrideWith(_ActivityReadState.new),
+          ],
+        );
+        addTearDown(container.dispose);
+        final listening = container.listen(
+          channelFilterActivityProvider(_channelA),
+          (_, _) {},
+        );
+        addTearDown(listening.close);
+        await container.read(channelsProvider.future);
+        final notifier = container.read(channelsProvider.notifier);
+        await notifier.waitForUnreadCatchUp();
+        expect(notifier.activityFor(_channelA), (
+          known: true,
+          at: old.createdAt,
+        ));
+        final sampled = Completer<void>();
+        final release = Completer<void>();
+        debugRunActivityChecks = (checks) async {
+          final verified = await Isolate.run(checks);
+          if (!before && !sampled.isCompleted && verified.contains(head.id)) {
+            sampled.complete();
+            await release.future;
+          }
+          return verified;
+        };
+        session.recentMessages = [old, if (catchUp) middle, head];
+        Future<void>? refreshing;
+        final batchesBefore = session.queryBatches.length;
+        if (catchUp) {
+          if (before) {
+            session.pauseNextUnreadCatchUpQuery();
+          } else {
+            // Read on another device between the two posts, so the catch-up
+            // starts after `middle` and leaves it in a gap.
+            (container.read(readStateProvider.notifier) as _ActivityReadState)
+                .markReadThrough(_channelA, now - 75);
+          }
+          session.setStatus(SessionStatus.reconnecting);
+          session.setStatus(SessionStatus.connected);
+        } else {
+          // The refresh reads a head newer than the cached one, so deleting
+          // it forgets no committed head. The other device has already read
+          // through the deletion's second.
+          (container.read(readStateProvider.notifier) as _ActivityReadState)
+              .markReadThrough(_channelA, now);
+          refreshing = notifier.refresh();
+        }
+        if (before) {
+          await session.nextUnreadCatchUpQueryStarted;
+        } else {
+          await sampled.future.timeout(const Duration(seconds: 5));
+        }
+        final deletion = NostrEvent.fromJson(
+          signNostrEvent(
+            kind: EventKind.deletion,
+            secretKey: _activityKey,
+            content: '',
+            createdAt: now,
+            tags: [
+              ['h', _channelA],
+              ['e', head.id],
+            ],
+          ).toMap(),
+        );
+        session.recentMessages = [old, if (catchUp) middle, deletion];
+        session.emit(deletion);
+        await _settle();
+        release.complete();
+        if (before) session.resumePausedUnreadCatchUpQuery();
+        if (refreshing != null) await refreshing;
+        await notifier.waitForUnreadCatchUp();
+        await _settle();
+        if (catchUp && before) {
+          await _waitForIsolate(
+            () => notifier.activityFor(_channelA).at == middle.createdAt,
+          );
+        }
+        final result = notifier.activityFor(_channelA);
+        if (catchUp) {
+          if (before) {
+            expect(result, (known: true, at: middle.createdAt));
+          } else {
+            // The deleted head leaves the channel unknown, with no gap read
+            // that could settle it on a post older than the deleted one.
+            expect(result.known, isFalse);
+            expect(
+              session.queryBatches.skip(batchesBefore).where(_isGapBatch),
+              isEmpty,
+            );
+          }
+          expect(result.known && result.at == old.createdAt, isFalse);
+        } else {
+          expect(result.known, isFalse);
+          final pre = session.queryBatches.length;
+          session.setStatus(SessionStatus.reconnecting);
+          session.setStatus(SessionStatus.connected);
+          // The reconnect's list read checks signatures on the real isolate
+          // before its catch-up goes out.
+          await _waitForIsolate(
+            () => session.queryBatches
+                .skip(pre)
+                .any((b) => b.every((f) => f.since != null)),
+          );
+          await notifier.waitForUnreadCatchUp();
+          await _waitForIsolate(() => notifier.activityFor(_channelA).known);
+          expect(notifier.activityFor(_channelA), (
+            known: true,
+            at: old.createdAt,
+          ));
+        }
+      },
+    );
+  }
+
+  // Past one request's channel values, the head deletions go out on their
+  // own after the gap posts; below it, with them.
+  for (final empty in [0, 2]) {
+    test('gap posts settle Active activity even when the head deletion read '
+        'fails ($empty channels without a head)', () async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final ids = [
+        for (var i = 0; i <= kMaxExplicitChannelValues ~/ 2; i++) 'gap-$i',
+      ];
+      final heads = {
+        for (final id in ids.take(ids.length - empty))
+          id: _signedPost(now - 100, channel: id, content: id),
+      };
+      final newer = _signedPost(now - 30, channel: ids[0], content: 'newer');
+      final deletion = NostrEvent.fromJson(
+        signNostrEvent(
+          kind: EventKind.deletion,
+          content: '',
+          secretKey: _activityKey,
+          createdAt: now - 50,
+          tags: [
+            ['h', ids[1]],
+            ['e', heads[ids[1]]!.id],
+          ],
+        ).toMap(),
+      );
+      final session = _FakeRelaySession(
+        memberships: [for (final id in ids) _membership(id, _activityPk)],
+        metadata: [for (final id in ids) _meta(id: id, name: id)],
+        recentMessages: heads.values.toList(),
+        enforceHistoryLimits: true,
+      );
+      final container = _buildContainer(
+        session: session,
+        overrides: [
+          readStateProvider.overrideWith(_ActivityReadState.new),
+          _testPubkeyProvider.overrideWith(_ActivityPubkey.new),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      final notifier = container.read(channelsProvider.notifier);
+      await notifier.waitForUnreadCatchUp();
+      for (final id in ids) {
+        final shown = container.listen(
+          channelFilterActivityProvider(id),
+          (_, _) {},
+        );
+        addTearDown(shown.close);
+      }
+      Future<void> reconnect() async {
+        final batches = session.queryBatches.length;
+        session.setStatus(SessionStatus.reconnecting);
+        session.setStatus(SessionStatus.connected);
+        await _waitUntil(
+          () => session.queryBatches
+              .skip(batches)
+              .any((batch) => batch.every((filter) => filter.since != null)),
+        );
+        await notifier.waitForUnreadCatchUp();
+        await _settle();
+      }
+
+      // Read on another device while disconnected, so every channel has a gap.
+      session.recentMessages = [...heads.values, newer, deletion];
+      for (final id in ids) {
+        (container.read(readStateProvider.notifier) as _ActivityReadState)
+            .markReadThrough(id, now - 15);
+      }
+      session.headDeletionBatchError = RelayException(
+        503,
+        '{"error":"query timed out"}',
+      );
+      final before = session.queryBatches.length;
+      await reconnect();
+      expect(
+        session.queryBatches
+            .skip(before)
+            .where(
+              (batch) =>
+                  _isGapBatch(batch) ||
+                  batch.every((filter) => filter.tags.containsKey('#e')),
+            ),
+        hasLength(empty == 0 ? 2 : 1),
+      );
+      expect(notifier.activityFor(ids[0]), (known: true, at: newer.createdAt));
+      expect(notifier.activityFor(ids[1]).known, isFalse);
+      // Only a separate deletion read can fail on its own.
+      expect(notifier.activityFor(ids[2]).known, empty > 0);
+
+      // Once the deletions are read, only the deleted head stays unknown.
+      session.headDeletionBatchError = null;
+      await reconnect();
+      expect(notifier.activityFor(ids[1]).known, isFalse);
+      expect(notifier.activityFor(ids[2]), (
+        known: true,
+        at: heads[ids[2]]!.createdAt,
+      ));
+    });
+  }
 
   test('live channel events update channel lastMessageAt', () async {
     final session = _FakeRelaySession(
@@ -3095,6 +4630,143 @@ void main() {
     await _waitUntil(() => session.subscribeFilters.length == 1);
     expect(session.subscribeFilters, hasLength(1));
   });
+
+  // A reply also sent to the channel shows in the timeline, but it is still a
+  // thread reply: it dots only when it mentions the reader or sits in one of
+  // their threads. Elsewhere it bolds the channel like a top-level post.
+  group('replies also sent to the channel', () {
+    final otherRoot = 'a' * 64;
+    final ownRoot = 'b' * 64;
+    bool isUnread(List<NostrFilter> batch) =>
+        batch.isNotEmpty && batch.every((filter) => filter.since != null);
+    NostrEvent post(
+      String id,
+      int createdAt, {
+      String author = 'alice',
+      String? parentId,
+      bool broadcast = false,
+      bool mention = false,
+    }) => NostrEvent(
+      id: id,
+      pubkey: author,
+      createdAt: createdAt,
+      kind: EventKind.streamMessageV2,
+      tags: [
+        const ['h', _channelA],
+        if (parentId != null) ['e', parentId, '', 'reply'],
+        if (broadcast) const ['broadcast', '1'],
+        if (mention) const ['p', myPk],
+      ],
+      content: 'hi',
+      sig: 'sig',
+    );
+
+    for (final (name, setup, follow, mention, dotted) in [
+      ("someone else's thread", <NostrEvent>[], false, false, false),
+      (
+        "someone else's thread, mentioning the reader",
+        <NostrEvent>[],
+        false,
+        true,
+        true,
+      ),
+      ('a thread the reader follows', <NostrEvent>[], true, false, true),
+      (
+        'a thread the reader started',
+        [post(ownRoot, 10, author: myPk)],
+        false,
+        false,
+        true,
+      ),
+      (
+        'a thread the reader replied in',
+        [post('own-reply', 11, author: myPk, parentId: otherRoot)],
+        false,
+        false,
+        true,
+      ),
+    ]) {
+      test('$name ${dotted ? 'dots' : 'only bolds'} the channel', () async {
+        final root = setup.any((event) => event.id == ownRoot)
+            ? ownRoot
+            : otherRoot;
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [_meta(id: _channelA, name: 'general')],
+        );
+        final follows = _TestFollows();
+        final container = _buildContainer(session: session, follows: follows);
+        addTearDown(container.dispose);
+        await container.read(channelsProvider.future);
+        await _waitUntil(() => session.queryBatches.any(isUnread));
+        await _settle();
+        if (follow) {
+          follows.choose(followed: {root}, channelByRoot: {root: _channelA});
+        }
+        setup.forEach(session.emit);
+        final broadcast = post(
+          'broadcast',
+          20,
+          parentId: root,
+          broadcast: true,
+          mention: mention,
+        );
+        session.emit(broadcast);
+        await _settle();
+
+        final notifier = container.read(channelsProvider.notifier);
+        final channels = container.read(channelsProvider).value!;
+        final observed =
+            notifier.observedUnreadEventsByChannel[_channelA]!['broadcast']!;
+        expect(observed.highPriority, dotted);
+        expect(observed.attention, dotted);
+        // Activity lists the thread only when the reply earns attention.
+        expect(
+          notifier.observedThreadReplies(channels),
+          dotted ? [broadcast] : isEmpty,
+        );
+        // The app icon counts it as attention only when it dots. Otherwise
+        // it is ordinary unread, the same as a new top-level post.
+        final badge = container.read(unreadBadgeProvider);
+        expect(badge.highPriorityCount, dotted ? 1 : 0);
+        expect(badge.generalUnreadCount, dotted ? 0 : 1);
+
+        void expectHighlights(
+          Map<String, int> contexts, {
+          required bool unread,
+          required bool attention,
+        }) {
+          final highlights = computeChannelListHighlights(
+            channels: channels,
+            readState: ReadStateState(
+              isReady: true,
+              pubkey: myPk,
+              contexts: contexts,
+              version: 0,
+            ),
+            channelsNotifier: notifier,
+          );
+          expect(highlights.unread, unread ? {_channelA} : isEmpty);
+          expect(highlights.attention, attention ? {_channelA} : isEmpty);
+        }
+
+        expectHighlights(const {}, unread: !dotted, attention: dotted);
+        // Read by its own mark either way, as desktop reads it: reaching the
+        // bottom of the channel does not read it.
+        expect(observed.channelCatchUp, isFalse);
+        expectHighlights(
+          {activityContextKey(_channelA): 100},
+          unread: !dotted,
+          attention: dotted,
+        );
+        expectHighlights(
+          {msgContextKey('broadcast'): 20},
+          unread: false,
+          attention: false,
+        );
+      });
+    }
+  });
 }
 
 const _channelA = '11111111-1111-4111-8111-111111111111';
@@ -3151,6 +4823,8 @@ NostrEvent _meta({
   String visibility = 'open',
   int createdAt = 1,
   int? ttlSeconds,
+  String? creator,
+  String? description,
   bool archived = false,
   bool unlisted = false,
   List<String> participants = const [],
@@ -3162,6 +4836,8 @@ NostrEvent _meta({
   tags: [
     ['d', id],
     ['name', name],
+    if (creator != null) ['P', creator],
+    if (description != null) ['about', description],
     ['t', channelType],
     [visibility == 'private' ? 'private' : 'public'],
     if (ttlSeconds != null) ['ttl', '$ttlSeconds'],
@@ -3176,11 +4852,15 @@ NostrEvent _meta({
 ProviderContainer _buildContainer({
   required _FakeRelaySession session,
   _TestMutes? mutes,
+  _TestFollows? follows,
+  List<Override> overrides = const [],
 }) {
   return ProviderContainer(
     retry: (_, _) => null,
     overrides: [
+      ...overrides,
       if (mutes != null) channelMutesProvider.overrideWith(() => mutes),
+      if (follows != null) threadFollowsProvider.overrideWith(() => follows),
       appLifecycleProvider.overrideWith(() => _FakeAppLifecycleNotifier()),
       relaySessionProvider.overrideWith(() => session),
       // Route the pubkey through a mutable notifier so tests can switch the
@@ -3224,10 +4904,53 @@ final _testPubkeyProvider = NotifierProvider<_TestPubkeyNotifier, String?>(
   _TestPubkeyNotifier.new,
 );
 
+// Active filter activity counts only signed messages.
+const _activityKey =
+    '0000000000000000000000000000000000000000000000000000000000000001';
+const _aliceKey =
+    '0000000000000000000000000000000000000000000000000000000000000002';
+final _activityPk = derivePublicKeyHex(_activityKey);
+
+class _ActivityPubkey extends _TestPubkeyNotifier {
+  @override
+  String? build() => _activityPk;
+}
+
+NostrEvent _signedPost(
+  int at, {
+  String channel = _channelA,
+  String content = 'hi',
+  String key = _activityKey,
+  List<List<String>> tags = const [],
+}) => NostrEvent.fromJson(
+  signNostrEvent(
+    kind: EventKind.streamMessageV2,
+    content: content,
+    secretKey: key,
+    createdAt: at,
+    tags: [
+      ['h', channel],
+      ...tags,
+    ],
+  ).toMap(),
+);
+
+bool _isGapBatch(List<NostrFilter> batch) =>
+    batch.any((filter) => filter.until != null && filter.limit == 1);
+
 /// Drains pending microtasks so provider rebuilds and awaited writes land.
 Future<void> _settle() async {
   for (var i = 0; i < 20; i++) {
     await Future<void>.delayed(Duration.zero);
+  }
+}
+
+/// Waits in real time for work a real isolate finishes, such as catch-up
+/// activity, which lands after unread readiness.
+Future<void> _waitForIsolate(bool Function() predicate) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 5));
+  while (!predicate() && DateTime.now().isBefore(deadline)) {
+    await Future<void>.delayed(const Duration(milliseconds: 10));
   }
 }
 
@@ -3259,6 +4982,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     this.maxMetadataPageRequests,
     this.hiddenDmEvents = const [],
     this.huddleStarts = const [],
+    this.creations = const [],
     this.recentMessages = const [],
     this.deletionChannels = const {},
     this.enforceHistoryLimits = false,
@@ -3276,6 +5000,10 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final int? maxMetadataPageRequests;
   final List<NostrEvent> hiddenDmEvents;
   final List<NostrEvent> huddleStarts;
+  final List<NostrEvent> creations;
+  Completer<void>? creationGate;
+  int creationReads = 0;
+  bool failCreations = false;
   List<NostrEvent> recentMessages;
   final Map<String, String> deletionChannels;
   final bool enforceHistoryLimits;
@@ -3290,8 +5018,17 @@ class _FakeRelaySession extends RelaySessionNotifier {
 
   /// While set, member metadata reads wait for it to complete.
   Completer<void>? metadataGate;
+  // Holds the next latest-message batch, which a list refresh awaits after it
+  // has merged the directory.
+  Completer<void>? latestBatchGate;
   final List<List<NostrFilter>> queryBatches = [];
   Object? messageBatchError;
+  // Fails batches made only of the catch-up's activity gap reads.
+  Object? gapBatchError;
+  // Fails a batch that only reads deletions of given posts.
+  Object? headDeletionBatchError;
+  // Holds the next batch of activity gap reads.
+  Completer<void>? gapBatchGate;
   Object? latestBatchError;
   Object? messageHistoryError;
   int messageHistoryCount = 0;
@@ -3312,6 +5049,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   Completer<void>? _pausedSubscribe;
   Completer<void>? _subscribeStarted;
   Completer<void>? _pausedDirectory;
+  bool _pauseClaimed = false;
   Completer<void>? _directoryStarted;
   Completer<void>? _pausedHiddenDm;
   Completer<void>? _hiddenDmStarted;
@@ -3543,6 +5281,13 @@ class _FakeRelaySession extends RelaySessionNotifier {
       }
       return hiddenDmEvents;
     }
+    if (filter.kinds.contains(9007)) {
+      creationReads++;
+      await creationGate?.future;
+      if (failCreations) throw Exception('receipt unavailable');
+      final ids = filter.tags['#h'] ?? const <String>[];
+      return creations.where((e) => ids.contains(e.getTagValue('h'))).toList();
+    }
     if (filter.kinds.contains(EventKind.huddleStarted)) {
       // Claim the parked slot so the newer refresh's own Huddle query runs
       // unblocked: one shot, exactly like the hidden-DM and member-metadata hooks.
@@ -3634,11 +5379,15 @@ class _FakeRelaySession extends RelaySessionNotifier {
       // active when the response is released.
       final directorySnapshot = List.of(metadata);
       final paused = _pausedDirectory;
-      if (paused != null) {
+      // Only the first query after the pause waits; a later one meanwhile
+      // (a new scope's load) answers at once.
+      if (paused != null && !_pauseClaimed) {
+        _pauseClaimed = true;
         _directoryStarted!.complete();
         await paused.future;
         _pausedDirectory = null;
         _directoryStarted = null;
+        _pauseClaimed = false;
       }
       if (directoryFailures > 0) {
         directoryFailures--;
@@ -3659,19 +5408,44 @@ class _FakeRelaySession extends RelaySessionNotifier {
         }
         return const [];
       }
-      return filter.until == null ? directorySnapshot : const [];
+      if (filter.until != null) return const [];
+      final since = filter.since;
+      return [
+        for (final event in directorySnapshot)
+          if (since == null || event.createdAt >= since) event,
+      ];
     }
     queryBatches.add(filters);
     if (_explicitChannelValues(filters) > kMaxExplicitChannelValues) {
       throw RelayException(400, '{"error":"too many explicit channels"}');
     }
     if (messageBatchError case final error?) throw error;
+    if (headDeletionBatchError case final error?
+        when filters.isNotEmpty &&
+            filters.every(
+              (filter) =>
+                  filter.tags.containsKey('#e') &&
+                  filter.kinds.contains(EventKind.deletion),
+            )) {
+      throw error;
+    }
+    if (_isGapBatch(filters)) {
+      if (gapBatchError case final error?) throw error;
+      final gate = gapBatchGate;
+      gapBatchGate = null;
+      await gate?.future;
+    }
     // The unread catch-up is the only batch that carries `since` on every
     // filter; the latest-message batch leaves it null. Snapshot the messages at
     // request time so a parked response reflects the scope that asked for it.
     final isUnreadCatchUp =
         filters.isNotEmpty && filters.every((filter) => filter.since != null);
     if (!isUnreadCatchUp && latestBatchError != null) throw latestBatchError!;
+    if (!isUnreadCatchUp) {
+      final gate = latestBatchGate;
+      latestBatchGate = null;
+      await gate?.future;
+    }
     final messageSnapshot = List.of(recentMessages);
     if (isUnreadCatchUp) {
       // Claim the parked slot so the refresh that follows the switch can run
@@ -3737,6 +5511,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
     required void Function(RelaySubscriptionStatus) onStatusChanged,
+    bool resumeSince = true,
   }) => subscribe(filter, onEvent, onClosed: onClosed);
 
   @override
@@ -3876,6 +5651,19 @@ class _BridgeDownRelaySession extends _FakeRelaySession {
     _batchOf([filter]),
     () => super.fetchHistory(filter, timeout: timeout),
   );
+}
+
+class _ActivityReadState extends ReadStateNotifier {
+  bool unavailable = false;
+
+  @override
+  ReadStateState build() {
+    if (unavailable) throw StateError('read state unavailable');
+    return const ReadStateState.inert();
+  }
+
+  void markReadThrough(String channelId, int at) =>
+      state = state.copyWithContext(channelId, at);
 }
 
 class _FakeAppLifecycleNotifier extends AppLifecycleNotifier {

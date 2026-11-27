@@ -3,17 +3,24 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
+import 'package:buzz/shared/http/app_http_client.dart';
+import 'relay_call_error.dart';
 
-/// The default transport. `dart:io` would inflate gzip responses on the
-/// calling isolate, so leave them compressed for the response decoder.
+import 'relay_query_response.dart' show RelayResponseTooLarge;
+
+/// The default transport. On iOS and Android, the app-wide native session
+/// inflates gzip natively, off the Dart isolate. `dart:io` would inflate on
+/// the calling isolate, so leave its responses compressed for the response
+/// decoder.
 ///
 /// A non-`dart:io` client supplied through `http.runWithClient`, such as a
 /// `MockClient`, is used as is. An `IOClient` is replaced, not closed, since
 /// it may be shared.
-http.Client _gzipPassthroughClient() {
+http.Client _defaultTransport() {
+  if (hasNativeHttpSession) return newAppHttpClient();
   final client = http.Client();
-  if (client is! IOClient) return client;
-  return IOClient(HttpClient()..autoUncompress = false);
+  if (client is! IOClient) return countedAppHttpClient(client);
+  return countedAppHttpClient(IOClient(HttpClient()..autoUncompress = false));
 }
 
 /// Owns the reusable HTTP transport used for relay `/query` requests.
@@ -25,12 +32,24 @@ class RelayHttpQueryClient {
     http.Client? client,
     http.Client Function()? clientFactory,
   }) : _injectedClient = client,
-       _clientFactory = clientFactory ?? _gzipPassthroughClient;
+       _clientFactory = clientFactory ?? _defaultTransport;
 
   final http.Client? _injectedClient;
   final http.Client Function() _clientFactory;
   _ClientGeneration? _currentGeneration;
   final Set<_ClientGeneration> _generations = {};
+
+  /// The error for a request that outlived [timeout]: a [call] when the
+  /// request is one, otherwise a plain [TimeoutException]. Its stack is the
+  /// caller's, since the timer that raises it has no frames from the app.
+  static TimeoutException _timedOut(Duration timeout, RelayCall? call) =>
+      call == null
+      ? TimeoutException('Relay request timed out after $timeout', timeout)
+      : RelayTimeoutException(
+          call,
+          'Relay query timed out after $timeout',
+          timeout,
+        );
 
   Future<http.Response> post(
     Uri url, {
@@ -39,17 +58,22 @@ class RelayHttpQueryClient {
     required Duration timeout,
     http.Client Function(http.Client, bool Function())? decorate,
   }) async {
+    final callSite = StackTrace.current;
     final generation = _injectedClient == null
         ? (_currentGeneration ??= _createGeneration())
         : null;
     generation?.acquire();
     var active = true;
+    // Retiring a generation cannot stop a request on a shared session, so a
+    // timed-out request is aborted rather than left holding bandwidth.
+    final abort = Completer<void>();
+    final request =
+        http.AbortableRequest('POST', url, abortTrigger: abort.future)
+          ..followRedirects = false
+          ..headers['Accept-Encoding'] = 'gzip'
+          ..headers.addAll(headers)
+          ..bodyBytes = body;
     try {
-      final request = http.Request('POST', url)
-        ..followRedirects = false
-        ..headers['Accept-Encoding'] = 'gzip'
-        ..headers.addAll(headers)
-        ..bodyBytes = body;
       final transport = _injectedClient ?? generation!.client;
       final client = decorate?.call(transport, () => active) ?? transport;
       return await client
@@ -57,11 +81,16 @@ class RelayHttpQueryClient {
           .then(http.Response.fromStream)
           .timeout(timeout);
     } on TimeoutException {
+      noteHttpDeadline(request);
+      if (!abort.isCompleted) abort.complete();
       if (identical(_currentGeneration, generation)) {
         _currentGeneration = null;
       }
       generation?.retire();
-      rethrow;
+      Error.throwWithStackTrace(
+        _timedOut(timeout, RelayCall.query),
+        trimCallSite(callSite),
+      );
     } finally {
       active = false;
       generation?.release();
@@ -69,14 +98,27 @@ class RelayHttpQueryClient {
   }
 
   /// Sends a non-redirecting request, bounding bytes before buffering or parsing.
-  /// The deadline includes headers and the entire response body.
+  /// The deadline includes headers and the entire response body. A timeout is
+  /// a [RelayTimeoutException] for [call], or untyped when [call] is null.
   Future<http.Response> sendBounded(
     http.Request request, {
     required int maxBytes,
     required Duration timeout,
+    required RelayCall? call,
     http.Client Function(http.Client, bool Function())? decorate,
   }) async {
-    request.followRedirects = false;
+    final callSite = StackTrace.current;
+    // As in [post], a timed-out request on a shared session is aborted.
+    final abort = Completer<void>();
+    final sent =
+        http.AbortableRequest(
+            request.method,
+            request.url,
+            abortTrigger: abort.future,
+          )
+          ..followRedirects = false
+          ..headers.addAll(request.headers)
+          ..bodyBytes = request.bodyBytes;
     final generation = _injectedClient == null
         ? (_currentGeneration ??= _createGeneration())
         : null;
@@ -86,20 +128,22 @@ class RelayHttpQueryClient {
     Future<http.Response> receive() async {
       final transport = _injectedClient ?? generation!.client;
       final client = decorate?.call(transport, () => !finished) ?? transport;
-      final response = await client.send(request);
+      final response = await client.send(sent);
       if (finished) {
         await response.stream.listen(null).cancel();
         throw StateError('Relay request already timed out');
       }
       iterator = StreamIterator(response.stream);
       if ((response.contentLength ?? 0) > maxBytes) {
-        throw const FormatException('Relay response exceeds byte limit');
+        throw const RelayResponseTooLarge('Relay response exceeds byte limit');
       }
       final bytes = <int>[];
       while (await iterator!.moveNext()) {
         final chunk = iterator!.current;
         if (bytes.length + chunk.length > maxBytes) {
-          throw const FormatException('Relay response exceeds byte limit');
+          throw const RelayResponseTooLarge(
+            'Relay response exceeds byte limit',
+          );
         }
         bytes.addAll(chunk);
       }
@@ -115,13 +159,21 @@ class RelayHttpQueryClient {
     try {
       return await receive().timeout(timeout);
     } on TimeoutException {
+      noteHttpDeadline(sent);
+      if (!abort.isCompleted) abort.complete();
       if (identical(_currentGeneration, generation)) {
         _currentGeneration = null;
       }
       generation?.retire();
-      rethrow;
+      Error.throwWithStackTrace(
+        _timedOut(timeout, call),
+        trimCallSite(callSite),
+      );
     } finally {
       finished = true;
+      // Cancelling an iterator that never listened leaves the body
+      // downloading on a shared session, so abort on every exit.
+      if (!abort.isCompleted) abort.complete();
       if (iterator != null) await iterator!.cancel();
       generation?.release();
     }

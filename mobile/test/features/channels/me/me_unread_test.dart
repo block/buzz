@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:buzz/features/channels/channel_typing_provider.dart';
 import 'package:buzz/features/channels/me/solo_working_dots.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
@@ -13,7 +15,6 @@ import 'package:buzz/features/channels/me/me_page.dart';
 import 'package:buzz/features/channels/me/me_unread_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/home/home_page.dart';
-import 'package:buzz/features/home/messages_filters.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:buzz/shared/me/me_sync.dart';
@@ -25,8 +26,9 @@ Channel chat(String id, {bool member = true, bool archived = false}) => Channel(
   name: id,
   channelType: 'stream',
   visibility: 'private',
+  labels: id == 'ordinary' ? const [] : const ['buzz.solo'],
   description: '',
-  createdBy: 'owner',
+  createdBy: 'other',
   createdAt: DateTime(2026),
   lastMessageAt: DateTime.fromMillisecondsSinceEpoch(20000),
   memberCount: 2,
@@ -123,7 +125,7 @@ const organization = MeGroups(
     {'id': 'project', 'name': 'Project', 'defaultTemplateId': ''},
   ],
   assignments: {'solo': 'project'},
-  channels: ['solo', 'archived', 'nonmember'],
+  channels: ['archived', 'nonmember'],
 );
 
 class _Typing extends ChannelTypingNotifier {
@@ -183,7 +185,7 @@ void main() {
         );
         expect(
           tester.widget<Text>(find.text('Project')).style?.color,
-          dark ? const Color(0xFFC7C7C7) : const Color(0xFF525252),
+          Theme.of(tester.element(find.text('Project'))).colorScheme.onSurface,
         );
         expect(find.bySemanticsLabel('Project, unread'), findsNothing);
         typing.show([const TypingEntry(pubkey: 'human', expiresAtMs: 999999)]);
@@ -217,7 +219,7 @@ void main() {
         await tester.pump();
         expect(
           tester.widget<Text>(find.text('solo')).style?.fontWeight,
-          FontWeight.w400,
+          FontWeight.w500,
         );
         expect(
           tester.widget<Text>(find.text('solo')).style?.color,
@@ -246,8 +248,7 @@ void main() {
             channelsProvider.overrideWith(() => channels),
             readStateProvider.overrideWith(() => reads),
             meGroupsProvider.overrideWith(
-              (ref) =>
-                  Stream.value(const MeGroups(channels: ['solo', 'ordinary'])),
+              (ref) => Stream.value(const MeGroups(channels: ['ordinary'])),
             ),
           ],
         );
@@ -348,13 +349,6 @@ void main() {
         final container = ProviderScope.containerOf(
           tester.element(find.byType(HomePage)),
         );
-        await tester.tap(
-          find.descendant(
-            of: find.byType(MessagesFilters),
-            matching: find.text('Team'),
-          ),
-        );
-        await tester.pumpAndSettle();
         if (loading) {
           expect(container.read(meUnreadChannelIdsProvider), isEmpty);
           expect(find.bySemanticsLabel('Solo, unread'), findsNothing);
@@ -378,9 +372,6 @@ void main() {
         }
         expect(container.read(meUnreadChannelIdsProvider), {'solo'});
         expect(find.bySemanticsLabel('Solo, unread'), findsNothing);
-        expect(find.text('solo').hitTestable(), findsNothing);
-        await tester.tap(find.text('Solo'));
-        await tester.pumpAndSettle();
         expect(
           tester.widget<Text>(find.text('solo')).style?.fontWeight,
           FontWeight.w600,
@@ -399,13 +390,6 @@ void main() {
           find.byKey(const ValueKey('solo-section-unread-Project')),
           findsNothing,
         );
-        await tester.tap(
-          find.descendant(
-            of: find.byType(MessagesFilters),
-            matching: find.text('Team'),
-          ),
-        );
-        await tester.pumpAndSettle();
         expect(find.bySemanticsLabel('Solo, unread'), findsNothing);
         channels.reply();
         await tester.pumpAndSettle();
@@ -419,4 +403,42 @@ void main() {
       },
     );
   }
+
+  test('labelled shared chats badge before the filing record loads', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final channels = _Channels();
+    final record = StreamController<MeGroups>();
+    addTearDown(() => unawaited(record.close()));
+    final container = ProviderContainer(
+      overrides: [
+        savedPrefsProvider.overrideWithValue(prefs),
+        channelsProvider.overrideWith(() => channels),
+        readStateProvider.overrideWith(() => _Reads(empty: true)),
+        meGroupsProvider.overrideWith((ref) => record.stream),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.listen(channelsProvider, (_, _) {});
+    container.listen(meGroupsProvider, (_, _) {});
+    container.listen(meUnreadChannelIdsProvider, (_, _) {});
+    await container.read(channelsProvider.future);
+    expect(container.read(meGroupsProvider).hasValue, isFalse);
+    expect(container.read(meUnreadChannelIdsProvider), isEmpty);
+    await container.pump();
+    expect(container.read(readStateProvider).effectiveTimestamp('solo'), 20);
+    channels.reply();
+    await container.pump();
+    expect(container.read(meUnreadChannelIdsProvider), {'solo'});
+
+    // Legacy ids join once the record arrives, seeded at their history.
+    record.add(const MeGroups(channels: ['ordinary']));
+    await container.read(meGroupsProvider.future);
+    expect(container.read(meUnreadChannelIdsProvider), {'solo'});
+    await container.pump();
+    expect(container.read(meUnreadChannelIdsProvider), {'solo'});
+    channels.reply();
+    await container.pump();
+    expect(container.read(meUnreadChannelIdsProvider), {'solo', 'ordinary'});
+  });
 }

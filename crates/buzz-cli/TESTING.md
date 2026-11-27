@@ -134,13 +134,16 @@ FORUM_ID=$(buzz channels create --name "test-forum" --type forum --visibility op
 
 # channels list
 buzz channels list | jq .
-# Expected: [{"channel_id":"...","name":"...","description":"...","created_at":N}]
+# Expected: [{"channel_id":"...","name":"...","channel_type":"stream","visibility":"open","labels":[],"archived":false,"description":"..."|null,"topic":null,"purpose":null,"ttl_seconds":null,"created_at":N,"updated_at":N}]
 buzz channels list --visibility open | jq .
 buzz channels list --member | jq .
+buzz channels list --include-archived | jq .   # archived channels are hidden without this
+# `visibility` is "open" or "private" from the relay's ["public"]/["private"] tag. It is null only
+# when an event carries neither (older or non-Buzz relays); NIP-29 would read that as public.
 
 # channels get
 buzz channels get --channel "$CHANNEL_ID" | jq .
-# Expected: {"channel_id":"...","name":"...","description":"...","created_at":N,"pubkey":"..."} or null
+# Expected: {"channel_id":"...","name":"...","channel_type":"stream","visibility":"open","labels":[],"archived":false,"description":"..."|null,"topic":null,"purpose":null,"ttl_seconds":null,"created_at":N,"updated_at":N,"pubkey":"..."} or null
 
 # channels update
 buzz channels update --channel "$CHANNEL_ID" --name "test-cli-updated" \
@@ -191,6 +194,13 @@ echo "# Canvas from stdin" | buzz canvas set --channel "$CHANNEL_ID" --content -
 # canvas get
 buzz canvas get --channel "$CHANNEL_ID"
 # Expected: raw markdown string, or: null
+
+# canvas set guarded by the head it read
+HEAD=$(buzz canvas history --channel "$CHANNEL_ID" --limit 1 | jq -r '.[0].event_id')
+buzz canvas set --channel "$CHANNEL_ID" --content "# Guarded" --expected "$HEAD" | jq .
+# Expected: {"event_id":"...","accepted":true,...}
+buzz canvas set --channel "$CHANNEL_ID" --content "# Stale" --expected "$HEAD"; echo "exit $?"
+# Expected: {"error":"conflict",...} on stderr, exit 5, canvas unchanged
 ```
 
 ### 6.3 Messages
@@ -596,7 +606,7 @@ buzz channels delete --channel "$FORUM_ID" | jq .
 | 21 | `channels add-member` | ☐ | Needs admin:channels |
 | 22 | `channels remove-member` | ☐ | Needs admin:channels |
 | 23 | `canvas get` | ☐ | |
-| 24 | `canvas set` | ☐ | Direct and stdin |
+| 24 | `canvas set` | ☐ | Direct, stdin and `--expected` |
 | 25 | `reactions add` | ☐ | |
 | 26 | `reactions remove` | ☐ | |
 | 27 | `reactions get` | ☐ | |
@@ -635,3 +645,5 @@ buzz channels delete --channel "$FORUM_ID" | jq .
 | 60 | `notes ls` | ☐ | Own, --author all, --tag, --limit |
 | 61 | `notes rm` | ☐ | Delete→get 404, double-delete idempotent, missing slug → NotFound |
 | 62 | `users set-status` | ☐ | Text+emoji, text only, emoji-only (`--text ""`), `--clear`, `--clear` + `--text` → exit 1 |
+| 63 | `raw query` | ☐ | Single filter, filter array, stdin (`-`), non-object filter → exit 1 |
+| 64 | `raw publish` | ☐ | `--kind/--tag/--content`, `--event-json`, `auth` tag refused → exit 1 |

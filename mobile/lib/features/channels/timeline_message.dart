@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/mentions/mention_tags.dart';
+import 'channel_event_order.dart';
 import 'channel_window.dart';
 import 'message_media.dart';
 import 'message_content/bubble_segments.dart';
@@ -180,6 +181,11 @@ class TimelineMessage {
   final String id;
   final String pubkey;
   final int createdAt;
+
+  /// Effective send time in milliseconds of the original event (see
+  /// [channelEventMilliseconds]). [tags] may come from a later edit, so the
+  /// original's `ms` offset is kept here.
+  final int createdAtMs;
   final String content;
   final List<List<String>> tags;
   final bool isSystem;
@@ -202,6 +208,7 @@ class TimelineMessage {
     required this.id,
     required this.pubkey,
     required this.createdAt,
+    int? createdAtMs,
     required this.content,
     this.tags = const [],
     this.isSystem = false,
@@ -211,7 +218,7 @@ class TimelineMessage {
     this.reactions = const [],
     this.parentId,
     this.rootId,
-  });
+  }) : createdAtMs = createdAtMs ?? createdAt * 1000;
 
   /// Attachment messages stay visually distinct from surrounding messages,
   /// even when several are sent by the same author in quick succession.
@@ -337,9 +344,14 @@ VoidCallback? debugOnFormatTimeline;
 ///
 /// Mirrors the desktop's `formatTimelineMessages` logic.
 /// [currentPubkey] is used to determine if the current user has reacted.
+/// [agentOwners] maps authors to owners verified from their signed profiles,
+/// and [relayPubkey] is the relay's trusted signing key, used to recognize
+/// attributed authors; `useEditAuthority` supplies both.
 List<TimelineMessage> formatTimeline(
   List<NostrEvent> events, {
   String? currentPubkey,
+  Map<String, String> agentOwners = const {},
+  String? relayPubkey,
 }) {
   assert(() {
     debugOnFormatTimeline?.call();
@@ -361,17 +373,29 @@ List<TimelineMessage> formatTimeline(
   }
 
   // 2. Build edit map: targetId → latest edit content.
+  final targets = {for (final event in events) event.id.toLowerCase(): event};
   final edits = <String, _Edit>{};
   for (final event in events) {
     if (event.kind != EventKind.streamMessageEdit) continue;
     if (deletedIds.contains(event.id)) continue;
 
-    final targetId = _lastETag(event.tags);
+    final targetId = _firstEditTarget(event.tags);
     if (targetId == null || deletedIds.contains(targetId)) continue;
+    final target = targets[targetId];
+    if (target == null ||
+        !_mayEditMessage(event, target, agentOwners, relayPubkey)) {
+      continue;
+    }
 
+    // Greatest (created_at, id) wins, as the relay resolves effective edits
+    // (docs/effective-message-edits.md), whatever order [events] is in.
     final existing = edits[targetId];
-    if (existing == null || event.createdAt > existing.createdAt) {
+    if (existing == null ||
+        event.createdAt > existing.createdAt ||
+        (event.createdAt == existing.createdAt &&
+            event.id.compareTo(existing.id) > 0)) {
       edits[targetId] = _Edit(
+        id: event.id,
         content: event.content,
         createdAt: event.createdAt,
         tags: event.tags,
@@ -448,6 +472,7 @@ List<TimelineMessage> formatTimeline(
             id: event.id,
             pubkey: event.pubkey,
             createdAt: event.createdAt,
+            createdAtMs: channelEventMilliseconds(event),
             content: event.content,
             tags: event.tags,
             isSystem: true,
@@ -468,6 +493,7 @@ List<TimelineMessage> formatTimeline(
             id: event.id,
             pubkey: event.pubkey,
             createdAt: event.createdAt,
+            createdAtMs: channelEventMilliseconds(event),
             content: event.content,
             tags: event.tags,
             isSystem: true,
@@ -482,7 +508,7 @@ List<TimelineMessage> formatTimeline(
     if (event.kind == EventKind.streamMessage ||
         event.kind == EventKind.streamMessageV2 ||
         event.kind == EventKind.streamMessageDiff) {
-      final edit = edits[event.id];
+      final edit = edits[event.id.toLowerCase()];
       final effectiveTags = edit?.tags ?? event.tags;
       // Include both notify (`p`) and reference-only (`mention`) tags —
       // mirrors desktop's resolveMentionNames, so names in messages sent
@@ -496,6 +522,7 @@ List<TimelineMessage> formatTimeline(
           id: event.id,
           pubkey: event.pubkey,
           createdAt: event.createdAt,
+          createdAtMs: channelEventMilliseconds(event),
           content: edit?.content ?? event.content,
           tags: effectiveTags,
           edited: edit != null,
@@ -731,18 +758,109 @@ List<String> _mergeParticipants(
 }
 
 class _Edit {
+  final String id;
   final String content;
   final int createdAt;
   final List<List<String>> tags;
 
   const _Edit({
+    required this.id,
     required this.content,
     required this.createdAt,
     required this.tags,
   });
 }
 
-/// Get the last `e` tag value (reaction/edit target convention).
+final _editHex = RegExp(r'^[0-9a-fA-F]{64}$');
+
+bool _isEditHex(String? value) =>
+    value != null && value.length == 64 && _editHex.hasMatch(value);
+
+String? _firstEditTarget(List<List<String>> tags) {
+  for (final tag in tags) {
+    if (tag.length >= 2 && tag[0] == 'e' && _isEditHex(tag[1])) {
+      return tag[1].toLowerCase();
+    }
+  }
+  return null;
+}
+
+/// Message kinds whose author's verified owner may edit them.
+const _ownerEditableKinds = {
+  EventKind.streamMessage,
+  EventKind.streamMessageV2,
+  EventKind.streamMessageDiff,
+};
+
+bool _mayEditMessage(
+  NostrEvent edit,
+  NostrEvent target,
+  Map<String, String> agentOwners,
+  String? relayPubkey,
+) {
+  final signer = edit.pubkey.toLowerCase();
+  final author = _effectiveEditAuthor(target, relayPubkey);
+  if (signer == target.pubkey.toLowerCase() || signer == author) return true;
+  return _ownerMayEdit(edit, target) &&
+      signer == agentOwners[author]?.toLowerCase();
+}
+
+bool _ownerMayEdit(NostrEvent edit, NostrEvent target) =>
+    _ownerEditableKinds.contains(target.kind) &&
+    edit.channelId != null &&
+    edit.channelId == target.channelId;
+
+String _effectiveEditAuthor(NostrEvent target, String? relayPubkey) {
+  final signer = target.pubkey.toLowerCase();
+  if (signer != relayPubkey?.toLowerCase()) return signer;
+  return _attributedAuthor(target) ?? signer;
+}
+
+/// The author a relay-signed [target] names: its `actor`, else first `p`.
+/// Only meaningful once the target's signer is known to be the relay.
+String? _attributedAuthor(NostrEvent target) {
+  final actor = target.getTagValue('actor');
+  if (_isEditHex(actor)) return actor!.toLowerCase();
+  for (final tag in target.tags) {
+    if (tag.length >= 2 && tag[0] == 'p' && _isEditHex(tag[1])) {
+      return tag[1].toLowerCase();
+    }
+  }
+  return null;
+}
+
+/// What the cross-signer edits in [events] need before [formatTimeline] can
+/// judge them: [owners] lists the authors whose verified owner could make an
+/// edit, and [relayKey] says a target names an attributed author, which
+/// counts only if the relay's signing key signed it. Edits by a message's
+/// own signer need neither.
+typedef EditAuthorityNeeds = ({List<String> owners, bool relayKey});
+
+/// Computes [EditAuthorityNeeds] for the edits in [events].
+EditAuthorityNeeds editAuthorityNeeds(List<NostrEvent> events) {
+  Map<String, NostrEvent>? targets;
+  final owners = <String>{};
+  var relayKey = false;
+  for (final edit in events) {
+    if (edit.kind != EventKind.streamMessageEdit) continue;
+    final targetId = _firstEditTarget(edit.tags);
+    if (targetId == null) continue;
+    targets ??= {for (final event in events) event.id.toLowerCase(): event};
+    final target = targets[targetId];
+    if (target == null ||
+        edit.pubkey.toLowerCase() == target.pubkey.toLowerCase()) {
+      continue;
+    }
+    final attributed = _attributedAuthor(target);
+    relayKey |= attributed != null;
+    if (!_ownerMayEdit(edit, target)) continue;
+    owners.add(target.pubkey.toLowerCase());
+    if (attributed != null) owners.add(attributed);
+  }
+  return (owners: owners.toList()..sort(), relayKey: relayKey);
+}
+
+/// Get the last `e` tag value (reaction target convention).
 String? _lastETag(List<List<String>> tags) {
   for (var i = tags.length - 1; i >= 0; i--) {
     final tag = tags[i];

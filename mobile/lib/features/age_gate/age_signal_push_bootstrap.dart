@@ -35,18 +35,6 @@ final ageSignalPushSnapshotRetryWaitProvider =
       return Future<void>.delayed;
     });
 
-/// Releases only the current process's confirmed notification restriction.
-final ageAllowedNotificationRestorerProvider =
-    Provider<Future<void> Function()>(
-      (ref) => restoreAgeRestrictedBuzzNotifications,
-    );
-
-/// Native notification purge performed once restriction is confirmed.
-final ageRestrictedNotificationPurgerProvider =
-    Provider<Future<void> Function()>(
-      (ref) => purgeAgeRestrictedBuzzNotifications,
-    );
-
 /// Delay between successful maintenance purges while restriction remains active.
 const ageRestrictedNotificationMaintenanceDelay = Duration(seconds: 30);
 
@@ -91,7 +79,13 @@ class AgeSignalPushBootstrap extends HookConsumerWidget {
         previousState.value = state;
         consecutiveFailures.value = 0;
       }
-      if (state == AgeSignalState.restricted) return null;
+      // On Android the age check itself releases the restriction once it
+      // finishes allowed (see AgeSignalNotifier). Restoring here would lift a
+      // restriction the process still holds from an earlier engine.
+      if (state == AgeSignalState.restricted ||
+          defaultTargetPlatform == TargetPlatform.android) {
+        return null;
+      }
       var cancelled = false;
       unawaited(() async {
         try {
@@ -156,7 +150,12 @@ class _AgeRestrictedPushCleanup extends HookConsumerWidget {
         VoidCallback? cancelMaintenancePurge;
         unawaited(() async {
           try {
-            await purgeNotifications();
+            final confirmed = ref
+                .read(ageSignalProvider.notifier)
+                .takeConfirmedPurge();
+            final needsPurge = confirmed == null || !await confirmed;
+            if (cancelled) return;
+            if (needsPurge) await purgeNotifications();
             consecutivePurgeFailures.value = 0;
             if (!cancelled && remainingMaintenancePurges.value > 0) {
               remainingMaintenancePurges.value -= 1;
