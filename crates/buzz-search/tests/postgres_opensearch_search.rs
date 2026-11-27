@@ -1848,12 +1848,12 @@ async fn parked_rows_recover_after_cluster_fix_or_message_change() {
     index.delete().await.expect("delete index");
 }
 
-/// A cluster-wide rejection — either a whole-request HTTP 400 or a multi-item
-/// batch where every single document is rejected — keeps rows queued instead
-/// of parking the entire queue.
+/// A whole-request HTTP 400 keeps rows queued (not parked), while a batch
+/// holding only individually oversized documents behind a 413 limit parks all
+/// of them instead of leaving them stuck in the active queue.
 #[tokio::test]
 #[ignore = "requires Postgres and OpenSearch"]
-async fn a_cluster_wide_rejection_keeps_rows_queued() {
+async fn whole_request_400_stays_queued_while_oversized_only_batch_parks() {
     let db = sync_db().await;
     let proxy = Proxy::start().await;
     let prefix = format!("test-{}-", Uuid::new_v4().simple());
@@ -1891,53 +1891,31 @@ async fn a_cluster_wide_rejection_keeps_rows_queued() {
     let report = indexer.drain().await.expect("drain after fix");
     assert_eq!((report.written, report.parked), (2, 0));
     assert_eq!(search_outbox::depth(db.pool()).await.expect("depth"), 0);
-    index.delete().await.expect("delete index");
 
-    // 2) Multi-item batch where every item gets HTTP 400 also stays queued.
-    let broken_prefix = format!("test-{}-", Uuid::new_v4().simple());
-    let response = raw_client()
-        .indices()
-        .create(IndicesCreateParts::Index(&format!(
-            "{broken_prefix}messages-v1"
-        )))
-        .body(serde_json::json!({
-            "mappings": { "properties": { "content": { "type": "keyword" } } },
-            "aliases": { format!("{broken_prefix}messages"): {} }
-        }))
-        .send()
-        .await
-        .expect("create broken index");
-    assert!(response.status_code().is_success());
-    let broken_index = SearchIndex::new(&OpenSearchConfig {
-        url: opensearch_url(),
-        basic_auth: None,
-        aws_sigv4: None,
-        index_prefix: broken_prefix.clone(),
-    })
-    .expect("client");
-
-    let bad1 = message_at(&keys, &"x".repeat(40_000), -5);
-    let bad2 = message_at(&keys, &"y".repeat(40_000), -4);
+    // 2) Two oversized documents alone in a batch behind a 413 limit are both
+    //    parked rather than remaining queued forever.
+    let bad1 = message_at(&keys, &format!("giant1 {}", "x".repeat(3_000)), -5);
+    let bad2 = message_at(&keys, &format!("giant2 {}", "y".repeat(3_000)), -4);
     for event in [&bad1, &bad2] {
         db.insert_event(community, event, None)
             .await
             .expect("insert");
     }
-    let broken_indexer = Indexer::new(db.clone(), broken_index.clone());
-    let report = broken_indexer
+    proxy.set(Bulk::LimitBytes(2_500)).await;
+    let report = indexer
         .drain()
         .await
-        .expect("all-rejected batch skips community");
-    assert_eq!((report.written, report.parked), (0, 0));
-    assert_eq!(search_outbox::depth(db.pool()).await.expect("depth"), 2);
+        .expect("oversized-only batch parks both rows");
+    assert_eq!((report.written, report.failed, report.parked), (0, 0, 2));
+    assert_eq!(search_outbox::depth(db.pool()).await.expect("depth"), 0);
     assert_eq!(
         search_outbox::parked_depth(db.pool())
             .await
             .expect("parked depth"),
-        0
+        2
     );
 
-    broken_index.delete().await.expect("delete broken index");
+    index.delete().await.expect("delete index");
 }
 
 /// An HTTP 413 bulk response splits the request and retries so neighbours are

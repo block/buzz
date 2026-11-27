@@ -97,17 +97,16 @@ psql -c "SELECT setval('search_index_version', GREATEST((SELECT last_value FROM 
 When OpenSearch refuses individual documents for good (a mapping error, or a
 document that is still too large on its own after splitting an HTTP 413 bulk
 request), the indexer sets `parked_at` on those `search_outbox` rows. Whole-
-request HTTP 400s and multi-item batches where every document is rejected are
-treated as cluster-wide failures and stay queued rather than parking the queue.
-Parked rows are left out of normal claims and out of the 2,000-row backfill
-threshold, so they do not delay newer messages or pause backfill. A separate
-rate-limited pass retries up to 50 parked rows every 60 seconds, re-reading
-each message's current state from Postgres; once a retry clears rows, later
-passes continue draining parked rows immediately without waiting a full
-interval. If `buzz_search_outbox_parked` or `buzz_search_index_rejected_total`
-rises, investigate the rejection and fix the cause: once fixed (or once the
-message is edited or deleted), the relay indexes the row on its own and
-`buzz_search_outbox_parked` returns to `0`.
+request HTTP 400s are treated as cluster-wide failures and stay queued rather
+than parking the queue. Parked rows are left out of normal claims and out of
+the 2,000-row backfill threshold, so they do not delay newer messages or pause
+backfill. A separate rate-limited pass probes up to 50 parked rows every 60
+seconds, re-reading each message's current state from Postgres; once a retry
+clears rows, later passes continue draining parked rows in full batches (500)
+immediately without waiting a full interval. If `buzz_search_outbox_parked` or
+`buzz_search_index_rejected_total` rises, investigate the rejection and fix
+the cause: once fixed (or once the message is edited or deleted), the relay
+indexes the row on its own and `buzz_search_outbox_parked` returns to `0`.
 
 ## Known gaps
 
