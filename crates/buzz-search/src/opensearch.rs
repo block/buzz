@@ -576,21 +576,21 @@ impl SearchIndex {
             .flatten()
             .map(|hit| {
                 let hit = parse_hit(hit)?;
-                let age = relevance::age_factor(hit.created_at, now);
                 // Every relevance hit is in the rescore window, so its rank
-                // carries the age factor.
-                let query_match = if rescored {
-                    (f64::from(hit.rank) / age) as f32
-                } else {
-                    hit.rank
-                };
-                Ok(ScoredHit {
-                    hit,
-                    parts: ScoreParts {
-                        query_match,
+                // carries the age factor; a hit sorted by time has none.
+                let parts = if rescored {
+                    let age = relevance::age_factor(hit.created_at, now);
+                    ScoreParts {
+                        query_match: (f64::from(hit.rank) / age) as f32,
                         age: age as f32,
-                    },
-                })
+                    }
+                } else {
+                    ScoreParts {
+                        query_match: hit.rank,
+                        age: 1.0,
+                    }
+                };
+                Ok(ScoredHit { hit, parts })
             })
             .collect::<Result<_, SearchError>>()?;
         Ok(ScoredResult { hits, page })

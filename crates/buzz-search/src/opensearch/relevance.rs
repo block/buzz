@@ -16,7 +16,9 @@
 //! - **Typos only rank.** A word matched only with a typo scores a third
 //!   of an exact match, so relevance order keeps it below. Newest order has
 //!   no such defence: for a short word most matches are other words one
-//!   letter away (`log` and `lag`), so it matches no typos.
+//!   letter away (`log` and `lag`), so it matches no typos. In prefix
+//!   mode the unfinished last word gets typos only from
+//!   [`MIN_TYPO_PREFIX`] characters.
 //! - **Long tokens get no prefixes.** Tokens over [`LONG_TOKEN`] characters
 //!   (`nostr:` URIs, keys, hashes) are not typed a letter at a time, and
 //!   each would add dozens of prefixes.
@@ -60,6 +62,9 @@ const STEM_WEIGHT: f64 = 0.4;
 const TYPO_WEIGHT: f64 = 0.3;
 /// Weight of a partial last word matched as a prefix.
 const PREFIX_WEIGHT: f64 = 0.5;
+/// Shortest unfinished last word that may match with a typo in prefix mode:
+/// a shorter one is a single edit from too many other words.
+const MIN_TYPO_PREFIX: usize = 4;
 /// Bonus weight of the query found as an exact phrase. An exact phrase is
 /// also within [`PROXIMITY_SLOP`], so it earns both bonuses.
 const PHRASE_WEIGHT: f64 = 2.0;
@@ -80,7 +85,7 @@ const _: () = assert!(RESCORE_WINDOW >= buzz_db::DEFAULT_MAX_PAGE_LIMIT);
 /// T never falls below this, so old exact matches survive.
 const AGE_FLOOR: f64 = 0.2;
 /// Age at which the decaying part of T has halved.
-const AGE_HALF_LIFE_DAYS: f64 = 30.0;
+const AGE_HALF_LIFE_DAYS: u32 = 30;
 
 /// The index's `analysis` settings.
 pub(super) fn analysis() -> Value {
@@ -98,11 +103,7 @@ pub(super) fn analysis() -> Value {
         },
         "analyzer": {
             "message": analyzer(&["word_parts", "lowercase", "asciifolding"]),
-            "message_search": analyzer(&["word_parts", "lowercase", "asciifolding"]),
             "message_stem": analyzer(&["word_parts", "lowercase", "asciifolding", "light_stem"]),
-            "message_stem_search": analyzer(&[
-                "word_parts", "lowercase", "asciifolding", "light_stem"
-            ]),
             "message_prefix": analyzer(&[
                 "word_parts", "lowercase", "asciifolding", "short_tokens", "prefixes"
             ]),
@@ -122,12 +123,10 @@ pub(super) fn content_mapping() -> Value {
     json!({
         "type": "text",
         "analyzer": "message",
-        "search_analyzer": "message_search",
         "fields": {
             "stem": {
                 "type": "text",
                 "analyzer": "message_stem",
-                "search_analyzer": "message_stem_search",
                 "index_options": "freqs"
             },
             "prefix": prefix_mapping()
@@ -190,11 +189,13 @@ pub(super) fn text_query(text: &str, mode: SearchMode, typos: bool) -> Option<Te
         .collect();
     clauses.push(match mode {
         SearchMode::FullText => word_clause(last, typos),
-        SearchMode::Prefix => json!({ "dis_max": { "queries": [
-            exact_clause(last),
-            stem_clause(last),
-            prefix_query(last),
-        ] } }),
+        SearchMode::Prefix => {
+            let mut queries = vec![exact_clause(last), stem_clause(last), prefix_query(last)];
+            if typos && last.chars().count() >= MIN_TYPO_PREFIX {
+                queries.push(typo_clause(last));
+            }
+            json!({ "dis_max": { "queries": queries } })
+        }
     });
     let matched = json!({ "bool": {
         "should": clauses,
@@ -287,10 +288,10 @@ fn age_rescore(now: i64) -> Value {
 
 /// T for a message created at `created_at`, at `now` (both Unix seconds):
 /// what [`rescore`] multiplies by. A message from the future (clock
-/// skew) decays as if as old.
+/// skew) decays as if as old, as the index's decay does.
 pub(super) fn age_factor(created_at: i64, now: i64) -> f64 {
-    let age_days = (now - created_at).unsigned_abs() as f64 / 86_400.0;
-    AGE_FLOOR + (1.0 - AGE_FLOOR) * 0.5_f64.powf(age_days / AGE_HALF_LIFE_DAYS)
+    let age_days = now.abs_diff(created_at) as f64 / 86_400.0;
+    AGE_FLOOR + (1.0 - AGE_FLOOR) * 0.5_f64.powf(age_days / f64::from(AGE_HALF_LIFE_DAYS))
 }
 
 #[cfg(test)]

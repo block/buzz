@@ -115,22 +115,34 @@ fn ranks_above(hits: &[[u8; 32]], better: &[u8; 32], worse: &[u8; 32], what: &st
     assert!(b < w, "{what}: expected rank {b} above {w}");
 }
 
-/// One- and two-letter typos still find a message, below an exact match;
-/// the first letter is never a typo.
+/// One- and two-letter typos still find a message, below an exact match, in
+/// either mode; the first letter is never a typo, and an unfinished word of
+/// three letters gets none.
 #[tokio::test]
 #[ignore = "requires Postgres and OpenSearch"]
 async fn typos_find_the_message_below_an_exact_match() {
     let (pool, fx, c) = setup().await;
     let exact = post(&pool, c, "kubernetes upgrade tonight", DAY).await;
     let misspelt = post(&pool, c, "kubernates upgrade tonight", DAY).await;
-    post(&pool, c, "unrelated chatter", DAY).await;
+    let log = post(&pool, c, "deploy log attached", DAY).await;
 
-    for typo in ["kubernates", "kubarnates", "kubrenetes"] {
-        let hits = words(&fx, c, typo).await;
-        assert!(hits.contains(&exact), "{typo} finds the exact spelling");
+    for mode in [SearchMode::FullText, SearchMode::Prefix] {
+        for typo in ["kubernates", "kubarnates", "kubrenetes"] {
+            let hits = ranked(&fx, c, typo, mode).await;
+            assert!(
+                hits.contains(&exact),
+                "{mode:?}: {typo} finds the exact spelling"
+            );
+        }
+        let hits = ranked(&fx, c, "kubernetes", mode).await;
+        ranks_above(&hits, &exact, &misspelt, "exact above typo");
     }
-    let hits = words(&fx, c, "kubernetes").await;
-    ranks_above(&hits, &exact, &misspelt, "exact above typo");
+    assert!(
+        !ranked(&fx, c, "lag", SearchMode::Prefix)
+            .await
+            .contains(&log),
+        "an unfinished three-letter word gets no typos"
+    );
     // Kept well apart, not just below: a typo is worth under half a word.
     let scores = query_match(&fx, c, "kubernetes").await;
     let (exact_q, typo_q) = (

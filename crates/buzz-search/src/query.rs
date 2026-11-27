@@ -151,15 +151,15 @@ pub struct SearchResult {
 }
 
 /// The parts of a hit's relevance score, for tests, tuning and ranking
-/// evaluation; never sent to clients. A hit ranked by relevance within
-/// OpenSearch's age window (its top 500) has the rank Q × T; any other hit's
-/// rank is Q alone.
+/// evaluation; never sent to clients. An OpenSearch hit ranked by relevance
+/// has the rank Q × T: those results end at the age rescore's window, so
+/// every hit is in it. A hit sorted by time, or from Postgres, has T = 1.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScoreParts {
     /// Q, how well the message matches the query.
     pub query_match: f32,
-    /// T, the age factor: 1 for a new message, falling towards 0.2. Postgres
-    /// search has no age factor and reports 1.
+    /// T, the age factor: 1 for a new message, falling towards 0.2. A search
+    /// sorted by time or run on Postgres has no age factor and reports 1.
     pub age: f32,
 }
 

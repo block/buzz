@@ -159,7 +159,7 @@ impl SearchService {
 
     /// [`SearchService::search`] with each hit's score parts, for tests and
     /// ranking evaluation. It asks the backend that would serve the search,
-    /// Postgres while the community shadows, and records no metrics.
+    /// Postgres while the relay shadows, and records no metrics.
     pub async fn search_scored(&self, query: &SearchQuery) -> Result<ScoredResult, SearchError> {
         match self
             .opensearch

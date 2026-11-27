@@ -129,7 +129,9 @@ The backends differ on edited messages: Postgres matches the text a message
 was stored with, and the index holds its latest edit. OpenSearch
 also matches words one or two typos away, when sorted by relevance. So shadow overlap drops for
 searches that touch edited messages or misspell a word, and moving to `2`
-changes their results.
+changes their results. Prefix searches overlap less too: OpenSearch
+completes a last word from 2 characters where Postgres needs 3 (a shorter
+one finds nothing there), and the two rank prefix matches differently.
 
 A new message is searchable on OpenSearch only after the index refreshes:
 every 30 seconds on a self-hosted cluster, on its own schedule on
