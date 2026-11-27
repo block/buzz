@@ -92,18 +92,22 @@ psql -c "SELECT setval('search_index_version', GREATEST((SELECT last_value FROM 
 | `buzz_search_outbox_parked` | Above `0` for a community: OpenSearch refused those documents for good and the indexer parked their outbox rows. |
 | `buzz_search_index_rejected_total` | It rises steadily: the cluster refuses those documents for good (including rate-limited retries of parked rows). |
 | `buzz_search_index_version_conflicts_total` | It is not zero: the version sequence handed out values again (below). |
-| `buzz_search_backfill_complete` | `1` means every stored message of the community is queued, not yet indexed. Move searches to OpenSearch once it is `1` for every community and active `search_outbox` rows (`parked_at IS NULL`) have emptied. |
+| `buzz_search_backfill_complete` | `1` means every stored message of the community is queued, not yet indexed. Move searches to OpenSearch once it is `1` for every community, active `search_outbox` rows (`parked_at IS NULL`) have emptied, and `buzz_search_outbox_parked` is `0` (or any parked rows are understood). |
 
-When OpenSearch refuses a document for good (a mapping error, or a document
-that is still too large on its own after splitting an HTTP 413 bulk request),
-the indexer sets `parked_at` on its `search_outbox` row. Parked rows are left
-out of normal claims and out of the 2,000-row backfill threshold, so they do
-not delay newer messages or pause backfill. A separate rate-limited pass
-retries up to 50 parked rows every 60 seconds, re-reading each message's
-current state from Postgres. If `buzz_search_outbox_parked` or
-`buzz_search_index_rejected_total` rises, investigate the rejection and fix
-the cause: once fixed (or once the message is edited or deleted), the relay
-indexes the row on its own and `buzz_search_outbox_parked` returns to `0`.
+When OpenSearch refuses individual documents for good (a mapping error, or a
+document that is still too large on its own after splitting an HTTP 413 bulk
+request), the indexer sets `parked_at` on those `search_outbox` rows. Whole-
+request HTTP 400s and multi-item batches where every document is rejected are
+treated as cluster-wide failures and stay queued rather than parking the queue.
+Parked rows are left out of normal claims and out of the 2,000-row backfill
+threshold, so they do not delay newer messages or pause backfill. A separate
+rate-limited pass retries up to 50 parked rows every 60 seconds, re-reading
+each message's current state from Postgres; once a retry clears rows, later
+passes continue draining parked rows immediately without waiting a full
+interval. If `buzz_search_outbox_parked` or `buzz_search_index_rejected_total`
+rises, investigate the rejection and fix the cause: once fixed (or once the
+message is edited or deleted), the relay indexes the row on its own and
+`buzz_search_outbox_parked` returns to `0`.
 
 ## Known gaps
 

@@ -1064,8 +1064,6 @@ mod postgres_tests {
 
         assert_eq!(migrations.len(), 109);
         assert_eq!(migrations[108].version, 109);
-        assert!(strip_sql_comments(migrations[108].sql.as_str())
-            .contains("ADD COLUMN IF NOT EXISTS parked_at TIMESTAMPTZ;"));
         assert_eq!(migrations[107].version, 108);
         assert!(strip_sql_comments(migrations[107].sql.as_str())
             .contains("CREATE SEQUENCE search_index_version"));

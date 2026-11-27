@@ -273,19 +273,6 @@ impl SearchOutboxBatch {
         self.complete_with(&[], &[]).await
     }
 
-    /// Delete the claimed rows except those naming an event in `retry`, and
-    /// commit. Call once the index holds every other event of the batch; the
-    /// kept rows are claimed again by a later batch.
-    pub async fn complete_except(self, retry: &[[u8; 32]]) -> Result<()> {
-        self.complete_with(retry, &[]).await
-    }
-
-    /// Park every event in this batch and commit.
-    pub async fn park_all(self) -> Result<()> {
-        let all: Vec<[u8; 32]> = self.rows.iter().map(|(_, event)| *event).collect();
-        self.complete_with(&[], &all).await
-    }
-
     /// Finish a batch with per-event outcomes and commit:
     /// - Events in `retry` stay untouched so a later batch claims them again.
     /// - Events in `park` (and not in `retry`) keep one row marked with
@@ -366,6 +353,16 @@ pub async fn claim_batch(
     claim_batch_share(pool, limit, skip, 1).await
 }
 
+/// Which lane of `search_outbox` a claim reads from.
+enum ClaimMode {
+    /// Active (unparked) rows, ordered by `created_at`, partitioned across
+    /// `workers` concurrent workers.
+    Active { workers: usize },
+    /// Parked rows whose `parked_at` is at least `cooldown` old (evaluated by
+    /// Postgres `now()`), ordered by `parked_at`.
+    Parked { cooldown: std::time::Duration },
+}
+
 /// [`claim_batch`] for one of `workers` workers: the batch locks at most
 /// `ceil(64 / workers)` of the community's partitions, picked at random
 /// among the free ones holding its oldest rows, and claims only their rows,
@@ -379,23 +376,72 @@ pub async fn claim_batch_share(
     skip: &[CommunityId],
     workers: usize,
 ) -> Result<Option<SearchOutboxBatch>> {
-    let workers = i32::try_from(workers.max(1)).unwrap_or(CLAIM_PARTITIONS);
+    claim_batch_inner(pool, limit, skip, ClaimMode::Active { workers }).await
+}
+
+/// Claim up to `limit` parked rows of one active community whose `parked_at`
+/// is at least `cooldown` old (measured by Postgres `now()`), oldest parked
+/// first, and re-read their events' current state from Postgres.
+///
+/// Uses the same partition advisory locks as [`claim_batch_share`] so a
+/// parked retry never overlaps with a live batch for the same event.
+pub async fn claim_parked_batch(
+    pool: &PgPool,
+    limit: i64,
+    cooldown: std::time::Duration,
+    skip: &[CommunityId],
+) -> Result<Option<SearchOutboxBatch>> {
+    claim_batch_inner(pool, limit, skip, ClaimMode::Parked { cooldown }).await
+}
+
+async fn claim_batch_inner(
+    pool: &PgPool,
+    limit: i64,
+    skip: &[CommunityId],
+    mode: ClaimMode,
+) -> Result<Option<SearchOutboxBatch>> {
+    let workers = match mode {
+        ClaimMode::Active { workers } => i32::try_from(workers.max(1)).unwrap_or(CLAIM_PARTITIONS),
+        ClaimMode::Parked { .. } => 1,
+    };
     let share = (CLAIM_PARTITIONS + workers - 1) / workers;
+    let cooldown_secs = match mode {
+        ClaimMode::Active { .. } => None,
+        ClaimMode::Parked { cooldown } => Some(cooldown.as_secs_f64()),
+    };
+    let (filter_sql, order_col) = match mode {
+        ClaimMode::Active { .. } => ("parked_at IS NULL", "created_at"),
+        ClaimMode::Parked { .. } => (
+            "parked_at IS NOT NULL AND parked_at <= now() - make_interval(secs => $6)",
+            "parked_at",
+        ),
+    };
     let mut refused: Vec<Uuid> = skip.iter().map(|community| *community.as_uuid()).collect();
     for _ in 0..CLAIM_COMMUNITY_CANDIDATES {
-        // Exclude fenced communities and parked rows so they cannot occupy the queue head.
-        let candidate: Option<Uuid> = sqlx::query_scalar(
-            "SELECT o.community_id FROM search_outbox o \
-             JOIN communities c ON c.id = o.community_id \
-             WHERE c.deletion_state = 'active' AND c.deleted_at IS NULL \
-               AND o.parked_at IS NULL \
-               AND o.community_id <> ALL($1) \
-             ORDER BY o.created_at LIMIT 1",
-        )
-        .bind(&refused)
-        .fetch_optional(pool)
-        .await?;
-        let Some(id) = candidate else {
+        let candidate_sql = match mode {
+            ClaimMode::Active { .. } => {
+                "SELECT o.community_id FROM search_outbox o \
+                 JOIN communities c ON c.id = o.community_id \
+                 WHERE c.deletion_state = 'active' AND c.deleted_at IS NULL \
+                   AND o.parked_at IS NULL \
+                   AND o.community_id <> ALL($1) \
+                 ORDER BY o.created_at LIMIT 1"
+            }
+            ClaimMode::Parked { .. } => {
+                "SELECT o.community_id FROM search_outbox o \
+                 JOIN communities c ON c.id = o.community_id \
+                 WHERE c.deletion_state = 'active' AND c.deleted_at IS NULL \
+                   AND o.parked_at IS NOT NULL \
+                   AND o.parked_at <= now() - make_interval(secs => $2) \
+                   AND o.community_id <> ALL($1) \
+                 ORDER BY o.parked_at LIMIT 1"
+            }
+        };
+        let mut candidate_query = sqlx::query_scalar::<_, Uuid>(candidate_sql).bind(&refused);
+        if let Some(secs) = cooldown_secs {
+            candidate_query = candidate_query.bind(secs);
+        }
+        let Some(id) = candidate_query.fetch_optional(pool).await? else {
             return Ok(None);
         };
         let community = CommunityId::from_uuid(id);
@@ -411,39 +457,40 @@ pub async fn claim_batch_share(
         };
         // Lock up to `share` free partitions among those of the community's
         // oldest rows, so no other batch claims a row of their events until
-        // this one completes. The head is two batches per worker, since the
-        // oldest rows are mostly in flight; picking from it keeps claims
-        // oldest-first and off empty partitions. A worker that has run ahead
-        // of the others can find every partition of the head held, so it
-        // looks once more over a head sixteen times as long: otherwise its
-        // claim comes back empty while rows remain, and the drain retires it.
-        // The shuffle is fenced with `OFFSET 0`, so the lock call runs on
-        // shuffled partitions one at a time and stops at the limit;
-        // flattened, the planner would lock every candidate before sorting.
-        // The locks end with the batch's transaction.
+        // this one completes. The shuffle is fenced with `OFFSET 0`, so the
+        // lock call runs on shuffled partitions one at a time and stops at
+        // the limit; flattened, the planner would lock every candidate before
+        // sorting. The locks end with the batch's transaction.
         let head = limit.saturating_mul(2 * i64::from(workers));
+        let windows: &[i64] = match mode {
+            ClaimMode::Active { .. } => &[head, head.saturating_mul(16)],
+            ClaimMode::Parked { .. } => &[head],
+        };
+        let part_sql = format!(
+            "SELECT p FROM ( \
+                 SELECT p FROM ( \
+                     SELECT DISTINCT get_byte(event_id, 0) % $3 AS p FROM ( \
+                         SELECT event_id FROM search_outbox \
+                         WHERE community_id = $2 AND {filter_sql} \
+                         ORDER BY {order_col} LIMIT $5 \
+                     ) head \
+                 ) candidates ORDER BY random() OFFSET 0 \
+             ) shuffled \
+             WHERE pg_try_advisory_xact_lock($1, hashtext($2::text || '/' || p)) \
+             LIMIT $4"
+        );
         let mut partitions: Vec<i32> = Vec::new();
-        for window in [head, head.saturating_mul(16)] {
-            partitions = sqlx::query_scalar(
-                "SELECT p FROM ( \
-                     SELECT p FROM ( \
-                         SELECT DISTINCT get_byte(event_id, 0) % $3 AS p FROM ( \
-                             SELECT event_id FROM search_outbox \
-                             WHERE community_id = $2 AND parked_at IS NULL \
-                             ORDER BY created_at LIMIT $5 \
-                         ) head \
-                     ) candidates ORDER BY random() OFFSET 0 \
-                 ) shuffled \
-                 WHERE pg_try_advisory_xact_lock($1, hashtext($2::text || '/' || p)) \
-                 LIMIT $4",
-            )
-            .bind(CLAIM_LOCK_CLASS)
-            .bind(id)
-            .bind(CLAIM_PARTITIONS)
-            .bind(share)
-            .bind(window)
-            .fetch_all(tx.conn())
-            .await?;
+        for &window in windows {
+            let mut q = sqlx::query_scalar::<_, i32>(sqlx::AssertSqlSafe(part_sql.clone()))
+                .bind(CLAIM_LOCK_CLASS)
+                .bind(id)
+                .bind(CLAIM_PARTITIONS)
+                .bind(share)
+                .bind(window);
+            if let Some(secs) = cooldown_secs {
+                q = q.bind(secs);
+            }
+            partitions = q.fetch_all(tx.conn()).await?;
             if !partitions.is_empty() {
                 break;
             }
@@ -452,20 +499,34 @@ pub async fn claim_batch_share(
             refused.push(id);
             continue;
         }
-        let rows = sqlx::query(
-            "SELECT id, event_id, event_created_at FROM search_outbox \
-             WHERE community_id = $1 AND parked_at IS NULL \
-               AND get_byte(event_id, 0) % $3 = ANY($4) \
-             ORDER BY created_at \
-             FOR UPDATE SKIP LOCKED \
-             LIMIT $2",
-        )
-        .bind(community.as_uuid())
-        .bind(limit)
-        .bind(CLAIM_PARTITIONS)
-        .bind(&partitions)
-        .fetch_all(tx.conn())
-        .await?;
+        let claim_sql = match mode {
+            ClaimMode::Active { .. } => {
+                "SELECT id, event_id, event_created_at FROM search_outbox \
+                 WHERE community_id = $1 AND parked_at IS NULL \
+                   AND get_byte(event_id, 0) % $3 = ANY($4) \
+                 ORDER BY created_at \
+                 FOR UPDATE SKIP LOCKED \
+                 LIMIT $2"
+            }
+            ClaimMode::Parked { .. } => {
+                "SELECT id, event_id, event_created_at FROM search_outbox \
+                 WHERE community_id = $1 AND parked_at IS NOT NULL \
+                   AND parked_at <= now() - make_interval(secs => $5) \
+                   AND get_byte(event_id, 0) % $3 = ANY($4) \
+                 ORDER BY parked_at \
+                 FOR UPDATE SKIP LOCKED \
+                 LIMIT $2"
+            }
+        };
+        let mut claim_query = sqlx::query(claim_sql)
+            .bind(community.as_uuid())
+            .bind(limit)
+            .bind(CLAIM_PARTITIONS)
+            .bind(&partitions);
+        if let Some(secs) = cooldown_secs {
+            claim_query = claim_query.bind(secs);
+        }
+        let rows = claim_query.fetch_all(tx.conn()).await?;
         if rows.is_empty() {
             // Other workers hold every partition with rows, or the rows
             // were completed since the candidate read.
@@ -584,20 +645,16 @@ pub async fn parked_depth(pool: &PgPool) -> Result<i64> {
     )
 }
 
-/// Parked row count for every active community (including zero, so gauges
-/// drop back to zero when a community's last parked row clears).
+/// Parked row count for each active community that currently has parked rows.
+/// Scans only the partial `search_outbox_parked_queue` index.
 pub async fn parked_counts(pool: &PgPool) -> Result<Vec<(CommunityId, u64)>> {
     let rows: Vec<(Uuid, i64)> = sqlx::query_as(
-        "WITH parked AS ( \
-             SELECT community_id, count(*) AS count \
-             FROM search_outbox \
-             WHERE parked_at IS NOT NULL \
-             GROUP BY community_id \
-         ) \
-         SELECT c.id, COALESCE(p.count, 0) \
-         FROM communities c \
-         LEFT JOIN parked p ON p.community_id = c.id \
-         WHERE c.deletion_state = 'active' AND c.deleted_at IS NULL",
+        "SELECT o.community_id, count(*) \
+         FROM search_outbox o \
+         JOIN communities c ON c.id = o.community_id \
+         WHERE o.parked_at IS NOT NULL \
+           AND c.deletion_state = 'active' AND c.deleted_at IS NULL \
+         GROUP BY o.community_id",
     )
     .fetch_all(pool)
     .await?;
@@ -610,113 +667,6 @@ pub async fn parked_counts(pool: &PgPool) -> Result<Vec<(CommunityId, u64)>> {
             )
         })
         .collect())
-}
-
-/// Claim up to `limit` parked rows of one active community whose `parked_at`
-/// is at or before `older_than`, oldest parked first, and re-read their
-/// events' current state from Postgres.
-///
-/// Uses the same partition advisory locks as [`claim_batch_share`] so a
-/// parked retry never overlaps with a live batch for the same event.
-pub async fn claim_parked_batch(
-    pool: &PgPool,
-    limit: i64,
-    older_than: DateTime<Utc>,
-    skip: &[CommunityId],
-) -> Result<Option<SearchOutboxBatch>> {
-    let mut refused: Vec<Uuid> = skip.iter().map(|community| *community.as_uuid()).collect();
-    for _ in 0..CLAIM_COMMUNITY_CANDIDATES {
-        let candidate: Option<Uuid> = sqlx::query_scalar(
-            "SELECT o.community_id FROM search_outbox o \
-             JOIN communities c ON c.id = o.community_id \
-             WHERE c.deletion_state = 'active' AND c.deleted_at IS NULL \
-               AND o.parked_at IS NOT NULL \
-               AND o.parked_at <= $2 \
-               AND o.community_id <> ALL($1) \
-             ORDER BY o.parked_at LIMIT 1",
-        )
-        .bind(&refused)
-        .bind(older_than)
-        .fetch_optional(pool)
-        .await?;
-        let Some(id) = candidate else {
-            return Ok(None);
-        };
-        let community = CommunityId::from_uuid(id);
-        let Some(mut tx) = crate::begin_community_sweep_transaction(
-            pool,
-            community,
-            crate::observability::WriterOperation::Maintenance,
-        )
-        .await?
-        else {
-            refused.push(id);
-            continue;
-        };
-        let partitions: Vec<i32> = sqlx::query_scalar(
-            "SELECT p FROM ( \
-                 SELECT DISTINCT get_byte(event_id, 0) % $3 AS p FROM ( \
-                     SELECT event_id FROM search_outbox \
-                     WHERE community_id = $2 AND parked_at IS NOT NULL AND parked_at <= $4 \
-                     ORDER BY parked_at LIMIT $5 \
-                 ) head \
-             ) candidates \
-             WHERE pg_try_advisory_xact_lock($1, hashtext($2::text || '/' || p))",
-        )
-        .bind(CLAIM_LOCK_CLASS)
-        .bind(id)
-        .bind(CLAIM_PARTITIONS)
-        .bind(older_than)
-        .bind(limit.saturating_mul(2))
-        .fetch_all(tx.conn())
-        .await?;
-        if partitions.is_empty() {
-            refused.push(id);
-            continue;
-        }
-        let rows = sqlx::query(
-            "SELECT id, event_id, event_created_at FROM search_outbox \
-             WHERE community_id = $1 AND parked_at IS NOT NULL AND parked_at <= $5 \
-               AND get_byte(event_id, 0) % $3 = ANY($4) \
-             ORDER BY parked_at \
-             FOR UPDATE SKIP LOCKED \
-             LIMIT $2",
-        )
-        .bind(community.as_uuid())
-        .bind(limit)
-        .bind(CLAIM_PARTITIONS)
-        .bind(&partitions)
-        .bind(older_than)
-        .fetch_all(tx.conn())
-        .await?;
-        if rows.is_empty() {
-            refused.push(id);
-            continue;
-        }
-        let mut claimed = Vec::with_capacity(rows.len());
-        let mut queued = std::collections::BTreeMap::<[u8; 32], DateTime<Utc>>::new();
-        for row in &rows {
-            let event = bytes32(row.try_get("event_id")?)?;
-            claimed.push((row.try_get("id")?, event));
-            queued.insert(event, row.try_get("event_created_at")?);
-        }
-        let documents = read_documents(&mut tx, &queued).await?;
-        let version: i64 = sqlx::query_scalar("SELECT nextval('search_index_version')")
-            .fetch_one(tx.conn())
-            .await?;
-        for document in &documents {
-            queued.remove(&document.event_id);
-        }
-        let removed = queued.into_keys().collect();
-        return Ok(Some(SearchOutboxBatch {
-            tx,
-            rows: claimed,
-            documents,
-            removed,
-            version,
-        }));
-    }
-    Ok(None)
 }
 
 fn bytes32(bytes: Vec<u8>) -> Result<[u8; 32]> {

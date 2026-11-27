@@ -829,69 +829,6 @@ mod tests {
         assert_eq!(requests.load(Ordering::SeqCst), 2, "the rest is not sent");
     }
 
-    #[tokio::test]
-    async fn a_413_bulk_request_is_split_and_only_an_oversized_document_is_rejected() {
-        let limit = 2_000usize;
-        let app = axum::Router::new()
-            .fallback(move |body: axum::body::Bytes| async move {
-                if body.len() > limit {
-                    (axum::http::StatusCode::PAYLOAD_TOO_LARGE, "{}".to_string())
-                } else {
-                    (
-                        axum::http::StatusCode::OK,
-                        json!({ "errors": false, "items": [] }).to_string(),
-                    )
-                }
-            })
-            .layer(axum::extract::DefaultBodyLimit::disable());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let url = format!("http://{}", listener.local_addr().expect("address"));
-        let server = tokio::spawn(async move { axum::serve(listener, app).await });
-        let index = SearchIndex::new(&OpenSearchConfig {
-            url,
-            basic_auth: None,
-            aws_sigv4: None,
-            index_prefix: DEFAULT_INDEX_PREFIX.into(),
-        })
-        .expect("client");
-
-        let make_doc = |byte: u8, len: usize| SearchDocument {
-            event_id: [byte; 32],
-            kind: 9,
-            pubkey: [0; 32],
-            channel_id: None,
-            created_at: chrono::DateTime::from_timestamp(0, 0).expect("epoch"),
-            content: "x".repeat(len),
-            channel_type: None,
-            author_is_agent: false,
-            thread_root: None,
-            mentions: Vec::new(),
-        };
-        // Combined > 2_000 bytes, but each neighbour fits alone; only doc 2 exceeds 2_000 alone.
-        let documents = [
-            make_doc(1, 900),
-            make_doc(2, 2_500),
-            make_doc(3, 900),
-            make_doc(4, 900),
-        ];
-
-        let outcome = index
-            .write(
-                CommunityId::from_uuid(uuid::Uuid::nil()),
-                &documents,
-                &[],
-                1,
-            )
-            .await
-            .expect("413 splits the batch instead of failing it");
-        server.abort();
-
-        assert!(outcome.failed.is_empty(), "{outcome:?}");
-        assert_eq!(outcome.rejected, vec![[2; 32]]);
-    }
-
     #[test]
     fn a_batch_over_the_request_limit_is_split_in_order() {
         // Mutation: never start a new run → RED.
