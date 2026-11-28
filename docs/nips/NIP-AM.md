@@ -124,7 +124,21 @@ The `content` field decrypts to a UTF-8 JSON object:
     "cacheClass": "ephemeral"                    // cache-write class; omit when not applicable
   },
 
-  "stopReason": "end_turn"               // optional
+  "stopReason": "end_turn",              // optional
+
+  // Tool calls and skill invocations during this turn, as name -> count.
+  // Both OPTIONAL; omitted (not empty) when no tool calls were observed.
+  // Publishers SHOULD send at most 64 distinct names, each at most 128 bytes,
+  // folding overflow into the key "_other". Consumers MUST NOT reject the
+  // event over these fields; they MUST ignore them if absent or malformed.
+  "tools":  { "Read": 3, "shell": 1 },
+  "skills": { "git": 1 },
+
+  // Context-window occupancy at the last report during this turn. OPTIONAL;
+  // omitted when the harness reports no window size. Publishers send
+  // windowTokens > 0; consumers MUST ignore the field (not the event) when it
+  // is absent or windowTokens is 0. Percent used = usedTokens / windowTokens.
+  "context": { "usedTokens": 50000, "windowTokens": 200000 }
 }
 ```
 
@@ -137,8 +151,9 @@ unknown fields (forward compatibility).
 
 When a `cumulative` object is present, `sessionId` and `turnSeq` are
 REQUIRED. `turnSeq` is a per-session monotonically increasing integer
-starting at any value, incremented by the publisher on every published turn
-metric for that session; a publisher restart that loses the counter MUST
+starting at any value, incremented by the publisher on every published
+token-bearing turn metric for that session (usage-null records do not
+consume a value); a publisher restart that loses the counter MUST
 start a new `sessionId` rather than reuse the old one with a reset `turnSeq`.
 Cumulative values form a series only *within* one `sessionId`, ordered by
 `turnSeq` — consumers MUST NOT diff cumulative values across different
@@ -219,7 +234,10 @@ unlabeled total.
 - Publish exactly one event per completed turn, at turn completion, including
   turns that end in cancellation or error when usage was observed.
 - Do NOT publish an event for a turn with no observed usage (all counters
-  unknown); an all-null metric carries no information.
+  unknown) unless it carries `tools`, `skills`, or `context`. Such a
+  *usage-null* record omits `turn`, `cumulative`, and `turnSeq` (never zeros)
+  and sets `deltaReliable: false`; it takes no position in the `turnSeq`
+  sequence, so token-bearing records stay contiguous.
 - `created_at` SHOULD equal the payload `timestamp` truncated to seconds.
 
 ## Relay Behavior

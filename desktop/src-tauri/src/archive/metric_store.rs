@@ -105,6 +105,29 @@ pub(super) struct AgentMetricIndexRow {
 }
 
 impl AgentMetricIndexRow {
+    /// True for a usage-null NIP-AM record: no `turnSeq` and no token or cost
+    /// counters at all, so it carries only tools/skills/context. Such rows are
+    /// not usage reports and must stay out of token accounting.
+    pub(super) fn is_usage_null(&self) -> bool {
+        self.turn_seq.is_none()
+            && [
+                self.turn_input_tokens,
+                self.turn_output_tokens,
+                self.turn_total_tokens,
+                self.turn_cache_read_tokens,
+                self.turn_cache_write_tokens,
+                self.cumulative_input_tokens,
+                self.cumulative_output_tokens,
+                self.cumulative_total_tokens,
+                self.cumulative_cache_read_tokens,
+                self.cumulative_cache_write_tokens,
+            ]
+            .iter()
+            .all(Option::is_none)
+            && self.turn_cost_usd.is_none()
+            && self.cumulative_cost_usd.is_none()
+    }
+
     /// Parse a decrypted NIP-AM payload (the plaintext JSON already stored in
     /// `archived_events.raw_json` for kind 44200 rows) into an index row.
     ///

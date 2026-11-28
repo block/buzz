@@ -77,11 +77,9 @@ pub(crate) struct UsageUpdatePayload {
     /// Total tokens used (context-usage proxy). Optional — buzz-agent omits
     /// this field or sends 0 because it does not track a context window limit.
     #[serde(default)]
-    #[allow(dead_code)]
     pub used: u64,
     /// Context window size. Optional — buzz-agent omits this field.
     #[serde(default)]
-    #[allow(dead_code)]
     pub context_limit: u64,
     /// Session-cumulative inclusive input tokens.
     ///
@@ -185,12 +183,15 @@ struct SessionState {
 ///
 /// `turn_*` fields are `None` when delta is unreliable (first turn or counter
 /// decrease). `cumulative_*` fields are always present when the agent reports them.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TurnUsage {
     /// Goose session id (maps to NIP-AM `sessionId`).
     pub session_id: String,
     /// Per-session monotonic sequence number for this turn (maps to NIP-AM `turnSeq`).
-    pub turn_seq: u64,
+    /// `None` for usage-null records ([`TurnUsage::tokenless`]): they carry no
+    /// `cumulative` series, so they take no position in the sequence and never
+    /// consume a number a later token-bearing record needs.
+    pub turn_seq: Option<u64>,
     /// Whether the `turn_*` delta fields are reliable.
     pub delta_reliable: bool,
     /// Per-turn input token delta; `None` when unreliable.
@@ -242,6 +243,39 @@ pub struct TurnUsage {
     /// `None` when the publisher omitted it (unrecognised endpoint, mixed
     /// identities, old harness). Per-turn only — not session-cumulative.
     pub pricing_identity: Option<buzz_core::agent_turn_metric::PricingIdentity>,
+    /// Non-token turn data; filled by `AcpClient::take_turn_usage`.
+    pub activity: TurnActivity,
+}
+
+/// Per-turn tool, skill, and context-window data (NIP-AM `tools`, `skills`,
+/// `context`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TurnActivity {
+    /// Tool calls by name for this turn.
+    pub tools: Option<std::collections::BTreeMap<String, u32>>,
+    /// Skill invocations by name for this turn.
+    pub skills: Option<std::collections::BTreeMap<String, u32>>,
+    /// Context-window occupancy at the last report this turn.
+    pub context: Option<buzz_core::agent_turn_metric::ContextUsage>,
+}
+
+impl TurnActivity {
+    /// True when no tool, skill, or context data was observed.
+    pub(crate) fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl TurnUsage {
+    /// A usage-null record: the harness reported no token counts this turn, but
+    /// tools, skills, or context data exist. Every token field is `None` (never
+    /// zero), `delta_reliable` is false, and `turn_seq` is `None`.
+    pub(crate) fn tokenless(session_id: String) -> Self {
+        Self {
+            session_id,
+            ..Default::default()
+        }
+    }
 }
 
 /// Per-turn usage carried by a standard ACP `session/prompt` response.
@@ -261,6 +295,17 @@ pub(crate) struct PromptResponseUsage {
 pub(crate) enum StandardAdapterKind {
     Claude,
     Codex,
+    /// Hermes reports session-cumulative counters in the prompt response, with
+    /// input already inclusive of cache reads. See `StandardUsageTracker::take_hermes`.
+    Hermes,
+}
+
+/// Last session-cumulative Hermes counters, used to derive per-turn deltas.
+#[derive(Debug, Clone, Copy, Default)]
+struct HermesCounters {
+    input: u64,
+    output: u64,
+    cache_read: u64,
 }
 
 #[derive(Debug, Default)]
@@ -268,6 +313,9 @@ struct StandardSessionState {
     published_seq: u64,
     last_cost: Option<f64>,
     cost_poisoned: bool,
+    /// Baseline for Hermes cumulative counters; `None` until first observed
+    /// (or seeded at zero for a session buzz-acp created).
+    hermes_last: Option<HermesCounters>,
 }
 
 #[derive(Debug, Default)]
@@ -286,7 +334,14 @@ impl StandardUsageTracker {
                 published_seq: 0,
                 last_cost: Some(0.0),
                 cost_poisoned: false,
+                hermes_last: Some(HermesCounters::default()),
             });
+    }
+
+    /// Session id of the turn currently in flight, if any. Read before
+    /// [`Self::take`], which ends the turn.
+    pub(crate) fn in_flight_session(&self) -> Option<&str> {
+        self.in_flight_session.as_deref()
     }
 
     pub(crate) fn begin_turn(&mut self, session_id: &str) {
@@ -323,8 +378,13 @@ impl StandardUsageTracker {
             .map(|(session_id, _, _)| session_id.clone())
             .or_else(|| cost.as_ref().map(|(session_id, _)| session_id.clone()))?;
 
+        if let Some((_, usage, StandardAdapterKind::Hermes)) = &prompt {
+            return Some(self.take_hermes(session_id, usage));
+        }
+
         let (inclusive_input, output_tokens, total_tokens, cache_read, cache_write) = match prompt {
             Some((_, usage, adapter)) => {
+                // Claude/Codex `input` excludes cache; Hermes returned above.
                 let inclusive_input = usage
                     .input_tokens
                     .checked_add(usage.cached_read_tokens.unwrap_or(0))
@@ -373,7 +433,7 @@ impl StandardUsageTracker {
         state.published_seq += 1;
         Some(TurnUsage {
             session_id,
-            turn_seq: state.published_seq,
+            turn_seq: Some(state.published_seq),
             // Standard prompt counters are per-turn already. A cost-only record
             // is reliable only when a seeded/previous cumulative baseline made
             // the cost delta provable.
@@ -392,7 +452,59 @@ impl StandardUsageTracker {
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
+            activity: Default::default(),
         })
+    }
+}
+
+impl StandardUsageTracker {
+    /// Map a Hermes prompt-response `usage` to a record.
+    ///
+    /// Evidence (NousResearch/hermes-agent @ 3166d61):
+    /// - `acp_adapter/server.py` builds `Usage(input_tokens=result["prompt_tokens"],
+    ///   output_tokens=result["completion_tokens"], cached_read_tokens=
+    ///   result["cache_read_tokens"])`.
+    /// - `agent/turn_finalizer.py` fills those result keys from
+    ///   `agent.session_<key>`: SESSION-CUMULATIVE counters on a persistent
+    ///   agent, not per-turn values. Per-turn counts are therefore the delta
+    ///   between consecutive responses.
+    /// - `agent/usage_pricing.py` defines `prompt_tokens = input_tokens +
+    ///   cache_read_tokens + cache_write_tokens`, so the wire `inputTokens` is
+    ///   already inclusive (unlike Claude/Codex); nothing is added to it.
+    /// - Hermes always sends `cachedReadTokens` (0 when the provider reports no
+    ///   cache), so 0 is indistinguishable from "unreported" and is omitted.
+    /// - No cost and no provider total are sent (its `total_tokens` is a sum).
+    fn take_hermes(&mut self, session_id: String, usage: &PromptResponseUsage) -> TurnUsage {
+        let current = HermesCounters {
+            input: usage.input_tokens,
+            output: usage.output_tokens,
+            cache_read: usage.cached_read_tokens.unwrap_or(0),
+        };
+        let state = self.sessions.entry(session_id.clone()).or_default();
+        let previous = state.hermes_last.replace(current);
+        // A decrease means the agent restarted or the series is corrupt: the
+        // turn delta is unknown, and the new value becomes the baseline.
+        let delta = previous
+            .filter(|p| current.input >= p.input && current.output >= p.output)
+            .map(|p| {
+                (
+                    current.input - p.input,
+                    current.output - p.output,
+                    current.cache_read.checked_sub(p.cache_read),
+                )
+            });
+        state.published_seq += 1;
+        let nonzero = |n: u64| (n > 0).then_some(n);
+        let mut record = TurnUsage::tokenless(session_id);
+        record.turn_seq = Some(state.published_seq);
+        record.delta_reliable = delta.is_some();
+        record.turn_input_tokens = delta.map(|d| d.0);
+        record.turn_output_tokens = delta.map(|d| d.1);
+        record.turn_cache_read_tokens = delta.and_then(|d| d.2).and_then(nonzero);
+        record.cumulative_input_tokens = Some(current.input);
+        record.cumulative_output_tokens = Some(current.output);
+        record.cumulative_cache_read_tokens = nonzero(current.cache_read);
+        record
     }
 }
 
@@ -731,7 +843,7 @@ impl UsageTracker {
             };
             self.pending = Some(TurnUsage {
                 session_id: session_id.to_string(),
-                turn_seq,
+                turn_seq: Some(turn_seq),
                 delta_reliable,
                 turn_input_tokens: turn_input,
                 turn_output_tokens: turn_output,
@@ -749,6 +861,7 @@ impl UsageTracker {
                 // The folded identity is written in take() — use a placeholder
                 // here and replace it before returning the record.
                 pricing_identity: None,
+                activity: Default::default(),
             });
         } else if self.in_flight_session.is_none() {
             // Not in-flight at all: advance the committed baseline so the next
@@ -907,7 +1020,7 @@ impl UsageTracker {
         self.sessions.insert(
             record.session_id.clone(),
             SessionState {
-                published_seq: record.turn_seq,
+                published_seq: record.turn_seq.unwrap_or_default(),
                 last_input: record.cumulative_input_tokens,
                 last_output: record.cumulative_output_tokens,
                 last_cost: record.cumulative_cost_usd,
@@ -1081,7 +1194,7 @@ mod tests {
         tracker.begin_turn("sess-a");
         tracker.record("sess-a", &payload(1000, 100, None));
         let a1 = tracker.take().expect("A turn 1");
-        assert_eq!(a1.turn_seq, 1);
+        assert_eq!(a1.turn_seq, Some(1));
         assert!(!a1.delta_reliable, "first turn is unreliable");
         assert_eq!(a1.cumulative_input_tokens, Some(1000));
 
@@ -1105,7 +1218,8 @@ mod tests {
 
         assert_eq!(a2.session_id, "sess-a");
         assert_eq!(
-            a2.turn_seq, 2,
+            a2.turn_seq,
+            Some(2),
             "seq must increment per publish, not per notification"
         );
         assert!(a2.delta_reliable, "A turn 2 must have a reliable delta");
@@ -1130,7 +1244,7 @@ mod tests {
         let usage = tracker.take().expect("should have pending usage");
 
         assert_eq!(usage.session_id, "sess-1");
-        assert_eq!(usage.turn_seq, 1);
+        assert_eq!(usage.turn_seq, Some(1));
         assert!(
             !usage.delta_reliable,
             "first turn: delta must be unreliable"
@@ -1157,7 +1271,7 @@ mod tests {
         tracker.record("sess-2", &payload(100, 50, Some(0.001)));
         let usage = tracker.take().expect("pending");
 
-        assert_eq!(usage.turn_seq, 2);
+        assert_eq!(usage.turn_seq, Some(2));
         assert!(
             !usage.delta_reliable,
             "counter decrease: delta must be unreliable"
@@ -1177,14 +1291,14 @@ mod tests {
         tracker.begin_turn("sess-cost");
         tracker.record("sess-cost", &payload(1000, 200, Some(0.10)));
         let t1 = tracker.take().expect("t1");
-        assert_eq!(t1.turn_seq, 1);
+        assert_eq!(t1.turn_seq, Some(1));
 
         // Turn 2 — tokens monotone, but cost decreased.
         tracker.begin_turn("sess-cost");
         tracker.record("sess-cost", &payload(1500, 350, Some(0.05)));
         let usage = tracker.take().expect("t2");
 
-        assert_eq!(usage.turn_seq, 2, "turn_seq must still increment");
+        assert_eq!(usage.turn_seq, Some(2), "turn_seq must still increment");
         assert!(
             !usage.delta_reliable,
             "cost decrease: delta must be unreliable"
@@ -1240,7 +1354,7 @@ mod tests {
         let usage = tracker.take().expect("pending");
 
         assert_eq!(usage.session_id, "sess-b");
-        assert_eq!(usage.turn_seq, 1);
+        assert_eq!(usage.turn_seq, Some(1));
         assert!(
             !usage.delta_reliable,
             "new session: delta must be unreliable"
@@ -1261,7 +1375,7 @@ mod tests {
         tracker.record("sess-3", &payload(1800, 450, Some(0.018)));
         let usage = tracker.take().expect("pending");
 
-        assert_eq!(usage.turn_seq, 2);
+        assert_eq!(usage.turn_seq, Some(2));
         assert!(usage.delta_reliable);
         assert_eq!(usage.turn_input_tokens, Some(800));
         assert_eq!(usage.turn_output_tokens, Some(250));
@@ -1295,7 +1409,7 @@ mod tests {
         tracker.begin_turn("sess-5");
         tracker.record("sess-5", &payload(1000, 100, None));
         let t1 = tracker.take().expect("turn 1");
-        assert_eq!(t1.turn_seq, 1);
+        assert_eq!(t1.turn_seq, Some(1));
 
         // Turn 2 — two notifications arrive before take(). The second overwrites
         // the first in pending; delta is measured from the committed baseline
@@ -1312,13 +1426,13 @@ mod tests {
         assert_eq!(usage.turn_input_tokens, Some(1000));
         assert_eq!(usage.turn_output_tokens, Some(150));
         // seq increments once per publish, not once per notification.
-        assert_eq!(usage.turn_seq, 2);
+        assert_eq!(usage.turn_seq, Some(2));
 
         // Turn 3 — prove seq continues to increment per publish, not per notification.
         tracker.begin_turn("sess-5");
         tracker.record("sess-5", &payload(2300, 290, None));
         let t3 = tracker.take().expect("turn 3");
-        assert_eq!(t3.turn_seq, 3);
+        assert_eq!(t3.turn_seq, Some(3));
         // Delta from turn-2 committed baseline (2000, 250).
         assert_eq!(t3.turn_input_tokens, Some(300));
         assert_eq!(t3.turn_output_tokens, Some(40));
@@ -1973,7 +2087,7 @@ mod tests {
 
         let usage = TurnUsage {
             session_id: "sess-pool-none".into(),
-            turn_seq: 2,
+            turn_seq: Some(2),
             delta_reliable: true,
             turn_input_tokens: Some(400),
             turn_output_tokens: Some(100),
@@ -1989,6 +2103,7 @@ mod tests {
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
+            activity: Default::default(),
         };
 
         let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);
@@ -2014,7 +2129,7 @@ mod tests {
 
         let usage = TurnUsage {
             session_id: "sess-pool-some".into(),
-            turn_seq: 2,
+            turn_seq: Some(2),
             delta_reliable: true,
             turn_input_tokens: Some(400),
             turn_output_tokens: Some(100),
@@ -2030,6 +2145,7 @@ mod tests {
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
+            activity: Default::default(),
         };
 
         let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);
@@ -2067,7 +2183,7 @@ mod tests {
             usage.delta_reliable,
             "spawned session first turn must be reliable"
         );
-        assert_eq!(usage.turn_seq, 1);
+        assert_eq!(usage.turn_seq, Some(1));
         // Turn deltas == cumulative (baseline was zero).
         assert_eq!(usage.turn_input_tokens, Some(1000));
         assert_eq!(usage.turn_output_tokens, Some(200));
@@ -2092,7 +2208,7 @@ mod tests {
             !usage.delta_reliable,
             "re-attach first turn must remain fail-closed (delta_reliable=false)"
         );
-        assert_eq!(usage.turn_seq, 1);
+        assert_eq!(usage.turn_seq, Some(1));
         assert!(
             usage.turn_input_tokens.is_none(),
             "no turn delta on re-attach"
@@ -2118,7 +2234,7 @@ mod tests {
         spawned.record("sess-s", &payload(1800, 250, None));
         let t2_s = spawned.take().expect("spawned turn 2");
         assert!(t2_s.delta_reliable, "spawned path: turn 2 reliable");
-        assert_eq!(t2_s.turn_seq, 2);
+        assert_eq!(t2_s.turn_seq, Some(2));
         assert_eq!(t2_s.turn_input_tokens, Some(800));
         assert_eq!(t2_s.turn_output_tokens, Some(150));
 
@@ -2132,7 +2248,7 @@ mod tests {
         reattach.record("sess-r", &payload(6000, 1200, None));
         let t2_r = reattach.take().expect("reattach turn 2");
         assert!(t2_r.delta_reliable, "re-attach path: turn 2 reliable");
-        assert_eq!(t2_r.turn_seq, 2);
+        assert_eq!(t2_r.turn_seq, Some(2));
         assert_eq!(t2_r.turn_input_tokens, Some(1000));
         assert_eq!(t2_r.turn_output_tokens, Some(200));
     }
@@ -2164,7 +2280,7 @@ mod tests {
 
         // Wire payload fields — every field checked.
         assert_eq!(usage.session_id, "sess-wire");
-        assert_eq!(usage.turn_seq, 1);
+        assert_eq!(usage.turn_seq, Some(1));
         assert!(usage.delta_reliable);
         assert_eq!(usage.turn_input_tokens, Some(10000));
         assert_eq!(usage.turn_output_tokens, Some(2345));
