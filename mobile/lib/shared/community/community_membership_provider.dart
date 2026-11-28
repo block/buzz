@@ -104,10 +104,25 @@ CommunityMembershipSnapshot communityMembershipFromEvents(
 /// The HTTP query resolves from the first response rather than waiting for a
 /// WebSocket EOSE frame, and watching [relayConfigProvider] makes the result
 /// community-scoped.
+///
+/// The snapshot is queried once per community and kept alive across consumer
+/// remounts. It refreshes only on an explicit `ref.invalidate`, on a community
+/// switch, or when the relay session (re)connects — never on every session
+/// state emission.
 final communityMembershipProvider =
     FutureProvider.autoDispose<CommunityMembershipSnapshot>((ref) async {
       ref.watch(relayConfigProvider);
-      final session = ref.watch(relaySessionProvider.notifier);
+      ref.keepAlive();
+      // Re-fetch only after a (re)connect completes, mirroring
+      // channelMembersProvider. Reading (not watching) the notifier keeps
+      // reconnecting/disconnected transitions from rebuilding this provider.
+      ref.listen(relaySessionProvider, (previous, next) {
+        if (next.status == SessionStatus.connected &&
+            previous?.status != SessionStatus.connected) {
+          ref.invalidateSelf();
+        }
+      });
+      final session = ref.read(relaySessionProvider.notifier);
       final events = await session.queryRelay([NostrFilters.relayMembers()]);
       return communityMembershipFromEvents(events);
     });
