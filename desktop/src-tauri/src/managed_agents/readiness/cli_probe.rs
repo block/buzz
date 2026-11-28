@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::managed_agents::runtime::build_augmented_path;
@@ -57,12 +58,15 @@ pub(crate) fn login_probe(
     binary_path: &Path,
     probe_args: &[&str],
     augmented_path: Option<&str>,
+    effective_env: &BTreeMap<String, String>,
 ) -> ProbeOutcome {
     let mut command = std::process::Command::new(binary_path);
     command.args(&probe_args[1..]);
     if let Some(path) = augmented_path {
         command.env("PATH", path);
     }
+    // Match launch precedence: explicit effective settings override the PATH floor.
+    command.envs(effective_env);
     crate::util::configure_no_window(&mut command);
 
     match command.output() {
@@ -154,6 +158,7 @@ mod tests {
                 &script_path,
                 &["fake-codex", "login", "status"],
                 Some(&augmented_path),
+                &Default::default(),
             ),
             ProbeOutcome::LoggedIn,
             "the injected augmented PATH should allow /usr/bin/env to find the interpreter"
@@ -187,6 +192,7 @@ mod tests {
             &script_path,
             &["fake-codex-bad-config", "login", "status"],
             None,
+            &Default::default(),
         );
         assert!(
             matches!(outcome, ProbeOutcome::ConfigInvalid { .. }),
@@ -225,6 +231,7 @@ mod tests {
             &script_path,
             &["fake-codex-logged-out", "login", "status"],
             None,
+            &Default::default(),
         );
         assert_eq!(
             outcome,
