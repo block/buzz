@@ -7,6 +7,9 @@ use serde_json::{json, Value};
 
 use crate::{api::api_error, state::AppState};
 
+/// Stable error for a stored event the relay cannot read back.
+const UNREADABLE: &str = "read_state_snapshot_unreadable";
+
 pub(super) fn requested(filters: &[Value]) -> bool {
     filters
         .iter()
@@ -40,6 +43,12 @@ pub(super) async fn query(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "read_state_snapshot exceeds event or byte limit; cannot prove complete",
             ),
+            // A stored event that cannot be read back fails every retry;
+            // clients may stop waiting for it, unlike a storage failure.
+            buzz_db::DbError::InvalidData(_) => {
+                tracing::error!(%error, "read-state snapshot unreadable");
+                api_error(StatusCode::SERVICE_UNAVAILABLE, UNREADABLE)
+            }
             _ => {
                 tracing::error!(%error, "read-state snapshot failed");
                 api_error(
@@ -330,6 +339,7 @@ mod postgres_tests {
             .unwrap();
             let (status, body) = request(state.clone(), &host, Some(&key), filter(&key)).await;
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+            assert_eq!(body["error"], UNREADABLE);
             assert_ne!(body["complete"], true);
             assert!(body.get("events").is_none());
         }
@@ -345,6 +355,11 @@ mod postgres_tests {
             .await
             .unwrap();
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        // A storage failure may pass, so it stays distinct from corruption.
+        assert_eq!(
+            body["error"],
+            "read_state_snapshot unavailable; cannot prove complete"
+        );
         assert_ne!(body["complete"], true);
     }
 

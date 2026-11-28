@@ -55,6 +55,76 @@ void main() {
     );
   });
 
+  // A permanent snapshot failure ends the wait for the first landing's
+  // baseline; a temporary one keeps it, so missing marks stay unknown.
+  for (final (name, error, permanent) in <(String, Object, bool)>[
+    (
+      'over the snapshot cap',
+      RelayException(413, '{"error":"read_state_snapshot exceeds limit"}'),
+      true,
+    ),
+    (
+      'an unreadable stored event',
+      RelayException(503, '{"error":"$readStateSnapshotUnreadableError"}'),
+      true,
+    ),
+    (
+      'no snapshot descriptor',
+      const FormatException('Atomic read-state snapshot not discovered'),
+      true,
+    ),
+    (
+      'a storage failure',
+      RelayException(
+        503,
+        '{"error":"read_state_snapshot unavailable; cannot prove complete"}',
+      ),
+      false,
+    ),
+    ('an unknown 503 body', RelayException(503, 'upstream unavailable'), false),
+    ('a timeout', TimeoutException('offline'), false),
+    (
+      'an invalid envelope',
+      const FormatException('Incomplete or mismatched read-state snapshot'),
+      false,
+    ),
+  ]) {
+    test('first-landing baseline after $name', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keys = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keys.nsec,
+        pubkey: keys.public,
+      )!;
+      final session = _FakeRelaySession()..fetchError = error;
+      final manager = ReadStateManager(
+        pubkey: keys.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: session,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+        now: () => 2000,
+      );
+      await manager.initialize();
+      manager.markContextRead('marked', 1500);
+      manager.seedInitialContextsRead({'marked': 1990, 'unmarked': 1990});
+      // A later landing never replaces the capture.
+      manager.seedInitialContextsRead({'unmarked': 1999});
+      expect(manager.loadPending, !permanent);
+      expect(manager.remoteUnsupported, permanent);
+      expect(manager.effectiveContexts, {
+        'marked': 1500,
+        if (permanent) 'unmarked': 1990,
+      });
+      expect(session.fetchCount, 1);
+      manager.dispose(flushPending: false);
+    });
+  }
+
   test('disables remote sync after relay rejects read-state kind', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -2273,6 +2343,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   List<NostrEvent> historyEvents = [];
   Future<void>? fetchGate;
   bool failNextFetch = false;
+  Object? fetchError;
   int fetchCount = 0;
   int subscribeCount = 0;
   int liveSubscriptions = 0;
@@ -2300,6 +2371,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
       failNextFetch = false;
       throw TimeoutException('history timed out');
     }
+    if (fetchError case final error?) throw error;
     return events;
   }
 

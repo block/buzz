@@ -24,6 +24,15 @@ const _snapshotRetryMax = Duration(minutes: 5);
 /// Failed-sync retry, unpublished-state checks, refused-publish recovery
 /// and acknowledgement.
 extension ReadStateRetry on ReadStateManager {
+  /// Whether synced read state has yet to load: no snapshot has merged
+  /// since this manager started, and the relay has not refused it for the
+  /// session. Local-only read state never waits.
+  bool get loadPending =>
+      _remoteEnabled &&
+      _relaySession != null &&
+      !_followsLoaded &&
+      !_remoteUnsupported;
+
   /// Retry now after a failed sync: the remote snapshot again if the last one
   /// failed, else any unpublished state. Does nothing while in sync.
   Future<void> retrySync() async {
@@ -42,6 +51,17 @@ extension ReadStateRetry on ReadStateManager {
       return;
     }
     await flush();
+  }
+
+  /// Retries a failed snapshot read, unless every retry would fail the same
+  /// way: then read state is unsupported for this session, and the first
+  /// landing's baseline stops waiting for it.
+  void _retrySnapshotUnlessPermanent(Object error) {
+    if (!isPermanentReadStateSnapshotError(error)) {
+      return _scheduleSnapshotRetry();
+    }
+    _remoteUnsupported = true;
+    _applySeedBaseline();
   }
 
   void _scheduleSnapshotRetry() {

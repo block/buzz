@@ -6,6 +6,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../crypto/event_signing.dart';
 import 'nostr_models.dart';
+import 'relay_client.dart';
 import 'relay_query_response.dart';
 
 /// Snapshot bytes and the authenticated scope they must match.
@@ -37,13 +38,35 @@ final _uuid = RegExp(
   r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
 );
 
+const _notDiscovered = 'Atomic read-state snapshot not discovered';
+
+/// The relay's stable error for a stored event it cannot read back.
+const readStateSnapshotUnreadableError = 'read_state_snapshot_unreadable';
+
+/// Whether a snapshot read failed in a way every retry repeats: the relay
+/// offers no snapshot, the state exceeds its limits, or the relay cannot
+/// read a stored event back. Anything else may be temporary.
+bool isPermanentReadStateSnapshotError(Object error) {
+  if (error is FormatException) return error.message == _notDiscovered;
+  if (error is! RelayException) return false;
+  if (error.statusCode == 413) return true;
+  try {
+    final body = jsonDecode(error.body);
+    return error.statusCode == 503 &&
+        body is Map &&
+        body['error'] == readStateSnapshotUnreadableError;
+  } on FormatException {
+    return false;
+  }
+}
+
 /// Requires explicit version-1 host-bound NIP-11 discovery, never a fallback.
 String readStateSnapshotCommunity(Object? descriptor) {
   if (descriptor is! Map<String, dynamic> ||
       descriptor['version'] != 1 ||
       descriptor['community_id'] is! String ||
       !_uuid.hasMatch(descriptor['community_id'] as String)) {
-    throw const FormatException('Atomic read-state snapshot not discovered');
+    throw const FormatException(_notDiscovered);
   }
   return descriptor['community_id'] as String;
 }

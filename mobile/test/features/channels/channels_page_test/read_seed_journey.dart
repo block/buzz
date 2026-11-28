@@ -66,6 +66,125 @@ void _readSeedJourney(
     await tester.pumpWidget(const SizedBox());
   });
 
+  testWidgets('first landing baselines only after read state loads', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keys = nostr.Keys.generate();
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keys.nsec,
+      pubkey: keys.public,
+    )!;
+    // A mark on this device and one from another device both predate the
+    // newest message, so both channels are really unread.
+    await prefs.setString(
+      localReadStateKey(keys.public, 'https://seed.example'),
+      jsonEncode({
+        'channel-0': DateTime.fromMillisecondsSinceEpoch(
+          (now - 10) * 1000,
+          isUtc: true,
+        ).toIso8601String(),
+      }),
+    );
+    final peerMark = NostrEvent(
+      id: 'peer-read-state',
+      pubkey: keys.public,
+      createdAt: now - 5,
+      kind: EventKind.readState,
+      tags: [
+        ['d', '${readStateDTagPrefix}peer'],
+        ['t', 'read-state'],
+      ],
+      content: crypto.encrypt(
+        jsonEncode(
+          ReadStateBlob(
+            clientId: 'peer',
+            contexts: {'channel-1': now - 5},
+          ).toJson(),
+        ),
+      ),
+      sig: '',
+    );
+    final scope =
+        '${keys.public}:${Uri.encodeComponent('https://seed.example')}';
+    Future<ProviderContainer> mount(_ReadSeedSession session) async {
+      await tester.pumpWidget(
+        buildTestable(
+          prefs: prefs,
+          overrides: [
+            relayConfigProvider.overrideWith(() => _ReadSeedConfig(keys.nsec)),
+            relaySessionProvider.overrideWith(() => session),
+            activeCommunityProvider.overrideWith((ref) async => null),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      return ProviderScope.containerOf(
+        tester.element(find.byType(ChannelsPage)),
+      );
+    }
+
+    FontWeight? weight(String name) =>
+        tester.widget<Text>(find.text(name)).style?.fontWeight;
+
+    // The first load fails: nothing is baselined and the unread channels
+    // stay unread, across a restart too.
+    final offline = TimeoutException('offline');
+    var session = _ReadSeedSession(keys.public, now)..snapshotError = offline;
+    var container = await mount(session);
+    expect(container.read(readStateProvider).contexts, {'channel-0': now - 10});
+    expect(weight('channel-0'), FontWeight.w600);
+    expect(weight('channel-1'), FontWeight.w600);
+    // The baseline is captured at landing: every channel without a mark.
+    final captured = {for (var i = 1; i < 400; i++) 'channel-$i': now};
+    expect(
+      ReadStateStorage(prefs).readJournal(scope)!['seedPending'],
+      captured,
+    );
+    // A teammate posts while the load is failing, so that row is unread.
+    session.post('channel-10', now + 5);
+    await tester.pumpAndSettle();
+    expect(weight('channel-10'), FontWeight.w600);
+    // Restart: the list reloads with that post, the journal keeps the capture.
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
+    session = _ReadSeedSession(keys.public, now)
+      ..snapshotError = offline
+      ..postedAt['channel-10'] = now + 5;
+    container = await mount(session);
+    expect(container.read(readStateProvider).contexts, {'channel-0': now - 10});
+    expect(weight('channel-1'), FontWeight.w600);
+    expect(
+      ReadStateStorage(prefs).readJournal(scope)!['seedPending'],
+      captured,
+    );
+
+    // The retry loads: only channels with no mark anywhere are baselined.
+    session
+      ..snapshotError = null
+      ..snapshot = [peerMark];
+    await tester.pump(const Duration(seconds: 6));
+    await tester.pumpAndSettle();
+    final reads = container.read(readStateProvider).contexts;
+    expect(reads, {
+      'channel-0': now - 10,
+      'channel-1': now - 5,
+      for (var i = 2; i < 400; i++) 'channel-$i': now,
+    });
+    expect(weight('channel-0'), FontWeight.w600);
+    expect(weight('channel-1'), FontWeight.w600);
+    // The post that arrived while waiting stays unread.
+    expect(weight('channel-10'), FontWeight.w600);
+    expect(weight('channel-100'), FontWeight.w500);
+    final saved = ReadStateStorage(prefs).readJournal(scope)!;
+    expect(saved.containsKey('seedPending'), isFalse);
+    expect(saved['observed'], reads);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('cold community seeds read state with one saved snapshot', (
     tester,
   ) async {
@@ -161,14 +280,30 @@ class _ReadSeedSession extends RelaySessionNotifier {
   final String pubkey;
   int readStatePublishes = 0;
   bool available = true;
+  Object? snapshotError;
+  List<NostrEvent> snapshot = const [];
+  // Each channel's newest message, when not [now].
+  final postedAt = <String, int>{};
+  final _live = <void Function(NostrEvent)>[];
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
 
+  /// A teammate's live message in [channel].
+  void post(String channel, int createdAt) {
+    postedAt[channel] = createdAt;
+    final message = event(9, channel, [
+      ['h', channel],
+    ]);
+    for (final onEvent in List.of(_live)) {
+      onEvent(message);
+    }
+  }
+
   NostrEvent event(int kind, String channel, List<List<String>> tags) =>
       NostrEvent(
-        id: '$kind-$channel',
+        id: '$kind-$channel-${postedAt[channel] ?? now}',
         pubkey: kind == 9 ? 'other-member' : pubkey,
-        createdAt: now,
+        createdAt: kind == 9 ? postedAt[channel] ?? now : now,
         kind: kind,
         tags: tags,
         content: '',
@@ -205,7 +340,10 @@ class _ReadSeedSession extends RelaySessionNotifier {
   @override
   Future<List<NostrEvent>> fetchReadStateSnapshot({
     Duration timeout = const Duration(seconds: 8),
-  }) async => [];
+  }) async {
+    if (snapshotError case final error?) throw error;
+    return snapshot;
+  }
 
   @override
   Future<List<NostrEvent>> fetchHistory(
@@ -237,7 +375,11 @@ class _ReadSeedSession extends RelaySessionNotifier {
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String)? onClosed,
-  }) async => () {};
+  }) async {
+    if (filter.tags['#h'] == null) return () {};
+    _live.add(onEvent);
+    return () => _live.remove(onEvent);
+  }
 
   @override
   Future<NostrEvent> publish(

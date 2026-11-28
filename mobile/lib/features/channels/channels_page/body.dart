@@ -317,6 +317,8 @@ class _SliverChannelsList extends HookConsumerWidget {
             seeds[channel.id] = lastMessageAt;
           }
         }
+        // Captured now; applied once synced read state loads, since a
+        // missing mark is unknown until then.
         ref.read(readStateProvider.notifier).seedContextsRead(seeds);
         initialSeedComplete.value = true;
       });
