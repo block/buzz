@@ -381,6 +381,7 @@ run_unit_tests() {
       handlers::auth::tests::repeat_auth_after_a_terminal_logs_one_denial \
       nip_fi_upgrade::tests::deny_protected_logs_one_denied_auth_line \
       api::bridge::moderation_refusal_tests::moderation_lookup_failure_is_unavailable \
+      api::bridge::filter_cap_tests::query_and_count_refuse_more_filters_than_the_advertised_cap \
       api::admin::auth::tests::admin_role_refusal_logs_denied \
       api::admin::auth::tests::admin_duplicate_authorization_logs_duplicate
 

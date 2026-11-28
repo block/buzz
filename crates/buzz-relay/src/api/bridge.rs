@@ -1756,6 +1756,20 @@ async fn query_member_events(
     // depth_limit, feed_types) that nostr::Filter silently drops.
     let raw_filters: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    // Enforce the same NIP-11 `max_filters` cap the WebSocket REQ door does
+    // (protocol.rs), before any routing. Each filter becomes an independent DB
+    // query, so an unbounded list turns one 1 MB request into hundreds of
+    // thousands of queries against the shared pool.
+    if raw_filters.len() > crate::protocol::MAX_FILTERS_PER_REQ {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "too many filters: {} (max {})",
+                raw_filters.len(),
+                crate::protocol::MAX_FILTERS_PER_REQ
+            ),
+        ));
+    }
     if membership_snapshot::requested(&raw_filters) {
         caller.read_artifact(&raw_filters);
         return membership_snapshot::query(
@@ -2460,6 +2474,19 @@ async fn count_member_events(
     let pubkey_bytes = pubkey.to_bytes().to_vec();
     let raw: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    // Same NIP-11 `max_filters` cap as the WS COUNT door and `/query`, before
+    // any routing — a non-pushable COUNT filter runs an unbounded aggregate
+    // scan, so an uncapped list is an even cheaper amplification than `/query`.
+    if raw.len() > crate::protocol::MAX_FILTERS_PER_REQ {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "too many filters: {} (max {})",
+                raw.len(),
+                crate::protocol::MAX_FILTERS_PER_REQ
+            ),
+        ));
+    }
     let routed = || caller.read_artifact(&raw);
     if let Some(result) = super::artifact::query(state, tenant, &pubkey, &raw, true, routed).await {
         return result;
@@ -3495,6 +3522,101 @@ mod moderation_refusal_tests {
         assert_eq!(
             super::moderation_refusal(&refused),
             AuthResult::Denied(AuthReason::NotModerator)
+        );
+    }
+}
+
+#[cfg(test)]
+mod filter_cap_tests {
+    //! The HTTP `/query` and `/count` doors refuse more filters than the
+    //! NIP-11 `max_filters` cap before any routing or database work, as the
+    //! WebSocket REQ and COUNT doors do. Infra-free: the pool is lazy and the
+    //! refusal happens before it is touched.
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind};
+
+    async fn lazy_state() -> Arc<AppState> {
+        let mut config = crate::config::Config::for_test();
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            Keys::generate(),
+            media_storage,
+        );
+        Arc::new(state)
+    }
+
+    fn caller() -> ProvenCaller {
+        let proof = EventBuilder::new(Kind::HttpAuth, "")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign auth event");
+        ProvenCaller {
+            pubkey: Keys::generate().public_key(),
+            event_id_bytes: proof.id.to_bytes(),
+            signed_at: None,
+            token_owner: None,
+            slot: AccessSlot::default(),
+        }
+    }
+
+    fn filters(n: usize) -> Vec<u8> {
+        let list: Vec<Value> = (0..n)
+            .map(|_| serde_json::json!({ "kinds": [9] }))
+            .collect();
+        serde_json::to_vec(&list).expect("filters json")
+    }
+
+    fn assert_too_many(result: Result<Json<Value>, (StatusCode, Json<Value>)>, n: usize) {
+        let Err((status, Json(body))) = result else {
+            panic!("{n} filters were accepted");
+        };
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let expected = format!(
+            "too many filters: {n} (max {})",
+            crate::protocol::MAX_FILTERS_PER_REQ
+        );
+        assert!(body.to_string().contains(&expected), "{body}");
+    }
+
+    #[tokio::test]
+    async fn query_and_count_refuse_more_filters_than_the_advertised_cap() {
+        let state = lazy_state().await;
+        let tenant = TenantContext::resolved(
+            buzz_core::CommunityId::from_uuid(uuid::Uuid::new_v4()),
+            "relay.example",
+        );
+        let n = crate::protocol::MAX_FILTERS_PER_REQ + 1;
+        let body = filters(n);
+        assert_too_many(
+            query_member_events(&state, &tenant, &body, &caller()).await,
+            n,
+        );
+        assert_too_many(
+            count_member_events(&state, &tenant, &body, &caller()).await,
+            n,
         );
     }
 }
