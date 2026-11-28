@@ -618,17 +618,33 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Active in the past'), findsNothing);
       await _chooseSectionOption(tester, 'View', 'Active');
-      await _chooseSectionOption(tester, 'Active in the past', '7 days');
+      await _chooseSectionOption(tester, 'Active in the past', '3 days');
+      await _chooseSectionOption(tester, 'Active in the past', 'Custom…');
+      expect(find.text('Active in the past'), findsNothing);
+      await tester.drag(find.byType(ListWheelScrollView), const Offset(0, -44));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.text('3 days'), findsOneWidget);
+      await _chooseSectionOption(tester, 'Active in the past', 'Custom…');
+      final wheel = tester.widget<ListWheelScrollView>(
+        find.byType(ListWheelScrollView),
+      );
+      (wheel.controller! as FixedExtentScrollController).jumpToItem(10);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Use period'));
+      await tester.pumpAndSettle();
+      expect(find.text('11 days'), findsOneWidget);
       expect(manager.store.modeFor('channels'), ChannelFilterMode.unreads);
       await tester.tap(find.byTooltip('Apply changes'));
       await tester.pumpAndSettle();
       expect(manager.store.modeFor('channels'), ChannelFilterMode.active);
-      expect(manager.store.windowFor('channels'), 7 * 86400);
+      expect(manager.store.windowFor('channels'), 11 * 86400);
       await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
       final days = tester.widget<AppListRow>(
         find.ancestor(
-          of: find.text('7 days'),
+          of: find.text('11 days'),
           matching: find.byType(AppListRow),
         ),
       );
