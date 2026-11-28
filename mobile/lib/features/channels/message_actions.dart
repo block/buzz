@@ -100,6 +100,7 @@ Future<void> showMessageActions({
 
   final selectedAction = await showBuzzModalBottomSheet<bool>(
     context: context,
+    nativeIosBarrier: true,
     isScrollControlled: true,
     showDragHandle: true,
     showCloseButton: false,
@@ -163,7 +164,7 @@ Future<void> showMessageActions({
                       children: [
                         // Export: take the content out of the conversation.
                         ListTile(
-                          leading: const Icon(BuzzIcons.copy),
+                          leading: const AppListRowIcon(BuzzIcons.copy),
                           title: const Text('Copy text'),
                           onTap: () {
                             if (!_selectMessageAction(sheetContext)) return;
@@ -173,7 +174,9 @@ Future<void> showMessageActions({
                           },
                         ),
                         ListTile(
-                          leading: const Icon(BuzzIcons.messageCircle),
+                          leading: const AppListRowIcon(
+                            BuzzIcons.messageCircle,
+                          ),
                           title: const Text('Start Solo chat'),
                           onTap: () {
                             if (!_selectMessageAction(sheetContext)) return;
@@ -199,7 +202,7 @@ Future<void> showMessageActions({
                     SheetActionSection(
                       children: [
                         ListTile(
-                          leading: const Icon(BuzzIcons.pencil),
+                          leading: const AppListRowIcon(BuzzIcons.pencil),
                           title: const Text('Edit message'),
                           onTap: () {
                             if (!_selectMessageAction(sheetContext)) return;
@@ -211,7 +214,7 @@ Future<void> showMessageActions({
                           },
                         ),
                         ListTile(
-                          leading: Icon(
+                          leading: AppListRowIcon(
                             BuzzIcons.trash2,
                             color: sheetContext.colors.error,
                           ),
@@ -256,6 +259,7 @@ void showImageActions({
 }) {
   showBuzzModalBottomSheet<void>(
     context: context,
+    nativeIosBarrier: true,
     isScrollControlled: true,
     showDragHandle: true,
     title: 'Image',
@@ -276,7 +280,7 @@ void showImageActions({
                 SheetActionSection(
                   children: [
                     ListTile(
-                      leading: const Icon(BuzzIcons.download),
+                      leading: const AppListRowIcon(BuzzIcons.download),
                       title: const Text('Save image'),
                       onTap: () {
                         Navigator.of(sheetContext).pop();
@@ -284,7 +288,7 @@ void showImageActions({
                       },
                     ),
                     ListTile(
-                      leading: const Icon(BuzzIcons.share2),
+                      leading: const AppListRowIcon(BuzzIcons.share2),
                       title: const Text('Share image'),
                       onTap: () {
                         final renderBox =
@@ -305,7 +309,7 @@ void showImageActions({
                       },
                     ),
                     ListTile(
-                      leading: const Icon(BuzzIcons.link2),
+                      leading: const AppListRowIcon(BuzzIcons.link2),
                       title: const Text('Copy image link'),
                       onTap: () {
                         Navigator.of(sheetContext).pop();
@@ -322,7 +326,7 @@ void showImageActions({
                   SheetActionSection(
                     children: [
                       ListTile(
-                        leading: Icon(
+                        leading: AppListRowIcon(
                           BuzzIcons.trash2,
                           color: sheetContext.colors.error,
                         ),
@@ -677,7 +681,9 @@ class _FollowThreadTile extends ConsumerWidget {
     final following = follows.isFollowing(rootId);
 
     return ListTile(
-      leading: Icon(following ? BuzzIcons.bellOff : BuzzIcons.bellRing),
+      leading: AppListRowIcon(
+        following ? BuzzIcons.bellOff : BuzzIcons.bellRing,
+      ),
       title: Text(following ? 'Unfollow thread' : 'Follow thread'),
       onTap: () async {
         if (!_selectMessageAction(context)) return;
@@ -726,13 +732,16 @@ class _MessageQuickActionsRow extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final messages = allMessages;
+    final ownMessage =
+        message.pubkey == (currentPubkey ?? ref.watch(myPubkeyProvider));
     final canRemind = ref.watch(reminderServiceProvider) != null;
     final startsThreads = ref.watch(channelStartsThreadsProvider(channelId));
 
     final tiles = <Widget>[
-      if (ref.watch(readStateProvider.select((state) => state.isReady)))
+      if (!ownMessage &&
+          ref.watch(readStateProvider.select((state) => state.isReady)))
         _MarkReadUnreadTile(message: message, channelId: channelId),
-      if (messages != null && startsThreads)
+      if (!ownMessage && messages != null && startsThreads)
         _MessageQuickActionTile(
           icon: BuzzIcons.messageSquareReply,
           label: 'Reply',
@@ -839,12 +848,12 @@ class _MessageQuickActionTile extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.center,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(icon, size: 22, color: context.colors.onSurface),
+                Icon(icon, size: 22, color: context.colors.onSurfaceVariant),
                 const SizedBox(height: Grid.xxs),
                 Text(
                   label,
                   textAlign: TextAlign.center,
-                  style: context.textTheme.labelMedium?.copyWith(
+                  style: compactSheetActionTextStyle.copyWith(
                     color: context.colors.onSurface,
                   ),
                 ),

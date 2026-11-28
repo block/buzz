@@ -175,6 +175,13 @@ void main() {
             .imageUrl,
         originalAvatar,
       );
+      // Centre the button: ensureVisible stops at the viewport edge, under
+      // the frosted header.
+      await Scrollable.ensureVisible(
+        tester.element(find.text('Choose avatar')),
+        alignment: 0.5,
+      );
+      await tester.pump();
       await tester.tap(find.text('Choose avatar'));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(ValueKey('agent-avatar-$targetIndex')));

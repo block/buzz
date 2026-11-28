@@ -148,7 +148,7 @@ class ForumThreadPage extends HookConsumerWidget {
             child: SheetActionSection(
               children: [
                 ListTile(
-                  leading: const Icon(BuzzIcons.copy),
+                  leading: const AppListRowIcon(BuzzIcons.copy),
                   title: const Text('Copy text'),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
@@ -156,7 +156,7 @@ class ForumThreadPage extends HookConsumerWidget {
                   },
                 ),
                 ListTile(
-                  leading: Icon(
+                  leading: AppListRowIcon(
                     BuzzIcons.trash2,
                     color: sheetContext.colors.error,
                   ),
@@ -615,7 +615,7 @@ class _ReplyRow extends ConsumerWidget {
             child: SheetActionSection(
               children: [
                 ListTile(
-                  leading: const Icon(BuzzIcons.copy),
+                  leading: const AppListRowIcon(BuzzIcons.copy),
                   title: const Text('Copy text'),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
@@ -624,7 +624,7 @@ class _ReplyRow extends ConsumerWidget {
                 ),
                 if (isOwn)
                   ListTile(
-                    leading: Icon(
+                    leading: AppListRowIcon(
                       BuzzIcons.trash2,
                       color: sheetContext.colors.error,
                     ),

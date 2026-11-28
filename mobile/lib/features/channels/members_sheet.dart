@@ -327,11 +327,7 @@ class _MemberTile extends ConsumerWidget {
                 horizontalPadding: Grid.gutter,
                 children: [
                   ListTile(
-                    leading: Icon(
-                      BuzzIcons.activity,
-                      size: 18,
-                      color: context.colors.primary,
-                    ),
+                    leading: const AppListRowIcon(BuzzIcons.activity),
                     title: const Text('View activity'),
                     onTap: () {
                       Navigator.of(sheetContext).pop();
@@ -362,9 +358,8 @@ class _MemberTile extends ConsumerWidget {
                 horizontalPadding: Grid.gutter,
                 children: [
                   ListTile(
-                    leading: Icon(
+                    leading: AppListRowIcon(
                       BuzzIcons.userMinus,
-                      size: 18,
                       color: context.colors.error,
                     ),
                     title: Text(

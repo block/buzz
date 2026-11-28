@@ -159,7 +159,7 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        AppListCard(
+        AppListCard.sheet(
           horizontalPadding: 0,
           children: [
             if (!isDm && member.role != 'admin')

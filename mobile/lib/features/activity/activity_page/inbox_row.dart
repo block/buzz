@@ -389,7 +389,9 @@ class _InboxRow extends HookConsumerWidget {
               child: SheetActionSection(
                 children: [
                   ListTile(
-                    leading: Icon(isDone ? BuzzIcons.mail : BuzzIcons.mailOpen),
+                    leading: AppListRowIcon(
+                      isDone ? BuzzIcons.mail : BuzzIcons.mailOpen,
+                    ),
                     title: Text(isDone ? 'Mark unread' : 'Mark as read'),
                     onTap: () {
                       Navigator.of(sheetContext).pop();
@@ -398,7 +400,7 @@ class _InboxRow extends HookConsumerWidget {
                   ),
                   if (followRootId != null)
                     ListTile(
-                      leading: Icon(
+                      leading: AppListRowIcon(
                         following ? BuzzIcons.bellOff : BuzzIcons.bellRing,
                       ),
                       title: Text(
@@ -425,7 +427,7 @@ class _InboxRow extends HookConsumerWidget {
                     ),
                   if (canRemind)
                     ListTile(
-                      leading: const Icon(BuzzIcons.clock),
+                      leading: const AppListRowIcon(BuzzIcons.clock),
                       title: const Text('Remind me'),
                       onTap: () {
                         Navigator.of(sheetContext).pop();
@@ -435,7 +437,7 @@ class _InboxRow extends HookConsumerWidget {
                       },
                     ),
                   ListTile(
-                    leading: const Icon(BuzzIcons.externalLink),
+                    leading: const AppListRowIcon(BuzzIcons.externalLink),
                     title: const Text('Open conversation'),
                     onTap: () {
                       Navigator.of(sheetContext).pop();
@@ -444,7 +446,7 @@ class _InboxRow extends HookConsumerWidget {
                   ),
                   if (_canStartSoloChat)
                     ListTile(
-                      leading: const Icon(BuzzIcons.messageCircle),
+                      leading: const AppListRowIcon(BuzzIcons.messageCircle),
                       title: const Text('Start Solo chat'),
                       onTap: () {
                         Navigator.of(sheetContext).pop();

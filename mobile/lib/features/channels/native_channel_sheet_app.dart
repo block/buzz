@@ -154,6 +154,7 @@ class ChannelSheetContent extends HookWidget {
                 )
               else
                 AppListCard(
+                  sheetActions: true,
                   iconColumnWidth: aligned ? Grid.md : null,
                   dividerIndent: !solo && details != null && index == 1
                       ? Grid.xs + memberSize + Grid.xs
@@ -180,7 +181,9 @@ class ChannelSheetContent extends HookWidget {
                           ),
                           title: Text(
                             row['label'] as String,
-                            style: context.textTheme.bodyLarge,
+                            style: sheetActionTextStyle.copyWith(
+                              color: context.colors.onSurface,
+                            ),
                           ),
                           subtitle: Text(
                             row['subtitle'] as String,
@@ -239,7 +242,9 @@ class ChannelSheetContent extends HookWidget {
                                 ),
                           title: Text(
                             row['label'] as String,
-                            style: context.textTheme.bodyLarge,
+                            style: sheetActionTextStyle.copyWith(
+                              color: context.colors.onSurface,
+                            ),
                           ),
                           trailing: const _ChannelDetailsChevron(),
                           verticalPadding: aligned ? Grid.xs : Grid.xxs,

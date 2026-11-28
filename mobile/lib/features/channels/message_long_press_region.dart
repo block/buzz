@@ -8,6 +8,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
 import 'message_reply_drag_target.dart';
+import 'message_reply_semantics.dart';
 
 /// Shared hold deadline so nested reaction pills win before the message menu.
 const iosMessageLongPressDuration = Duration(milliseconds: 500);
@@ -198,9 +199,13 @@ class _MessageLongPressRegion extends HookWidget {
       );
     }
 
+    final reply = MessageReplySemantics.maybeOf(context);
     return Semantics(
       container: true,
       onLongPress: recognize,
+      customSemanticsActions: reply == null
+          ? null
+          : {const CustomSemanticsAction(label: 'Reply'): reply},
       child: RawGestureDetector(
         behavior: HitTestBehavior.translucent,
         // The detector's own semantic long press reports its centre, which

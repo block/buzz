@@ -432,7 +432,7 @@ class _SectionViewSheet extends HookConsumerWidget {
                           ),
                         ),
                         if (global && canReorder)
-                          AppListCard(
+                          AppListCard.sheet(
                             children: [
                               AppListRow(
                                 title: 'Edit Sections',
@@ -461,7 +461,7 @@ class _SectionViewSheet extends HookConsumerWidget {
                           ),
                         if (!centralized &&
                             (custom && layoutEditable || canReorder))
-                          AppListCard(
+                          AppListCard.sheet(
                             children: [
                               if (custom && layoutEditable)
                                 AppListRow(

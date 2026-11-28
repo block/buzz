@@ -1,6 +1,7 @@
 import 'package:buzz/shared/read_state/thread_follows_format.dart';
 import 'package:buzz/features/channels/thread_follows/thread_follows_storage.dart';
 import 'package:buzz/shared/widgets/sheet_action_section.dart';
+import 'package:buzz/shared/widgets/ios_composition_layer.dart';
 import 'package:buzz/shared/widgets/app_list_card.dart';
 import 'dart:ui' as ui;
 import 'dart:convert';
@@ -540,6 +541,13 @@ void main() {
         expect(find.byType(BottomSheet), findsOneWidget);
         expect(find.byType(SheetActionSection), findsNWidgets(3));
         expect(find.byType(AppListCard), findsNWidgets(3));
+        final nativeScrim = find.byWidgetPredicate(
+          (widget) => widget is IosCompositionLayer && widget.color != null,
+        );
+        expect(
+          nativeScrim,
+          platform == TargetPlatform.iOS ? findsOneWidget : findsNothing,
+        );
         expect(captures, 0);
         expect(harness.sourceHidden.value, isFalse);
         for (final label in [
@@ -612,6 +620,24 @@ void main() {
         tester.getSize(find.byKey(const ValueKey('quick-reaction-\u{1F44D}'))),
         const Size.square(52),
       );
+    });
+
+    testWidgets('own messages offer copy and reminder quick actions', (
+      tester,
+    ) async {
+      final message = _message(pubkey: 'self');
+      await _pumpMessageActionsPopover(
+        tester,
+        message: message,
+        prefs: await _mockPrefs(),
+        allMessages: [message],
+        reminderService: _stubReminderService(),
+      );
+      expect(find.text('Mark unread'), findsNothing);
+      expect(find.text('Mark read'), findsNothing);
+      expect(find.text('Reply'), findsNothing);
+      expect(find.text('Copy link'), findsOneWidget);
+      expect(find.text('Remind me'), findsOneWidget);
     });
 
     testWidgets(
@@ -966,6 +992,28 @@ void main() {
         prefs: prefs,
       );
 
+      final follow = find.text('Follow thread');
+      final rowStyle = DefaultTextStyle.of(tester.element(follow)).style;
+      final quickStyle = tester.widget<Text>(find.text('Copy link')).style!;
+      expect(rowStyle.fontSize, 16);
+      expect(rowStyle.height, 21 / 16);
+      expect(quickStyle.fontSize, 14);
+      expect(quickStyle.height, 17.5 / 14);
+      expect(rowStyle.color, tester.element(follow).colors.onSurface);
+      expect(rowStyle.fontWeight, FontWeight.w400);
+      expect(quickStyle.fontWeight, FontWeight.w500);
+      for (final style in [rowStyle, quickStyle]) {
+        expect(style.letterSpacing, messageBodyTextStyle.letterSpacing);
+      }
+      final tile = find.ancestor(of: follow, matching: find.byType(ListTile));
+      final icon = find.descendant(of: tile, matching: find.byType(Icon));
+      final left = tester.getTopLeft(tile).dx;
+      expect(tester.getCenter(icon).dx - left, Grid.xs + Grid.md / 2);
+      expect(tester.getTopLeft(follow).dx - left, Grid.xs + Grid.md + Grid.xs);
+      expect(
+        tester.getTopLeft(find.text('Copy text')).dx,
+        tester.getTopLeft(follow).dx,
+      );
       await tester.tap(find.text('Follow thread'));
       await tester.pumpAndSettle();
 

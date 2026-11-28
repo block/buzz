@@ -12,11 +12,23 @@ class AppListCard extends StatelessWidget {
     this.label,
     this.dividerIndent,
     this.iconColumnWidth,
+    this.sheetActions = false,
     this.clipBehavior = Clip.antiAlias,
     this.verticalPadding = Grid.xxs,
     this.horizontalPadding = Grid.gutter,
     required this.children,
   });
+
+  const AppListCard.sheet({
+    super.key,
+    this.label,
+    this.dividerIndent,
+    this.clipBehavior = Clip.antiAlias,
+    this.horizontalPadding = Grid.gutter,
+    required this.children,
+  }) : sheetActions = true,
+       iconColumnWidth = Grid.md,
+       verticalPadding = Grid.twelve;
 
   /// Rendered above the card in sentence case, as written — no uppercasing.
   final String? label;
@@ -27,6 +39,7 @@ class AppListCard extends StatelessWidget {
   /// separators align with their row content on both sides.
   final double? dividerIndent;
   final double? iconColumnWidth;
+  final bool sheetActions;
 
   /// Outer padding above and below this section.
   ///
@@ -97,6 +110,7 @@ class AppListCard extends StatelessWidget {
             clipBehavior: clipBehavior,
             child: AppListInset(
               horizontal: _inset,
+              sheetActions: sheetActions,
               iconColumnWidth: iconColumnWidth,
               child: Column(
                 mainAxisSize: MainAxisSize.min,

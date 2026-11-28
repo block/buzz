@@ -606,13 +606,13 @@ class ChannelsPage extends HookConsumerWidget {
           child: SheetActionSection(
             children: [
               ListTile(
-                leading: const Icon(BuzzIcons.hash),
+                leading: const AppListRowIcon(BuzzIcons.hash),
                 title: const Text('New channel'),
                 onTap: () =>
                     Navigator.pop(sheetContext, _QuickAction.createChannel),
               ),
               ListTile(
-                leading: const Icon(BuzzIcons.messageSquare),
+                leading: const AppListRowIcon(BuzzIcons.messageSquare),
                 title: const Text('New DM'),
                 onTap: () => Navigator.pop(sheetContext, _QuickAction.newDm),
               ),

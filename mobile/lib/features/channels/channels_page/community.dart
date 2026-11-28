@@ -38,7 +38,7 @@ class _CommunityMenuSheet extends StatelessWidget {
           children: [
             if (appearancePageBuilder != null ||
                 (canInvite && invitePageBuilder != null))
-              AppListCard(
+              AppListCard.sheet(
                 label: 'Community settings',
                 children: [
                   if (canInvite && invitePageBuilder != null)
@@ -59,7 +59,7 @@ class _CommunityMenuSheet extends StatelessWidget {
               ),
             // An internal build reaches only its organization's community.
             if (!OrganizationEnvironment.enabled)
-              AppListCard(
+              AppListCard.sheet(
                 children: [
                   AppListRow(
                     key: const Key('community-menu-switch'),

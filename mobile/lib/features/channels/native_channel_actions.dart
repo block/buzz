@@ -15,7 +15,12 @@ class _ChannelSheetRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) => ListTile(
     title: title,
-    leading: leading,
+    leading: leading == null
+        ? null
+        : SizedBox(
+            width: Grid.md,
+            child: Center(widthFactor: 1, heightFactor: 1, child: leading),
+          ),
     enabled: enabled,
     onTap: onTap == null ? null : () => onTap!(),
   );

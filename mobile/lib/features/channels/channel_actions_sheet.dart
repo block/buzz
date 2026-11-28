@@ -605,7 +605,10 @@ class _ActionTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => ListTile(
-    leading: Icon(icon, color: destructive ? context.colors.error : null),
+    leading: AppListRowIcon(
+      icon,
+      color: destructive ? context.colors.error : null,
+    ),
     title: Text(
       label,
       style: destructive ? TextStyle(color: context.colors.error) : null,
@@ -748,7 +751,7 @@ Future<void> _showMoveSectionSheet(
               children: [
                 for (final section in sections)
                   ListTile(
-                    leading: const Icon(BuzzIcons.folder),
+                    leading: const AppListRowIcon(BuzzIcons.folder),
                     title: Text(section.name),
                     trailing: sectionId == section.id
                         ? Icon(
@@ -762,7 +765,7 @@ Future<void> _showMoveSectionSheet(
                     },
                   ),
                 ListTile(
-                  leading: const Icon(BuzzIcons.folderPlus),
+                  leading: const AppListRowIcon(BuzzIcons.folderPlus),
                   title: const Text('New section…'),
                   onTap: () async {
                     Navigator.of(sheetContext).pop();
@@ -776,7 +779,7 @@ Future<void> _showMoveSectionSheet(
                 ),
                 if (sectionId != null)
                   ListTile(
-                    leading: const Icon(BuzzIcons.folderMinus),
+                    leading: const AppListRowIcon(BuzzIcons.folderMinus),
                     title: const Text('Remove from section'),
                     onTap: () {
                       Navigator.of(sheetContext).pop();

@@ -311,7 +311,7 @@ class _SetStatusSheet extends HookConsumerWidget {
                   onSubmitted: handleSave,
                 ),
               ),
-              AppListCard(
+              AppListCard.sheet(
                 label: 'Duration',
                 children: [
                   AppListRow(
@@ -330,13 +330,13 @@ class _SetStatusSheet extends HookConsumerWidget {
                     ),
                 ],
               ),
-              AppListCard(
+              AppListCard.sheet(
                 label: 'Quick statuses',
                 children: [
                   for (final preset in _statusPresets)
                     AppListRowRaw(
                       leading: SizedBox(
-                        width: 22,
+                        width: Grid.md,
                         child: Center(
                           child: Text(
                             preset.emoji,
@@ -346,7 +346,9 @@ class _SetStatusSheet extends HookConsumerWidget {
                       ),
                       title: Text(
                         preset.text,
-                        style: context.textTheme.bodyLarge,
+                        style: sheetActionTextStyle.copyWith(
+                          color: context.colors.onSurface,
+                        ),
                       ),
                       onTap: () {
                         textController.text = preset.text;
@@ -356,7 +358,7 @@ class _SetStatusSheet extends HookConsumerWidget {
                 ],
               ),
               if (hasExistingStatus)
-                AppListCard(
+                AppListCard.sheet(
                   children: [
                     AppListRow(
                       icon: BuzzIcons.trash2,
@@ -518,7 +520,7 @@ Future<_StatusDuration?> _showStatusDurationSheet(
     builder: (sheetContext) => SingleChildScrollView(
       child: SafeArea(
         top: false,
-        child: AppListCard(
+        child: AppListCard.sheet(
           children: [
             for (final option in _StatusDuration.values)
               AppListRow(
