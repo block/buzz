@@ -1010,6 +1010,8 @@ enum Bulk {
     Pass,
     /// Answer HTTP 429, as Serverless does while it scales.
     Throttle,
+    /// Forward every bulk request after this long, as a slow cluster does.
+    Delay(Duration),
     /// Signal `arrived`, wait for `release`, then forward it.
     Hold {
         arrived: tokio::sync::oneshot::Sender<()>,
@@ -1144,6 +1146,10 @@ async fn proxy_request(
                     ))
                     .expect("throttled response");
             }
+            Bulk::Delay(delay) => {
+                *bulk.lock().await = Bulk::Delay(delay);
+                tokio::time::sleep(delay).await;
+            }
             Bulk::Hold { arrived, release } => {
                 let _ = arrived.send(());
                 let _ = release.await;
@@ -1206,6 +1212,39 @@ async fn throttling_keeps_rows_queued() {
     index.refresh().await.expect("refresh");
     let service = SearchService::with_opensearch(db.pool().clone(), index.clone());
     assert_eq!(find(&service, community, "slowword").await.len(), 2);
+    index.delete().await.expect("delete index");
+}
+
+/// A batch too large for one bulk request ends within its time budget on a
+/// slow cluster: the batch's transaction is idle meanwhile, and Postgres
+/// ends one that idles too long. The request that ran out fails, and the
+/// one applied before it still counts.
+#[tokio::test]
+#[ignore = "requires Postgres and OpenSearch"]
+async fn a_slow_batch_write_ends_within_its_budget() {
+    let db = sync_db().await;
+    let (index, prefix) = sync_index().await;
+    let proxy = Proxy::start().await;
+    let (community, keys, channel) = late_community(&db).await;
+    // Two documents of five mebibytes: one bulk request each.
+    let text = "word ".repeat(1024 * 1024);
+    let events = [
+        channel_message(&keys, channel, 9, "first", &[], 0),
+        channel_message(&keys, channel, 9, "second", &[], 1),
+    ];
+    let documents: Vec<SearchDocument> = events
+        .iter()
+        .map(|event| document_of(event, channel, &text))
+        .collect();
+
+    // The first request ends well inside the budget; the second cannot.
+    proxy.set(Bulk::Delay(Duration::from_secs(2))).await;
+    let outcome = proxy
+        .index(&prefix)
+        .write_within(community, &documents, &[], 1, Duration::from_millis(3500))
+        .await
+        .expect("the first request was applied");
+    assert_eq!(outcome.failed, vec![events[1].id.to_bytes()]);
     index.delete().await.expect("delete index");
 }
 
