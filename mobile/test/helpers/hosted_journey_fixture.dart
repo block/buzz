@@ -23,6 +23,7 @@ import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/organization_sign_in.dart';
 import 'package:buzz/shared/relay/media_upload.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
+import 'package:buzz/shared/relay/relay_rate_limit_gate.dart';
 import 'package:buzz/shared/relay/relay_session.dart';
 import 'package:buzz/shared/relay/relay_socket.dart';
 import 'package:buzz/shared/hosted/self_hosted_entry.dart';
@@ -88,6 +89,12 @@ class HostedJourneyFixture {
   /// The `Date` the issuer's refusal carries, when [denyAssertion] is set.
   DateTime? denialDate;
   bool refuseUpgrade = false;
+
+  /// The HTTP status a refused upgrade answers with.
+  int refusalStatus = 403;
+
+  /// Replaces the relay session's reconnect timers when set.
+  RelayTimerFactory? reconnectTimerFactory;
   String subject = 'journey-owner';
   String? accountEmail = 'owner@example.com';
 
@@ -516,6 +523,7 @@ class HostedJourneyFixture {
             }),
             relaySessionProvider.overrideWith(
               () => RelaySessionNotifier(
+                reconnectTimerFactory: reconnectTimerFactory ?? Timer.new,
                 socketFactory:
                     ({
                       required wsUrl,
@@ -797,7 +805,7 @@ class _RelaySocket extends RelaySocket {
           : isNull,
     );
     if (fixture.refuseUpgrade) {
-      _disconnected(const WebSocketException('refused', 403));
+      _disconnected(WebSocketException('refused', fixture.refusalStatus));
     } else {
       _connected();
     }
