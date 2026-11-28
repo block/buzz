@@ -19,20 +19,12 @@ import 'ios_glass_navigation_button.dart';
 import 'ios_glass_navigation_action.dart';
 import 'ios_navigation_bar.dart';
 import 'navigation_backdrop.dart';
+export 'buzz_navigation_metrics.dart' show androidNavigationButtonStyle;
 export 'ios_navigation_bar.dart' show IosNavigationAction;
 
 /// Space below the Android conversation toolbar controls.
 double conversationNavigationBottomPadding(BuildContext context) =>
     Theme.of(context).platform == TargetPlatform.android ? Grid.xxs : 0;
-
-/// Round Material action containers shared by Android navigation headers.
-ButtonStyle androidNavigationButtonStyle(BuildContext context) =>
-    IconButton.styleFrom(
-      backgroundColor: context.colors.surfaceContainerHighest,
-      foregroundColor: context.colors.onSurface,
-      shape: const CircleBorder(),
-      minimumSize: const Size.square(48),
-    );
 
 /// Minimum height of the frosted app bar content area below the safe area.
 const _kBarContentMinHeight = buzzNavigationRowHeight;
@@ -181,7 +173,7 @@ class FrostedAppBar extends StatelessWidget {
   final List<Widget> actions;
 
   /// Horizontal inset for the app bar's leading, title, and actions.
-  final double horizontalInset;
+  final double? horizontalInset;
 
   /// Color applied to icons in the app bar.
   final Color? iconColor;
@@ -291,7 +283,7 @@ class FrostedAppBar extends StatelessWidget {
     this.bottom,
     this.bottomHeight = 0,
     this.actions = const [],
-    this.horizontalInset = Grid.xxs,
+    this.horizontalInset,
     this.iconColor,
     this.frosted = true,
     this.alwaysFrosted = false,
@@ -310,6 +302,11 @@ class FrostedAppBar extends StatelessWidget {
   }
 
   Widget _build(BuildContext context, bool nativeSuppressed) {
+    final horizontalInset =
+        this.horizontalInset ??
+        (Theme.of(context).platform == TargetPlatform.android
+            ? Grid.gutter
+            : Grid.xxs);
     final railInsets = duoContentInsetsOf(context);
     if (useNativeNavigation &&
         defaultTargetPlatform == TargetPlatform.iOS &&

@@ -187,6 +187,7 @@ class HomePage extends HookConsumerWidget {
                           : IconButton.filledTonal(
                               tooltip: inboxLabel,
                               style: IconButton.styleFrom(
+                                side: context.navigationControlStroke,
                                 shape: const CircleBorder(),
                                 backgroundColor:
                                     context.colors.surfaceContainerHighest,

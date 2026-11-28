@@ -1,3 +1,5 @@
+import '../../../shared/widgets/android_page_header.dart';
+import '../../../shared/widgets/buzz_search_field.dart';
 import 'package:flutter/material.dart';
 import 'package:duo_kit/duo_kit.dart';
 import '../../../shared/widgets/duo_toolbar.dart';
@@ -205,6 +207,8 @@ class _SectionChatsPage extends HookConsumerWidget {
               View.of(context).physicalSize / View.of(context).devicePixelRatio,
         );
     final regularPhone = ios && strip == null && isCompactDuoWindow(context);
+    final android = defaultTargetPlatform == TargetPlatform.android;
+    final searchGutter = android ? Grid.gutter : Grid.xs;
     final idleInset = regularPhone ? Grid.xs : Grid.xxs;
     final activeInset = splitDuo ? Grid.xxs + Grid.xs : Grid.xxs;
     final searchTopInset = idleInset + (activeInset - idleInset) * progress;
@@ -255,91 +259,142 @@ class _SectionChatsPage extends HookConsumerWidget {
                                 ? const SizedBox.shrink()
                                 : SizedBox(
                                     height: kToolbarHeight,
-                                    child: AppBar(
-                                      primary: false,
-                                      leading: Center(
-                                        child: IconButton(
-                                          tooltip: MaterialLocalizations.of(
+                                    child: android
+                                        ? androidPageHeader(
                                             context,
-                                          ).backButtonTooltip,
-                                          style: androidNavigationButtonStyle(
-                                            context,
+                                            title: title,
+                                            leading: IconButton(
+                                              tooltip: MaterialLocalizations.of(
+                                                context,
+                                              ).backButtonTooltip,
+                                              style:
+                                                  androidNavigationButtonStyle(
+                                                    context,
+                                                  ),
+                                              icon: const BackButtonIcon(),
+                                              onPressed: () =>
+                                                  Navigator.maybePop(context),
+                                            ),
+                                          )
+                                        : AppBar(
+                                            primary: false,
+                                            title: Text(title),
+                                            leading: Center(
+                                              child: IconButton(
+                                                tooltip:
+                                                    MaterialLocalizations.of(
+                                                      context,
+                                                    ).backButtonTooltip,
+                                                style:
+                                                    androidNavigationButtonStyle(
+                                                      context,
+                                                    ),
+                                                icon: const BackButtonIcon(),
+                                                onPressed: () =>
+                                                    Navigator.maybePop(context),
+                                              ),
+                                            ),
                                           ),
-                                          icon: const BackButtonIcon(),
-                                          onPressed: () =>
-                                              Navigator.maybePop(context),
-                                        ),
-                                      ),
-                                      title: Text(title),
-                                    ),
                                   ),
                           ),
                         Padding(
                           padding: EdgeInsets.fromLTRB(
-                            Grid.xs,
+                            searchGutter,
                             searchTopInset,
-                            Grid.xs,
+                            searchGutter,
                             Grid.xxs,
                           ),
                           child: Row(
                             children: [
                               Expanded(
-                                child: DecoratedBox(
-                                  decoration: BoxDecoration(
-                                    color: Color.lerp(
-                                      searchColor,
-                                      searchColor.withValues(alpha: 0),
-                                      ios ? progress : 0,
-                                    ),
-                                    borderRadius: BorderRadius.circular(
-                                      Radii.full,
-                                    ),
-                                  ),
-                                  child: Stack(
-                                    children: [
-                                      Positioned.fill(
-                                        child: ConcentricSheetSurface(
-                                          enabled: ios && editing.value,
-                                          usesGlass: ios && editing.value,
-                                          capsule: true,
-                                          minimumRadius: Radii.full,
-                                          providesSheetSurface: false,
-                                          color: searchColor,
-                                          padding: EdgeInsets.zero,
-                                          child: const SizedBox.expand(),
+                                child: android
+                                    ? SizedBox(
+                                        height: buzzSearchPageFieldHeight(
+                                          context,
                                         ),
-                                      ),
-                                      TextField(
-                                        controller: controller,
-                                        focusNode: focus,
-                                        textInputAction: TextInputAction.search,
-                                        textAlignVertical:
-                                            TextAlignVertical.center,
-                                        style: searchInputTextStyle,
-                                        decoration: const InputDecoration(
+                                        child: BuzzSearchField(
+                                          controller: controller,
+                                          focusNode: focus,
                                           hintText: 'Search...',
-                                          isDense: true,
-                                          contentPadding: EdgeInsets.symmetric(
-                                            vertical: Grid.twelve,
-                                          ),
-                                          prefixIconConstraints:
-                                              BoxConstraints.tightFor(
-                                                width: 44,
-                                                height: 44,
+                                          iconColor:
+                                              navigationPrimaryForeground(
+                                                context,
                                               ),
-                                          prefixIcon: Icon(
-                                            BuzzIcons.search,
-                                            size: 22,
+                                          inputColor:
+                                              navigationPrimaryForeground(
+                                                context,
+                                              ),
+                                          placeholderColor:
+                                              context.colors.onSurfaceVariant,
+                                          surfaceColor: navigationSearchSurface(
+                                            context,
                                           ),
-                                          filled: false,
-                                          border: InputBorder.none,
-                                          enabledBorder: InputBorder.none,
-                                          focusedBorder: InputBorder.none,
+                                          isEditing: false,
+                                          reduceMotion: true,
+                                          motionDuration: Duration.zero,
+                                          onTap: focus.requestFocus,
+                                          onChanged: (_) {},
+                                          onSubmitted: (_) {},
+                                        ),
+                                      )
+                                    : DecoratedBox(
+                                        decoration: BoxDecoration(
+                                          color: Color.lerp(
+                                            searchColor,
+                                            searchColor.withValues(alpha: 0),
+                                            ios ? progress : 0,
+                                          ),
+                                          borderRadius: BorderRadius.circular(
+                                            Radii.full,
+                                          ),
+                                        ),
+                                        child: Stack(
+                                          children: [
+                                            Positioned.fill(
+                                              child: ConcentricSheetSurface(
+                                                enabled: ios && editing.value,
+                                                usesGlass: ios && editing.value,
+                                                capsule: true,
+                                                minimumRadius: Radii.full,
+                                                providesSheetSurface: false,
+                                                color: searchColor,
+                                                padding: EdgeInsets.zero,
+                                                child: const SizedBox.expand(),
+                                              ),
+                                            ),
+                                            TextField(
+                                              controller: controller,
+                                              focusNode: focus,
+                                              textInputAction:
+                                                  TextInputAction.search,
+                                              textAlignVertical:
+                                                  TextAlignVertical.center,
+                                              style: searchInputTextStyle,
+                                              decoration: const InputDecoration(
+                                                hintText: 'Search...',
+                                                isDense: true,
+                                                contentPadding:
+                                                    EdgeInsets.symmetric(
+                                                      vertical: Grid.twelve,
+                                                    ),
+                                                prefixIconConstraints:
+                                                    BoxConstraints.tightFor(
+                                                      width: 44,
+                                                      height: 44,
+                                                    ),
+                                                prefixIcon: Icon(
+                                                  BuzzIcons.search,
+                                                  size: 22,
+                                                ),
+                                                filled: false,
+                                                border: InputBorder.none,
+                                                enabledBorder: InputBorder.none,
+                                                focusedBorder: InputBorder.none,
+                                              ),
+                                            ),
+                                          ],
                                         ),
                                       ),
-                                    ],
-                                  ),
-                                ),
                               ),
                               if (progress > 0)
                                 ClipRect(
@@ -363,6 +418,18 @@ class _SectionChatsPage extends HookConsumerWidget {
                                             else
                                               IconButton(
                                                 tooltip: 'Cancel search',
+                                                style: android
+                                                    ? androidNavigationButtonStyle(
+                                                        context,
+                                                      ).copyWith(
+                                                        backgroundColor:
+                                                            WidgetStatePropertyAll(
+                                                              navigationSearchSurface(
+                                                                context,
+                                                              ),
+                                                            ),
+                                                      )
+                                                    : null,
                                                 icon: const Icon(Icons.close),
                                                 onPressed: cancel,
                                               ),

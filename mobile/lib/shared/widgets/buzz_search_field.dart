@@ -18,6 +18,15 @@ const double _searchIdleIconInset = Grid.xxs;
 const double _searchCompactTextInset =
     _searchIdleIconInset + _searchCompactIconSize + Grid.xxs;
 
+double buzzSearchPageFieldHeight(BuildContext context) {
+  final scaledFontSize = MediaQuery.textScalerOf(
+    context,
+  ).scale(buzzSearchIdleTextSize);
+  final contentHeight =
+      scaledFontSize * (20 / buzzSearchIdleTextSize) + Grid.xxs * 2;
+  return contentHeight > Grid.xl ? contentHeight : Grid.xl;
+}
+
 /// Buzz's global-search text field treatment, shared by search-like inputs.
 class BuzzSearchField extends StatelessWidget {
   /// Creates a search field with Buzz's shared styling.
@@ -99,18 +108,31 @@ class BuzzSearchField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final idleIconSize = defaultTargetPlatform == TargetPlatform.android
+    final android = defaultTargetPlatform == TargetPlatform.android;
+    final idleIconSize = android
         ? buzzSearchControlIconSize * 0.75
         : _searchIdleIconSize;
     final idleTextInset = _searchIdleIconInset + idleIconSize + Grid.xxs;
+    final textInset = isEditing ? _searchCompactTextInset : idleTextInset;
+    final searchIcon = Padding(
+      padding: const EdgeInsets.only(left: _searchIdleIconInset),
+      child: AnimatedScale(
+        duration: reduceMotion ? Duration.zero : motionDuration,
+        curve: Curves.easeInOutCubic,
+        scale: isEditing ? _searchCompactIconSize / idleIconSize : 1,
+        child: Icon(
+          BuzzIcons.search,
+          key: const Key('search-moving-icon'),
+          size: idleIconSize,
+          color: iconColor,
+        ),
+      ),
+    );
     return DecoratedBox(
       decoration: BoxDecoration(
         color: surfaceColor,
-        borderRadius: BorderRadius.circular(
-          defaultTargetPlatform == TargetPlatform.android
-              ? Radii.full
-              : Radii.lg,
-        ),
+        border: Border.fromBorderSide(context.navigationControlStroke),
+        borderRadius: BorderRadius.circular(android ? Radii.full : Radii.lg),
       ),
       child: Stack(
         children: [
@@ -119,6 +141,7 @@ class BuzzSearchField extends StatelessWidget {
               alignment: Alignment.centerLeft,
               child: SizedBox(
                 width: double.infinity,
+                height: android ? double.infinity : null,
                 child: TextField(
                   key: fieldKey,
                   controller: controller,
@@ -137,8 +160,20 @@ class BuzzSearchField extends StatelessWidget {
                     enabledBorder: InputBorder.none,
                     focusedBorder: InputBorder.none,
                     isDense: true,
+                    prefixIcon: android
+                        ? Align(
+                            alignment: Alignment.centerLeft,
+                            child: searchIcon,
+                          )
+                        : null,
+                    prefixIconConstraints: android
+                        ? BoxConstraints.tightFor(
+                            width: textInset,
+                            height: double.infinity,
+                          )
+                        : null,
                     contentPadding: EdgeInsets.only(
-                      left: isEditing ? _searchCompactTextInset : idleTextInset,
+                      left: android ? 0 : textInset,
                       right: Grid.xxs,
                       top: isEditing ? Grid.xxs : 0,
                       bottom: isEditing ? Grid.xxs : 0,
@@ -155,25 +190,10 @@ class BuzzSearchField extends StatelessWidget {
               ),
             ),
           ),
-          IgnorePointer(
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Padding(
-                padding: const EdgeInsets.only(left: _searchIdleIconInset),
-                child: AnimatedScale(
-                  duration: reduceMotion ? Duration.zero : motionDuration,
-                  curve: Curves.easeInOutCubic,
-                  scale: isEditing ? _searchCompactIconSize / idleIconSize : 1,
-                  child: Icon(
-                    BuzzIcons.search,
-                    key: const Key('search-moving-icon'),
-                    size: idleIconSize,
-                    color: iconColor,
-                  ),
-                ),
-              ),
+          if (!android)
+            IgnorePointer(
+              child: Align(alignment: Alignment.centerLeft, child: searchIcon),
             ),
-          ),
         ],
       ),
     );

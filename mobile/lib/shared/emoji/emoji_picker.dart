@@ -238,6 +238,8 @@ class _EmojiPickerContent extends HookConsumerWidget {
       [trimmedQuery, customEmoji],
     );
 
+    final headerActionSize =
+        Theme.of(context).platform == TargetPlatform.android ? Grid.xl : 44.0;
     return _EmojiGridSizing(
       large: nativeEmojiOnly,
       child: Column(
@@ -246,10 +248,20 @@ class _EmojiPickerContent extends HookConsumerWidget {
             builder: (context, constraints) => BuzzSheetHeader(
               showDragHandle: true,
               leading: SizedBox(
-                width: constraints.maxWidth - Grid.gutter * 2 - 44 - Grid.xxs,
-                child: _EmojiSearchField(
-                  controller: searchController,
-                  padding: EdgeInsets.zero,
+                width:
+                    constraints.maxWidth -
+                    Grid.gutter * 2 -
+                    headerActionSize -
+                    Grid.xxs,
+                height: headerActionSize,
+                // Keep the header's control style off the field's clear
+                // button.
+                child: IconButtonTheme(
+                  data: IconButtonTheme.of(context),
+                  child: _EmojiSearchField(
+                    controller: searchController,
+                    padding: EdgeInsets.zero,
+                  ),
                 ),
               ),
             ),

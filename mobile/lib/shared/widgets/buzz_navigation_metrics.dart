@@ -1,3 +1,7 @@
+import 'package:flutter/material.dart';
+
+import '../theme/theme.dart';
+
 /// Shared geometry for page and sheet navigation chrome.
 const double buzzNavigationRowHeight = 56;
 
@@ -6,3 +10,13 @@ const double buzzNavigationActionSize = 44;
 
 /// Diameter of the standalone glass controls on the Duo cover rail.
 const double duoCoverRailActionSize = 48;
+
+/// Round Material action containers shared by Android navigation headers.
+ButtonStyle androidNavigationButtonStyle(BuildContext context) =>
+    IconButton.styleFrom(
+      backgroundColor: context.colors.surfaceContainerHighest,
+      foregroundColor: context.colors.onSurface,
+      side: context.navigationControlStroke,
+      shape: const CircleBorder(),
+      minimumSize: const Size.square(Grid.xl),
+    );

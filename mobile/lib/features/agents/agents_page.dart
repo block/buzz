@@ -1,3 +1,4 @@
+import '../../shared/widgets/android_page_header.dart';
 import 'dart:async';
 import 'package:duo_kit/duo_kit.dart';
 
@@ -654,12 +655,162 @@ class AgentsPage extends HookConsumerWidget {
       fontWeight: FontWeight.w600,
       color: navigationPrimaryForeground(context),
     );
-    final topHeight = frostedAppBarHeight(
-      context,
-      nativeLargeTitle: true,
-      titleStyle: headerStyle,
-      bottomHeight: Grid.xxs,
+    final android = defaultTargetPlatform == TargetPlatform.android;
+    final topHeight = android
+        ? 0.0
+        : frostedAppBarHeight(
+            context,
+            nativeLargeTitle: true,
+            titleStyle: headerStyle,
+            bottomHeight: Grid.xxs,
+          );
+    final body = SafeArea(
+      top: false,
+      child: Material(
+        color: Colors.transparent,
+        child: BeeRefreshIndicator(
+          edgeOffset: topHeight,
+          onRefresh: refresh,
+          child: CustomScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            slivers: [
+              SliverToBoxAdapter(child: SizedBox(height: topHeight)),
+              if (signInNeeded)
+                SliverToBoxAdapter(
+                  child: ReconnectCapsule(
+                    inline: true,
+                    message: signingIn
+                        ? 'Finish sign-in in browser'
+                        : 'Reconnect to Builderlab',
+                    actionLabel: signingIn ? 'Cancel' : 'Sign in',
+                    destructiveAction: signingIn,
+                    onSignIn: () => unawaited(
+                      signingIn ? flow.leave() : flow.reconnectAccount(),
+                    ),
+                  ),
+                ),
+              SliverToBoxAdapter(
+                child: Column(
+                  children: [
+                    if (createOnOpen && (loading || signingIn))
+                      const LinearProgressIndicator(),
+                    if (createOnOpen &&
+                        supportsRemoteAgents(community) &&
+                        controller.failure.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.all(Grid.sm),
+                        child: Text(controller.failure),
+                      ),
+                    if (failed && keys.isEmpty)
+                      ListTile(
+                        title: const Text('Could not load agents'),
+                        trailing: TextButton(
+                          onPressed: refresh,
+                          child: const Text('Retry'),
+                        ),
+                      ),
+                    if (!loading && !failed && !needsSignIn && keys.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.all(Grid.sm),
+                        child: Text(
+                          'You haven’t added any agents yet.',
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              AgentCardGrid(
+                itemCount: keys.length,
+                itemBuilder: (context, index) {
+                  final key = keys[index];
+                  final remote = controller.agents
+                      .where((row) => row['agent_pubkey'] == key)
+                      .firstOrNull;
+                  final editable =
+                      community != null &&
+                      supportsRemoteAgents(community) &&
+                      controller.owner == community.pubkey &&
+                      owned?.contains(key) == true &&
+                      controller.activeAgents.contains(key) &&
+                      remote != null;
+                  return AgentCard(
+                    key: ValueKey(key),
+                    name: names.labelFor(key),
+                    isBestie: key == bestie,
+                    imageUrl:
+                        profiles[key]?.avatarUrl ??
+                        ownedDirectory.asData?.value
+                            .where((entry) => entry.pubkey == key)
+                            .firstOrNull
+                            ?.avatarUrl,
+                    location: remote != null ? 'Remote' : null,
+                    onOpen: () => onSelect(key),
+                    footer: editable
+                        ? RemoteAgentModelControl(
+                            key: ValueKey('model-$key'),
+                            controller: controller,
+                            agent: remote,
+                            community: community,
+                            isCurrent: () =>
+                                ref
+                                    .read(activeCommunityProvider)
+                                    .asData
+                                    ?.value
+                                    ?.id ==
+                                community.id,
+                          )
+                        : null,
+                    subtitle: editable
+                        ? null
+                        : remote != null
+                        ? 'Builderbot agent'
+                        : needsSignIn
+                        ? null
+                        : 'Manage on desktop',
+                  );
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
     );
+    if (android) {
+      return Scaffold(
+        body: SafeArea(
+          top: true,
+          bottom: false,
+          child: Column(
+            children: [
+              SizedBox(
+                height: kToolbarHeight,
+                child: androidPageHeader(
+                  context,
+                  title: 'Agents',
+                  leading: IconButton(
+                    tooltip: 'Close agents',
+                    icon: const Icon(BuzzIcons.x),
+                    onPressed: onClose,
+                    style: androidNavigationButtonStyle(context),
+                  ),
+                  actions: [
+                    if (supportsRemoteAgents(community))
+                      IconButton(
+                        tooltip: 'Add agent',
+                        onPressed: addAgent,
+                        icon: const Icon(Icons.add),
+                        style: androidNavigationButtonStyle(context),
+                      ),
+                  ],
+                ),
+              ),
+              Expanded(child: body),
+            ],
+          ),
+        ),
+      );
+    }
     return FrostedScaffold(
       backgroundColor: context.colors.surface,
       appBar: FrostedAppBar(
@@ -699,118 +850,7 @@ class AgentsPage extends HookConsumerWidget {
             ),
         ],
       ),
-      body: SafeArea(
-        top: false,
-        child: Material(
-          color: Colors.transparent,
-          child: BeeRefreshIndicator(
-            edgeOffset: topHeight,
-            onRefresh: refresh,
-            child: CustomScrollView(
-              physics: const AlwaysScrollableScrollPhysics(),
-              slivers: [
-                SliverToBoxAdapter(child: SizedBox(height: topHeight)),
-                if (signInNeeded)
-                  SliverToBoxAdapter(
-                    child: ReconnectCapsule(
-                      inline: true,
-                      message: signingIn
-                          ? 'Finish sign-in in browser'
-                          : 'Reconnect to Builderlab',
-                      actionLabel: signingIn ? 'Cancel' : 'Sign in',
-                      destructiveAction: signingIn,
-                      onSignIn: () => unawaited(
-                        signingIn ? flow.leave() : flow.reconnectAccount(),
-                      ),
-                    ),
-                  ),
-                SliverToBoxAdapter(
-                  child: Column(
-                    children: [
-                      if (createOnOpen && (loading || signingIn))
-                        const LinearProgressIndicator(),
-                      if (createOnOpen &&
-                          supportsRemoteAgents(community) &&
-                          controller.failure.isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.all(Grid.sm),
-                          child: Text(controller.failure),
-                        ),
-                      if (failed && keys.isEmpty)
-                        ListTile(
-                          title: const Text('Could not load agents'),
-                          trailing: TextButton(
-                            onPressed: refresh,
-                            child: const Text('Retry'),
-                          ),
-                        ),
-                      if (!loading && !failed && !needsSignIn && keys.isEmpty)
-                        const Padding(
-                          padding: EdgeInsets.all(Grid.sm),
-                          child: Text(
-                            'You haven’t added any agents yet.',
-                            textAlign: TextAlign.center,
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-                AgentCardGrid(
-                  itemCount: keys.length,
-                  itemBuilder: (context, index) {
-                    final key = keys[index];
-                    final remote = controller.agents
-                        .where((row) => row['agent_pubkey'] == key)
-                        .firstOrNull;
-                    final editable =
-                        community != null &&
-                        supportsRemoteAgents(community) &&
-                        controller.owner == community.pubkey &&
-                        owned?.contains(key) == true &&
-                        controller.activeAgents.contains(key) &&
-                        remote != null;
-                    return AgentCard(
-                      key: ValueKey(key),
-                      name: names.labelFor(key),
-                      isBestie: key == bestie,
-                      imageUrl:
-                          profiles[key]?.avatarUrl ??
-                          ownedDirectory.asData?.value
-                              .where((entry) => entry.pubkey == key)
-                              .firstOrNull
-                              ?.avatarUrl,
-                      location: remote != null ? 'Remote' : null,
-                      onOpen: () => onSelect(key),
-                      footer: editable
-                          ? RemoteAgentModelControl(
-                              key: ValueKey('model-$key'),
-                              controller: controller,
-                              agent: remote,
-                              community: community,
-                              isCurrent: () =>
-                                  ref
-                                      .read(activeCommunityProvider)
-                                      .asData
-                                      ?.value
-                                      ?.id ==
-                                  community.id,
-                            )
-                          : null,
-                      subtitle: editable
-                          ? null
-                          : remote != null
-                          ? 'Builderbot agent'
-                          : needsSignIn
-                          ? null
-                          : 'Manage on desktop',
-                    );
-                  },
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
+      body: body,
     );
   }
 }

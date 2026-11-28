@@ -298,6 +298,15 @@ void main() {
         tester.getCenter(find.byType(EditableText)).dy,
         closeTo(center, 1),
       );
+      if (defaultTargetPlatform == TargetPlatform.android) {
+        final box = tester.widget<DecoratedBox>(
+          find.ancestor(of: field, matching: find.byType(DecoratedBox)).first,
+        );
+        final decoration = box.decoration as BoxDecoration;
+        expect(decoration.color, const Color(0xFFF5F5F6));
+        expect(decoration.border, isNotNull);
+        return;
+      }
       final surface = tester.widget<ConcentricSheetSurface>(
         find.byType(ConcentricSheetSurface),
       );
@@ -340,7 +349,19 @@ void main() {
     await tester.pumpAndSettle();
     final editable = tester.state<EditableTextState>(find.byType(EditableText));
     final idleTop = tester.getTopLeft(find.byType(TextField)).dy;
-    await tester.tap(find.byType(TextField));
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      final capsule = tester.getRect(
+        find
+            .ancestor(
+              of: find.byType(TextField),
+              matching: find.byType(DecoratedBox),
+            )
+            .first,
+      );
+      await tester.tapAt(capsule.topCenter + const Offset(0, 2));
+    } else {
+      await tester.tap(find.byType(TextField));
+    }
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 80));
     final movingTop = tester.getTopLeft(find.byType(TextField)).dy;

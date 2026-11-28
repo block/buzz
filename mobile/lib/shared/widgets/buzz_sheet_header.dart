@@ -32,7 +32,7 @@ class BuzzSheetHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
+    final header = Padding(
       padding: const EdgeInsets.only(
         top: Grid.xxs,
         left: Grid.gutter,
@@ -50,7 +50,9 @@ class BuzzSheetHeader extends StatelessWidget {
                 left: 64,
                 right: 64,
                 bottom: 0,
-                height: 44,
+                height: Theme.of(context).platform == TargetPlatform.android
+                    ? Grid.xl
+                    : buzzNavigationActionSize,
                 child: Center(
                   child: Text(
                     title,
@@ -75,6 +77,14 @@ class BuzzSheetHeader extends StatelessWidget {
         ),
       ),
     );
+    return Theme.of(context).platform == TargetPlatform.android
+        ? IconButtonTheme(
+            data: IconButtonThemeData(
+              style: androidNavigationButtonStyle(context),
+            ),
+            child: header,
+          )
+        : header;
   }
 }
 
@@ -106,17 +116,22 @@ class _SheetCloseButton extends StatelessWidget {
     }
 
     return SizedBox.square(
-      dimension: buzzNavigationActionSize,
+      dimension: Theme.of(context).platform == TargetPlatform.android
+          ? Grid.xl
+          : buzzNavigationActionSize,
       child: IconButton(
         tooltip: 'Close sheet',
         onPressed: closeSheet,
         style: IconButton.styleFrom(
           padding: EdgeInsets.zero,
+          side: context.navigationControlStroke,
           backgroundColor: context.colors.surfaceContainerHighest,
           foregroundColor: context.colors.primary,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(Radii.dialog),
-          ),
+          shape: Theme.of(context).platform == TargetPlatform.android
+              ? const CircleBorder()
+              : RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(Radii.dialog),
+                ),
         ),
         icon: const Icon(BuzzIcons.x, size: 24),
       ),

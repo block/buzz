@@ -17433,27 +17433,34 @@ void main() {
       },
     );
 
-    testWidgets('shows lock icon for private channel', (tester) async {
-      final privateChannel = Channel(
-        id: _channelId,
-        name: 'secret',
-        channelType: 'stream',
-        visibility: 'private',
-        description: 'Private channel',
-        createdBy: 'abc',
-        createdAt: DateTime(2025),
-        memberCount: 3,
-        isMember: true,
-      );
+    testWidgets(
+      'Android private channel title announces privacy without a lock',
+      (tester) async {
+        final privateChannel = Channel(
+          id: _channelId,
+          name: 'secret',
+          channelType: 'stream',
+          visibility: 'private',
+          description: 'Private channel',
+          createdBy: 'abc',
+          createdAt: DateTime(2025),
+          memberCount: 3,
+          isMember: true,
+        );
 
-      await tester.pumpWidget(
-        _buildTestable(messages: [], channel: privateChannel),
-      );
-      await tester.pumpAndSettle();
+        await tester.pumpWidget(
+          _buildTestable(messages: [], channel: privateChannel),
+        );
+        await tester.pumpAndSettle();
 
-      expect(find.text('secret'), findsOneWidget);
-      expect(find.byIcon(BuzzIcons.lock), findsOneWidget);
-    });
+        expect(find.text('secret'), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.lock), findsNothing);
+        expect(
+          find.bySemanticsLabel('secret, Private channel'),
+          findsOneWidget,
+        );
+      },
+    );
   });
 
   group('Error and loading states', () {

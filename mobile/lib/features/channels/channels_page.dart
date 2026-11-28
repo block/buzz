@@ -744,7 +744,10 @@ class ChannelsPage extends HookConsumerWidget {
                     ],
                   ),
                 ],
-          horizontalInset: messages ? Grid.gutter : _kTopSectionInset,
+          horizontalInset:
+              messages || defaultTargetPlatform == TargetPlatform.android
+              ? Grid.gutter
+              : _kTopSectionInset,
           // Let the full Buzz gradient show at rest. Once the list begins to
           // move beneath this row, build up blur over the first 64dp of scroll
           // without adding the usual white frosted wash. The Buzz list is

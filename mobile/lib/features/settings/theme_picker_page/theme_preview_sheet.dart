@@ -356,19 +356,21 @@ class _ThemePreviewCloseButton extends StatelessWidget {
       );
     }
     return SizedBox.square(
-      dimension: 44,
+      dimension: defaultTargetPlatform == TargetPlatform.android ? Grid.xl : 44,
       child: IconButton(
         key: const ValueKey('theme-preview-close'),
         tooltip: 'Close preview',
         onPressed: onPressed,
-        style: IconButton.styleFrom(
-          padding: EdgeInsets.zero,
-          backgroundColor: context.colors.surfaceContainerHighest,
-          foregroundColor: navigationPrimaryForeground(context),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(Radii.dialog),
-          ),
-        ),
+        style: defaultTargetPlatform == TargetPlatform.android
+            ? androidNavigationButtonStyle(context)
+            : IconButton.styleFrom(
+                padding: EdgeInsets.zero,
+                backgroundColor: context.colors.surfaceContainerHighest,
+                foregroundColor: navigationPrimaryForeground(context),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(Radii.dialog),
+                ),
+              ),
         icon: const Icon(BuzzIcons.x, size: 24),
       ),
     );

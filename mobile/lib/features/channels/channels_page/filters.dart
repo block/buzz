@@ -32,6 +32,7 @@ class MessagesSectionOptions extends InheritedWidget {
   const MessagesSectionOptions({super.key, required super.child});
 
   static double messagesGutter(BuildContext context) {
+    if (defaultTargetPlatform == TargetPlatform.android) return Grid.gutter;
     if (defaultTargetPlatform != TargetPlatform.iOS) return Grid.xs;
     final hasStrip =
         DuoToolbarScope.maybeStripOf(context) != null ||
