@@ -531,6 +531,43 @@ pub async fn owned_agents_among(
     .await?)
 }
 
+/// Check whether `actor_pubkey` may remove `target_pubkey` from `channel_id`
+/// because the channel is a DM, the target is an agent, and the actor is a
+/// person: anyone in a DM may remove an agent from it. Channel type and
+/// agent ownership never change once set, so the answer needs no lock.
+pub async fn may_remove_agent_from_dm(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: uuid::Uuid,
+    target_pubkey: &[u8],
+    actor_pubkey: &[u8],
+) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    Ok(sqlx::query_scalar::<_, bool>(
+        r#"SELECT EXISTS (
+            SELECT 1 FROM channels c
+            JOIN users t ON t.community_id = c.community_id AND t.pubkey = $3
+            WHERE c.community_id = $1 AND c.id = $2 AND c.channel_type = 'dm'
+              AND t.agent_owner_pubkey IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM users a
+                  WHERE a.community_id = $1 AND a.pubkey = $4
+                    AND a.agent_owner_pubkey IS NOT NULL
+              )
+        )"#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(target_pubkey)
+    .bind(actor_pubkey)
+    .fetch_one(&mut *connection)
+    .await?)
+}
+
 /// Check whether `actor_pubkey` is the `agent_owner_pubkey` of `target_pubkey`.
 /// Queries `agent_owner_pubkey` directly rather than going through
 /// `get_agent_channel_policy`, which would fetch unrelated fields.
@@ -746,6 +783,26 @@ impl Db {
         candidates: &[Vec<u8>],
     ) -> Result<Vec<Vec<u8>>> {
         crate::user::owned_agents_among(&self.pool, community_id, owner_pubkey, candidates).await
+    }
+
+    /// Check whether `actor_pubkey`, a person, may remove the agent
+    /// `target_pubkey` from the DM `channel_id`.
+    #[datastore_span(name = "may_remove_agent_from_dm", system = "postgresql")]
+    pub async fn may_remove_agent_from_dm(
+        &self,
+        community_id: CommunityId,
+        channel_id: uuid::Uuid,
+        target_pubkey: &[u8],
+        actor_pubkey: &[u8],
+    ) -> Result<bool> {
+        crate::user::may_remove_agent_from_dm(
+            &self.pool,
+            community_id,
+            channel_id,
+            target_pubkey,
+            actor_pubkey,
+        )
+        .await
     }
 
     /// Check whether `actor_pubkey` is the agent owner of `target_pubkey`.

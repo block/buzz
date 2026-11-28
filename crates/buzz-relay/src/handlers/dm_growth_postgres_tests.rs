@@ -674,35 +674,64 @@ async fn a_person_can_leave_a_dm() {
     assert_ne!(again, dm);
 }
 
-/// An owner can remove their own agent from a DM, as deleting an agent does;
-/// the DM stays its people's DM. Someone else's agent cannot be removed.
-/// Mutation: refuse every kind:9001 for another member on DMs → the owner's
-/// removal is refused → RED; allow any → B removes A's agent → RED.
+/// Any person in a DM can remove an agent from it, whoever owns the agent;
+/// the DM stays its people's DM. People cannot be removed, an agent cannot
+/// remove another agent or a person, and someone outside the DM cannot
+/// remove anyone from it.
+/// Mutation: allow removals of people → A removes B → RED; let agents remove
+/// agents → the second agent removes the first → RED; skip the membership
+/// check → C removes the agent → RED; keep owner-only removal → B's removal
+/// of A's agent is refused → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn an_owner_can_remove_their_agent_from_a_dm() {
+async fn a_person_can_remove_an_agent_from_a_dm() {
     let state = state().await;
     let tenant = community(&state, "dm-remove-agent").await;
-    let (a, b, agent) = (Keys::generate(), Keys::generate(), Keys::generate());
+    let (a, b, outsider) = (Keys::generate(), Keys::generate(), Keys::generate());
+    let (agent, other_agent) = (Keys::generate(), Keys::generate());
     make_agent(&state, &tenant, &agent, &a, "anyone").await;
-    let dm = open_with_history(&state, &tenant, &a, &[&b, &agent])
+    make_agent(&state, &tenant, &other_agent, &b, "anyone").await;
+    let dm = open_with_history(&state, &tenant, &a, &[&b, &agent, &other_agent])
         .await
         .expect("open");
-    let remove = vec![
-        vec!["h".to_string(), dm.to_string()],
-        vec!["p".into(), hex(&agent)],
-    ];
+    let remove = |target: &Keys| {
+        vec![
+            vec!["h".to_string(), dm.to_string()],
+            vec!["p".into(), hex(target)],
+        ]
+    };
 
     rejected(
-        submit(&state, &tenant, &b, 9001, remove.clone())
+        submit(&state, &tenant, &a, 9001, remove(&b))
             .await
             .map(|r| (r.accepted, r.message)),
         "kind:41011",
     );
-    let removed = submit(&state, &tenant, &a, 9001, remove)
+    for (actor, target) in [(&other_agent, &agent), (&other_agent, &a)] {
+        rejected(
+            submit(&state, &tenant, actor, 9001, remove(target))
+                .await
+                .map(|r| (r.accepted, r.message)),
+            "kind:41011",
+        );
+    }
+    let from_outside = submit(&state, &tenant, &outsider, 9001, remove(&agent))
         .await
-        .expect("remove");
-    assert!(removed.accepted, "{}", removed.message);
+        .map(|r| (r.accepted, r.message));
+    assert!(
+        !matches!(from_outside, Ok((true, _))),
+        "an outsider removed an agent: {from_outside:?}"
+    );
+    assert_eq!(
+        members(&state, &tenant, dm).await,
+        set_of(&[&a, &b, &agent, &other_agent])
+    );
+    for (actor, target) in [(&b, &agent), (&a, &other_agent)] {
+        let removed = submit(&state, &tenant, actor, 9001, remove(target))
+            .await
+            .expect("remove");
+        assert!(removed.accepted, "{}", removed.message);
+    }
 
     assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &b]));
     assert_eq!(open(&state, &tenant, &b, &[&a]).await.expect("reopen"), dm);
