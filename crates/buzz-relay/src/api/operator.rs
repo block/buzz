@@ -5,7 +5,9 @@
 //! ingest, relay membership, channel scoping, storage, or fan-out.
 
 mod community_policy;
+mod identity_archive;
 mod invites;
+pub mod members;
 pub use community_policy::{community_nip_fi_policy_status, set_community_nip_fi_policy};
 pub use invites::mint_community_invite;
 
@@ -1257,6 +1259,7 @@ mod postgres_tests {
     mod creation_policy_postgres_tests;
     mod initial_policy_postgres_tests;
     mod invite_postgres_tests;
+    mod members_postgres_tests;
     use std::{
         collections::HashSet,
         sync::{Arc, Mutex},

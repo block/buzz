@@ -4572,7 +4572,7 @@ pub async fn reconcile_channel_events(
     Ok(())
 }
 
-/// Test-only barrier hooks for [`publish_nipia_archival_list`]. Lets a test
+/// Test-only hooks for [`publish_nipia_archival_list`]. Lets a test
 /// hold one publisher after it has read canonical archive state and before it
 /// replaces the head, making the stale-read/late-write race deterministic.
 /// Compiled only under `cfg(test)`; the production call site is `#[cfg(test)]`.
@@ -4596,6 +4596,13 @@ pub(crate) mod publish_test_hooks {
 
     static GATE: Mutex<Option<Gate>> = Mutex::new(None);
 
+    static FAIL_ONCE: Mutex<Vec<CommunityId>> = Mutex::new(Vec::new());
+
+    /// Fail the next snapshot publication for this test's community.
+    pub(crate) fn fail_next(community: CommunityId) {
+        FAIL_ONCE.lock().unwrap().push(community);
+    }
+
     /// Arm a one-shot barrier for `community`. Await the returned receiver to
     /// learn when the held publisher has reached the hook (i.e. has read
     /// canonical state); call `notify_one` on the returned handle to let it
@@ -4612,7 +4619,14 @@ pub(crate) mod publish_test_hooks {
         (rx, release)
     }
 
-    pub(super) async fn after_list_archived(community: CommunityId) {
+    pub(super) async fn after_list_archived(community: CommunityId) -> anyhow::Result<()> {
+        {
+            let mut failures = FAIL_ONCE.lock().unwrap();
+            if let Some(index) = failures.iter().position(|armed| *armed == community) {
+                failures.swap_remove(index);
+                anyhow::bail!("injected archive snapshot publication failure");
+            }
+        }
         let gate = {
             let mut slot = GATE.lock().unwrap();
             match slot.as_ref() {
@@ -4624,6 +4638,7 @@ pub(crate) mod publish_test_hooks {
             let _ = gate.arrived.send(());
             gate.release.notified().await;
         }
+        Ok(())
     }
 }
 
@@ -4649,7 +4664,7 @@ pub async fn publish_nipia_archival_list(
         // stale-read/late-write ordering the drift check must catch is
         // deterministic, not scheduler-dependent. Inert in production.
         #[cfg(test)]
-        publish_test_hooks::after_list_archived(tenant.community()).await;
+        publish_test_hooks::after_list_archived(tenant.community()).await?;
         let mut tags: Vec<Tag> = Vec::with_capacity(archived.len() + 1);
         tags.push(Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?);
 
@@ -4899,15 +4914,26 @@ async fn publish_nipia_delta(
 ) -> anyhow::Result<()> {
     let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
 
+    // NIP-IA: a `relay` decision has no request event and omits the actor.
+    let relay_consent = consent_path == "relay";
+    let consent = if relay_consent {
+        Tag::parse(["consent", consent_path])
+    } else {
+        Tag::parse(["consent", consent_path, actor_pubkey_hex])
+    }
+    .map_err(|e| anyhow::anyhow!("failed to build consent tag: {e}"))?;
     let mut tags = vec![
         Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?,
         Tag::parse(["p", target_pubkey_hex])
             .map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?,
-        Tag::parse(["consent", consent_path, actor_pubkey_hex])
-            .map_err(|e| anyhow::anyhow!("failed to build consent tag: {e}"))?,
-        Tag::parse(["e", request_event_id])
-            .map_err(|e| anyhow::anyhow!("failed to build e tag: {e}"))?,
+        consent,
     ];
+    if !relay_consent {
+        tags.push(
+            Tag::parse(["e", request_event_id])
+                .map_err(|e| anyhow::anyhow!("failed to build e tag: {e}"))?,
+        );
+    }
 
     if let Some(reason) = reason {
         tags.push(

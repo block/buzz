@@ -1987,7 +1987,7 @@ mod postgres_tests {
         if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
             db.migrate().await.expect("migrate deletion engine test DB");
         }
-        claimed_test_deletion_in(db, prefix).await
+        claimed_test_deletion_in(db, prefix, |_| {}).await
     }
 
     /// A migrated database of its own, named `{prefix}_{uuid}`, for a test
@@ -2026,7 +2026,13 @@ mod postgres_tests {
         .expect("drop scratch database");
     }
 
-    async fn claimed_test_deletion_in(db: Db, prefix: &str) -> (Db, Services, ClaimedDeletion) {
+    /// Claim a fresh deletion in `db`, with `edit` applied to the schema
+    /// inventory before it is frozen.
+    async fn claimed_test_deletion_in(
+        db: Db,
+        prefix: &str,
+        edit: impl FnOnce(&mut buzz_db::deletion::SchemaManifest),
+    ) -> (Db, Services, ClaimedDeletion) {
         let store = db.deletion_store();
         let host = format!("{prefix}-{}.example", Uuid::new_v4().simple());
         let community = db
@@ -2037,13 +2043,14 @@ mod postgres_tests {
             .submit(Some(&host), "test", None, None)
             .await
             .expect("submit deletion request");
-        let inventory = FrozenInventory {
+        let mut inventory = FrozenInventory {
             schema: store
                 .inventory_schema(community.id)
                 .await
                 .expect("inventory schema"),
             storage: empty_storage_manifest(community.id),
         };
+        edit(&mut inventory.schema);
         store
             .freeze_inventory(request.id, &inventory)
             .await
@@ -2942,7 +2949,7 @@ mod postgres_tests {
 
         // An unlisted addition fails before fencing.
         let (db, services, claim) =
-            claimed_test_deletion_in(scratch.clone(), "deletion-unlisted").await;
+            claimed_test_deletion_in(scratch.clone(), "deletion-unlisted", |_| {}).await;
         let services = services_with_infra(services);
         let request_id = claim.request.id;
         sqlx::query("CREATE TABLE deletion_unlisted_scoped (community_id UUID NOT NULL)")
@@ -2972,10 +2979,16 @@ mod postgres_tests {
             .expect("load request");
         assert!(request.fence_generation.is_none());
 
-        // The forward tables appear after approval, with rows for the target
-        // and for a bystander.
+        // A request approved before the expand migration: its frozen
+        // inventory lacks the forward tables, which hold rows for the target
+        // and for a bystander by the time it executes.
+        let forward = |table: &str| buzz_db::deletion::APPROVAL_FORWARD_TABLES.contains(&table);
         let (db, services, claim) =
-            claimed_test_deletion_in(scratch.clone(), "deletion-straddle").await;
+            claimed_test_deletion_in(scratch.clone(), "deletion-straddle", |schema| {
+                schema.scoped_tables.retain(|table| !forward(table));
+                schema.row_counts.retain(|table, _| !forward(table));
+            })
+            .await;
         let services = services_with_infra(services);
         let target = *claim.request.community_id.as_uuid();
         let bystander = *db
@@ -2987,13 +3000,26 @@ mod postgres_tests {
             .expect("bystander community")
             .id
             .as_uuid();
+        for community in [target, bystander] {
+            sqlx::query(
+                "INSERT INTO search_outbox (community_id, event_id, event_created_at) \
+                 VALUES ($1, $2, now())",
+            )
+            .bind(community)
+            .bind(vec![9_u8; 32])
+            .execute(db.pool())
+            .await
+            .expect("seed forward table");
+        }
+        // Pending tables appear only after approval, from a later expand
+        // migration.
         for table in buzz_db::deletion::PENDING_SCOPED_TABLES {
             sqlx::query(sqlx::AssertSqlSafe(format!(
                 "CREATE TABLE {table} (community_id UUID NOT NULL)"
             )))
             .execute(db.pool())
             .await
-            .expect("create forward table");
+            .expect("create pending table");
             for community in [target, bystander] {
                 sqlx::query(sqlx::AssertSqlSafe(format!(
                     "INSERT INTO {table} (community_id) VALUES ($1)"
@@ -3001,7 +3027,7 @@ mod postgres_tests {
                 .bind(community)
                 .execute(db.pool())
                 .await
-                .expect("seed forward table");
+                .expect("seed pending table");
             }
         }
         let output = execute_claim(&services, LoopMode::Run, claim, &CancellationToken::new())
@@ -3013,7 +3039,7 @@ mod postgres_tests {
             "{:?}",
             output.blocked_reason.or(output.last_error)
         );
-        for table in buzz_db::deletion::PENDING_SCOPED_TABLES {
+        for table in buzz_db::deletion::APPROVAL_FORWARD_TABLES {
             for (community, expected) in [(target, 0_i64), (bystander, 1)] {
                 let rows: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
                     "SELECT count(*) FROM {table} WHERE community_id = $1"
@@ -3026,17 +3052,17 @@ mod postgres_tests {
             }
         }
 
-        // An approval that froze the forward tables fails before fencing
-        // once they are gone.
+        // An approval that froze the pending tables fails before fencing once
+        // they are gone.
         let (db, services, claim) =
-            claimed_test_deletion_in(scratch.clone(), "deletion-removed").await;
+            claimed_test_deletion_in(scratch.clone(), "deletion-removed", |_| {}).await;
         let services = services_with_infra(services);
         let request_id = claim.request.id;
         for table in buzz_db::deletion::PENDING_SCOPED_TABLES {
             sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE {table}")))
                 .execute(db.pool())
                 .await
-                .expect("drop forward table");
+                .expect("drop pending table");
         }
         let output = execute_claim(&services, LoopMode::Run, claim, &CancellationToken::new())
             .await
@@ -3062,7 +3088,7 @@ mod postgres_tests {
         // the executor still advances through the Approved stage on the
         // original digest.
         let (db, services, claim) =
-            claimed_test_deletion_in(scratch.clone(), "deletion-retired").await;
+            claimed_test_deletion_in(scratch.clone(), "deletion-retired", |_| {}).await;
         let services = services_with_infra(services);
         let request_id = claim.request.id;
         let approved_digest = claim

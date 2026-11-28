@@ -158,13 +158,7 @@ pub const RETIRING_SCOPED_TABLES: &[&str] = &["delivery_log", "subscriptions"];
 /// this release. The release that ships the table moves it to
 /// [`EXPECTED_SCOPED_TABLES`] and [`PURGE_SCOPED_TABLES`]. These tables have
 /// no foreign keys, so purge order does not matter.
-pub const PENDING_SCOPED_TABLES: &[&str] = &[
-    "channel_heads",
-    "identity_retirement_actions",
-    "identity_retirement_holds",
-    "identity_retirement_workflows",
-    "thread_heads",
-];
+pub const PENDING_SCOPED_TABLES: &[&str] = &["channel_heads", "thread_heads"];
 
 /// Tenant tables an expand migration may add between a deletion's approval
 /// and its execution.
@@ -178,9 +172,6 @@ pub const PENDING_SCOPED_TABLES: &[&str] = &[
 /// runs on the release that requires it.
 pub const APPROVAL_FORWARD_TABLES: &[&str] = &[
     "channel_heads",
-    "identity_retirement_actions",
-    "identity_retirement_holds",
-    "identity_retirement_workflows",
     "search_backfill",
     "search_outbox",
     "thread_heads",

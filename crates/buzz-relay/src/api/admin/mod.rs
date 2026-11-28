@@ -27,7 +27,7 @@ use axum::{
     Json, Router,
 };
 use chrono::{DateTime, Utc};
-use error::ApiError;
+pub(crate) use error::ApiError;
 use serde::{Deserialize, Serialize};
 use tower_http::limit::RequestBodyLimitLayer;
 use uuid::Uuid;
@@ -41,6 +41,7 @@ pub(crate) fn is_admin_host(state: &crate::state::AppState, headers: &HeaderMap)
 /// the advertised origin without reaching into the private `auth` module.
 pub(crate) use auth::admin_api_origin;
 pub(crate) use auth::is_relay_operator;
+pub(crate) use reads::{identity_inventory_in, search_members_in, MemberSearchQuery};
 
 /// Build the deployment-admin routes.
 ///
@@ -67,6 +68,10 @@ pub fn router(state: Arc<crate::state::AppState>) -> Router {
         .route("/communities", get(reads::communities))
         .route("/members/search", get(reads::search_members))
         .route("/members/{pubkey}", get(reads::lookup_member))
+        .route(
+            "/members/{pubkey}/ownership",
+            get(reads::identity_inventory),
+        )
         .route("/events/{id}", get(reads::event_preview))
         .route("/members/restrictions", get(list_member_restrictions))
         .route("/members/{pubkey}/ban", delete(unban_member))
@@ -1180,8 +1185,8 @@ fn decode_cursor(token: &str) -> Result<(DateTime<Utc>, Vec<u8>), ApiError> {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CommunityQuery {
-    community_host: String,
+pub(crate) struct CommunityQuery {
+    pub(crate) community_host: String,
 }
 
 /// Resolve a client-supplied community host to its tenant through the same
@@ -1195,7 +1200,8 @@ async fn community_for_host(
     Ok(tenant_for_host(state, host).await?.community())
 }
 
-async fn tenant_for_host(
+/// Resolve an explicit community host for a management request.
+pub(crate) async fn tenant_for_host(
     state: &crate::state::AppState,
     host: &str,
 ) -> Result<buzz_core::TenantContext, ApiError> {

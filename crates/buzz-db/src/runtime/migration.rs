@@ -1062,7 +1062,17 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 108);
+        assert_eq!(migrations.len(), 110);
+        assert_eq!(migrations[109].version, 110);
+        assert!(migrations[109]
+            .sql
+            .as_str()
+            .contains("VALIDATE CONSTRAINT archived_identities_consent_path_check"));
+        assert_eq!(migrations[108].version, 109);
+        let consent = strip_sql_comments(migrations[108].sql.as_str());
+        assert!(consent
+            .contains("CHECK (consent_path IN ('self', 'owner', 'admin', 'relay')) NOT VALID"));
+        assert!(!consent.contains("CREATE TABLE"));
         assert_eq!(migrations[107].version, 108);
         assert!(strip_sql_comments(migrations[107].sql.as_str())
             .contains("CREATE SEQUENCE search_index_version"));
@@ -3527,6 +3537,7 @@ mod postgres_tests {
 
         for table in [
             "media_uploaders",
+            "archived_identities",
             "audit_log",
             "media_publications",
             "relay_members",
@@ -3616,6 +3627,7 @@ mod postgres_tests {
         );
 
         for table in [
+            "archived_identities",
             "communities",
             "community_auth_upgrades",
             "entity_deletion_requests",
