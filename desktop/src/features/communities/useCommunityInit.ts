@@ -41,6 +41,10 @@ import {
 } from "@/features/agents/activeAgentTurnsStore";
 import { resetAgentWorkingSignal } from "@/features/agents/agentWorkingSignal";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
+import {
+  initAgentCommandCatalog,
+  resetAgentCommandCatalog,
+} from "@/features/agents/agentCommandCatalog";
 import { resetAvatarPresentations } from "@/features/profile/avatarPresentationStore";
 import { resetAvatarProfileSync } from "@/features/profile/avatarProfileSync";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
@@ -72,6 +76,7 @@ async function resetCommunityState({
   resetRateLimitGate();
   clearAllDrafts();
   resetAgentObserverStore();
+  resetAgentCommandCatalog();
   resetActiveAgentTurnsStore();
   resetAgentWorkingSignal();
   if (isTauri() && isMacPlatform()) {
@@ -398,6 +403,7 @@ export function useCommunityInit(
         if (identityPubkey !== null) {
           initDraftStore(identityPubkey, activeCommunity.relayUrl);
         }
+        initAgentCommandCatalog(activeCommunity.id);
         // Restore any turn state saved for this community (a prior A→B round-
         // trip). This runs after applyCommunity succeeds and before the app
         // renders so components see the restored timers on first render.
