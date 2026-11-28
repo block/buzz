@@ -114,6 +114,61 @@ async function clickStop(page: Page) {
 test.describe("agent control browser regressions", () => {
   test.use({ viewport: { width: 1280, height: 720 } });
 
+  test("Activity preserves the model provider's authentication failure", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          name: "Charlie",
+          pubkey: AGENT_PUBKEY,
+          status: "running",
+          channelNames: ["agents"],
+        },
+      ],
+    });
+    const panel = await openAgentActivity(page, CHANNEL_AGENTS);
+    await page.evaluate(
+      ({ agentPubkey, channelId }) => {
+        const seed = window.__BUZZ_E2E_SEED_OBSERVER_EVENTS__;
+        if (!seed) throw new Error("Observer event seed is unavailable.");
+        seed({
+          agentPubkey,
+          events: [
+            {
+              seq: 100,
+              timestamp: new Date().toISOString(),
+              kind: "turn_error",
+              agentIndex: 0,
+              channelId,
+              sessionId: "auth-error-session",
+              turnId: "auth-error-turn",
+              payload: {
+                outcome: "error",
+                code: -32001,
+                error:
+                  "Agent reported error (code -32001): llm auth: Databricks rejected the refresh token; sign in again",
+              },
+            },
+          ],
+        });
+      },
+      { agentPubkey: AGENT_PUBKEY, channelId: CHANNEL_AGENTS },
+    );
+    await expect(panel.getByText("Turn error", { exact: true })).toBeVisible();
+    if (process.env.BUZZ_AUTH_SCREENSHOT_PATH) {
+      await waitForAnimations(page);
+      await panel.screenshot({ path: process.env.BUZZ_AUTH_SCREENSHOT_PATH });
+    }
+    const transcript = panel.getByRole("log", { name: "Live ACP transcript" });
+    await expect(transcript).toContainText(
+      "Turn error · error: The model provider rejected authentication — check its credentials or sign in again. Databricks rejected the refresh token; sign in again",
+    );
+    await expect(transcript).not.toContainText(
+      "Community access denied this agent",
+    );
+  });
+
   test("Stop uses the channelId-only activity scope and carries a requestId", async ({
     page,
   }) => {
