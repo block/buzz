@@ -31,6 +31,8 @@ test("getPersonaProviderOptions returns databricks v1 and v2 when hideProviderId
   const ids = options.map((o) => o.id);
   assert.ok(ids.includes("databricks"), "databricks v1 present");
   assert.ok(ids.includes("databricks_v2"), "databricks v2 present");
+  assert.ok(ids.includes("minimax"), "MiniMax global present");
+  assert.ok(ids.includes("minimax-cn"), "MiniMax China present");
 });
 
 test("getPersonaProviderOptions hides databricks v1 when it is in hideProviderIds", () => {
@@ -275,6 +277,11 @@ test("getProviderApiKeyLabel_openai_compat_returns_distinct_label", () => {
 test("getProviderApiKeyLabel_openrouter_returns_openrouter_label", () => {
   // Key fix: OpenRouter was mislabeled "OpenAI API Key" before this change.
   assert.equal(getProviderApiKeyLabel("openrouter"), "OpenRouter API Key");
+});
+
+test("getProviderApiKeyLabel_minimax_regions_share_minimax_label", () => {
+  assert.equal(getProviderApiKeyLabel("minimax"), "MiniMax API Key");
+  assert.equal(getProviderApiKeyLabel("minimax-cn"), "MiniMax API Key");
 });
 
 test("getProviderApiKeyLabel_databricks_returns_null", () => {

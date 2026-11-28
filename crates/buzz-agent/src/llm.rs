@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "minimax_requests_tests.rs"]
+mod minimax_requests_tests;
+
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -93,6 +97,14 @@ impl Llm {
         effective_model: &str,
     ) -> Result<LlmResponse, AgentError> {
         let effort = cfg.thinking_effort;
+        // Validate the effective model at request time, including session/set_model.
+        if crate::config::is_minimax_flash(effective_model)
+            && matches!(effort, Some(ThinkingEffort::None | ThinkingEffort::Minimal))
+        {
+            return Err(AgentError::Llm(format!(
+                "({effective_model}) reasoning effort must be low, medium, high, xhigh, or max"
+            )));
+        }
         let call_start = std::time::Instant::now();
         let result = match cfg.provider {
             Provider::Anthropic => self
@@ -123,9 +135,9 @@ impl Llm {
                     .await
                     .and_then(parse_openai_with_reasoning_details)
             }
-            Provider::OpenAi | Provider::Databricks => {
+            Provider::OpenAi | Provider::Databricks | Provider::MiniMax => {
                 let provider_str = match cfg.provider {
-                    Provider::OpenAi => "openai",
+                    Provider::OpenAi | Provider::MiniMax => "openai",
                     Provider::Databricks => "databricks",
                     _ => unreachable!(),
                 };
@@ -135,8 +147,13 @@ impl Llm {
                     // Adopted exact-record corrections (e.g. databricks-gpt-5-4-mini →
                     // [low,medium,high]) are enforced here; the openai fallback's effort set
                     // carries the former "unknown model: max→xhigh, others pass" behavior.
-                    let e = effort
-                        .map(|ef| normalize_effort_for_provider(provider_str, request_model, ef));
+                    let e = effort.map(|ef| {
+                        if crate::config::is_minimax_flash(request_model) {
+                            ef
+                        } else {
+                            normalize_effort_for_provider(provider_str, request_model, ef)
+                        }
+                    });
                     if use_responses {
                         (
                             responses_body(cfg, system_prompt, history, tools, request_model, e),
@@ -278,7 +295,7 @@ impl Llm {
                     let v = self.post_openrouter(cfg, &body).await?;
                     Ok(parse_openai(v)?.text)
                 }
-                Provider::OpenAi | Provider::Databricks => {
+                Provider::OpenAi | Provider::Databricks | Provider::MiniMax => {
                     let r = self
                         .openai_request(cfg, effective_model, |use_responses, request_model| {
                             if use_responses {
@@ -661,12 +678,19 @@ fn anthropic_body(
     let mut body = json!({ "model": effective_model, "max_tokens": cfg.max_output_tokens,
         "system": system_value, "messages": messages });
     if let Some(e) = effort {
-        let (thinking, output_config) = crate::config::anthropic_thinking_config(
-            provider,
-            effective_model,
-            e,
-            cfg.max_output_tokens,
-        );
+        let (thinking, output_config) = if effective_model == "MiniMax-M3.1-Flash" {
+            (
+                Some(json!({ "type": "adaptive" })),
+                Some(json!({ "effort": e.openai_effort_str() })),
+            )
+        } else {
+            crate::config::anthropic_thinking_config(
+                provider,
+                effective_model,
+                e,
+                cfg.max_output_tokens,
+            )
+        };
         if let Some(t) = thinking {
             body["thinking"] = t;
         }
@@ -2104,7 +2128,7 @@ pub(crate) fn databricks_pkce_config(
 ///   flow; subsequent requests use the cache + refresh transparently.
 pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, AgentError> {
     match cfg.provider {
-        Provider::Anthropic | Provider::OpenAi | Provider::OpenRouter => {
+        Provider::Anthropic | Provider::OpenAi | Provider::OpenRouter | Provider::MiniMax => {
             Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())))
         }
         Provider::Databricks | Provider::DatabricksV2 => {
@@ -2131,9 +2155,11 @@ pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, A
 pub(crate) fn summary_completion_cap(provider: Provider, max_output_tokens: u32) -> u32 {
     match provider {
         Provider::OpenRouter => max_output_tokens.saturating_mul(2),
-        Provider::Anthropic | Provider::OpenAi | Provider::Databricks | Provider::DatabricksV2 => {
-            max_output_tokens
-        }
+        Provider::Anthropic
+        | Provider::OpenAi
+        | Provider::Databricks
+        | Provider::DatabricksV2
+        | Provider::MiniMax => max_output_tokens,
     }
 }
 
