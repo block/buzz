@@ -198,7 +198,10 @@ pub const RESULT_GATED_KINDS: &[u32] = &[
 ///
 /// The relay enforces this at the filter layer (`p_gated_filters_authorized`):
 /// a REQ that can match any kind in this set is closed unless the filter's
-/// `#p` values exactly equal the authenticated reader's pubkey. For stored
+/// `#p` values exactly equal the authenticated reader's pubkey. The one
+/// exception is a live REQ whose only kind here is
+/// [`KIND_AGENT_OBSERVER_FRAME`]: its `#p` may also name agents the reader
+/// owns (NIP-AO control frames). For stored
 /// (non-ephemeral) kinds in this set, the storage layer additionally writes a
 /// NULL `search_tsv` so the event is unsearchable through NIP-50 FTS
 /// (`schema/schema.sql` and `migrations/0001_initial_schema.sql` — drift

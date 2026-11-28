@@ -92,6 +92,15 @@ impl From<nostr::event::builder::Error> for TestClientError {
     }
 }
 
+/// Installs rustls' process-wide crypto provider, so tests can reach a
+/// `wss://` relay. rustls can't pick one itself when more than one is
+/// compiled in. Later calls do nothing.
+fn install_crypto_provider() {
+    let _ = rustls::crypto::CryptoProvider::install_default(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    );
+}
+
 /// WebSocket test client for integration testing against a running Buzz relay.
 pub struct BuzzTestClient {
     inner: NostrWsConnection,
@@ -107,6 +116,7 @@ impl BuzzTestClient {
 
     /// Connects to the relay at `url` without performing authentication.
     pub async fn connect_unauthenticated(url: &str) -> Result<Self, TestClientError> {
+        install_crypto_provider();
         let inner = NostrWsConnection::connect(url).await?;
         debug!("connected to relay at {url}");
         Ok(Self { inner })

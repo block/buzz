@@ -7,8 +7,8 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_DELETION,
-    KIND_HUDDLE_LIVENESS, P_GATED_KINDS, RESULT_GATED_KINDS, SHARED_GATED_KINDS,
+    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_OBSERVER_FRAME,
+    KIND_DELETION, KIND_HUDDLE_LIVENESS, P_GATED_KINDS, RESULT_GATED_KINDS, SHARED_GATED_KINDS,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
@@ -377,7 +377,31 @@ pub async fn handle_admitted_req(
     // the fan_out() invariant in subscription.rs.
     if channel_id.is_none() {
         let authed_pubkey_hex = hex::encode(&pubkey_bytes);
-        if !p_gated_filters_authorized(&filters, &authed_pubkey_hex) {
+        let candidates = observer_control_candidates(&filters, &authed_pubkey_hex);
+        let owned_agents = match owned_agents_cached(
+            &state,
+            conn.tenant.community(),
+            &pubkey_bytes,
+            candidates,
+        )
+        .await
+        {
+            Ok(owned) => owned,
+            Err(e) => {
+                warn!(conn_id = %conn_id, sub_id = %sub_id, "observer control owner lookup failed: {e}");
+                super::close::close_if_owner(
+                    &sub_id,
+                    owner,
+                    Some("error: agent ownership unavailable"),
+                    &conn,
+                    &state,
+                )
+                .await;
+                access.db_failed(&e);
+                return;
+            }
+        };
+        if !p_gated_filters_authorized_for_owner(&filters, &authed_pubkey_hex, &owned_agents) {
             super::close::close_if_owner(
                 &sub_id,
                 owner,
@@ -836,7 +860,7 @@ pub(crate) fn channels_needing_membership_check(
 /// sticky for the rest of the request.
 pub(crate) async fn confirm_requested_channel_access(
     state: &AppState,
-    community: buzz_core::tenant::CommunityId,
+    community: buzz_core::CommunityId,
     pubkey: &[u8],
     requested: &[uuid::Uuid],
     token_channel_ids: Option<&[uuid::Uuid]>,
@@ -1201,7 +1225,7 @@ pub async fn build_event_query_from_filter(
     filter: &Filter,
     _pubkey_bytes: &[u8],
     _state: &AppState,
-    community: buzz_core::tenant::CommunityId,
+    community: buzz_core::CommunityId,
 ) -> EventQuery {
     let channel_id = extract_channel_id_from_filter(filter);
     filter_to_query_params(filter, channel_id, community)
@@ -1330,7 +1354,7 @@ const PAGE_LIMIT_MAX: u32 = buzz_db::DEFAULT_MAX_PAGE_LIMIT as u32;
 fn filter_to_query_params(
     filter: &Filter,
     channel_id: Option<uuid::Uuid>,
-    community: buzz_core::tenant::CommunityId,
+    community: buzz_core::CommunityId,
 ) -> EventQuery {
     let kinds: Option<Vec<i32>> = filter.kinds.as_ref().map(|ks| {
         if ks.is_empty() {
@@ -1937,7 +1961,112 @@ fn extract_channel_id_from_filters(filters: &[Filter]) -> Option<uuid::Uuid> {
     found_id
 }
 
+/// Most `#p` values one kind-24200 filter may name when it names agents the
+/// reader owns. It bounds the ownership read a REQ can cause.
+pub(crate) const MAX_OBSERVER_CONTROL_AGENTS: usize = 64;
+
+/// Whether `filter` names kinds explicitly and its only P-gated kind is
+/// `KIND_AGENT_OBSERVER_FRAME`. Only such a filter may name agents the reader
+/// owns in `#p` (NIP-AO control frames); a kindless filter or one that also
+/// names another P-gated kind keeps the reader-only rule.
+fn is_observer_control_filter(filter: &Filter) -> bool {
+    filter.kinds.as_ref().is_some_and(|kinds| {
+        let kinds = || kinds.iter().map(|kind| kind.as_u16() as u32);
+        kinds().any(|kind| kind == KIND_AGENT_OBSERVER_FRAME)
+            && kinds()
+                .all(|kind| kind == KIND_AGENT_OBSERVER_FRAME || !P_GATED_KINDS.contains(&kind))
+    })
+}
+
+/// The `#p` pubkeys, other than the reader, that kind-24200 filters name and
+/// that ownership could admit. Every other REQ yields none and so pays no
+/// ownership read. Filters over [`MAX_OBSERVER_CONTROL_AGENTS`] are skipped:
+/// the gate rejects them anyway.
+pub(crate) fn observer_control_candidates(
+    filters: &[Filter],
+    authed_pubkey_hex: &str,
+) -> Vec<nostr::PublicKey> {
+    let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
+    let mut candidates = Vec::new();
+    for filter in filters {
+        if !is_observer_control_filter(filter)
+            || filter.ids.as_ref().is_some_and(|ids| !ids.is_empty())
+        {
+            continue;
+        }
+        let Some(values) = filter.generic_tags.get(&p_tag) else {
+            continue;
+        };
+        if values.len() > MAX_OBSERVER_CONTROL_AGENTS {
+            continue;
+        }
+        for value in values {
+            if value == authed_pubkey_hex {
+                continue;
+            }
+            if let Ok(pubkey) = nostr::PublicKey::from_hex(value) {
+                if !candidates.contains(&pubkey) {
+                    candidates.push(pubkey);
+                }
+            }
+        }
+    }
+    candidates
+}
+
+/// Of `candidates`, the agents `owner` owns in `community`, as lowercase hex.
+///
+/// An owner link never changes once made, so a cached `true` in
+/// `observer_owner_cache` is final. The rest are asked in one
+/// `owned_agents_among` read, bounded by the caller's candidates; only `true`
+/// is cached, since a missing link may just not be made yet. No candidates
+/// means no read, which keeps a mass reconnect to at most one read per REQ
+/// that names agents.
+pub(crate) async fn owned_agents_cached(
+    state: &AppState,
+    community: buzz_core::CommunityId,
+    owner: &[u8],
+    candidates: Vec<nostr::PublicKey>,
+) -> Result<HashSet<String>, buzz_db::DbError> {
+    let key = |agent: &nostr::PublicKey| (community, agent.to_bytes().to_vec(), owner.to_vec());
+    let (owned, unknown): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .partition(|agent| state.observer_owner_cache.get(&key(agent)) == Some(true));
+    let mut owned: HashSet<String> = owned.iter().map(nostr::PublicKey::to_hex).collect();
+    if !unknown.is_empty() {
+        let bytes: Vec<Vec<u8>> = unknown.iter().map(|a| a.to_bytes().to_vec()).collect();
+        let linked = state
+            .db
+            .owned_agents_among(community, owner, &bytes)
+            .await?;
+        for agent in unknown {
+            if linked.iter().any(|pubkey| pubkey[..] == agent.to_bytes()) {
+                state.observer_owner_cache.insert(key(&agent), true);
+                owned.insert(agent.to_hex());
+            }
+        }
+    }
+    Ok(owned)
+}
+
+/// The P-gate with the reader-only rule: every `#p` value must be the reader.
+/// COUNT and the HTTP bridge use it; a live REQ uses
+/// [`p_gated_filters_authorized_for_owner`].
 pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: &str) -> bool {
+    p_gated_filters_authorized_for_owner(filters, authed_pubkey_hex, &HashSet::new())
+}
+
+/// Authorize filters that can match a P-gated kind. Each such filter's `#p`
+/// values must all be the reader, except that a filter whose only P-gated kind
+/// is `KIND_AGENT_OBSERVER_FRAME` may also name agents in `owned_agents`, at
+/// most [`MAX_OBSERVER_CONTROL_AGENTS`] values (NIP-AO: an owner's connection
+/// receives the control frames it sends to its agents). One failing filter
+/// fails them all.
+pub(crate) fn p_gated_filters_authorized_for_owner(
+    filters: &[Filter],
+    authed_pubkey_hex: &str,
+    owned_agents: &HashSet<String>,
+) -> bool {
     let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
     filters.iter().all(|filter| {
         let can_match_p_gated = filter.kinds.as_ref().is_none_or(|ks| {
@@ -1969,7 +2098,17 @@ pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: 
         }
 
         filter.generic_tags.get(&p_tag).is_some_and(|values| {
-            !values.is_empty() && values.iter().all(|value| value == authed_pubkey_hex)
+            if values.is_empty() {
+                return false;
+            }
+            if values.iter().all(|value| value == authed_pubkey_hex) {
+                return true;
+            }
+            is_observer_control_filter(filter)
+                && values.len() <= MAX_OBSERVER_CONTROL_AGENTS
+                && values
+                    .iter()
+                    .all(|value| value == authed_pubkey_hex || owned_agents.contains(value))
         })
     })
 }
@@ -4181,6 +4320,131 @@ mod tests {
             ))
             .search("x");
         assert!(!p_gated_filters_authorized(&[f], &agent));
+    }
+
+    // ── NIP-AO: an owner's connection may subscribe to its agents' control frames ──
+
+    fn observer_filter(p_values: &[&str]) -> Filter {
+        Filter::new()
+            .kind(nostr::Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16))
+            .custom_tags(
+                SingleLetterTag::lowercase(Alphabet::P),
+                p_values.iter().copied(),
+            )
+    }
+
+    #[test]
+    fn observer_control_gate_admits_owned_agents_only() {
+        let (agent, owner, stranger) = three_pubkeys();
+        let owned = HashSet::from([agent.clone()]);
+        let gate =
+            |filters: &[Filter]| p_gated_filters_authorized_for_owner(filters, &owner, &owned);
+
+        assert!(gate(&[observer_filter(&[&agent])]), "owned agent");
+        assert!(
+            gate(&[observer_filter(&[&owner, &agent])]),
+            "self plus owned agent"
+        );
+        assert!(!gate(&[observer_filter(&[&stranger])]), "unowned agent");
+        assert!(
+            !gate(&[observer_filter(&[&agent, &stranger])]),
+            "one unowned value rejects the filter"
+        );
+        assert!(
+            !gate(&[observer_filter(&[&owner]), observer_filter(&[&stranger])]),
+            "one failing filter rejects the REQ"
+        );
+        // Without the owned set (COUNT, HTTP bridge), the reader-only rule holds.
+        assert!(!p_gated_filters_authorized(
+            &[observer_filter(&[&agent])],
+            &owner
+        ));
+    }
+
+    #[test]
+    fn observer_control_gate_keeps_reader_only_rule_for_other_p_gated_kinds() {
+        let (agent, owner, _) = three_pubkeys();
+        let owned = HashSet::from([agent.clone()]);
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let gate = |filter: Filter| p_gated_filters_authorized_for_owner(&[filter], &owner, &owned);
+
+        let gift_wrap = nostr::Kind::Custom(buzz_core::kind::KIND_GIFT_WRAP as u16);
+        assert!(!gate(
+            Filter::new().kind(gift_wrap).custom_tags(p_tag, [&agent])
+        ));
+        assert!(
+            !gate(observer_filter(&[&agent]).kind(gift_wrap)),
+            "24200 beside another P-gated kind"
+        );
+        assert!(
+            !gate(Filter::new().custom_tags(p_tag, [&agent])),
+            "a kindless filter can match every P-gated kind"
+        );
+        assert!(
+            gate(observer_filter(&[&agent]).kind(nostr::Kind::TextNote)),
+            "an ungated kind beside 24200 does not widen what the filter can read"
+        );
+    }
+
+    #[test]
+    fn observer_control_gate_caps_p_values() {
+        let owner = nostr::Keys::generate().public_key().to_hex();
+        let agents: Vec<String> = (0..=MAX_OBSERVER_CONTROL_AGENTS)
+            .map(|_| nostr::Keys::generate().public_key().to_hex())
+            .collect();
+        let owned: HashSet<String> = agents.iter().cloned().collect();
+        let refs: Vec<&str> = agents.iter().map(String::as_str).collect();
+
+        let at_cap = observer_filter(&refs[..MAX_OBSERVER_CONTROL_AGENTS]);
+        assert!(p_gated_filters_authorized_for_owner(
+            std::slice::from_ref(&at_cap),
+            &owner,
+            &owned
+        ));
+        assert_eq!(
+            observer_control_candidates(&[at_cap], &owner).len(),
+            MAX_OBSERVER_CONTROL_AGENTS
+        );
+
+        let over_cap = observer_filter(&refs);
+        assert!(!p_gated_filters_authorized_for_owner(
+            std::slice::from_ref(&over_cap),
+            &owner,
+            &owned
+        ));
+        assert!(
+            observer_control_candidates(&[over_cap], &owner).is_empty(),
+            "an over-cap filter causes no ownership read"
+        );
+    }
+
+    #[test]
+    fn observer_control_candidates_name_only_foreign_agents_in_24200_filters() {
+        let (agent, owner, other) = three_pubkeys();
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        // The usual REQs (own telemetry, other kinds) cause no ownership read.
+        assert!(observer_control_candidates(&[observer_filter(&[&owner])], &owner).is_empty());
+        assert!(observer_control_candidates(
+            &[Filter::new()
+                .kind(nostr::Kind::TextNote)
+                .custom_tags(p_tag, [&agent])],
+            &owner
+        )
+        .is_empty());
+        assert!(
+            observer_control_candidates(&[Filter::new().custom_tags(p_tag, [&agent])], &owner)
+                .is_empty()
+        );
+
+        let candidates = observer_control_candidates(
+            &[
+                observer_filter(&[&owner, &agent, "not-a-pubkey"]),
+                observer_filter(&[&agent, &other]),
+            ],
+            &owner,
+        );
+        let hex: Vec<String> = candidates.iter().map(nostr::PublicKey::to_hex).collect();
+        assert_eq!(hex, vec![agent, other], "deduplicated, reader left out");
     }
 
     // ── filter_can_match_result_gated_kinds + result_gated_count_safe_for_pushdown ──
