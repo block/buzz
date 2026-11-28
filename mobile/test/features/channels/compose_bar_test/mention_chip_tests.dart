@@ -26,6 +26,7 @@ void mentionChipTests() {
   Future<TextEditingController> mount(
     WidgetTester tester, {
     required ComposeBarOnSend onSend,
+    TextScaler? textScaler,
   }) async {
     final signer = nostr.Keys.generate();
     await tester.pumpWidget(
@@ -33,7 +34,16 @@ void mentionChipTests() {
         uploadService: _testUploadService(signer.nsec),
         currentPubkey: signer.public,
         members: members,
-        relayAgents: [_testAgent(agent)],
+        textScaler: textScaler,
+        relayAgents: [
+          AgentDirectoryEntry(
+            pubkey: agent,
+            displayName: 'Helper Bot',
+            respondTo: 'anyone',
+            channelIds: const ['shared-channel'],
+            avatarUrl: 'https://example.org/agent.png',
+          ),
+        ],
         channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
         searchPeople: (_) async => const [],
         onSend: onSend,
@@ -74,6 +84,48 @@ void mentionChipTests() {
     );
     await tester.pump();
   }
+
+  testWidgets(
+    'adjacent picked mentions keep their chips when the keyboard closes',
+    (tester) async {
+      final controller = await mount(
+        tester,
+        textScaler: const TextScaler.linear(2),
+        onSend: (_, _, {mediaTags = const []}) async {},
+      );
+      final field = find.byType(TextField);
+      await tester.enterText(field, '@bo');
+      await tester.pumpAndSettle();
+      await tester.tap(row('Bob'));
+      await tester.pumpAndSettle();
+      await tester.enterText(field, '${controller.text}@help');
+      await tester.pumpAndSettle();
+      await tester.tap(row('Helper Bot'));
+      await tester.pumpAndSettle();
+      void checkChips() {
+        expect(personChip, findsOneWidget);
+        expect(agentChip, findsOneWidget);
+        final person = tester.getRect(personChip);
+        final agent = tester.getRect(agentChip);
+        expect(person.overlaps(agent), isFalse);
+      }
+
+      checkChips();
+      final avatar = find.descendant(
+        of: agentChip,
+        matching: find.byType(AvatarImage),
+      );
+      final fontSize = tester
+          .widget<MessageMentionPill>(agentChip)
+          .textStyle!
+          .fontSize!;
+      expect(tester.getRect(avatar).width, closeTo(2 * fontSize, 0.01));
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tester.pumpAndSettle();
+      expect(field, findsNothing);
+      checkChips();
+    },
+  );
 
   testWidgets(
     'picked people and agents are atomic chips that carry the recipient',
@@ -130,6 +182,11 @@ void mentionChipTests() {
       await tester.pumpAndSettle();
       expect(controller.text, 'hi @Helper Bot ');
       expect(agentChip, findsOneWidget);
+      final portrait = tester.widget<AvatarImage>(
+        find.descendant(of: agentChip, matching: find.byType(AvatarImage)),
+      );
+      expect(portrait.imageUrl, 'https://example.org/agent.png');
+      expect(portrait.isAgent, isTrue);
       backspace(tester, controller);
       await tester.pump();
       expect(controller.text, 'hi @Helper Bot');

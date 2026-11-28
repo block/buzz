@@ -182,6 +182,7 @@ class _ComposeBarLayout extends HookWidget {
                     button: true,
                     label: resolvedHint,
                     child: GestureDetector(
+                      key: const ValueKey('collapsed-composer-input'),
                       behavior: HitTestBehavior.opaque,
                       onTap: () => _runComposerAction(onExpand),
                       child: Padding(
@@ -205,7 +206,15 @@ class _ComposeBarLayout extends HookWidget {
                                   ),
                                   child: SingleChildScrollView(
                                     primary: false,
-                                    child: inactiveText,
+                                    child: controller.bindings.isEmpty
+                                        ? inactiveText
+                                        : Text.rich(
+                                            controller.buildTextSpan(
+                                              context: context,
+                                              style: inactiveText.style,
+                                              withComposing: false,
+                                            ),
+                                          ),
                                   ),
                                 )
                               : inactiveText,
@@ -458,6 +467,10 @@ class _ComposeBarLayout extends HookWidget {
         allowedMimeTypes: _pastedImageMimeTypes,
         onContentInserted: onContentInserted,
       ),
+      // Give wrapped mention chips room above and below their baseline.
+      strutStyle: controller.bindings.isEmpty
+          ? null
+          : const StrutStyle(forceStrutHeight: false),
       minLines: 1,
       maxLines: 5,
       style: messageBodyTextStyle,

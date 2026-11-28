@@ -118,7 +118,7 @@ void shareDeliveryTests() {
     expect(bound(), [picked]);
 
     if (find.byType(TextField).evaluate().isEmpty) {
-      await tester.tap(find.textContaining('@Sam'));
+      await tester.tap(_collapsedInput);
       await tester.pumpAndSettle();
     }
     await tester.enterText(find.byType(TextField), 'My draft');

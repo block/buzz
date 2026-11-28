@@ -95,6 +95,7 @@ class MessagePreview extends HookConsumerWidget {
                     semanticsLabel: semanticsLabel,
                     isAgent: agents.contains(pubkey),
                     textStyle: style,
+                    showPortrait: false,
                   ),
                 ),
               PreviewEmoji(:final shortcode, :final url) => WidgetSpan(

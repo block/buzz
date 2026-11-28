@@ -142,6 +142,8 @@ class _AvatarImageContentState extends ConsumerState<AvatarImageContent> {
         url: url,
         fit: widget.fit,
         preferThumbnail: widget.preferThumbnail,
+        frameBuilder: (_, child, frame, synchronous) =>
+            synchronous || frame != null ? child : centeredFallback,
         errorBuilder: (_, _, _) => centeredFallback,
       ),
       null => centeredFallback,

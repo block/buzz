@@ -44,7 +44,7 @@ void exactMentionTests() {
     if (find.byType(TextField).evaluate().isEmpty &&
         find.textContaining('@Scout').evaluate().isNotEmpty) {
       // A restored draft displays its text, not the empty composer hint.
-      await tester.tap(find.textContaining('@Scout'));
+      await tester.tap(_collapsedInput);
       await tester.pumpAndSettle();
     } else {
       await _expandComposer(tester);

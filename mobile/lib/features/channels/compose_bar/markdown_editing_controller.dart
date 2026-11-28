@@ -954,6 +954,8 @@ class _MarkdownEditingController extends TextEditingController {
           alignment: PlaceholderAlignment.baseline,
           baseline: TextBaseline.alphabetic,
           child: _ComposerMentionChip(
+            pubkey: mention.pubkey,
+            avatar: mention.candidate.avatarUrl,
             label:
                 _mentionQualifiers[mention.pubkey] ?? mention.candidate.label,
             isAgent: mention.candidate.isAgent,

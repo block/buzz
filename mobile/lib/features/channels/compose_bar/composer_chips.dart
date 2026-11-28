@@ -51,11 +51,15 @@ class _ComposerBuzzLinkChip extends StatelessWidget {
 /// Semantics name the chip once, so a screen reader has one stop per
 /// mention rather than its hidden source characters.
 class _ComposerMentionChip extends StatelessWidget {
+  final String pubkey;
+  final String? avatar;
   final String label;
   final bool isAgent;
   final TextStyle textStyle;
 
   const _ComposerMentionChip({
+    required this.pubkey,
+    required this.avatar,
     required this.label,
     required this.isAgent,
     required this.textStyle,
@@ -63,54 +67,21 @@ class _ComposerMentionChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final style = textStyle.copyWith(
-      color: context.colors.primary,
-      fontWeight: FontWeight.w500,
-      height: 1,
-    );
-    final fontSize = style.fontSize ?? 16;
-
     return Semantics(
       label: isAgent ? 'Agent mention: $label' : 'Mention: $label',
       excludeSemantics: true,
-      child: Container(
+      child: MessageMentionPill(
         key: ValueKey(
           isAgent
               ? 'composer-agent-mention-chip'
               : 'composer-person-mention-chip',
         ),
-        padding: const EdgeInsets.fromLTRB(
-          Grid.half,
-          Grid.quarter + 1,
-          Grid.half,
-          Grid.quarter,
-        ),
-        decoration: BoxDecoration(
-          // The composer surface is already tinted, so the body chip's
-          // low-opacity fill disappears here. Keep the same chip geometry
-          // while giving this editable token enough contrast to read as one.
-          color: context.colors.primary.withValues(alpha: 0.16),
-          borderRadius: BorderRadius.circular(Radii.sm),
-          border: Border.all(
-            color: context.colors.primary.withValues(alpha: 0.12),
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            if (isAgent) ...[
-              Icon(
-                BuzzIcons.bot,
-                size: fontSize * 0.95,
-                color: context.colors.primary,
-              ),
-              const SizedBox(width: Grid.quarter),
-              Text(label, style: style),
-            ] else
-              Text('@$label', style: style),
-          ],
-        ),
+        pubkey: pubkey,
+        candidateAvatar: avatar,
+        composer: true,
+        label: label,
+        isAgent: isAgent,
+        textStyle: textStyle,
       ),
     );
   }
