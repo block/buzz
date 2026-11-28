@@ -61,8 +61,6 @@ confirmation, not app runs.
 - Before reviewing, read [VISION.md](VISION.md), the `VISION_*.md` docs for the affected surface, and the PR's stated goal and linked
   issue. Review the change against what it is trying to do.
 - Check the change against the [Review-Proven Rules](#review-proven-rules): the defects reviewers and load tests here find most often.
-- For mobile changes, and relay or push-gateway behavior the mobile app relies
-  on, also review against [mobile/REVIEWING.md](mobile/REVIEWING.md).
 - Judge minimalism, elegance, and correctness, aiming for 9/10 on each. A score
   below 9 names the concrete defect and the fix.
 - Recommend blocking only for concrete correctness, security, or agreed-contract
@@ -77,7 +75,7 @@ confirmation, not app runs.
 
 ## Open-source boundary
 
-This repository is public and contains the relay, NIP specifications, legacy desktop app, and mobile clients. Never commit values that only make sense inside Block: the employee-only bb-block community and its hosts (`block.builderlab.xyz`, `buzz.block.builderlab.xyz`, `*.communities.block.xyz`), private GitHub organizations or repositories, organization-specific SSH users, internal hosts, cloud accounts, IAM roles or buckets, internal ticket keys, `go/` links, internal Slack channels, or real employees' names and personal setups. Public Builderlab (`app.builderlab.xyz`, `*.communities.builderlab.xyz`) is supported and fine.
+This repository is public and contains the relay, NIP specifications, and legacy desktop app. Never commit values that only make sense inside Block: the employee-only bb-block community and its hosts (`block.builderlab.xyz`, `buzz.block.builderlab.xyz`, `*.communities.block.xyz`), private GitHub organizations or repositories, organization-specific SSH users, internal hosts, cloud accounts, IAM roles or buckets, internal ticket keys, `go/` links, internal Slack channels, or real employees' names and personal setups. Public Builderlab (`app.builderlab.xyz`, `*.communities.builderlab.xyz`) is supported and fine.
 
 Distributor-specific values belong in the relevant release configuration: build-time settings for clients and deployment configuration for the relay. If a setting is missing, add a generic one; never hardcode a Block-only value or special-case a host or organization.
 
@@ -89,12 +87,13 @@ Reviewers treat a violation as a blocking finding.
 
 ## Ecosystem
 
-This repository (`block/buzz`) is the OSS source for the relay, mobile, CLI, and the deprecated Buzz 0.X desktop app. [block/buzz-app](https://github.com/block/buzz-app) is the OSS source for the Buzz 1.0 desktop and web app. Block's internal builds and deployments live in private repositories.
+This repository (`block/buzz`) is the OSS source for the relay, CLI, and the deprecated Buzz 0.X desktop app. [block/buzz-app](https://github.com/block/buzz-app) is the OSS source for the Buzz 1.0 desktop and web app. [block/buzz-mobile](https://github.com/block/buzz-mobile) is the OSS source for the mobile app. Block's internal builds and deployments live in private repositories.
 
 | Repo | Purpose |
 |------|---------|
-| [block/buzz](https://github.com/block/buzz) | OSS source — relay, mobile app, CLI, agent harness, deprecated Buzz 0.X desktop app |
+| [block/buzz](https://github.com/block/buzz) | OSS source — relay, CLI, agent harness, deprecated Buzz 0.X desktop app |
 | [block/buzz-app](https://github.com/block/buzz-app) | OSS source — Buzz 1.0 desktop and web app; all new desktop feature work |
+| [block/buzz-mobile](https://github.com/block/buzz-mobile) | OSS source for the Buzz mobile app (Flutter, iOS + Android) |
 
 See [RELEASING.md](RELEASING.md) for the desktop release flow and
 [CONTRIBUTING.md § Ecosystem](CONTRIBUTING.md#ecosystem) for contributor
@@ -136,7 +135,6 @@ crates/
 
 desktop/              # Buzz 0.X Tauri desktop app (deprecated: new desktop work goes to block/buzz-app)
 web/                  # Browser web client (repo browser, served by the relay)
-mobile/               # Flutter mobile app
 migrations/           # SQL migrations (run at relay startup when BUZZ_AUTO_MIGRATE is on: binary default off, Helm default on; deployments at scale apply them out of band — see docs/database.md)
 schema/               # Desired-state schema (schema/tables/public/ is the declarative schema source)
 scripts/              # Dev tooling
@@ -162,10 +160,8 @@ See CONTRIBUTING.md for full setup details and dependency requirements.
 ## Quality Gates
 
 Run `just ci` before every PR — it runs repository-wide formatting, lint,
-and static checks; Rust, Tauri, desktop, and mobile tests; and desktop and web
+and static checks; Rust, Tauri, and desktop tests; and desktop and web
 builds. Clippy passing does not mean fmt passes; run both.
-For changes limited to Flutter/Dart code in the mobile app, run
-`just mobile-install mobile-check mobile-test` instead of `just ci`.
 Native code and build-configuration changes also require the corresponding
 platform checks.
 
@@ -174,11 +170,11 @@ Run `just test` for integration tests if you touched `buzz-relay`,
 
 **Pre-commit hooks** are installed automatically by `just setup` and auto-fix
 formatting via `stage_fixed`. Pre-commit runs fix variants in parallel (Rust
-fmt, Tauri Rust fmt, desktop biome fix, web biome fix, mobile dart format).
+fmt, Tauri Rust fmt, desktop biome fix, web biome fix).
 Auto-fixable issues are fixed and re-staged; unfixable lint issues block the
 commit. **Pre-push hooks** run the repository-wide differential file-size gate,
 clippy (workspace + Tauri), desktop TypeScript typechecking (`tsc --noEmit`),
-and fast unit tests in parallel (Rust, desktop JS, Tauri Rust, mobile Flutter)
+and fast unit tests in parallel (Rust, desktop JS, Tauri Rust)
 — no overlap with pre-commit. Builds are CI-only. Run `just fix-all` to auto-fix
 all formatting in one shot. Run `just ci` for the full local gate. Run `just
 hooks` to re-install hooks after env changes. Each globbed pre-push lane is
@@ -190,11 +186,11 @@ refspec, `--all`) gets a non-fatal `push-head-scope` warning and relies on CI fo
 its path-scoped checks.
 Before agents run Git or hooks, activate the repo's Hermit environment
 (`. ./bin/activate-hermit`) so `./bin` leads `PATH` and the pinned toolchain
-(flutter, dart, lefthook) wins over any Homebrew version; do not
+(such as lefthook) wins over any Homebrew version; do not
 rewrite hook commands to compensate for an unconfigured shell `PATH`. The
 pre-push hook self-pins regardless: `bin/.lefthookrc` (sourced by the generated
 `.git/hooks/*`) prepends the Hermit `bin/` to `PATH` and pins `LEFTHOOK_BIN`, so
-lane subprocesses resolve the pinned flutter/dart/lefthook even when an
+lane subprocesses resolve the pinned lefthook even when an
 unactivated shell has Homebrew first. Activating Hermit remains recommended for
 non-hook commands.
 
@@ -441,10 +437,6 @@ See [TESTING.md](TESTING.md) for the full multi-agent E2E guide.
 > from a PR body/comment. If you hand-edit PR markdown, run
 > `scripts/check-pr-image-urls.sh <markdown-file>` first to catch relay URLs.
 
-For mobile simulator screenshots, save the PNGs in a local directory and run
-`./scripts/post-screenshots.sh <PR-number> <png-dir>` or use the third argument
-with a markdown template containing `{{filename}}` placeholders.
-
 The desktop app requires the E2E mock bridge to render — it cannot run in a plain
 browser. Use `just desktop-screenshot` to capture screenshots (builds frontend,
 starts preview server, runs Playwright automatically):
@@ -657,8 +649,7 @@ description. See [PR #803](https://github.com/block/buzz/pull/803).
 > here only to fix a 0.X bug, or to keep it compiling when a shared crate it
 > depends on changes. This includes agent guidance bundled with the 0.X app,
 > such as `desktop/src-tauri/src/managed_agents/nest_skill.md`: CLI PRs do not
-> need to update it. Never use it as an implementation or design reference for
-> the mobile app, which is current.
+> need to update it.
 
 The desktop app is Tauri 2 + React 19 + Vite + Tailwind CSS. Features are
 organized under `desktop/src/features/`. Biome handles linting and formatting.
@@ -736,134 +727,12 @@ Key files:
 
 ---
 
-## Mobile App (Flutter)
-
-The mobile app lives in `mobile/` — a Flutter app using Riverpod + Hooks.
-
-The mobile app is current. Do not use the legacy `desktop/` app as an
-implementation or design reference for it: `desktop/` will soon be superseded
-by [block/buzz-app](https://github.com/block/buzz-app). This does not relax
-cross-client wire compatibility: mobile must keep reading and writing the same
-event payloads as other clients (for example the `channel-sort` NIP-78 payload,
-which buzz-app also uses), even where a payload is documented only in code.
-
-### Architecture
-
-- **State management:** Riverpod + `flutter_hooks` (`HookConsumerWidget`)
-- **Theme:** Catppuccin Latte (light) / Macchiato (dark)
-- **Features:** Isolated under `lib/features/`, shared code in `lib/shared/`
-- **Nostr models:** `lib/shared/relay/nostr_models.dart` — event kinds must
-  stay in sync with `crates/buzz-core/src/kind.rs`
-
-### Rules
-
-- **NEVER use `StatefulWidget`** — favor Riverpod for state and always use
-  `HookConsumerWidget` or `ConsumerWidget` with `flutter_hooks` for local state.
-- Agents may build and run the Flutter app when it materially helps implement,
-  debug, or validate mobile changes. Prefer the smallest relevant command and
-  reuse an already-running simulator/emulator and the app's configured staging
-  or production community when that is sufficient. Do not start or rebuild
-  local relay services unless the task specifically requires relay-side or
-  isolated integration behavior.
-- For iOS runtime validation, prefer `just mobile-dev`; it applies the
-  worktree-specific debug identity and runs `flutter run`. Direct `flutter run`
-  or IDE workflows are also allowed. Use `just mobile-build-android` only when
-  an APK build is relevant to the task.
-- Do not rebuild, reinstall, or relaunch merely for ceremony. Preserve Flutter's
-  incremental build cache and use hot reload/restart where appropriate. Use
-  `flutter clean` only when stale build artifacts are a credible cause. Run
-  `flutter upgrade` only when the task explicitly requires a toolchain change.
-- For user-visible or integration changes, exercise the affected workflow in a
-  real app when practical and report the device/simulator, connected community,
-  and workflow actually tested.
-- **Do NOT use `print()`** — use `debugPrint()` or structured logging.
-- Prefer `context.colors` and `context.textTheme` (via theme extensions)
-  over raw `Theme.of(context)` calls.
-- **Keep widgets small and composable.** One public widget per file; push
-  private sub-widgets (`_Foo`) into sibling `part` files under a
-  `<page>/` folder rather than growing the page file. Mobile's hard ceiling is
-  **1200 lines/file**, enforced with the other surface-specific limits by the
-  repository-level `just file-size-check` gate (`just check`, CI, and every
-  pre-push). If an individual file trips the guard, **split the file — never
-  bump a surface limit or add an override merely to admit that file.**
-  Deliberate repository-wide policy revisions must update the enforced rules,
-  tests, and guidance together.
-- Feature modules must not import from other feature modules — only from
-  `shared/`.
-- Use `Grid` tokens for spacing, `Radii` for border radius.
-
-### Quality Checks
-
-```bash
-cd mobile
-dart format --output=none --set-exit-if-changed .
-flutter analyze
-flutter test
-```
-
-Or from repo root: `just mobile-fmt` (auto-fix), `just mobile-check` (lint + fmt check), `just mobile-test` (tests).
-
-To run the app locally with a worktree-specific debug identity and a
-started or reused iOS Simulator:
-
-```bash
-just mobile-dev
-```
-
-This runs `flutter run` against the app's configured community; it does not
-start Docker or local relay services.
-
-When run from a git worktree, `just mobile-dev` (and `just
-mobile-build-android`) give the debug build a per-worktree app identifier
-(keyed to the worktree directory name) and a branch-labelled app name via
-`scripts/mobile-worktree-overrides.sh`, so builds from multiple worktrees
-install side by side. Release builds are unaffected. `just mobile-clean`
-removes stale worktree-suffixed installs from simulators/emulators. See
-[mobile/README.md](mobile/README.md) for direct Xcode / Android Studio
-usage.
-
-### Testing Conventions
-
-Favor a few functional tests over many small ones. Every test is code we
-maintain, so each one must protect a distinct user outcome or invariant.
-
-- **Start with journeys.** For each user-visible flow, write one widget test
-  that drives it through real widgets, notifiers and coordinators. Assert what
-  the user sees and what is durably saved, not internal stages or call counts.
-  Where Flutter can observe it, include semantics and non-primary input in the
-  journey: screen-reader labels and actions, keyboard, alternate gestures, text
-  scale and reduced motion.
-- **Put failure paths inside the journey.** Retry, cancel, resume and a second
-  request arriving midway are steps of a journey, not separate tests.
-- **Fake only external boundaries:** network, relay, OS, browser and storage.
-  Keep the flow's own notifiers and coordinators real. Override boundary
-  providers with `ProviderScope(overrides: [...])`, using
-  `WidgetHelpers.testable()` or a custom `ProviderScope` + `MaterialApp`.
-- **Use focused tests only for what a journey can't enumerate or observe.**
-  That means security and data-loss invariants, protocol or crypto vectors,
-  pure functions with many input combinations, and accessibility or platform
-  behavior owned by native code that a widget journey can't observe, such as
-  VoiceOver stops and traits, Dynamic Type layout and reduced motion in native
-  views. Make them table-driven where cases repeat.
-- **Extend before adding.** When a review finds a defect, add a step to an
-  existing journey or a row to an existing table. Don't add a new test per
-  finding. When a Review-Proven Rule says to test each path, cover the paths
-  as journey steps or table rows.
-- **Delete what a journey covers.** Remove a lower-level test once a journey
-  demonstrably catches the same failures; passing through the same path is not
-  enough. Keep distinct safety, interop, accessibility and native-platform
-  invariants.
-- **Prove it can fail.** Break the production code a test guards once and
-  confirm the test fails. A test that only exercises a fake protects nothing.
-
----
-
 ## See Also
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) — setup, code style, PR process, how to add event kinds / CLI subcommands / HTTP endpoints
 - [TESTING.md](TESTING.md) — multi-agent E2E test guide
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
-- [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `scripts/mobile-release.sh`, candidate tags, internal builds
+- [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, candidate tags, internal builds
 - [README.md](README.md) — project overview and quick start
 
 ### Mention editor contract

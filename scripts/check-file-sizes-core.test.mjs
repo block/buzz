@@ -13,7 +13,6 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
 import { policy as desktopPolicy } from "../desktop/scripts/check-file-sizes.mjs";
-import { policy as mobilePolicy } from "../mobile/scripts/check-file-sizes.mjs";
 import { policy as webPolicy } from "../web/scripts/check-file-sizes.mjs";
 import {
   allowedLineCount,
@@ -147,10 +146,6 @@ const entrypointCases = [
     ],
   },
   {
-    surface: "mobile",
-    files: [{ relativeFile: "lib/oversized.dart", maxLines: 1200 }],
-  },
-  {
     surface: "web",
     files: [
       { relativeFile: "src/app/oversized.ts", maxLines: 1000 },
@@ -230,7 +225,6 @@ test("surface entrypoints expose the exact ordered production policies", () => {
         ["src/shared/styles", [".css"], 1200],
       ],
     ],
-    [mobilePolicy, [["lib", [".dart"], 1200]]],
     [
       webPolicy,
       [

@@ -46,10 +46,10 @@ These 3 x 2 fixtures were produced by Android 16 (API 36) `Bitmap.compress`, not
    }
    ```
 
-2. Pull the four files from `/data/local/tmp/` into this directory. Copy all four into `mobile/android/app/src/test/resources/fixtures/android/`, and copy `bitmap-display-p3.png` and `bitmap-srgb.png` into `mobile/android/app/src/androidTest/resources/fixtures/android/`.
+2. Pull the four files from `/data/local/tmp/` into this directory. Copy all four into the matching fixture directories in [block/buzz-mobile](https://github.com/block/buzz-mobile) (`android/app/src/test/resources/fixtures/android/`, and `bitmap-display-p3.png` and `bitmap-srgb.png` also into `android/app/src/androidTest/resources/fixtures/android/`).
 3. Run `cmp` on every copied fixture to confirm it is byte-identical.
 4. Run the app's `AndroidImageProcessor.decodeSrgbBitmap` and `encodeAndScrub` path for both source color spaces and both formats on the API 36 emulator. Save the four outputs under `sanitized/` with the `-sanitized` suffix.
 5. Run `cargo test -p buzz-media android_` to verify the relay accepts every sanitized fixture while rejecting the three unsanitized fixtures that contain forbidden metadata.
-6. Run `cd mobile/android && ./gradlew app:testDebugUnitTest app:connectedDebugAndroidTest` with an API 36 emulator to verify structural scrubbing and the Display-P3 to sRGB conversion for sanitized PNG and JPEG output.
+6. In [block/buzz-mobile](https://github.com/block/buzz-mobile), run `cd android && ./gradlew app:testDebugUnitTest app:connectedDebugAndroidTest` with an API 36 emulator to verify structural scrubbing and the Display-P3 to sRGB conversion for sanitized PNG and JPEG output.
 
 Regenerate both the encoded inputs and sanitized outputs whenever Android `Bitmap.compress` behavior or `AndroidMediaSanitizer` changes. Do not update only the sanitized files, because the tests cover the exact encoder-to-sanitizer boundary.

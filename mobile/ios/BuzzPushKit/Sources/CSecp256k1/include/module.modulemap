@@ -1,4 +1,0 @@
-module CSecp256k1 {
-    header "CSecp256k1.h"
-    export *
-}

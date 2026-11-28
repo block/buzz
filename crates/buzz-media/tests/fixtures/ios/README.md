@@ -35,11 +35,11 @@ These 2 x 2 fixtures were produced on an iOS simulator with UIKit, not by a gene
      source.png uikit-encoded.png uikit-encoded.jpg
    ```
 
-2. Copy the encoded files into both fixture directories:
+2. Copy the encoded files into both fixture directories (the Runner fixtures live in [block/buzz-mobile](https://github.com/block/buzz-mobile)):
 
    ```sh
-   cp uikit-encoded.png mobile/ios/RunnerTests/Fixtures/UIKitEncoded.png
-   cp uikit-encoded.jpg mobile/ios/RunnerTests/Fixtures/UIKitEncoded.jpg
+   cp uikit-encoded.png <buzz-mobile>/ios/RunnerTests/Fixtures/UIKitEncoded.png
+   cp uikit-encoded.jpg <buzz-mobile>/ios/RunnerTests/Fixtures/UIKitEncoded.jpg
    cp uikit-encoded.png crates/buzz-media/tests/fixtures/ios/
    cp uikit-encoded.jpg crates/buzz-media/tests/fixtures/ios/
    ```

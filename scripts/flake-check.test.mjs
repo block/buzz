@@ -23,7 +23,6 @@ import {
   listPlaywright,
   MAX_PLAYWRIGHT_JOURNEYS,
   nodeTestArgs,
-  parseDartReport,
   parseJunit,
   playwrightRepetitions,
   playwrightShards,
@@ -128,7 +127,6 @@ test("classification follows each runner's test file layout", () => {
     ["desktop/src/shared/ui/thing.jsdom-test.mjs", "node"],
     ["desktop/scripts/demo-build-config.test.mjs", "node"],
     ["desktop/tests/e2e/channels.spec.ts", "playwright"],
-    ["mobile/test/features/invites/invite_join_provider_test.dart", "dart"],
   ])
     assert.equal(classify(file), runner, file);
   for (const file of [
@@ -141,8 +139,6 @@ test("classification follows each runner's test file layout", () => {
     "desktop/tests/e2e/helpers/animations.ts",
     "desktop/tests/e2e/typing-latency.perf.ts",
     "desktop/tests/e2e/fixtures/x.spec.ts",
-    "mobile/lib/main.dart",
-    "mobile/test/helpers.dart",
     "scripts/flake-check.test.mjs",
     "web/src/x.test.mjs",
     // Selections are shell-split downstream; refuse unusual names.
@@ -914,93 +910,6 @@ test("reports give per-test statuses per iteration", () => {
       ["buzz-core::e2e d", "failed"],
     ]),
   );
-  const event = (value) => JSON.stringify(value);
-  assert.deepEqual(
-    parseDartReport(
-      [
-        event({ type: "start", protocolVersion: "0.1.1" }),
-        event({ type: "suite", suite: { id: 7, path: "/m/test/a_test.dart" } }),
-        event({
-          type: "testStart",
-          test: { id: 1, name: "loading /m/test/a_test.dart", url: null },
-        }),
-        event({
-          type: "testDone",
-          testID: 1,
-          result: "success",
-          hidden: true,
-          skipped: false,
-        }),
-        event({
-          type: "testStart",
-          test: {
-            id: 2,
-            name: "group renders",
-            suiteID: 7,
-            url: "package:flutter_test/src/widget_tester.dart",
-          },
-        }),
-        event({
-          type: "testStart",
-          test: {
-            id: 3,
-            name: "group fails",
-            url: "file:///m/test/a_test.dart",
-          },
-        }),
-        event({
-          type: "testStart",
-          test: { id: 4, name: "later", url: "file:///m/test/b_test.dart" },
-        }),
-        event({
-          type: "testStart",
-          test: {
-            id: 5,
-            name: "widget renders",
-            url: "package:flutter_test/src/widget_tester.dart",
-            root_url: "file:///m/test/b_test.dart",
-          },
-        }),
-        "not json",
-        event({
-          type: "testDone",
-          testID: 2,
-          result: "success",
-          hidden: false,
-          skipped: false,
-        }),
-        event({
-          type: "testDone",
-          testID: 3,
-          result: "error",
-          hidden: false,
-          skipped: false,
-        }),
-        event({
-          type: "testDone",
-          testID: 4,
-          result: "success",
-          hidden: false,
-          skipped: true,
-        }),
-        event({
-          type: "testDone",
-          testID: 5,
-          result: "success",
-          hidden: false,
-          skipped: false,
-        }),
-        event({ type: "done", success: false }),
-      ].join("\n"),
-      "/m/",
-    ),
-    new Map([
-      ["test/a_test.dart › group renders", "passed"],
-      ["test/a_test.dart › group fails", "failed"],
-      ["test/b_test.dart › later", "skipped"],
-      ["test/b_test.dart › widget renders", "passed"],
-    ]),
-  );
   // Playwright lists a --repeat-each journey once per repetition, in order.
   const spec = (title, line, status) => ({
     title,
@@ -1084,7 +993,7 @@ test("repeat invocations mirror the lanes they stand in for", () => {
     ),
   );
   const flake = read("../.github/workflows/_ci-flake.yml");
-  for (const runner of ["rust", "tauri", "node", "dart"])
+  for (const runner of ["rust", "tauri", "node"])
     assert.ok(
       flake.includes(`flake-check.mjs ${runner} --iterations=10 $SELECTED`),
       runner,

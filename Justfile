@@ -93,7 +93,7 @@ build-release:
     cargo build --workspace --release
 
 # Run repo lint, formatting, and repository policy checks
-check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check security-review-check file-size-check
+check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check security-review-check file-size-check
 
 # Validate the trusted security-review workflow support and renderer contract.
 security-review-check:
@@ -108,7 +108,6 @@ file-size-check:
     node --test scripts/check-file-sizes-core.test.mjs
     node desktop/scripts/check-file-sizes.mjs
     node web/scripts/check-file-sizes.mjs
-    node mobile/scripts/check-file-sizes.mjs
 
 # Format all Rust code
 fmt:
@@ -158,11 +157,11 @@ desktop-tauri-fmt:
 desktop-tauri-fmt-check:
     cargo fmt --manifest-path {{desktop_tauri_manifest}} --all -- --check
 
-# Format all code (Rust + Tauri Rust + Dart)
-fmt-all: fmt desktop-tauri-fmt mobile-fmt
+# Format all code (Rust + Tauri Rust)
+fmt-all: fmt desktop-tauri-fmt
 
 # Fix all formatting and lint issues
-fix-all: fmt desktop-tauri-fmt desktop-fix web-fix mobile-fix
+fix-all: fmt desktop-tauri-fmt desktop-fix web-fix
 
 # Ensure sidecar placeholder binaries exist (Tauri validates externalBin at compile time)
 # Sidecar binary list must stay in sync with desktop-release-build below.
@@ -384,7 +383,7 @@ desktop-e2e-pre-push: _ensure-migrations
     cd {{desktop_dir}} && pnpm build:e2e && pnpm exec playwright test --only-changed=origin/main
 
 # Run all checks suitable for CI / pre-push (no infra needed)
-ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
+ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build
 
 # ─── Test ─────────────────────────────────────────────────────────────────────
 
@@ -1055,80 +1054,6 @@ web-build:
 web-e2e-smoke:
     cd {{web_dir}} && pnpm test:e2e:smoke
 
-# ─── Mobile ──────────────────────────────────────────────────────────────────
-
-mobile_dir := "mobile"
-
-# Install mobile Flutter dependencies
-mobile-install:
-    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter pub get
-
-# Format all Dart code
-mobile-fmt:
-    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format .
-
-# Fix mobile formatting and run analysis
-mobile-fix:
-    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format . && flutter analyze
-
-# Run mobile lint and format checks
-mobile-check:
-    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format --output=none --set-exit-if-changed . && flutter analyze
-
-# Run mobile tests
-mobile-test:
-    /bin/bash ./scripts/test-mobile-gateway-recipes.sh
-    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter test
-    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}}/packages/buzz_secp256k1 && dart pub get && dart test
-
-# Regenerate the emoji dataset asset from desktop's emoji-mart install.
-# Output is committed — rerun after bumping @emoji-mart/data.
-mobile-emoji-data:
-    node {{mobile_dir}}/scripts/generate-emoji-data.mjs
-
-# Compile an unsigned Android debug APK (worktree-aware debug identity)
-mobile-build-android:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ./scripts/mobile-worktree-overrides.sh
-    set -- build apk --debug --no-pub
-    if [[ -n "${BUZZ_PUSH_GATEWAY_URL:-}" ]]; then
-        set -- "$@" --dart-define="BUZZ_PUSH_GATEWAY_URL=${BUZZ_PUSH_GATEWAY_URL}"
-    fi
-    unset GIT_DIR GIT_WORK_TREE
-    cd {{mobile_dir}}
-    flutter "$@"
-
-# Run the mobile app on iOS simulator (worktree-aware debug identity)
-mobile-dev:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    developer_dir="$(xcode-select -p)"
-    simulator_app="$developer_dir/../Applications/DeviceHub.app"
-    if [[ ! -d "$simulator_app" ]]; then
-        simulator_app="$developer_dir/Applications/Simulator.app"
-    fi
-    # Use the selected Xcode even when another version's app is already running.
-    open -a "$simulator_app"
-    sleep 3
-    ./scripts/mobile-worktree-overrides.sh
-    gateway_url="${BUZZ_PUSH_GATEWAY_URL:-}"
-    overrides_file="{{mobile_dir}}/ios/Flutter/AppOverrides.xcconfig"
-    if [[ -z "$gateway_url" && -f "$overrides_file" ]]; then
-        gateway_url="$(sed -nE 's/^[[:space:]]*BUZZ_PUSH_GATEWAY_URL[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*$/\1/p' "$overrides_file" | tail -n 1 | sed 's/\$()//g')"
-    fi
-    set -- run
-    if [[ -n "$gateway_url" ]]; then
-        set -- "$@" --dart-define="BUZZ_PUSH_GATEWAY_URL=${gateway_url}"
-    fi
-    cd {{mobile_dir}}
-    unset GIT_DIR GIT_WORK_TREE
-    flutter "$@"
-
-# Uninstall stale worktree-suffixed Buzz debug installs (production apps kept)
-mobile-clean:
-    ./scripts/mobile-worktree-clean.sh
-
 # ─── Database ─────────────────────────────────────────────────────────────────
 
 # Apply database migrations
@@ -1230,8 +1155,7 @@ release-relay *ARGS:
     fi
     just _release-pr relay "$VERSION"
 
-# Shared release-PR engine for desktop and relay. Mobile publishes immutable
-# candidate tags directly from remote main instead of using metadata-only PRs.
+# Shared release-PR engine for desktop and relay.
 _release-pr lane version:
     #!/usr/bin/env bash
     set -euo pipefail

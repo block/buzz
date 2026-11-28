@@ -19,8 +19,6 @@ for (const key of [
   "desktop",
   "desktop-rust",
   "web",
-  "mobile",
-  "mobile-native",
 ]) {
   assert.ok(
     ["true", "false"].includes(filters[key]),

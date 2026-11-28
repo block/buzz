@@ -83,8 +83,6 @@ We review as capacity allows — focused PRs that follow this guide move fastest
 | Rust | 1.88+ | Install via [rustup](https://rustup.rs/) |
 | Node.js | 24+ | Required for desktop app commands and `just ci` |
 | pnpm | 10+ | Required for desktop app commands and `just ci` |
-| Flutter | 3.47.9+ | Required for mobile app — install via [flutter.dev](https://docs.flutter.dev/get-started/install) |
-| Xcode | 27.1 recommended; 26 supported | Required for iOS builds; see [iOS toolchain setup](mobile/README.md#ios-toolchain) |
 | Docker | 24+ | For Postgres, Redis, MinIO |
 | `just` | latest | Task runner — `cargo install just` |
 | `lefthook` | 2.1.3 (Hermit-pinned) | Auto-installed by `just hooks` — no manual install needed |
@@ -298,16 +296,16 @@ Before opening a PR, run the full CI gate locally:
 
 ```bash
 just ci
-# Runs: check + unit tests + desktop build + Tauri check + mobile tests
+# Runs: check + unit tests + desktop build + Tauri check
 ```
 
 This is the same check that runs in CI. PRs that fail `just ci` will not be
-merged. If `just ci` fails on formatting, `just fix-all` fixes it in one shot (`rustfmt` + Tauri fmt + desktop, web, and mobile formatters).
+merged. If `just ci` fails on formatting, `just fix-all` fixes it in one shot (`rustfmt` + Tauri fmt + desktop and web formatters).
 
 Pull requests also get an advisory **flake check**. `scripts/flake-check.mjs
 select` maps the diff against the base branch to the Rust tests (in the root
 and desktop Tauri workspaces), desktop `node --test` files, Playwright smoke
-journeys and Flutter test files it changed: a hunk inside a test body selects
+journeys it changed: a hunk inside a test body selects
 that test; a change anywhere else in a test file (imports, helpers, hooks,
 the code under test beside Rust tests) or a new file selects the whole file.
 An integration test binary's tests include those of the file modules its
@@ -427,7 +425,7 @@ required. The scope (in parentheses) is optional but encouraged.
    - How to test it manually (if applicable)
    - Any follow-up work deferred to a future PR
 
-6. **Shows the UI** — any PR that changes the desktop or mobile UI includes
+6. **Shows the UI** — any PR that changes the desktop UI includes
    before/after screenshots (or a short recording for interactions) in the
    description. We can't run every branch locally — screenshots let us review
    UI changes same-day instead of waiting for someone to build your branch.
@@ -487,10 +485,11 @@ to existing clients.
 ## Ecosystem
 
 Buzz is developed across multiple repositories. This repo (`block/buzz`)
-is the open-source home for the relay, mobile app, CLI, and agent harness.
+is the open-source home for the relay, CLI, and agent harness.
 It also holds `desktop/`, the deprecated Buzz 0.X desktop app. The Buzz 1.0
 desktop and web app lives in [block/buzz-app](https://github.com/block/buzz-app),
-and all new desktop feature work goes there. Internal repositories handle
+and all new desktop feature work goes there. The mobile app lives in
+[block/buzz-mobile](https://github.com/block/buzz-mobile). Internal repositories handle
 enterprise-signed builds and infrastructure deployment.
 
 See [AGENTS.md § Ecosystem](AGENTS.md#ecosystem) for the full repo table and
