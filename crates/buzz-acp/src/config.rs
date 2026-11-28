@@ -534,6 +534,30 @@ pub struct CliArgs {
     pub replay_floor: Option<u64>,
 }
 
+/// Whether a DM event may skip the mention requirement.
+///
+/// DM events carry no recipient `p` tag (the relay hides DM membership), so a
+/// mention rule can never match them. The waiver is deliberately narrow:
+///
+/// - **1:1 DMs only** (exactly two members). `channel_type: "dm"` also covers
+///   group DMs of up to nine members, where an unmentioned message has no
+///   addressee — waking every agent on every message would break addressing.
+/// - **Owner-authored events only.** Sibling agents and allowlisted humans
+///   keep mentioning explicitly, so two same-owner agents in a DM cannot wake
+///   each other into a reply loop.
+///
+/// Unresolved state (not a DM, or an unknown member count) keeps the old
+/// mention-only behaviour. Note that this waiver overrides a channel rule
+/// that sets `require_mention = true` for a 1:1 owner DM; there is currently
+/// no per-channel opt-out.
+pub(crate) fn dm_mention_waived(
+    is_dm: bool,
+    dm_member_count: Option<usize>,
+    author_is_owner: bool,
+) -> bool {
+    is_dm && dm_member_count == Some(2) && author_is_owner
+}
+
 /// Merged NIP-01 subscription filter for a single channel.
 #[derive(Debug, Clone)]
 pub struct ChannelFilter {
@@ -3244,5 +3268,47 @@ channels = "ALL"
             "Found secret-bearing env args without hide_env_values=true. \
              Add `hide_env_values = true` to each: {violations:?}"
         );
+    }
+    // ── dm_mention_waived ────────────────────────────────────────────────────
+    // The waiver is deliberately narrow: owner-authored events in 1:1 DMs only.
+    // Group DMs (the relay allows up to 9 members on channel_type "dm") and
+    // sibling agents keep their p-tag addressing.
+
+    #[test]
+    fn dm_mention_waived_for_owner_in_one_to_one_dm() {
+        assert!(dm_mention_waived(true, Some(2), true));
+    }
+
+    #[test]
+    fn dm_mention_not_waived_in_group_dm() {
+        // 3..=9 members: unmentioned messages have no addressee.
+        for members in [3usize, 5, 9] {
+            assert!(
+                !dm_mention_waived(true, Some(members), true),
+                "group DM with {members} members must keep the mention rule"
+            );
+        }
+    }
+
+    #[test]
+    fn dm_mention_not_waived_for_sibling_or_allowlisted_author() {
+        // Same-owner agents in a DM must keep mentioning each other, or two
+        // siblings wake each other into a reply loop.
+        assert!(!dm_mention_waived(true, Some(2), false));
+    }
+
+    #[test]
+    fn dm_mention_not_waived_outside_dm_channels() {
+        // Stream/forum channels never waive, whatever the member count.
+        assert!(!dm_mention_waived(false, Some(2), true));
+        assert!(!dm_mention_waived(false, Some(5), true));
+    }
+
+    #[test]
+    fn dm_mention_not_waived_when_member_list_unresolved() {
+        // Metadata or member list not visible yet keeps the old behaviour.
+        assert!(!dm_mention_waived(true, None, true));
+        // A member-less member-list event cannot be trusted as 1:1 either.
+        assert!(!dm_mention_waived(true, Some(0), true));
     }
 }

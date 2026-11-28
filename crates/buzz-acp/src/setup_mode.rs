@@ -493,7 +493,7 @@ async fn nudge_authorized_event(
     keys: &nostr::Keys,
     payload: &SetupPayload,
 ) -> bool {
-    let (buzz_event, effective_author) = authorized_event.into_parts();
+    let (buzz_event, effective_author, _gate_is_dm) = authorized_event.into_parts();
 
     // Apply channel/kind filter rules.
     let filter_matched =
