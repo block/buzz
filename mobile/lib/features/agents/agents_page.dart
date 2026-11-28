@@ -68,13 +68,16 @@ Future<void> showAgents(
   // a second one on top of it, but only while it shows just its list: a form,
   // profile or dialog above it may hold work the user hasn't finished.
   final open = _openAgentsRoute;
-  if (createOnOpen &&
+  final fromLink = draft != null;
+  // Agents is already open: ignore the request instead of stacking a second
+  // screen on top of it. Only a link below can replace what is open.
+  if (!fromLink &&
       open != null &&
       open.isActive &&
       open.navigator == navigator) {
     return;
   }
-  if (draft != null &&
+  if (fromLink &&
       open != null &&
       open.isActive &&
       open.navigator == navigator) {
