@@ -43,12 +43,12 @@ class ChannelSectionsManager {
   final bool _remoteEnabled;
   final VoidCallback _onChanged;
 
-  ChannelSectionStore _store;
+  late ChannelSectionStore _store;
 
   /// The Team layout as last read from or accepted by the relay, without
   /// unpublished edits: what desktop imports once it saves a unified layout.
   late ChannelSectionStore _confirmed;
-  ChannelSectionStore? _lastPublishedStore;
+  ChannelSectionStore? _pendingBase;
 
   /// Desktop's unified layout head. Once one exists, desktop no longer reads
   /// `channel-sections` edits, so this manager stops making them.
@@ -72,7 +72,8 @@ class ChannelSectionsManager {
   bool _syncAgain = false;
   int _subscriptionGeneration = 0;
   int _localRevision = 0;
-  bool _publishPending = false;
+  bool _publishing = false;
+  bool _retriedOvertakenWrite = false;
 
   ChannelSectionsManager({
     required this.pubkey,
@@ -91,15 +92,19 @@ class ChannelSectionsManager {
        _signedEventRelay = signedEventRelay,
        _remoteEnabled = remoteEnabled,
        _onChanged = onChanged,
-       _startupRetryBaseDelay = startupRetryBaseDelay,
-       _store = ChannelSectionsStorage(prefs).read(pubkey, relayUrl) {
-    _confirmed = _store;
+       _startupRetryBaseDelay = startupRetryBaseDelay {
+    final legacy = _storage.readWithPending(pubkey, relayUrl);
+    _store = legacy.store;
+    _pendingBase = legacy.pendingBase;
+    _confirmed = _pendingBase ?? _store;
     final cached = _storage.readWorkspace(pubkey, relayUrl);
     if (cached != null) {
       try {
         _workspace = WorkspaceRecord.decode(cached.plaintext);
         _workspaceCreatedAt = cached.createdAt;
         _workspaceEventId = cached.eventId;
+        _store = _confirmed;
+        _pendingBase = null;
       } on FormatException {
         // A record this build cannot read waits for the relay head.
       }
@@ -121,20 +126,25 @@ class ChannelSectionsManager {
     }
 
     await _syncWithRelay();
+    _schedulePublish();
     _onChanged();
   }
 
   /// Re-reads the retained head once, e.g. on app foreground resume, to catch
-  /// an EVENT a healthy socket never delivered. Skipped while a local edit is
-  /// pending and discarded if one lands before the read returns.
+  /// an EVENT a healthy socket never delivered. A pending edit fences the
+  /// legacy head; a unified head is still applied immediately.
   void refreshFromRelay() {
     if (_disposed || !_remoteEnabled) return;
+    if (_pendingBase != null && !_publishing && _publishDebounce == null) {
+      _retriedOvertakenWrite = false;
+      _schedulePublish();
+    }
     final revision = _localRevision;
-    final legacyCurrent = !_publishPending;
+    final legacyCurrent = _pendingBase == null;
     unawaited(
       _fetchAndMerge(
         isCurrent: () =>
-            legacyCurrent && revision == _localRevision && !_publishPending,
+            legacyCurrent && revision == _localRevision && _pendingBase == null,
       ),
     );
   }
@@ -257,50 +267,50 @@ class ChannelSectionsManager {
       name: name.trim(),
       order: maxOrder + 1,
     );
-    _store = ChannelSectionStore(
-      sections: [..._store.sections, section],
-      assignments: channelId == null
-          ? _store.assignments
-          : {..._store.assignments, channelId: section.id},
+    _editSections(
+      ChannelSectionStore(
+        sections: [..._store.sections, section],
+        assignments: channelId == null
+            ? _store.assignments
+            : {..._store.assignments, channelId: section.id},
+      ),
     );
-    _persist();
-    markDirty();
   }
 
   void renameSection(String sectionId, String? newName, {String? icon}) {
     if (!_editable) return;
-    _store = ChannelSectionStore(
-      sections: [
-        for (final s in _store.sections)
-          if (s.id == sectionId)
-            ChannelSection(
-              id: s.id,
-              name: newName?.trim() ?? s.name,
-              icon: icon ?? s.icon,
-              order: s.order,
-            )
-          else
-            s,
-      ],
-      assignments: _store.assignments,
+    _editSections(
+      ChannelSectionStore(
+        sections: [
+          for (final s in _store.sections)
+            if (s.id == sectionId)
+              ChannelSection(
+                id: s.id,
+                name: newName?.trim() ?? s.name,
+                icon: icon ?? s.icon,
+                order: s.order,
+              )
+            else
+              s,
+        ],
+        assignments: _store.assignments,
+      ),
     );
-    _persist();
-    markDirty();
   }
 
   void deleteSection(String sectionId) {
     if (!_editable) return;
     final updatedAssignments = Map<String, String>.from(_store.assignments)
       ..removeWhere((_, sid) => sid == sectionId);
-    _store = ChannelSectionStore(
-      sections: [
-        for (final s in _store.sections)
-          if (s.id != sectionId) s,
-      ],
-      assignments: updatedAssignments,
+    _editSections(
+      ChannelSectionStore(
+        sections: [
+          for (final s in _store.sections)
+            if (s.id != sectionId) s,
+        ],
+        assignments: updatedAssignments,
+      ),
     );
-    _persist();
-    markDirty();
   }
 
   void moveSectionUp(String sectionId) {
@@ -309,7 +319,6 @@ class ChannelSectionsManager {
     final idx = sorted.indexWhere((s) => s.id == sectionId);
     if (idx <= 0) return;
     _swapOrders(sorted, idx, idx - 1);
-    markDirty();
   }
 
   void moveSectionDown(String sectionId) {
@@ -318,45 +327,41 @@ class ChannelSectionsManager {
     final idx = sorted.indexWhere((s) => s.id == sectionId);
     if (idx < 0 || idx >= sorted.length - 1) return;
     _swapOrders(sorted, idx, idx + 1);
-    markDirty();
   }
 
   void assignChannel(String channelId, String sectionId) {
     if (!_editable) return;
     final updated = Map<String, String>.from(_store.assignments)
       ..[channelId] = sectionId;
-    _store = ChannelSectionStore(
-      sections: _store.sections,
-      assignments: updated,
+    _editSections(
+      ChannelSectionStore(sections: _store.sections, assignments: updated),
     );
-    _persist();
-    markDirty();
   }
 
   void unassignChannel(String channelId) {
     if (!_editable) return;
     final updated = Map<String, String>.from(_store.assignments)
       ..remove(channelId);
-    _store = ChannelSectionStore(
-      sections: _store.sections,
-      assignments: updated,
+    _editSections(
+      ChannelSectionStore(sections: _store.sections, assignments: updated),
     );
-    _persist();
-    markDirty();
   }
 
-  void markDirty() {
-    if (!_remoteEnabled || _disposed) return;
+  void _editSections(ChannelSectionStore edited) {
+    _pendingBase ??= _store;
+    _store = edited;
     _localRevision++;
-    _publishPending = true;
+    _retriedOvertakenWrite = false;
+    _persist();
+    _schedulePublish();
+  }
+
+  void _schedulePublish() {
+    if (!_remoteEnabled || !_editable || _pendingBase == null) return;
     _publishDebounce?.cancel();
     _publishDebounce = Timer(const Duration(seconds: 5), () {
       _publishDebounce = null;
-      unawaited(
-        _publish().whenComplete(
-          () => _publishPending = _publishDebounce != null,
-        ),
-      );
+      unawaited(_publish());
     });
   }
 
@@ -482,11 +487,15 @@ class ChannelSectionsManager {
       if (_isAfterCursor(event.createdAt, event.id)) {
         _lastRemoteCreatedAt = event.createdAt;
         _lastRemoteEventId = event.id;
-        _store = incoming;
+        final base = _pendingBase;
+        _store = base == null
+            ? incoming
+            : _store.applyLocalEdits(base, incoming);
+        if (base != null) {
+          _pendingBase = _samePreferences(_store, incoming) ? null : incoming;
+        }
         _confirmed = incoming;
         _persist();
-        // A pending debounce stays armed: its republish re-converges an OK
-        // that later wins the cursor after this head replaced the store.
       }
     } catch (_) {
       // Decryption failure or parse error — keep existing state.
@@ -510,8 +519,9 @@ class ChannelSectionsManager {
       // Desktop never saw an unpublished Team edit, so its layout omits it.
       _publishDebounce?.cancel();
       _publishDebounce = null;
-      _publishPending = false;
-      if (!identical(_store, _confirmed)) {
+      final hadPending = _pendingBase != null;
+      _pendingBase = null;
+      if (hadPending || !identical(_store, _confirmed)) {
         _store = _confirmed;
         _persist();
       }
@@ -541,29 +551,17 @@ class ChannelSectionsManager {
     if (!_disposed) _onChanged();
   }
 
-  bool _isIdenticalToLastPublished() {
-    final last = _lastPublishedStore;
-    if (last == null) return false;
-    if (last.sections.length != _store.sections.length) return false;
-    if (last.assignments.length != _store.assignments.length) return false;
-    for (var i = 0; i < _store.sections.length; i++) {
-      final a = last.sections[i];
-      final b = _store.sections[i];
-      if (a.id != b.id ||
-          a.name != b.name ||
-          a.icon != b.icon ||
-          a.order != b.order) {
-        return false;
-      }
-    }
-    for (final key in _store.assignments.keys) {
-      if (last.assignments[key] != _store.assignments[key]) return false;
-    }
-    return true;
-  }
+  bool _samePreferences(ChannelSectionStore a, ChannelSectionStore b) =>
+      mapEquals(a.assignments, b.assignments) &&
+      listEquals(
+        a.sections.map((s) => (s.id, s.name, s.icon, s.order)).toList(),
+        b.sections.map((s) => (s.id, s.name, s.icon, s.order)).toList(),
+      );
 
   Future<void> _publish({bool allowDisposed = false}) async {
     if ((!allowDisposed && _disposed) ||
+        _publishing ||
+        _pendingBase == null ||
         _workspace != null ||
         !_remoteEnabled ||
         _signedEventRelay == null ||
@@ -571,29 +569,36 @@ class ChannelSectionsManager {
       return;
     }
 
-    // Read-before-write: only a successful read can rule out a unified head
-    // the legacy record must not follow.
-    var read = await _fetchAndMerge(allowDisposed: allowDisposed);
-    // A retired manager cannot schedule a retry, so its flush re-reads here.
-    for (var i = 0; !read && allowDisposed && i < 2; i++) {
-      read = await _fetchAndMerge(allowDisposed: true);
-    }
-    if (!read) {
-      _retryPublishLater();
-      return;
-    }
-    _failedPreflights = 0;
-
-    // No-op suppression: skip if nothing changed
-    if (_isIdenticalToLastPublished() ||
-        !_servesThisCommunity ||
-        _workspace != null) {
-      return;
-    }
-
-    final submitted = _store;
-    final revision = _localRevision;
+    _publishing = true;
+    var revision = _localRevision;
+    var headOvertookWrite = false;
     try {
+      // Reconcile against the retained head and check for a unified head
+      // before signing any legacy changes.
+      var read = await _fetchAndMerge(allowDisposed: allowDisposed);
+      // A retired manager cannot schedule a retry, so re-read during its flush.
+      for (var i = 0; !read && allowDisposed && i < 2; i++) {
+        read = await _fetchAndMerge(allowDisposed: true);
+      }
+      if (!read) {
+        _retryPublishLater();
+        return;
+      }
+      _failedPreflights = 0;
+      if ((!allowDisposed && _disposed) ||
+          !_servesThisCommunity ||
+          _workspace != null) {
+        return;
+      }
+      final base = _pendingBase;
+      if (base == null) return;
+      final submitted = _store;
+      revision = _localRevision;
+      if (_samePreferences(base, submitted)) {
+        _pendingBase = null;
+        _persist();
+        return;
+      }
       final payload = jsonEncode(submitted.toJson());
       final ciphertext = _crypto.encrypt(payload);
       final createdAt = max(currentUnixSeconds(), _lastRemoteCreatedAt + 1);
@@ -615,43 +620,57 @@ class ChannelSectionsManager {
             _servesThisCommunity,
       );
 
+      if ((!allowDisposed && _disposed) ||
+          !_servesThisCommunity ||
+          _workspace != null) {
+        return;
+      }
+
       // Keep the cursor a coherent (created_at, id) pair so an OK that beats
       // its own echo cannot make later same-second heads compare against a
       // stale ID. A newer head learned during the await stays.
       if (signedId != null && _isAfterCursor(createdAt, signedId!)) {
         _lastRemoteCreatedAt = createdAt;
         _lastRemoteEventId = signedId;
-        // Only the head the relay keeps is confirmed.
-        _confirmed = submitted;
-        // A same-second loser merged during the await must not strand the
-        // device on content the relay did not keep.
-        if (revision == _localRevision && !identical(_store, submitted)) {
-          _store = submitted;
-          _persist();
-          if (!_disposed) _onChanged();
-        }
       }
-      _lastPublishedStore = ChannelSectionStore(
-        sections: List.of(submitted.sections),
-        assignments: Map.of(submitted.assignments),
-      );
+      if (signedId != null &&
+          createdAt == _lastRemoteCreatedAt &&
+          signedId == _lastRemoteEventId) {
+        _confirmed = submitted;
+        final previous = _store;
+        final pending = _pendingBase;
+        // The acknowledged snapshot is the new base. Carry forward only edits
+        // that arrived while it was in flight.
+        _store = revision == _localRevision || pending == null
+            ? submitted
+            : _store.applyLocalEdits(pending, submitted);
+        _pendingBase = _samePreferences(_store, submitted) ? null : submitted;
+        _persist();
+        if (!_disposed && !_samePreferences(previous, _store)) _onChanged();
+      } else if (_pendingBase != null &&
+          revision == _localRevision &&
+          !_retriedOvertakenWrite) {
+        _retriedOvertakenWrite = true;
+        headOvertookWrite = true;
+      }
     } catch (error) {
       debugPrint('[ChannelSectionsManager] publish failed: $error');
+    } finally {
+      _publishing = false;
+      if (_publishDebounce == null &&
+          (revision != _localRevision || headOvertookWrite)) {
+        _schedulePublish();
+      }
     }
   }
 
   /// Retries a publish whose preflight read failed, backing off to 40s.
   void _retryPublishLater() {
-    if (_disposed || _publishDebounce != null) return;
+    if (!_editable || _pendingBase == null || _publishDebounce != null) return;
     final delay = Duration(seconds: 5 << min(_failedPreflights++, 3));
-    _publishPending = true;
     _publishDebounce = Timer(delay, () {
       _publishDebounce = null;
-      unawaited(
-        _publish().whenComplete(
-          () => _publishPending = _publishDebounce != null,
-        ),
-      );
+      unawaited(_publish());
     });
   }
 
@@ -665,7 +684,7 @@ class ChannelSectionsManager {
   /// A retired manager never writes the prefs key its successor now owns.
   void _persist() {
     if (_disposed) return;
-    _storage.write(pubkey, relayUrl, _store);
+    _storage.write(pubkey, relayUrl, _store, pendingBase: _pendingBase);
   }
 
   List<ChannelSection> _sortedSections() {
@@ -680,18 +699,29 @@ class ChannelSectionsManager {
     final idA = sorted[indexA].id;
     final idB = sorted[indexB].id;
 
-    _store = ChannelSectionStore(
-      sections: [
-        for (final s in _store.sections)
-          if (s.id == idA)
-            ChannelSection(id: s.id, name: s.name, icon: s.icon, order: orderB)
-          else if (s.id == idB)
-            ChannelSection(id: s.id, name: s.name, icon: s.icon, order: orderA)
-          else
-            s,
-      ],
-      assignments: _store.assignments,
+    _editSections(
+      ChannelSectionStore(
+        sections: [
+          for (final s in _store.sections)
+            if (s.id == idA)
+              ChannelSection(
+                id: s.id,
+                name: s.name,
+                icon: s.icon,
+                order: orderB,
+              )
+            else if (s.id == idB)
+              ChannelSection(
+                id: s.id,
+                name: s.name,
+                icon: s.icon,
+                order: orderA,
+              )
+            else
+              s,
+        ],
+        assignments: _store.assignments,
+      ),
     );
-    _persist();
   }
 }

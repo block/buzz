@@ -1912,6 +1912,52 @@ void main() {
 
 /// Whole-blob lanes: resume re-read, and sections' publication cursor.
 void wholeBlobLanes(SharedPreferences Function() prefs) {
+  fakeAsyncTest('sections publish queued local edits after reconnect', (clock) {
+    final relay = SidebarRelay();
+    final config = _SwitchableConfig(relay.keys.nsec);
+    final container = ProviderContainer(
+      overrides: [
+        savedPrefsProvider.overrideWithValue(prefs()),
+        relayConfigProvider.overrideWith(() => config),
+        relaySessionProvider.overrideWith(() => relay.session),
+        activeCommunityProvider.overrideWith((ref) async => null),
+        appLifecycleProvider.overrideWith(_Lifecycle.new),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.listen(channelSectionsProvider, (_, _) {});
+    clock.elapse(Duration.zero);
+    container.read(channelSectionsProvider.notifier).createSection('mine');
+
+    // Lose the socket before the debounce fires, then make another local edit
+    // offline. Another device saves its own section during the outage.
+    relay.session.setConnectionStatus(SessionStatus.reconnecting);
+    clock.elapse(Duration.zero);
+    container.read(channelSectionsProvider.notifier).createSection('offline');
+    relay.stored.add(
+      relay.event('channel-sections', {
+        'version': 1,
+        'sections': [
+          {'id': 'peer', 'name': 'peer', 'order': 0},
+        ],
+        'assignments': <String, String>{},
+      }, nowSeconds() + 1),
+    );
+    relay.session.setConnectionStatus(SessionStatus.connected);
+    clock.elapse(Duration.zero);
+    expect(relay.published, isEmpty);
+    clock.elapse(const Duration(seconds: 6));
+
+    expect(relay.published, hasLength(1));
+    final published = relay.decrypt(relay.published.single) as Map;
+    expect([
+      for (final section in published['sections'] as List) section['name'],
+    ], unorderedEquals(['mine', 'offline', 'peer']));
+    container.invalidate(channelSectionsProvider);
+    clock.elapse(const Duration(seconds: 6));
+    expect(relay.published, hasLength(1));
+  });
+
   group('sections', () {
     late SidebarRelay relay;
     late ChannelSectionsManager m;
@@ -1995,7 +2041,7 @@ void wholeBlobLanes(SharedPreferences Function() prefs) {
       }
     });
 
-    fakeAsyncTest('a same-second loser merged during the OK wait is undone', (
+    fakeAsyncTest('a same-second loser does not hide the pending edit', (
       clock,
     ) {
       relay.holdOk = Completer<void>();
@@ -2012,7 +2058,7 @@ void wholeBlobLanes(SharedPreferences Function() prefs) {
         ..stored.add(loser)
         ..emit(loser);
       clock.elapse(const Duration(milliseconds: 20));
-      expect(names(), ['loser']);
+      expect(names(), unorderedEquals(['mine', 'loser']));
       relay.holdOk!.complete();
       clock.flushMicrotasks();
       relay.emit(own);
@@ -2041,7 +2087,7 @@ void wholeBlobLanes(SharedPreferences Function() prefs) {
         ..stored.add(loser)
         ..emit(loser);
       clock.elapse(const Duration(milliseconds: 20));
-      expect(names(), ['loser']);
+      expect(names(), unorderedEquals(['new-local', 'loser']));
       relay.holdOk!.complete();
       relay.holdOk = null;
       clock.flushMicrotasks();
@@ -2126,7 +2172,7 @@ void wholeBlobLanes(SharedPreferences Function() prefs) {
         ..stored.add(loser)
         ..emit(loser);
       clock.elapse(const Duration(milliseconds: 20));
-      expect(names(), ['loser']);
+      expect(names(), unorderedEquals(['mine', 'loser']));
       m.dispose(flushPending: false);
       m = ChannelSectionsManager(
         pubkey: relay.pubkey,
@@ -2144,7 +2190,7 @@ void wholeBlobLanes(SharedPreferences Function() prefs) {
       expect(before, contains('"successor-local"'));
       relay.holdOk!.complete();
       clock.flushMicrotasks();
-      expect(names(), ['successor-local']);
+      expect(names(), unorderedEquals(['mine', 'successor-local']));
       expect(prefs().getString(prefs().getKeys().single), before);
     });
   });

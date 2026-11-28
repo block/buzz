@@ -290,6 +290,11 @@ class ConnectedRelaySession extends RelaySessionNotifier {
     debugRelayUrl = ref.watch(relayConfigProvider).baseUrl;
     return const SessionState(status: SessionStatus.connected);
   }
+
+  void setConnectionStatus(SessionStatus status) {
+    debugSetSessionStatus(status);
+    state = SessionState(status: status);
+  }
 }
 
 class _ScriptedSocket extends RelaySocket {
