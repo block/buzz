@@ -120,6 +120,18 @@ function isAtBottomNow(
   );
 }
 
+/**
+ * Longest the highlight waits for its row to reach the viewport after the
+ * scroll is accepted. Past it the target is not highlighted at all.
+ */
+const HIGHLIGHT_VISIBLE_WAIT_MS = 5_000;
+
+function intersectsViewport(el: HTMLElement, container: HTMLElement): boolean {
+  const rect = el.getBoundingClientRect();
+  const containerRect = container.getBoundingClientRect();
+  return rect.bottom > containerRect.top && rect.top < containerRect.bottom;
+}
+
 function isInViewport(el: HTMLElement, container: HTMLElement): boolean {
   const rect = el.getBoundingClientRect();
   const containerRect = container.getBoundingClientRect();
@@ -252,6 +264,10 @@ export function useAnchoredScroll({
   const prevMessagesRef = React.useRef<AnchoredMessage[]>([]);
   const handledTargetIdRef = React.useRef<string | null>(null);
   const highlightTimeoutRef = React.useRef<number | null>(null);
+  const highlightWaitRef = React.useRef<{
+    messageId: string;
+    raf: number;
+  } | null>(null);
   // Tracks a pending rAF queued by pinToBottomOnMount so it can be cancelled
   // on channel switch (the channelId reset effect clears it).
   const mountPinRafIdRef = React.useRef<number | null>(null);
@@ -287,6 +303,22 @@ export function useAnchoredScroll({
     mountPinRafIdRef.current = null;
   }, []);
 
+  // Abandons a highlight still waiting for its row to reach the viewport. An
+  // applied highlight keeps its timer, so it still clears.
+  const cancelHighlightWait = React.useCallback(() => {
+    if (highlightWaitRef.current === null) return;
+    cancelAnimationFrame(highlightWaitRef.current.raf);
+    highlightWaitRef.current = null;
+  }, []);
+
+  const clearHighlightTimers = React.useCallback(() => {
+    if (highlightTimeoutRef.current !== null) {
+      window.clearTimeout(highlightTimeoutRef.current);
+      highlightTimeoutRef.current = null;
+    }
+    cancelHighlightWait();
+  }, [cancelHighlightWait]);
+
   // Reset everything when the channel changes — the layout effect that runs
   // immediately after this reset is responsible for either jumping to bottom
   // or to the target message for the new channel.
@@ -317,15 +349,12 @@ export function useAnchoredScroll({
       cancelAnimationFrame(targetSettleRafRef.current);
       targetSettleRafRef.current = null;
     }
-    if (highlightTimeoutRef.current !== null) {
-      window.clearTimeout(highlightTimeoutRef.current);
-      highlightTimeoutRef.current = null;
-    }
+    clearHighlightTimers();
     if (mountPinRafIdRef.current !== null) {
       cancelAnimationFrame(mountPinRafIdRef.current);
       mountPinRafIdRef.current = null;
     }
-  }, [channelId]);
+  }, [channelId, clearHighlightTimers]);
 
   const noteProgrammaticScroll = React.useCallback(
     (container: HTMLDivElement, scrollTopBefore: number) => {
@@ -436,6 +465,9 @@ export function useAnchoredScroll({
       if (!container) return;
       anchorRef.current = { kind: "at-bottom" };
       targetHoldRef.current = false;
+      // Leaving for the bottom abandons a target still waiting to reach the
+      // viewport, or scrolling back past it would flash it late.
+      cancelHighlightWait();
       // A programmatic jump-to-bottom is not atomic, even for `behavior: "auto"`:
       // the browser can emit `scroll` while the list is still settling row
       // measurements. During that window `computeAnchor` may read the transient
@@ -453,6 +485,7 @@ export function useAnchoredScroll({
       setNewMessageCount(0);
     },
     [
+      cancelHighlightWait,
       scrollContainerRef,
       virtualScrollToBottom,
       virtualizerOwnsPrependAnchoring,
@@ -515,18 +548,50 @@ export function useAnchoredScroll({
     virtualizerOwnsPrependAnchoring,
   ]);
 
-  const highlightMessage = React.useCallback((messageId: string) => {
-    if (highlightTimeoutRef.current !== null) {
-      window.clearTimeout(highlightTimeoutRef.current);
-    }
-    setHighlightedMessageId(messageId);
-    highlightTimeoutRef.current = window.setTimeout(() => {
-      setHighlightedMessageId((current) =>
-        current === messageId ? null : current,
-      );
-      highlightTimeoutRef.current = null;
-    }, 2_000);
-  }, []);
+  const highlightMessage = React.useCallback(
+    (messageId: string) => {
+      clearHighlightTimers();
+      setHighlightedMessageId(null);
+      // The flash is a one-shot 2s CSS keyframe whose clock starts when the
+      // highlight class first lands on a mounted row. Reaching an unmeasured
+      // row can take several measure passes, and the virtualizer can mount it
+      // off screen first, so apply the class only once the row is on screen:
+      // a flash that runs off screen holds at opacity 0 and is never seen.
+      // A row not on screen within HIGHLIGHT_VISIBLE_WAIT_MS of this call (the
+      // scroll being accepted) is not highlighted at all. The deadline is
+      // inclusive and checked first: a frame at exactly the deadline may still
+      // highlight, and a frame delayed past it never does, even if the row is
+      // on screen by then.
+      const deadline = performance.now() + HIGHLIGHT_VISIBLE_WAIT_MS;
+      const waitForVisible = () => {
+        highlightWaitRef.current = null;
+        if (performance.now() > deadline) return;
+        const container = scrollContainerRef.current;
+        const el = container?.querySelector<HTMLElement>(
+          `[data-message-id="${CSS.escape(messageId)}"]`,
+        );
+        if (container && el && intersectsViewport(el, container)) {
+          setHighlightedMessageId(messageId);
+          highlightTimeoutRef.current = window.setTimeout(() => {
+            setHighlightedMessageId((current) =>
+              current === messageId ? null : current,
+            );
+            highlightTimeoutRef.current = null;
+          }, 2_000);
+          return;
+        }
+        highlightWaitRef.current = {
+          messageId,
+          raf: requestAnimationFrame(waitForVisible),
+        };
+      };
+      highlightWaitRef.current = {
+        messageId,
+        raf: requestAnimationFrame(waitForVisible),
+      };
+    },
+    [clearHighlightTimers, scrollContainerRef],
+  );
 
   const scrollToMessageImperative = React.useCallback(
     (
@@ -786,6 +851,8 @@ export function useAnchoredScroll({
       forceBottomOnNextAppendRef.current = false;
       anchorRef.current = { kind: "at-bottom" };
       targetHoldRef.current = false;
+      // Like jump to latest, the send abandons a highlight still waiting.
+      cancelHighlightWait();
       settlingRef.current = true;
       if (virtualizerOwnsPrependAnchoring && virtualScrollToBottom) {
         virtualScrollToBottom("auto");
@@ -878,6 +945,7 @@ export function useAnchoredScroll({
     prevMessageCountRef.current = messages.length;
     prevMessagesRef.current = messages;
   }, [
+    cancelHighlightWait,
     highlightTargetMessage,
     isLoading,
     messages,
@@ -1012,6 +1080,17 @@ export function useAnchoredScroll({
     scrollContainerRef,
   ]);
 
+  // A different route target retires a highlight still waiting for the old
+  // one, even while the new target is not loaded and its centering keeps
+  // failing. The route clearing the param of an accepted target is not a new
+  // target, so that target keeps its own wait.
+  React.useLayoutEffect(() => {
+    if (!targetMessageId) return;
+    if (highlightWaitRef.current?.messageId !== targetMessageId) {
+      cancelHighlightWait();
+    }
+  }, [cancelHighlightWait, targetMessageId]);
+
   // ---------------------------------------------------------------------------
   // Target message handling (deep link, jump-to-reply, etc.). Distinct from
   // the initial-mount target above — this handles changes after the first
@@ -1067,9 +1146,7 @@ export function useAnchoredScroll({
 
   React.useEffect(() => {
     return () => {
-      if (highlightTimeoutRef.current !== null) {
-        window.clearTimeout(highlightTimeoutRef.current);
-      }
+      clearHighlightTimers();
       if (programmaticScrollRafRef.current !== null) {
         cancelAnimationFrame(programmaticScrollRafRef.current);
       }
@@ -1077,7 +1154,7 @@ export function useAnchoredScroll({
         cancelAnimationFrame(targetSettleRafRef.current);
       }
     };
-  }, []);
+  }, [clearHighlightTimers]);
 
   const onVirtualizerAtBottomStateChange = React.useCallback(
     (atBottom: boolean) => {

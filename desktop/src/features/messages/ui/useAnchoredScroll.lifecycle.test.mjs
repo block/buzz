@@ -1282,3 +1282,200 @@ for (const [name, steps, expected] of OWN_SEND_GATES) {
     await act(async () => root.unmount());
   });
 }
+
+// Accepts the virtual route target "selected" while its row is off screen, so
+// its highlight is waiting on the visibility poll. Frames and the clock are
+// hand-cranked: the poll runs only when `runFrames` says so, at the time
+// `clock.now` says. `scrollToMessage` accepts only ids in `fake.messages`, as
+// the virtualizer accepts only loaded rows, and a row is on screen once its id
+// is in `visible`.
+async function withPendingHighlight(t, body) {
+  globalThis.ResizeObserver = class {
+    disconnect() {}
+    observe() {}
+  };
+  const clock = { now: 1_000 };
+  t.mock.method(performance, "now", () => clock.now);
+  const frames = new Map();
+  let nextFrameId = 0;
+  t.mock.method(globalThis, "requestAnimationFrame", (callback) => {
+    nextFrameId += 1;
+    frames.set(nextFrameId, callback);
+    return nextFrameId;
+  });
+  t.mock.method(globalThis, "cancelAnimationFrame", (id) => frames.delete(id));
+
+  const visible = new Set();
+  const settles = [];
+  const scroller = document.createElement("div");
+  scroller.getBoundingClientRect = () => ({ bottom: 400, top: 0 });
+  const fake = {
+    content: { current: null },
+    messages: [
+      { createdAt: 100, id: "selected" },
+      { createdAt: 500, id: "latest" },
+    ],
+    scrollToBottom: () => settles.push("jump"),
+    scrollToMessage: (messageId) =>
+      fake.messages.some((message) => message.id === messageId),
+    scroller: { current: scroller },
+    settleAtBottom: () => settles.push("settle"),
+  };
+  scroller.querySelector = (selector) => {
+    const id = /data-message-id="([^"]*)"/.exec(selector)?.[1];
+    if (!fake.messages.some((message) => message.id === id)) return null;
+    const top = visible.has(id) ? 100 : -500;
+    return {
+      getBoundingClientRect: () => ({ bottom: top + 40, height: 40, top }),
+    };
+  };
+
+  let state = null;
+  // Every id the hook ever reported as highlighted, in order.
+  const highlighted = [];
+  let props = { targetMessageId: "selected" };
+  const root = createRoot(document.createElement("div"));
+  const render = (nextProps = {}) => {
+    props = { ...props, ...nextProps };
+    return act(async () =>
+      root.render(
+        React.createElement(TargetHoldHarness, {
+          fake,
+          onState: (next) => {
+            state = next;
+            if (
+              next.highlightedMessageId !== null &&
+              next.highlightedMessageId !== highlighted.at(-1)
+            ) {
+              highlighted.push(next.highlightedMessageId);
+            }
+          },
+          ...props,
+        }),
+      ),
+    );
+  };
+  // Runs the frames queued so far. A poll that re-queues itself waits for the
+  // next call.
+  const runFrames = () =>
+    act(async () => {
+      for (const [id, callback] of [...frames]) {
+        frames.delete(id);
+        callback();
+      }
+    });
+
+  try {
+    await render();
+    assert.equal(state.isAtBottom, false, "the target is accepted");
+    assert.equal(state.highlightedMessageId, null, "its row is off screen");
+    await body({
+      clock,
+      fake,
+      highlighted,
+      render,
+      runFrames,
+      settles,
+      state: () => state,
+      visible,
+    });
+  } finally {
+    await act(async () => root.unmount());
+  }
+}
+
+// The route clears its target param once the target is accepted. That clear
+// is not a reason to give up on the flash.
+test("clearing the accepted route target keeps its highlight waiting", async (t) => {
+  await withPendingHighlight(t, async (pending) => {
+    await pending.runFrames();
+    await pending.render({ targetMessageId: null });
+    await pending.runFrames();
+    assert.equal(pending.state().highlightedMessageId, null);
+
+    pending.visible.add("selected");
+    await pending.runFrames();
+    assert.equal(pending.state().highlightedMessageId, "selected");
+  });
+});
+
+const ownSend = async ({ fake, render, settles, state }) => {
+  state().scrollToBottomOnNextUpdate("conversation");
+  fake.messages = [...fake.messages, { createdAt: 600, id: "sent" }];
+  await render();
+  assert.deepEqual(settles, ["jump"], "the send pulls the view down");
+};
+
+test("own-send bottom jump abandons a highlight still waiting for its row", async (t) => {
+  await withPendingHighlight(t, async (pending) => {
+    await pending.runFrames();
+    await pending.render({ targetMessageId: null });
+    await ownSend(pending);
+
+    // The reader scrolls back past the old target inside the wait.
+    pending.visible.add("selected");
+    await pending.runFrames();
+    assert.equal(pending.state().highlightedMessageId, null);
+    assert.deepEqual(pending.highlighted, []);
+  });
+});
+
+// Only the wait is abandoned. A flash already showing keeps its clear timer,
+// or the highlight class would stay on the row for good.
+test("own-send bottom jump leaves a showing highlight to clear on its timer", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  await withPendingHighlight(t, async (pending) => {
+    pending.visible.add("selected");
+    await pending.runFrames();
+    assert.equal(pending.state().highlightedMessageId, "selected");
+
+    await ownSend(pending);
+    assert.equal(pending.state().highlightedMessageId, "selected");
+    await act(async () => t.mock.timers.tick(2_000));
+    assert.equal(pending.state().highlightedMessageId, null);
+  });
+});
+
+test("unresolved new target abandons the old target's waiting highlight", async (t) => {
+  await withPendingHighlight(t, async (pending) => {
+    await pending.runFrames();
+    await pending.render({ targetMessageId: null });
+    // The next target is not loaded, so its centering fails and retries.
+    await pending.render({ targetMessageId: "next" });
+    pending.visible.add("selected");
+    await pending.runFrames();
+    assert.equal(pending.state().highlightedMessageId, null, "old row in view");
+
+    pending.fake.messages = [
+      { createdAt: 50, id: "next" },
+      ...pending.fake.messages,
+    ];
+    pending.visible.add("next");
+    await pending.render();
+    await pending.runFrames();
+    assert.equal(pending.state().highlightedMessageId, "next");
+    assert.deepEqual(
+      pending.highlighted,
+      ["next"],
+      "the old row never flashed",
+    );
+  });
+});
+
+// The wait is five seconds from the accepted scroll. A poll running at exactly
+// five seconds still highlights; one that first runs later does not, even with
+// the row in view by then.
+for (const [elapsedMs, expected] of [
+  [5_000, "selected"],
+  [5_001, null],
+]) {
+  test(`a visibility poll first running ${elapsedMs} ms after accept highlights ${expected}`, async (t) => {
+    await withPendingHighlight(t, async (pending) => {
+      // The accepted scroll queued the poll; no frame has run it yet.
+      pending.visible.add("selected");
+      pending.clock.now += elapsedMs;
+      await pending.runFrames();
+      assert.equal(pending.state().highlightedMessageId, expected);
+    });
+  });
+}
