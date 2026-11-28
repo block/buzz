@@ -10,6 +10,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/theme/buzz_icons.dart';
 import '../../shared/theme/theme.dart';
 import 'channels_provider.dart';
+import '../../shared/widgets/adaptive_conversation_pane.dart';
 import 'thread_detail_page.dart';
 import 'message_reply_drag_target.dart';
 import 'timeline_message.dart';
@@ -159,16 +160,15 @@ class MessageSwipeReply extends HookConsumerWidget {
                       onReply!();
                       return;
                     }
-                    Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => ThreadDetailPage(
-                          threadHead: message,
-                          allMessages: messages,
-                          channelId: channelId,
-                          currentPubkey: currentPubkey,
-                          isMember: isMember,
-                          isArchived: isArchived,
-                        ),
+                    openThreadPane(
+                      context,
+                      (_) => ThreadDetailPage(
+                        threadHead: message,
+                        allMessages: messages,
+                        channelId: channelId,
+                        currentPubkey: currentPubkey,
+                        isMember: isMember,
+                        isArchived: isArchived,
                       ),
                     );
                   },
