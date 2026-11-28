@@ -12,6 +12,11 @@ async fn workflow_output(url: &str, args: &[&str]) -> Output {
             .args(args)
             .env("DATABASE_URL", url)
             .env("BUZZ_DB_POOL_SIZE", "1")
+            .env_remove("BUZZ_USER_DELETION_IDENTITY_BLOCK_URL")
+            .env_remove("BUZZ_USER_DELETION_IDENTITY_DELETE_LOGIN_URL")
+            .env_remove("BUZZ_USER_DELETION_IDENTITY_DELETE_ACCOUNT_URL")
+            .env_remove("BUZZ_USER_DELETION_IDENTITY_TOKEN_FILE")
+            .env_remove("BUZZ_USER_DELETION_IDENTITY_TIMEOUT_SECS")
             .kill_on_drop(true)
             .output(),
     )
@@ -60,7 +65,7 @@ pub async fn real_workflow_stops_at_gate(url: &str, id: &str) -> Value {
         workflow_refuses(
             url,
             &["run", id, "--delete", "--next-step"],
-            "real handler gate_user is not implemented",
+            "identity gate requires configured identity URLs",
         )
         .await;
         let stopped = workflow_cli(url, &["inspect", id], true).await;

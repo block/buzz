@@ -10,7 +10,33 @@ use buzz_db::user_deletion::{
 };
 use uuid::Uuid;
 
+#[derive(Debug)]
+pub(super) enum DispatchOutcome {
+    Completed,
+    Waiting,
+}
+
 pub(super) async fn dispatch(
+    store: &EntityDeletionStore,
+    lease: &EntityLease,
+    row: &EntityStage,
+    options: &RunOptions,
+) -> Result<DispatchOutcome> {
+    if row.stage == "gate_user" {
+        let request = store.get(lease.request_id).await?;
+        if !request.target.starts_with("demo:") {
+            super::gate::handle(store, lease, row, &request, options).await?;
+            return Ok(DispatchOutcome::Waiting);
+        }
+    }
+    if row.stage == "purge_builderlab" {
+        return super::purge_builderlab::handle(store, lease, row, options).await;
+    }
+    dispatch_action(store, lease, row, options).await?;
+    Ok(DispatchOutcome::Completed)
+}
+
+async fn dispatch_action(
     store: &EntityDeletionStore,
     lease: &EntityLease,
     row: &EntityStage,

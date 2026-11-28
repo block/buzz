@@ -29,6 +29,12 @@ pub(super) const INITIAL_STAGE: &str = "gate_user";
 const COMMUNITY_INITIAL_STAGE: &str = "purge_content";
 const RULES: &[Rule] = &[
     Rule {
+        name: "purge_builderlab",
+        community_scope: false,
+        allowed: &[Decision::RequestComplete],
+        decide: |_| Ok(Decision::RequestComplete),
+    },
+    Rule {
         name: "gate_user",
         community_scope: false,
         allowed: &[Decision::Stage("purge_media")],
@@ -97,6 +103,14 @@ pub(super) fn decision(stage: &EntityStage) -> Result<Decision> {
         .metadata_json
         .get("result")
         .ok_or_else(|| invalid("completed stage has no saved result"))?;
+    if stage.stage == "purge_builderlab" {
+        let target = stage.metadata_json["inputs"]["target"]
+            .as_str()
+            .ok_or_else(|| invalid("missing finalization target"))?;
+        if !super::purge_builderlab::confirmed(result, stage.request_id, target) {
+            return Err(invalid("invalid saved finalization receipt"));
+        }
+    }
     let next = (rule.decide)(result)?;
     if !rule.allowed.contains(&next) {
         return Err(invalid("stage selected a disallowed transition"));
@@ -114,6 +128,7 @@ pub(super) struct Progress {
     pub current: Option<EntityStage>,
     pub completed_communities: HashSet<Uuid>,
     pub terminal: bool,
+    finalize_identity: bool,
 }
 
 impl Progress {
@@ -128,6 +143,10 @@ impl Progress {
             current: None,
             completed_communities: HashSet::new(),
             terminal: false,
+            // Preserve the terminal history of requests finished before this stage existed.
+            finalize_identity: !request.target.starts_with("demo:")
+                && (request.status != "completed"
+                    || history.iter().any(|row| row.stage == "purge_builderlab")),
         };
         let mut successors = HashMap::new();
         for row in history {
@@ -226,6 +245,10 @@ impl Progress {
                     Some((id, _)) => Ok(Some(Step {
                         name: COMMUNITY_INITIAL_STAGE,
                         community: Some(*id),
+                    })),
+                    None if self.finalize_identity => Ok(Some(Step {
+                        name: "purge_builderlab",
+                        community: None,
                     })),
                     None => self.apply(inventory, row, Decision::RequestComplete),
                 }

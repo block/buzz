@@ -120,6 +120,8 @@ impl Fixture {
         RunOptions {
             db: Some(Db::from_pool(self.pool.clone())),
             media: None,
+            identity: None,
+            cleanup_verified: false,
             delete: true,
             relay_pubkey: None,
             batch_size: 2,
