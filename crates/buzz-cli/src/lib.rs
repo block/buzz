@@ -695,7 +695,7 @@ pub enum MessagesCmd {
         /// Attach file(s) — uploads and includes as imeta tags
         #[arg(long = "file")]
         files: Vec<String>,
-        /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
+        /// Pubkey to mention (hex or npub; repeatable). An @name written for someone the message tags must be a name Buzz shows as their tag, or the send is refused with the name to write; @text that names no one tagged stays plain text. Uniquely resolved member names still notify.
         #[arg(long = "mention")]
         mentions: Vec<String>,
     },

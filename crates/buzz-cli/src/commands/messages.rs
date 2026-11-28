@@ -6,15 +6,13 @@ use uuid::Uuid;
 
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
 use crate::commands::event_output::{format_events, thread_markers};
-use crate::commands::sent_from_thread;
+use crate::commands::{mention_tags, sent_from_thread, verified_profiles};
 use crate::error::CliError;
 use crate::validate::{
     infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
     validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
 };
-use buzz_sdk::mentions::{
-    extract_at_mentions_with_known, extract_nostr_uris, strip_code_regions, MENTION_CAP,
-};
+use buzz_sdk::mentions::{extract_nostr_uris, strip_code_regions, MENTION_CAP};
 
 /// Extract the thread root event ID from a Nostr tag array.
 ///
@@ -149,20 +147,46 @@ fn resolve_names_to_pubkeys(
     Ok(resolved)
 }
 
+/// The channel's members, the pubkeys `@name` text resolved to, and the
+/// names behind them, for the tag check after recipients are final.
+#[derive(Default)]
+struct ContentMentions {
+    member_pubkeys: Vec<String>,
+    resolved: Vec<String>,
+    people: Vec<mention_tags::Person>,
+    aliases: mention_tags::Aliases,
+}
+
+impl ContentMentions {
+    /// Refuses `content` when an `@name` written for someone in `mentions`
+    /// would notify them but show as plain text.
+    fn check_tags(&self, content: &str, mentions: &[String]) -> Result<(), CliError> {
+        if self.aliases.is_empty() {
+            return Ok(());
+        }
+        mention_tags::untagged_names(content, mentions, &self.aliases, &self.people)
+            .map_err(CliError::Usage)
+    }
+}
+
 /// Resolve mention text against the channel membership snapshot.
 ///
-/// Returns both the current member set and uniquely name-resolved pubkeys.
-/// Lookup failures are fatal when mention processing is requested: publishing
-/// visible mention text without its intended `p` tag is worse than not sending.
+/// `@name` resolves by the same names as the desktop agent `send` tool: each
+/// member's own `display_name` and `name` and, where the relay verified them,
+/// their verified display name, username and full name, a verified name
+/// winning a shared one. Membership and profile lookup failures are fatal
+/// when mention processing is requested: publishing visible mention text
+/// without its intended `p` tag is worse than not sending. A failed
+/// verified-name lookup leaves only the profile names, as in the app.
 async fn resolve_content_mentions(
     client: &BuzzClient,
     channel_id: &str,
     content: &str,
     has_explicit_mentions: bool,
-) -> Result<(Vec<String>, Vec<String>), CliError> {
-    let stripped = strip_code_regions(content);
-    if !stripped.contains('@') && !has_explicit_mentions {
-        return Ok((vec![], vec![]));
+) -> Result<ContentMentions, CliError> {
+    let prose = mention_tags::without_code(content);
+    if !prose.contains('@') && !has_explicit_mentions {
+        return Ok(ContentMentions::default());
     }
 
     let members_filter = serde_json::json!({
@@ -176,8 +200,11 @@ async fn resolve_content_mentions(
             CliError::Other("could not load channel membership for mention preflight".into())
         })?;
 
-    if !stripped.contains('@') {
-        return Ok((member_pubkeys, vec![]));
+    if !prose.contains('@') {
+        return Ok(ContentMentions {
+            member_pubkeys,
+            ..ContentMentions::default()
+        });
     }
 
     let profiles_filter = serde_json::json!({
@@ -190,39 +217,46 @@ async fn resolve_content_mentions(
         .ok_or_else(|| {
             CliError::Other("could not load member profiles for mention resolution".into())
         })?;
+    let verified = member_verified_profiles(client, &member_pubkeys).await;
+    let people = mention_tags::people_from(&profile_events, &verified);
+    let aliases = mention_tags::aliases(&people);
 
-    let mut name_to_pubkeys: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
-    let mut display_names = Vec::new();
-    for e in &profile_events {
-        let Some(pubkey) = e.get("pubkey").and_then(|v| v.as_str()) else {
+    let mut names = Vec::new();
+    let mut name_to_pubkeys = std::collections::HashMap::new();
+    for at in mention_tags::at_names(&prose, &aliases) {
+        let Some(token) = at.token else {
             continue;
         };
-        let Some(content_json) = e.get("content").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(content_json) else {
-            continue;
-        };
-        let Some(name) = v
-            .get("display_name")
-            .or_else(|| v.get("name"))
-            .and_then(|n| n.as_str())
-            .filter(|n| !n.is_empty())
-        else {
-            continue;
-        };
-        name_to_pubkeys
-            .entry(name.to_ascii_lowercase())
-            .or_default()
-            .push(pubkey.to_string());
-        display_names.push(name.to_string());
+        if let Some(name) = &at.name {
+            name_to_pubkeys
+                .entry(name.clone())
+                .or_insert_with(|| mention_tags::best_named(aliases.get(name)));
+        }
+        if !names.contains(&token) {
+            names.push(token);
+        }
     }
-
-    let known_refs: Vec<&str> = display_names.iter().map(String::as_str).collect();
-    let names = extract_at_mentions_with_known(&stripped, &known_refs);
     let resolved = resolve_names_to_pubkeys(&names, &name_to_pubkeys, has_explicit_mentions)?;
-    Ok((member_pubkeys, resolved))
+    Ok(ContentMentions {
+        member_pubkeys,
+        resolved,
+        people,
+        aliases,
+    })
+}
+
+/// Members' relay-verified profiles; empty when the community advertises
+/// none or the lookup fails.
+async fn member_verified_profiles(
+    client: &BuzzClient,
+    member_pubkeys: &[String],
+) -> std::collections::HashMap<String, verified_profiles::VerifiedProfile> {
+    let Ok(Some(authority)) = verified_profiles::discover_authority(client).await else {
+        return std::collections::HashMap::new();
+    };
+    verified_profiles::fetch_verified_profiles(client, &authority.pubkey, member_pubkeys)
+        .await
+        .unwrap_or_default()
 }
 
 fn normalize_explicit_mentions(values: &[String]) -> Result<Vec<String>, CliError> {
@@ -695,16 +729,19 @@ pub async fn cmd_send_message(
     let explicit_mentions = normalize_explicit_mentions(&p.mentions)?;
     let stripped = strip_code_regions(&p.content);
     let uri_pubkeys = extract_nostr_uris(&stripped);
-    // Supplying any identity explicitly authorizes unresolved or ambiguous @Name text
-    // as presentation-only, matching Desktop's separate visible-label and p-tag model.
-    // Uniquely resolvable member names still add their own p-tags; callers must supply
-    // every intended identity whose visible label cannot be resolved uniquely.
+    // With an explicit identity, `@text` that names no one, or several people, stays
+    // plain text; without one it is an error. Uniquely resolvable member names add
+    // their own p-tags. Every `@name` written for someone the message tags must show
+    // as their tag (checked below), so a caller can't send a tag that notifies but
+    // reads as plain text.
     let has_explicit_mentions = !explicit_mentions.is_empty() || !uri_pubkeys.is_empty();
-    let (member_pubkeys, auto_resolved) =
+    let content_mentions =
         resolve_content_mentions(client, &p.channel_id, &p.content, has_explicit_mentions).await?;
-    let mention_pubkeys = merge_message_mentions(&explicit_mentions, &uri_pubkeys, &auto_resolved)?;
+    let member_pubkeys = &content_mentions.member_pubkeys;
+    let mention_pubkeys =
+        merge_message_mentions(&explicit_mentions, &uri_pubkeys, &content_mentions.resolved)?;
 
-    let missing = missing_members(&mention_pubkeys, &member_pubkeys);
+    let missing = missing_members(&mention_pubkeys, member_pubkeys);
     if !missing.is_empty() {
         return Err(CliError::Usage(
             serde_json::json!({
@@ -715,6 +752,7 @@ pub async fn cmd_send_message(
             .to_string(),
         ));
     }
+    content_mentions.check_tags(&p.content, &mention_pubkeys)?;
 
     // Upload files and build imeta tags
     let mut media_tags: Vec<Vec<String>> = Vec::new();
@@ -1661,7 +1699,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_mentions_authorize_presentation_text_without_name_resolution() {
+    fn explicit_mentions_leave_unmatched_at_text_alone() {
         let names = vec!["renamed user".into()];
         let profiles = std::collections::HashMap::new();
         assert_eq!(
@@ -1672,7 +1710,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_mentions_authorize_ambiguous_presentation_text() {
+    fn explicit_mentions_leave_ambiguous_at_text_unresolved() {
         let names = vec!["alice".into()];
         let profiles = std::collections::HashMap::from([(
             "alice".into(),
@@ -1688,7 +1726,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_mentions_make_all_at_names_presentation_only() {
+    fn explicit_mentions_still_resolve_unique_member_names() {
         let names = vec!["alice".into(), "bob".into()];
         let profiles = std::collections::HashMap::from([("alice".into(), vec![PK_VALID_A.into()])]);
         assert_eq!(
@@ -1887,6 +1925,146 @@ mod tests {
         let addr: StdSocketAddr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (format!("http://{addr}"), query_count, captured_event)
+    }
+
+    /// A fake relay for the tag check: a channel with Sam as a member, Sam's
+    /// own profile saying "Sam", and a relay-signed verified profile with the
+    /// handle `srivera` and full name "Sam Rivera". Returns the relay URL, Sam's
+    /// pubkey and every event published.
+    async fn fake_tag_relay() -> (String, String, StdArc<std::sync::Mutex<Vec<String>>>) {
+        use axum::routing::get as axum_get;
+        let relay_keys = Keys::generate();
+        let sam_keys = Keys::generate();
+        let sam = sam_keys.public_key().to_hex();
+        let profile = nostr::EventBuilder::new(nostr::Kind::Metadata, r#"{"display_name":"Sam"}"#)
+            .sign_with_keys(&sam_keys)
+            .unwrap();
+        let tags: Vec<nostr::Tag> = [
+            vec!["d", sam.as_str()],
+            vec!["p", sam.as_str()],
+            vec!["active", "true"],
+            vec!["display_name", "srivera"],
+            vec!["username", "srivera"],
+            vec!["full_name", "Sam Rivera"],
+            vec!["issuer_label", "Example"],
+            vec!["verified_at", "100"],
+        ]
+        .into_iter()
+        .map(|tag| nostr::Tag::parse(tag).unwrap())
+        .collect();
+        let verified = nostr::EventBuilder::new(nostr::Kind::Custom(30382), "")
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(200))
+            .sign_with_keys(&relay_keys)
+            .unwrap();
+        let members = serde_json::json!({
+            "kind": 39002,
+            "tags": [["d", SEND_TEST_CHANNEL], ["p", sam, "", "member"]],
+            "content": "",
+        });
+        let responses = StdArc::new(std::collections::HashMap::from([
+            (39002u64, serde_json::json!([members]).to_string()),
+            (0, serde_json::json!([profile]).to_string()),
+            (30382, serde_json::json!([verified]).to_string()),
+        ]));
+        let info = serde_json::json!({
+            "self": relay_keys.public_key().to_hex(),
+            "federated_identity": {
+                "public_profile": {"kind": 30382, "multiple_issuers": false, "searchable": true}
+            },
+        })
+        .to_string();
+        let published = StdArc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = published.clone();
+        let app = AxumRouter::new()
+            .route("/", axum_get(move || async move { info }))
+            .route(
+                "/query",
+                axum_post(move |body: AxumBytes| {
+                    let responses = responses.clone();
+                    async move {
+                        let filter: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let filter = filter.as_array().and_then(|f| f.first()).unwrap_or(&filter);
+                        let kind = filter["kinds"][0].as_u64().unwrap_or(u64::MAX);
+                        (
+                            AxumStatusCode::OK,
+                            [("content-type", "application/json")],
+                            responses.get(&kind).cloned().unwrap_or_else(|| "[]".into()),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/events",
+                axum_post(move |body: AxumBytes| {
+                    let sink = sink.clone();
+                    async move {
+                        sink.lock()
+                            .unwrap()
+                            .push(String::from_utf8_lossy(&body).to_string());
+                        (
+                            AxumStatusCode::OK,
+                            [("content-type", "application/json")],
+                            r#"{"event_id":"fake0000","accepted":true}"#,
+                        )
+                    }
+                }),
+            );
+        let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: StdSocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), sam, published)
+    }
+
+    /// Mirrors buzz-app's "refuses an @name that would notify someone it tags
+    /// but not show as their tag": same cases, same error text.
+    #[tokio::test]
+    async fn send_refuses_an_at_name_that_would_notify_but_not_show_as_a_tag() {
+        let (url, sam, published) = fake_tag_relay().await;
+        let client = BuzzClient::new(
+            url,
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
+        let send = |content: &str, mentions: Vec<String>| {
+            let mut params = send_params(content);
+            params.mentions = mentions;
+            cmd_send_message(&client, params)
+        };
+        for mentions in [vec![sam.clone()], vec![]] {
+            let error = send("@Sam can you re-approve?", mentions)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "These would notify but not show as tags: @Sam: Sam Rivera is @srivera. Nothing was posted."
+            );
+        }
+        let error = send("@sam rivera hi", vec![sam.clone()]).await.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("@sam rivera: Sam Rivera is @srivera."));
+        assert!(published.lock().unwrap().is_empty(), "nothing is posted");
+
+        for content in ["@srivera can you re-approve?", "@Sam Rivera hi"] {
+            for mentions in [vec![sam.clone()], vec![]] {
+                send(content, mentions).await.unwrap();
+                let last = published.lock().unwrap().last().cloned().unwrap();
+                let event: serde_json::Value = serde_json::from_str(&last).unwrap();
+                assert!(
+                    event["tags"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!(["p", sam])),
+                    "{content} tags Sam: {last}"
+                );
+            }
+        }
+        // Text that names no one it tags is left alone, and so is code.
+        send("@Carol and @srivera, see `@Sam`", vec![sam.clone()])
+            .await
+            .unwrap();
+        assert_eq!(published.lock().unwrap().len(), 5);
     }
 
     /// Palette JSON with one emoji: `wave` → some URL.
