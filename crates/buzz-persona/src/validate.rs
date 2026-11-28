@@ -158,7 +158,10 @@ pub fn validate_pack(pack_dir: &Path) -> ValidationReport {
     // Step 3: advisory checks on raw files.
     advisory_check_manifest_keys(pack_dir, &mut report);
     advisory_check_respond_to_types(pack_dir, &mut report);
-    advisory_check_skill_names(pack_dir, &loaded, &mut report);
+
+    // Step 4: skill checks. Errors for skills the runtime would silently
+    // skip, warnings for naming drift.
+    check_skills(pack_dir, &loaded, &mut report);
 
     report
 }
@@ -349,14 +352,14 @@ fn advisory_check_manifest_keys(pack_dir: &Path, report: &mut ValidationReport) 
     }
 }
 
-/// For each skill directory referenced by a loaded persona, check that the
-/// SKILL.md `name:` field matches the directory name. Emits warnings.
-fn advisory_check_skill_names(
-    pack_dir: &Path,
-    loaded: &pack::LoadedPack,
-    report: &mut ValidationReport,
-) {
-    // Collect all skill paths referenced by any persona.
+/// Check every skill directory in the pack. The agent runtime silently
+/// skips any skill whose SKILL.md lacks `name:` or `description:` (no
+/// fallback to the directory name), so missing or malformed metadata is an
+/// error here. A SKILL.md `name:` that differs from its directory name
+/// stays a warning.
+fn check_skills(pack_dir: &Path, loaded: &pack::LoadedPack, report: &mut ValidationReport) {
+    // Collect all skill paths referenced by any persona. A reference that
+    // does not resolve to a directory means the skill will never load.
     let mut skill_paths: Vec<std::path::PathBuf> = Vec::new();
     for persona in &loaded.personas {
         for skill_ref in &persona.skills {
@@ -367,8 +370,15 @@ fn advisory_check_skill_names(
                 .unwrap_or(skill_ref.as_str())
                 .to_owned();
             let candidate = pack_dir.join("skills").join(&skill_name);
-            if candidate.is_dir() && !skill_paths.contains(&candidate) {
-                skill_paths.push(candidate);
+            if candidate.is_dir() {
+                if !skill_paths.contains(&candidate) {
+                    skill_paths.push(candidate);
+                }
+            } else {
+                report.error(format!(
+                    "persona \"{}\": skills entry \"{}\" does not resolve to a directory under skills/",
+                    persona.name, skill_ref
+                ));
             }
         }
     }
@@ -389,46 +399,82 @@ fn advisory_check_skill_names(
     }
 
     for skill_dir in &skill_paths {
+        let label = skill_dir
+            .strip_prefix(pack_dir)
+            .unwrap_or(skill_dir)
+            .display()
+            .to_string();
+
         let skill_md = skill_dir.join("SKILL.md");
         if !skill_md.exists() {
-            continue; // load_pack handles missing SKILL.md if it's required
+            report.error(format!("skill {label}: missing SKILL.md"));
+            continue;
         }
 
         let content = match std::fs::read_to_string(&skill_md) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(e) => {
+                report.error(format!("skill {label}: SKILL.md is unreadable: {e}"));
+                continue;
+            }
         };
 
         let (fm_str, _) = match crate::persona::split_frontmatter(&content).ok() {
             Some(parts) => parts,
-            None => continue,
+            None => {
+                report.error(format!(
+                    "skill {label}: SKILL.md has no frontmatter; the agent runtime silently skips skills without `name` and `description`"
+                ));
+                continue;
+            }
         };
 
         let yaml_val: serde_yaml::Value = match serde_yaml::from_str(fm_str) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(e) => {
+                report.error(format!("skill {label}: frontmatter is not valid YAML: {e}"));
+                continue;
+            }
         };
 
         let mapping = match yaml_val.as_mapping() {
             Some(m) => m,
-            None => continue,
+            None => {
+                report.error(format!("skill {label}: frontmatter is not a YAML mapping"));
+                continue;
+            }
         };
 
-        if let Some(name_val) = mapping.get(serde_yaml::Value::String("name".into())) {
-            if let Some(name_str) = name_val.as_str() {
+        match mapping
+            .get(serde_yaml::Value::String("name".into()))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(name_str) => {
                 if let Some(dir_name) = skill_dir.file_name().and_then(|n| n.to_str()) {
                     if name_str != dir_name {
-                        let label = skill_dir
-                            .strip_prefix(pack_dir)
-                            .unwrap_or(skill_dir)
-                            .display()
-                            .to_string();
                         report.warn(format!(
                             "skill {label}: name \"{name_str}\" differs from directory name \"{dir_name}\""
                         ));
                     }
                 }
             }
+            None => report.error(format!(
+                "skill {label}: frontmatter is missing required field \"name\""
+            )),
+        }
+
+        if mapping
+            .get(serde_yaml::Value::String("description".into()))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_none()
+        {
+            report.error(format!(
+                "skill {label}: frontmatter is missing required field \"description\""
+            ));
         }
     }
 }
@@ -1066,5 +1112,127 @@ mod tests {
             msg.contains("keywords") || msg.contains("invalid type"),
             "should flag keywords type error, got: {msg}"
         );
+    }
+
+    /// Persona skills entry pointing at a nonexistent directory → error.
+    #[test]
+    fn validate_pack_skill_ref_missing_dir_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        std::fs::create_dir_all(dir.join(".plugin")).unwrap();
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+
+        std::fs::write(
+            dir.join(".plugin/plugin.json"),
+            r#"{"id":"t","name":"T","version":"0.1.0","personas":["agents/t.persona.md"]}"#,
+        )
+        .unwrap();
+        // References skills/nope/ which does not exist.
+        std::fs::write(
+            dir.join("agents/t.persona.md"),
+            "---\nname: t\ndisplay_name: T\ndescription: T.\nskills:\n  - skills/nope\n---\n",
+        )
+        .unwrap();
+
+        let report = validate_pack(&dir);
+        assert!(report.has_errors(), "missing skill dir should be an error");
+        let msg = format!("{report}");
+        assert!(msg.contains("nope"), "got: {msg}");
+    }
+
+    /// SKILL.md missing `name:` → error (runtime silently skips such skills).
+    #[test]
+    fn validate_pack_skill_missing_name_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        std::fs::create_dir_all(dir.join(".plugin")).unwrap();
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        std::fs::create_dir_all(dir.join("skills/code-review")).unwrap();
+
+        std::fs::write(
+            dir.join(".plugin/plugin.json"),
+            r#"{"id":"t","name":"T","version":"0.1.0","personas":["agents/t.persona.md"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("agents/t.persona.md"),
+            "---\nname: t\ndisplay_name: T\ndescription: T.\nskills:\n  - skills/code-review\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("skills/code-review/SKILL.md"),
+            "---\ndescription: Reviews code.\n---\nDoes code review.\n",
+        )
+        .unwrap();
+
+        let report = validate_pack(&dir);
+        assert!(report.has_errors(), "missing name should be an error");
+        let msg = format!("{report}");
+        assert!(msg.contains("\"name\""), "got: {msg}");
+    }
+
+    /// SKILL.md missing `description:` → error.
+    #[test]
+    fn validate_pack_skill_missing_description_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        std::fs::create_dir_all(dir.join(".plugin")).unwrap();
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        std::fs::create_dir_all(dir.join("skills/code-review")).unwrap();
+
+        std::fs::write(
+            dir.join(".plugin/plugin.json"),
+            r#"{"id":"t","name":"T","version":"0.1.0","personas":["agents/t.persona.md"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("agents/t.persona.md"),
+            "---\nname: t\ndisplay_name: T\ndescription: T.\nskills:\n  - skills/code-review\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("skills/code-review/SKILL.md"),
+            "---\nname: code-review\n---\nDoes code review.\n",
+        )
+        .unwrap();
+
+        let report = validate_pack(&dir);
+        assert!(
+            report.has_errors(),
+            "missing description should be an error"
+        );
+        let msg = format!("{report}");
+        assert!(msg.contains("\"description\""), "got: {msg}");
+    }
+
+    /// SKILL.md with no frontmatter at all → error.
+    #[test]
+    fn validate_pack_skill_no_frontmatter_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        std::fs::create_dir_all(dir.join(".plugin")).unwrap();
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        std::fs::create_dir_all(dir.join("skills/code-review")).unwrap();
+
+        std::fs::write(
+            dir.join(".plugin/plugin.json"),
+            r#"{"id":"t","name":"T","version":"0.1.0","personas":["agents/t.persona.md"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("agents/t.persona.md"),
+            "---\nname: t\ndisplay_name: T\ndescription: T.\nskills:\n  - skills/code-review\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("skills/code-review/SKILL.md"),
+            "# Code Review\n\nNo frontmatter here.\n",
+        )
+        .unwrap();
+
+        let report = validate_pack(&dir);
+        assert!(report.has_errors(), "no frontmatter should be an error");
+        let msg = format!("{report}");
+        assert!(msg.contains("frontmatter"), "got: {msg}");
     }
 }
