@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import '../../shared/relay/relay.dart';
+import '../../shared/messages/message_action.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/mentions/mention_tags.dart';
 import 'channel_event_order.dart';
@@ -219,6 +220,9 @@ class TimelineMessage {
     this.parentId,
     this.rootId,
   }) : createdAtMs = createdAtMs ?? createdAt * 1000;
+
+  /// Narration from the latest effective content, never a system notice.
+  String? get action => isSystem ? null : messageAction(content);
 
   /// Attachment messages stay visually distinct from surrounding messages,
   /// even when several are sent by the same author in quick succession.

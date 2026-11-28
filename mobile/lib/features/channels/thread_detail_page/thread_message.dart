@@ -8,6 +8,7 @@ class _ThreadMessage extends HookConsumerWidget {
   final String channelId;
   final String? currentPubkey;
   final bool showAuthor;
+  final bool showActionTimestamp;
   final bool showAvatar;
   final bool startsDay;
   final bool endsDay;
@@ -28,6 +29,7 @@ class _ThreadMessage extends HookConsumerWidget {
     required this.channelId,
     required this.currentPubkey,
     required this.showAuthor,
+    this.showActionTimestamp = true,
     this.showAvatar = true,
     this.startsDay = false,
     this.endsDay = false,
@@ -70,8 +72,10 @@ class _ThreadMessage extends HookConsumerWidget {
     final messageSnapshotKey = useMemoized(GlobalKey.new, const []);
     final swipeContentKey = useMemoized(GlobalKey.new, const []);
     final mediaOffset = useMessageMediaOffset(message.content, message.tags);
+    final action = message.action;
     final pk = message.pubkey.toLowerCase();
-    final ownMessage = currentPubkey?.toLowerCase() == pk;
+    // Narration and its controls stay on the room's leading edge for everyone.
+    final ownMessage = action == null && currentPubkey?.toLowerCase() == pk;
     final showSenderIdentity = showMessageAuthorName(
       ref,
       channelId,
@@ -170,7 +174,14 @@ class _ThreadMessage extends HookConsumerWidget {
         return true;
       },
       child: Padding(
-        padding: EdgeInsets.only(top: showAuthor && !startsDay ? Grid.xs : 0),
+        padding: EdgeInsets.only(
+          top:
+              showAuthor &&
+                  !startsDay &&
+                  (action == null || showActionTimestamp)
+              ? Grid.xs
+              : 0,
+        ),
         child: DecoratedBox(
           key: ValueKey('thread-message-${message.id}'),
           decoration: BoxDecoration(
@@ -200,7 +211,9 @@ class _ThreadMessage extends HookConsumerWidget {
                 ),
                 child: MessageFooterLayout(
                   animateSize: true,
-                  overlap: message.reactions.isNotEmpty ? Grid.xs : 0,
+                  overlap: action == null && message.reactions.isNotEmpty
+                      ? Grid.xs
+                      : 0,
                   footer: (isThreadHead || message.reactions.isNotEmpty)
                       ? Align(
                           alignment: ownMessage
@@ -209,7 +222,9 @@ class _ThreadMessage extends HookConsumerWidget {
                           child: Padding(
                             padding: EdgeInsets.only(
                               right: ownMessage ? Grid.xxs : 0,
-                              left: ownMessage || !showSenderIdentity
+                              left: action != null
+                                  ? ActionMessageBody.contentInset(context)
+                                  : ownMessage || !showSenderIdentity
                                   ? 0
                                   : messageAvatarSize +
                                         messageAvatarContentGap +
@@ -248,21 +263,31 @@ class _ThreadMessage extends HookConsumerWidget {
                               : TextDirection.ltr,
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
-                            if (!ownMessage && showSenderIdentity)
+                            if (!ownMessage &&
+                                showSenderIdentity &&
+                                action == null)
                               const SizedBox(width: messageAvatarSize),
-                            if (!ownMessage && showSenderIdentity)
+                            if (!ownMessage &&
+                                showSenderIdentity &&
+                                action == null)
                               const SizedBox(width: messageAvatarContentGap),
                             Expanded(
                               child: Padding(
                                 padding: EdgeInsets.only(
-                                  top: showAuthor && !startsDay ? Grid.half : 0,
+                                  top:
+                                      showAuthor &&
+                                          !startsDay &&
+                                          (action == null ||
+                                              showActionTimestamp)
+                                      ? Grid.half
+                                      : 0,
                                 ),
                                 child: Column(
                                   crossAxisAlignment: ownMessage
                                       ? CrossAxisAlignment.end
                                       : CrossAxisAlignment.start,
                                   children: [
-                                    if (showAuthor)
+                                    if (showAuthor && action == null)
                                       Padding(
                                         padding: EdgeInsets.only(
                                           bottom: Grid.quarter,
@@ -327,89 +352,121 @@ class _ThreadMessage extends HookConsumerWidget {
                                       ),
                                     IdentityLinkChannel(
                                       channelId: channelId,
-                                      child: MessageContent(
+                                      child: ActionMessageBody(
                                         key: swipeContentKey,
-                                        content: message.content,
-                                        edited: message.edited,
-                                        bubble: true,
-                                        additionalTextWidth:
-                                            !ownMessage && !showSenderIdentity
-                                            ? messageAvatarSize +
-                                                  messageAvatarContentGap
-                                            : 0,
-                                        hasReactions:
-                                            message.reactions.isNotEmpty,
-                                        bubbleEnd: showAvatar,
-                                        bubbleStart: showAuthor,
-                                        ownMessage: ownMessage,
-                                        trimTrailingSpacing: true,
-                                        mentionNames: resolvedMentionNames,
-                                        mentionLabels: mentionLabels,
-                                        agentMentionPubkeys:
-                                            agentMentionPubkeys,
-                                        channelNames: channelNames,
-                                        tags: message.tags,
-                                        baseStyle: messageBodyTextStyle
-                                            .copyWith(
-                                              color: context.colors.onSurface,
-                                            ),
-                                        scaleEmojiOnly: true,
-                                        mediaCarouselTrailingOverflow:
-                                            Grid.gutter,
-                                        onMediaReply: onMediaReply,
-                                        nativePhotoActions: nativeImageActions(
-                                          context: context,
-                                          ref: ref,
-                                          message: message,
-                                          channelId: channelId,
-                                          canManageMessage: () =>
-                                              readCanManageMessage(
-                                                ref,
-                                                pk,
-                                                currentPubkey,
+                                        active: action != null,
+                                        showTimestamp: showActionTimestamp,
+                                        pubkey: message.pubkey,
+                                        displayName: displayName,
+                                        profile: profile,
+                                        isAgent: isAgent,
+                                        timestamp: formatMessageTime(
+                                          message.createdAt,
+                                        ),
+                                        onAuthorTap: () => showUserProfileSheet(
+                                          context,
+                                          message.pubkey,
+                                          names: channelIdentityNamesProvider(
+                                            channelId,
+                                          ),
+                                        ),
+                                        child: MessageContent(
+                                          content: action == null
+                                              ? message.content
+                                              : actionMessageMarkdown(
+                                                  displayName,
+                                                  action,
+                                                ),
+                                          edited: message.edited,
+                                          bubble: action == null,
+                                          additionalTextWidth:
+                                              action == null &&
+                                                  !ownMessage &&
+                                                  !showSenderIdentity
+                                              ? messageAvatarSize +
+                                                    messageAvatarContentGap
+                                              : 0,
+                                          hasReactions:
+                                              message.reactions.isNotEmpty,
+                                          bubbleEnd: showAvatar,
+                                          bubbleStart: showAuthor,
+                                          ownMessage:
+                                              ownMessage && action == null,
+                                          trimTrailingSpacing: true,
+                                          mentionNames: resolvedMentionNames,
+                                          mentionLabels: mentionLabels,
+                                          agentMentionPubkeys:
+                                              agentMentionPubkeys,
+                                          channelNames: channelNames,
+                                          tags: message.tags,
+                                          baseStyle: messageBodyTextStyle
+                                              .copyWith(
+                                                color: context.colors.onSurface,
+                                                fontStyle: action == null
+                                                    ? FontStyle.normal
+                                                    : FontStyle.italic,
+                                              ),
+                                          scaleEmojiOnly: action == null,
+                                          mediaCarouselTrailingOverflow:
+                                              Grid.gutter,
+                                          onMediaReply: onMediaReply,
+                                          nativePhotoActions:
+                                              nativeImageActions(
+                                                context: context,
+                                                ref: ref,
+                                                message: message,
+                                                channelId: channelId,
+                                                canManageMessage: () =>
+                                                    readCanManageMessage(
+                                                      ref,
+                                                      pk,
+                                                      currentPubkey,
+                                                    ),
+                                              ),
+                                          onMediaMore:
+                                              (
+                                                viewerContext,
+                                                imageUrl,
+                                              ) => showImageActions(
+                                                context: viewerContext,
+                                                ref: ref,
+                                                message: message,
+                                                channelId: channelId,
+                                                imageUrl: imageUrl,
+                                                canManageMessage:
+                                                    readCanManageMessage(
+                                                      ref,
+                                                      pk,
+                                                      currentPubkey,
+                                                    ),
+                                                onDeleted: () {
+                                                  if (viewerContext.mounted) {
+                                                    Navigator.of(
+                                                      viewerContext,
+                                                    ).maybePop();
+                                                  }
+                                                },
+                                              ),
+                                          onChannelTap: (targetChannelId) {
+                                            unawaited(
+                                              openChannelLink(
+                                                context: context,
+                                                ref: ref,
+                                                channelId: targetChannelId,
+                                                currentChannelId: channelId,
+                                              ),
+                                            );
+                                          },
+                                          onMentionTap: (pubkey) =>
+                                              showUserProfileSheet(
+                                                context,
+                                                pubkey,
+                                                names:
+                                                    channelIdentityNamesProvider(
+                                                      channelId,
+                                                    ),
                                               ),
                                         ),
-                                        onMediaMore:
-                                            (viewerContext, imageUrl) =>
-                                                showImageActions(
-                                                  context: viewerContext,
-                                                  ref: ref,
-                                                  message: message,
-                                                  channelId: channelId,
-                                                  imageUrl: imageUrl,
-                                                  canManageMessage:
-                                                      readCanManageMessage(
-                                                        ref,
-                                                        pk,
-                                                        currentPubkey,
-                                                      ),
-                                                  onDeleted: () {
-                                                    if (viewerContext.mounted) {
-                                                      Navigator.of(
-                                                        viewerContext,
-                                                      ).maybePop();
-                                                    }
-                                                  },
-                                                ),
-                                        onChannelTap: (targetChannelId) {
-                                          unawaited(
-                                            openChannelLink(
-                                              context: context,
-                                              ref: ref,
-                                              channelId: targetChannelId,
-                                              currentChannelId: channelId,
-                                            ),
-                                          );
-                                        },
-                                        onMentionTap: (pubkey) =>
-                                            showUserProfileSheet(
-                                              context,
-                                              pubkey,
-                                              names:
-                                                  channelIdentityNamesProvider(
-                                                    channelId,
-                                                  ),
-                                            ),
                                       ),
                                     ),
                                   ],
@@ -418,7 +475,10 @@ class _ThreadMessage extends HookConsumerWidget {
                             ),
                           ],
                         ),
-                        if (showAvatar && !ownMessage && showSenderIdentity)
+                        if (showAvatar &&
+                            !ownMessage &&
+                            showSenderIdentity &&
+                            action == null)
                           Positioned(
                             left: ownMessage ? null : 0,
                             right: ownMessage ? 0 : null,
