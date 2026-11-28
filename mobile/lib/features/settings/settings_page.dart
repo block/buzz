@@ -82,11 +82,19 @@ class SettingsPage extends HookConsumerWidget {
     final packageInfoFuture = useMemoized(() => PackageInfo.fromPlatform());
     final packageInfo = useFuture(packageInfoFuture);
     final strip = FoldGeometry.of(context).strip;
+    final portrait = hasIosPortraitHeader(context);
     final avatarFirst =
-        defaultTargetPlatform == TargetPlatform.iOS && strip != null;
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        strip != null &&
+        !portrait;
     final topSectionHeight = avatarFirst
         ? (usesConversationPanes(context, strip: strip) ? 0.0 : Grid.sm)
-        : frostedAppBarHeight(context, bottomHeight: Grid.xxs);
+        : frostedAppBarHeight(
+            context,
+            bottomHeight: Grid.xxs,
+            useNativeNavigation: !portrait,
+            alignWithStatusRegion: portrait,
+          );
 
     final wide = usesConversationPanes(context, strip: strip);
 
@@ -175,6 +183,10 @@ class SettingsPage extends HookConsumerWidget {
             child: FrostedScaffold(
               useUtilitySurfaceTheme: true,
               appBar: FrostedAppBar(
+                useNativeNavigation: !portrait,
+                alignWithStatusRegion: portrait,
+                centerTitle: portrait,
+                title: portrait ? const Text('Settings') : null,
                 nativeTitle: avatarFirst ? '' : 'Settings',
                 railOnly: avatarFirst,
                 nativeLeading: IosNavigationAction(

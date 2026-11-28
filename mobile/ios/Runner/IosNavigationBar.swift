@@ -267,7 +267,20 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   func view() -> UIView { container }
 
   private func layout() {
-    let portraitHeader = floatingTitle == nil && !backdropOnly ? nil : duoPortraitHeader(in: container.window)
+    // Publish window geometry even when the first route uses a large title.
+    let windowHeader = duoPortraitHeader(in: container.window)
+    if let window = container.window {
+      let values = [window.bounds.width, window.bounds.height,
+                    windowHeader?.minX ?? 0, windowHeader?.minY ?? 0,
+                    windowHeader?.width ?? 0, windowHeader?.height ?? 0]
+      if reportedPortraitHeader != values {
+        reportedPortraitHeader = values
+        DispatchQueue.main.async { [weak self] in
+          self?.channel.invokeMethod("portraitHeaderGeometry", arguments: values)
+        }
+      }
+    }
+    let portraitHeader = floatingTitle == nil && !backdropOnly ? nil : windowHeader
 
     if standaloneLargeTitle, let scroll = standaloneSurface as? UIScrollView,
        let label = scroll.subviews.compactMap({ $0 as? UILabel }).first {
@@ -323,17 +336,6 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     }
     navigation.view.setNeedsLayout()
     navigation.view.layoutIfNeeded()
-    if floatingTitle != nil || backdropOnly, let window = container.window {
-      let values = [window.bounds.width, window.bounds.height,
-                    portraitHeader?.minX ?? 0, portraitHeader?.minY ?? 0,
-                    portraitHeader?.width ?? 0, portraitHeader?.height ?? 0]
-      if reportedPortraitHeader != values {
-        reportedPortraitHeader = values
-        DispatchQueue.main.async { [weak self] in
-          self?.channel.invokeMethod("portraitHeaderGeometry", arguments: values)
-        }
-      }
-    }
     measureIfNeeded()
     applyScroll()
     // Glass-backed conversations need only a short status-area fade.
@@ -372,7 +374,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
         let rightEdge = container.bounds.width - titleInsetRight - 20 - trailingWidth
         availableWidth = max(0, min(center - leftEdge, rightEdge - center) * 2 - 16)
       }
-      let size = title.sizeThatFits(CGSize(width: availableWidth, height: 44))
+      var size = title.sizeThatFits(CGSize(width: availableWidth, height: 44))
+      size.width = min(size.width, availableWidth)
       title.frame = CGRect(x: alignCollapsedTitleToLeading
                            ? navigation.navigationBar.layoutMargins.left
                            : center - size.width / 2,

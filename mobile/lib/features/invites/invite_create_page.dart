@@ -84,12 +84,15 @@ class CommunityInvitePage extends HookConsumerWidget {
       ),
     );
     if (!split) {
+      final portrait = hasIosPortraitHeader(context);
       return FrostedScaffold(
         useUtilitySurfaceTheme: true,
-        appBar: const FrostedAppBar(
+        appBar: FrostedAppBar(
+          useNativeNavigation: !portrait,
+          alignWithStatusRegion: portrait,
           centerTitle: true,
-          nativeLargeTitle: true,
-          title: Text('Invite to community'),
+          nativeLargeTitle: !portrait,
+          title: const Text('Invite to community'),
         ),
         body: body,
       );
@@ -174,12 +177,19 @@ class _CommunityInviteBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final portrait = hasIosPortraitHeader(context);
     return ListView(
       padding: EdgeInsets.fromLTRB(
         0,
         split
             ? Grid.sm
-            : frostedAppBarHeight(context, nativeLargeTitle: true) + Grid.xs,
+            : frostedAppBarHeight(
+                    context,
+                    nativeLargeTitle: !portrait,
+                    useNativeNavigation: !portrait,
+                    alignWithStatusRegion: portrait,
+                  ) +
+                  Grid.xs,
         0,
         Grid.lg,
       ),

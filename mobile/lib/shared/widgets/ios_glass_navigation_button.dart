@@ -37,6 +37,8 @@ enum IosGlassNavigationIcon {
   bell,
 }
 
+const iosGlassNavigationButtonWidth = 48.0;
+
 /// Leading width used by iOS channel-style headers.
 const iosGlassChannelHeaderLeadingWidth = 58.0;
 
@@ -57,7 +59,7 @@ class IosGlassNavigationButton extends HookWidget {
     required this.semanticLabel,
     required this.onPressed,
     this.label,
-    this.width = 48,
+    this.width = iosGlassNavigationButtonWidth,
     this.height = 48,
     this.controlSize = 40,
     this.iconSize = 24,

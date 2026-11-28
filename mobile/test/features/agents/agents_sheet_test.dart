@@ -1,4 +1,7 @@
+import 'package:buzz/shared/widgets/ios_navigation_metrics.dart';
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:flutter/services.dart';
+import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/shared/widgets/duo_toolbar.dart';
 import 'package:buzz/shared/widgets/app_list_card.dart';
 import 'package:buzz/shared/widgets/agent_artwork_panel.dart';
@@ -22,6 +25,52 @@ import '../../helpers/remote_agents_fixture.dart';
 
 void main() {
   final existing = existingDesktopKeys.public;
+
+  testWidgets('portrait Agents uses the shared inline title with Add visible', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(669, 951);
+    tester.view.viewPadding = tester.view.padding = const FakeViewPadding(
+      top: 82,
+    );
+    addTearDown(tester.view.reset);
+    try {
+      final h = await AgentsHarness.create();
+      await h.open(tester, directory: [existing]);
+      IosNavigationMetrics.updatePortraitHeader(
+        tester.element(find.byType(AgentsPage)),
+        [669, 951, 0, 20, 535, 56],
+      );
+      await tester.pumpAndSettle();
+      final title = find.text('Agents').first;
+      expect(tester.getSemantics(title).flagsCollection.isHeader, isTrue);
+      final add = find.byWidgetPredicate(
+        (w) => w is IosGlassNavigationButton && w.semanticLabel == 'Add agent',
+      );
+      if (HostedEnvironment.enabled) {
+        final close = find.byWidgetPredicate(
+          (w) =>
+              w is IosGlassNavigationButton &&
+              w.semanticLabel == 'Close agents',
+        );
+        final midpoint =
+            (tester.getRect(close).right + tester.getRect(add).left) / 2;
+        expect(tester.getCenter(title), Offset(midpoint, 48));
+        expect(tester.getCenter(add).dy, 48);
+        expect(tester.getRect(title).right, lessThan(tester.getRect(add).left));
+      } else {
+        expect(tester.getCenter(title), const Offset(334.5, 48));
+        expect(add, findsNothing);
+      }
+      final label = tester.widget<Text>(title);
+      expect(label.style, isNull);
+    } finally {
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 
   testWidgets(
     'Duo keeps agent directory beside profile and Back clears detail',
