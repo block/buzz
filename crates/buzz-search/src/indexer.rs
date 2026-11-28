@@ -91,6 +91,7 @@ pub struct Indexer {
     backfill_bound: i64,
     workers: usize,
     new_index_settle: Duration,
+    leading: Arc<AtomicBool>,
 }
 
 impl Indexer {
@@ -103,7 +104,14 @@ impl Indexer {
             backfill_bound: BACKFILL_OUTBOX_BOUND,
             workers: 1,
             new_index_settle: NEW_INDEX_SETTLE,
+            leading: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Whether [`Indexer::run`] holds the indexer lease right now. The flag
+    /// lags a lost lease by at most one pass.
+    pub fn leading(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.leading)
     }
 
     /// Leave a new index alone for `settle` after its creation instead of
@@ -420,6 +428,7 @@ impl Indexer {
                 if !guard.is_live().await {
                     warn!("search indexer lease session lost; re-electing");
                     leader = None;
+                    self.leading.store(false, Ordering::Relaxed);
                 }
             }
             if leader.is_none() {
@@ -427,6 +436,7 @@ impl Indexer {
                     Ok(Some(acquired)) => {
                         info!("acquired the search indexer lease");
                         leader = Some(acquired);
+                        self.leading.store(true, Ordering::Relaxed);
                         settled = false;
                         failures = 0;
                         self.publish_backfill_progress().await;

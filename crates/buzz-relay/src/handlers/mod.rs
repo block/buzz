@@ -67,6 +67,8 @@ pub mod report;
 pub mod report_resolution;
 /// REQ handler — subscribe, deliver historical events, then EOSE.
 pub mod req;
+#[cfg(test)]
+mod search_backend_postgres_tests;
 /// NIP-29 and NIP-25 side-effect handlers.
 pub mod side_effects;
 mod solo_member_role;

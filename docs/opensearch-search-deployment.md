@@ -2,7 +2,8 @@
 
 With `BUZZ_OPENSEARCH_URL` set, the relay keeps an OpenSearch index of
 messages up to date through the `search_outbox` table, and backfills the
-messages stored before it was set. Searches still run on Postgres.
+messages stored before it was set. Searches run on Postgres unless the
+`search.backend` flag says otherwise.
 
 | Variable | Meaning |
 | --- | --- |
@@ -89,9 +90,45 @@ psql -c "SELECT setval('search_index_version', GREATEST((SELECT last_value FROM 
 
 | Metric | Act when |
 | --- | --- |
+| `buzz_search_index_lag_seconds` | It keeps growing: the indexer is failing or too slow. After an outage it stays up for up to a minute. |
+| `buzz_search_outbox_depth` | It keeps growing, as with the lag. Counted up to 100,000 rows. |
 | `buzz_search_index_rejected_total` | It rises steadily: the cluster refuses those documents for good, and their rows stay queued. |
 | `buzz_search_index_version_conflicts_total` | It is not zero: the version sequence handed out values again (below). |
 | `buzz_search_backfill_complete` | `1` means every stored message of the community is queued, not yet indexed. Move searches to OpenSearch once it is `1` for every community and `search_outbox` has emptied. |
+| `buzz_search_shadow_overlap_ratio` | In shadow mode: the share of the top 10 hits both backends returned. |
+| `buzz_search_requests_total{backend="opensearch", outcome="error"}` | It rises: at `2` each one is a failed search. `outcome="timeout"` counts the searches that ran out of time apart. |
+| `buzz_search_opensearch_skipped_total` | Searches at `1` or `2` that ran on Postgres anyway, by `reason`. `shadow_busy` rising means shadows are being dropped because 32 are already in flight. |
+| `buzz_search_backend_flag_invalid_total` | It is not zero: `search.backend` holds a value other than `0`, `1` or `2`, which means `0`. |
+
+Only the relay that holds the indexer lease samples the lag and depth, every 15 seconds. A relay that lost the lease keeps reporting its last values, as it does for `buzz_search_backfill_complete`.
+
+## Choosing the search backend
+
+The integer flag `search.backend` holds one value for the whole relay, so a
+relay never serves some communities from one backend and some from the
+other:
+
+| Value | Results from | OpenSearch |
+| --- | --- | --- |
+| `0` (default, and any unknown value) | Postgres | not queried |
+| `1` (shadow) | Postgres | runs the same first-page query alongside; only compared and measured |
+| `2` | OpenSearch | a failed search fails the request; nothing falls back to Postgres |
+
+Move a relay `0` → `1` → `2`, and back to `0` to roll back. With LaunchDarkly
+(the `relay` context) a change applies within seconds. The `environment`
+provider is read at startup, so a change there takes a restart:
+
+```sh
+BUZZ_FEATURE_FLAGS_PROVIDER=environment BUZZ_FEATURE_FLAG_SEARCH_BACKEND=1 just relay
+```
+
+Prefix-mode searches, and searches that name a kind other than a message
+kind (people search) or no kinds, stay on Postgres at every value.
+
+The backends differ on edited messages: Postgres matches the text a message
+was stored with, and the index holds its latest edit. So shadow overlap
+drops for searches that touch edited messages, and moving to `2` changes
+their results.
 
 If `buzz_search_index_rejected_total` rises, investigate the rejection and
 fix the cause. The relay retries rejected rows automatically. A sustained

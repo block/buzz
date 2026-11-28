@@ -499,7 +499,7 @@ impl SearchIndex {
         let body = checked(response).await?;
         // A partly failed search is an error, not fewer hits.
         if body["timed_out"] == true {
-            return Err(SearchError::Engine("search timed out".into()));
+            return Err(SearchError::Engine(crate::error::SEARCH_TIMED_OUT.into()));
         }
         if body["_shards"]["failed"].as_u64().unwrap_or(0) > 0 {
             return Err(SearchError::Engine("search shards failed".into()));
@@ -704,7 +704,7 @@ async fn checked(response: Response) -> Result<Value, SearchError> {
 
 fn transport_error(error: opensearch::Error) -> SearchError {
     if error.is_timeout() {
-        SearchError::Engine("request timed out".into())
+        SearchError::Engine(crate::error::REQUEST_TIMED_OUT.into())
     } else {
         SearchError::Engine("request failed".into())
     }

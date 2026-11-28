@@ -3,9 +3,10 @@
 //! Buzz search — community-scoped message search over Buzz events.
 //!
 //! [`SearchService`] answers from one of two backends: Postgres full-text
-//! search, described below and still the one the relay uses, or the
-//! [`opensearch`] index, which [`indexer::Indexer`] keeps in sync from the
-//! `search_outbox` queue.
+//! search, described below, or the [`opensearch`] index, which
+//! [`indexer::Indexer`] keeps in sync from the `search_outbox` queue. With
+//! OpenSearch configured, the `search.backend` flag picks for the whole relay
+//! between them, or runs OpenSearch as a shadow of Postgres ([`backend`]).
 //!
 //! ## Postgres full-text search
 //!
@@ -30,6 +31,8 @@
 //! A cannot return events stored under community B, by construction.
 
 mod aws_credentials;
+/// Choosing the relay's search backend, and shadow comparisons.
+pub mod backend;
 #[doc(hidden)]
 pub mod cancel;
 /// Search error types.
@@ -38,9 +41,12 @@ pub mod error;
 pub mod indexer;
 /// The OpenSearch message index.
 pub mod opensearch;
+/// Gauges over the indexer's queue.
+pub mod outbox_metrics;
 /// Search query execution.
 pub mod query;
 
+pub use backend::{BackendSetting, SEARCH_BACKEND_FLAG};
 pub use buzz_core::CommunityId;
 pub use error::SearchError;
 pub use query::{
@@ -48,6 +54,9 @@ pub use query::{
     SearchSort, PROFILE_NAMES_PER_PAGE_MAX,
 };
 
+use std::sync::Arc;
+
+use buzz_feature_flags::FlagEvaluator;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
@@ -66,50 +75,85 @@ pub fn pool_options() -> PgPoolOptions {
 /// [`SearchQuery`] in, a [`SearchResult`] of hit keys out.
 ///
 /// Which engine answers [`SearchService::search`] is internal to this type,
-/// so callers and their tests don't depend on it. Profile name search always
-/// runs on Postgres.
+/// so callers and their tests don't depend on it: Postgres, unless the
+/// service has an OpenSearch index, in which case [`backend`] chooses per
+/// search. Profile name search always runs on Postgres.
 #[derive(Debug, Clone)]
 pub struct SearchService {
     pool: PgPool,
-    backend: Backend,
-}
-
-/// The engine behind [`SearchService::search`].
-#[derive(Debug, Clone)]
-enum Backend {
-    /// Postgres full-text search over `events.search_tsv`.
-    Postgres,
-    /// The OpenSearch message index, kept in sync by [`indexer::Indexer`].
-    OpenSearch(Box<opensearch::SearchIndex>),
+    opensearch: Option<backend::OpenSearchBackend>,
 }
 
 impl SearchService {
     /// Build a search service over an existing Postgres pool, searching with
-    /// Postgres full-text search.
+    /// Postgres full-text search only.
     pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
-            backend: Backend::Postgres,
+            opensearch: None,
         }
     }
 
-    /// Build a search service that answers message searches from the
-    /// OpenSearch `index`. Profile name search stays on `pool`.
-    ///
-    /// Only tests select this backend for now; the relay still searches
-    /// Postgres.
+    /// Build a search service that answers word-mode message searches from
+    /// the OpenSearch `index`, whatever any flag says. For tests and tools.
     pub fn with_opensearch(pool: PgPool, index: opensearch::SearchIndex) -> Self {
+        Self::with_selection(
+            pool,
+            index,
+            backend::Selection::Fixed(BackendSetting::OpenSearch),
+        )
+    }
+
+    /// Build a search service that chooses Postgres, shadow or OpenSearch
+    /// for the whole relay from [`SEARCH_BACKEND_FLAG`] in `flags`, read on every
+    /// search; see [`backend`].
+    pub fn with_opensearch_switch(
+        pool: PgPool,
+        index: opensearch::SearchIndex,
+        flags: Arc<dyn FlagEvaluator>,
+    ) -> Self {
+        Self::with_selection(pool, index, backend::Selection::Flag(flags))
+    }
+
+    fn with_selection(
+        pool: PgPool,
+        index: opensearch::SearchIndex,
+        selection: backend::Selection,
+    ) -> Self {
         Self {
             pool,
-            backend: Backend::OpenSearch(Box::new(index)),
+            opensearch: Some(backend::OpenSearchBackend::new(index, selection)),
         }
+    }
+
+    /// Give shadow OpenSearch searches `deadline` instead of
+    /// [`backend::SHADOW_DEADLINE`]. No effect without OpenSearch.
+    pub fn with_shadow_deadline(mut self, deadline: std::time::Duration) -> Self {
+        if let Some(opensearch) = &mut self.opensearch {
+            opensearch.set_shadow_deadline(deadline);
+        }
+        self
     }
 
     /// Execute a community-scoped message search.
     pub async fn search(&self, query: &SearchQuery) -> Result<SearchResult, SearchError> {
-        match &self.backend {
-            Backend::Postgres => query::search(&self.pool, query).await,
-            Backend::OpenSearch(index) => index.search(query).await,
+        use backend::{primary, Engine, Route};
+        let route = match &self.opensearch {
+            None => Route::Postgres,
+            Some(opensearch) => opensearch.route(query),
+        };
+        let postgres = || primary(Engine::Postgres, query, query::search(&self.pool, query));
+        match route {
+            Route::Postgres => postgres().await,
+            Route::OpenSearch(index) => {
+                primary(Engine::OpenSearch, query, index.search(query)).await
+            }
+            Route::Shadow(compare) => {
+                let result = postgres().await;
+                // Fails only if the shadow task panicked; the result stands.
+                let _ = compare.send(result.as_ref().ok().map(backend::top_ids));
+                result
+            }
         }
     }
 

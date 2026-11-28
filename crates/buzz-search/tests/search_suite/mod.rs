@@ -111,7 +111,18 @@ impl Searcher<'_> {
             indexer.drain().await.expect("drain the search outbox");
             index.refresh().await.expect("refresh the test index");
         }
-        self.fixture.service.search(query).await
+        self.fixture.service.search(&self.routed(query)).await
+    }
+
+    /// `query` as the backend under test runs it. A search of every kind
+    /// stays on Postgres, so on OpenSearch it names the indexed kinds: the
+    /// same search there, since the index holds no other kind.
+    fn routed(&self, query: &SearchQuery) -> SearchQuery {
+        let mut query = query.clone();
+        if self.fixture.opensearch.is_some() && query.kinds.is_none() {
+            query.kinds = Some(buzz_db::search_outbox::SEARCHABLE_KINDS.to_vec());
+        }
+        query
     }
 }
 
