@@ -1013,13 +1013,7 @@ async fn should_fire_workflow(
         }
     }
 
-    let filter = match &def.trigger {
-        TriggerDef::MessagePosted { filter }
-        | TriggerDef::ReactionAdded { filter, .. }
-        | TriggerDef::DiffPosted { filter } => filter.as_ref(),
-        TriggerDef::Schedule { .. } | TriggerDef::Webhook => None,
-    };
-    if let Some(expr) = filter {
+    if let Some(expr) = def.trigger.filter() {
         match executor::evaluate_condition(expr, trigger_ctx, &HashMap::new()).await {
             Ok(true) => {}
             Ok(false) => {
