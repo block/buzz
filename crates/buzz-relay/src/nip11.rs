@@ -64,6 +64,11 @@ pub struct RelayInfo {
     pub software: String,
     /// Relay software version string.
     pub version: String,
+    /// Full source commit SHA the relay binary was built from. Absent when the
+    /// build did not record one (local builds), so a client can tell which
+    /// exact build answered without access to the internal status endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_sha: Option<String>,
     /// Protocol and resource limits advertised to clients.
     pub limitation: Option<RelayLimitation>,
     /// Public WebSocket URL of the dedicated NIP-AB device-pairing relay.
@@ -204,6 +209,14 @@ pub(crate) struct RelayCapabilityFlags {
     pub advertise_fi: bool,
 }
 
+/// The build's source SHA as NIP-11 advertises it: `None` unless the build
+/// recorded a full 40-hex commit SHA (`build_info` reports `unknown` when it
+/// recorded none, and a build arg can still be set empty).
+fn advertised_source_sha(sha: &str) -> Option<String> {
+    let full = sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit());
+    full.then(|| sha.to_owned())
+}
+
 impl RelayInfo {
     /// Builds the relay's NIP-11 information document.
     ///
@@ -325,6 +338,7 @@ impl RelayInfo {
             push: None,
             software: "https://github.com/block/buzz".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            source_sha: advertised_source_sha(crate::build_info::source_sha()),
             limitation: Some(relay_limitation(max_message_length, advertise_fi)),
             pairing_relay_url: pairing_relay_url.map(str::to_string),
             admin_api: admin_api.map(str::to_string),
@@ -748,6 +762,43 @@ mod tests {
             None,
         );
         assert_eq!(info.software, "https://github.com/block/buzz");
+    }
+
+    #[test]
+    fn source_sha_is_advertised_only_when_the_build_recorded_one() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(advertised_source_sha(sha).as_deref(), Some(sha));
+        let long = format!("{sha}0");
+        let non_hex = sha.replace('a', "g");
+        for bad in ["unknown", "", "0123456", long.as_str(), non_hex.as_str()] {
+            assert_eq!(advertised_source_sha(bad), None, "{bad:?}");
+        }
+
+        // The builder advertises exactly what this binary recorded. The SHA is
+        // a compile-time constant, so this pins the wiring, not a value.
+        let info = RelayInfo::build(
+            None,
+            None,
+            RelayCapabilityFlags::default(),
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+        );
+        let json = serde_json::to_value(&info).expect("serialize");
+        assert_eq!(
+            json.get("source_sha").and_then(|v| v.as_str()),
+            advertised_source_sha(crate::build_info::source_sha()).as_deref()
+        );
+
+        // A build without a recorded SHA serializes no field at all.
+        let mut info = info;
+        info.source_sha = None;
+        let json = serde_json::to_value(&info).expect("serialize");
+        assert!(json.get("source_sha").is_none());
+        info.source_sha = Some(sha.to_owned());
+        let json = serde_json::to_value(&info).expect("serialize");
+        assert_eq!(json["source_sha"], sha);
     }
 
     #[test]

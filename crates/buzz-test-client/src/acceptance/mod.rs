@@ -77,7 +77,10 @@ pub struct Report {
     pub relay_url: String,
     /// The public key (hex) the run authenticated and signed as.
     pub pubkey: String,
-    /// The relay's NIP-11 `version`, when it reported one.
+    /// The build that answered the NIP-11 request: its `source_sha`, else
+    /// its `version` (see [`relay_version`]). Behind a load balancer the
+    /// WebSocket checks can reach other instances, so this names the run's
+    /// build only when the target serves a single revision.
     pub relay_version: Option<String>,
     /// True when no check failed.
     pub passed: bool,
@@ -293,13 +296,27 @@ async fn relay_info(cfg: &Config) -> (CheckReport, Option<String>) {
             if !info["supported_nips"].is_array() {
                 bail!("not a NIP-11 document: no supported_nips");
             }
-            Ok(info["version"].as_str().map(str::to_owned))
+            Ok(relay_version(&info))
         })
         .await;
     match result {
         Ok(version) => (check.finish(Ok(())), version),
         Err(e) => (check.finish(Err(e)), None),
     }
+}
+
+/// The build that answered NIP-11: its `source_sha` when that is a full
+/// 40-hex commit SHA, else its software `version`.
+///
+/// This identifies the NIP-11 responder only. The run's WebSocket
+/// connections are separate requests, so during a rolling deploy they can
+/// reach another revision. A deployment gate that counts runs for one build
+/// must point the probe at a target that serves only that revision.
+fn relay_version(info: &serde_json::Value) -> Option<String> {
+    let sha = info["source_sha"]
+        .as_str()
+        .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+    sha.or_else(|| info["version"].as_str()).map(str::to_owned)
 }
 
 async fn connect_auth(cfg: &Config) -> (CheckReport, Option<NostrWsConnection>) {
@@ -739,6 +756,47 @@ fn tag<const N: usize>(parts: [&str; N]) -> anyhow::Result<Tag> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_version_prefers_the_build_sha_over_the_software_version() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let both = serde_json::json!({"version": "0.1.0", "source_sha": sha});
+        assert_eq!(relay_version(&both).as_deref(), Some(sha));
+        // Relays without a recorded build, and older relays, keep the version.
+        let version_only = serde_json::json!({"version": "0.1.0"});
+        assert_eq!(relay_version(&version_only).as_deref(), Some("0.1.0"));
+        let non_string = serde_json::json!({"version": "0.1.0", "source_sha": 7});
+        assert_eq!(relay_version(&non_string).as_deref(), Some("0.1.0"));
+        for bad in ["", "unknown", "0123456"] {
+            let info = serde_json::json!({"version": "0.1.0", "source_sha": bad});
+            assert_eq!(relay_version(&info).as_deref(), Some("0.1.0"), "{bad:?}");
+        }
+        assert_eq!(relay_version(&serde_json::json!({})), None);
+    }
+
+    /// `relay_info` reports the build SHA from the NIP-11 document it fetched.
+    #[tokio::test]
+    async fn relay_info_reports_the_served_source_sha() {
+        let (addr, server) = one_http_response(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/nostr+json",
+            r#"{"supported_nips":[1],"version":"0.1.0","source_sha":"0123456789abcdef0123456789abcdef01234567"}"#,
+        )
+        .await;
+
+        // The probe's stage timeout bounds this call, so check its result
+        // first: a probe that never sends the request fails here, not in a
+        // server still waiting in `accept`.
+        let (report, version) = relay_info(&config(format!("ws://{addr}"))).await;
+        assert_eq!(report.result, Outcome::Success, "{:?}", report.error);
+        assert_eq!(
+            version.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("server finished")
+            .unwrap();
+    }
 
     fn config(relay_url: String) -> Config {
         Config {
