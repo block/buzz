@@ -47,6 +47,13 @@ test("scoreUserCandidate ranks display labels before pubkeys", () => {
   );
 });
 
+test("scoreUserCandidate matches a profile name that differs from the display name", () => {
+  const user = makeUser({ displayName: "S", name: "Starfish Sol" });
+
+  assert.equal(scoreUserCandidate({ label: "S", query: "starfish", user }), 0);
+  assert.equal(scoreUserCandidate({ label: "S", query: "sol", user }), 1);
+});
+
 test("scoreUserCandidate supports agent labels and empty-query defaults", () => {
   const agent = makeUser({ isAgent: true });
 
