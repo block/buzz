@@ -12,7 +12,7 @@ async fn failed_policy_evidence_rolls_back_verified_owner_and_membership() {
         &pool,
         community,
         &postgres_tests::test_pubkey(),
-        3600,
+        InviteExpiry::After(3600),
         Some(1),
     )
     .await
@@ -67,7 +67,7 @@ async fn successful_claim_reports_only_committed_user_creation() {
         &pool,
         community,
         &postgres_tests::test_pubkey(),
-        3600,
+        InviteExpiry::After(3600),
         Some(1),
     )
     .await
@@ -140,9 +140,15 @@ async fn issuer_timeout_denies_temporarily_without_revoking_invite() {
     let community = postgres_tests::make_test_community(&pool).await;
     let issuer = postgres_tests::test_pubkey();
     let claimant = postgres_tests::test_pubkey();
-    let invite = mint_relay_invite(&pool, community, &issuer, 3600, Some(1))
-        .await
-        .unwrap();
+    let invite = mint_relay_invite(
+        &pool,
+        community,
+        &issuer,
+        InviteExpiry::After(3600),
+        Some(1),
+    )
+    .await
+    .unwrap();
     sqlx::query("INSERT INTO community_bans (community_id,pubkey,muted_until,actor_pubkey) VALUES ($1,$2,clock_timestamp()+interval '1 hour',$2)")
         .bind(community.as_uuid()).bind(hex::decode(&issuer).unwrap()).execute(&pool).await.unwrap();
     assert_eq!(

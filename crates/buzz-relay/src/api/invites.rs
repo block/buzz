@@ -41,6 +41,7 @@ use buzz_core::invite::{
 
 use crate::invite_token;
 use crate::state::AppState;
+use buzz_db::relay_invite::InviteExpiry;
 
 use super::{api_error, bridge, internal_error};
 mod claim_auth;
@@ -71,20 +72,35 @@ pub struct MintInviteRequest {
     /// must be an integer from 1 through [`MAX_INVITE_USES`].
     #[serde(default)]
     pub max_uses: Option<i32>,
+    /// `true` mints an invite that never expires; it stays claimable until
+    /// revoked or exhausted. Cannot be combined with `ttl_secs`.
+    #[serde(default)]
+    pub never_expires: bool,
 }
 
 pub(crate) fn validate_mint_request(
     request: &MintInviteRequest,
-) -> Result<(u64, Option<i32>), (StatusCode, Json<Value>)> {
-    let ttl = request.ttl_secs.unwrap_or(DEFAULT_INVITE_TTL_SECS);
-    if !(MIN_INVITE_TTL_SECS..=MAX_INVITE_TTL_SECS).contains(&ttl) {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            &format!(
-                "ttl_secs must be between {} and {MAX_INVITE_TTL_SECS}",
-                MIN_INVITE_TTL_SECS
-            ),
-        ));
+) -> Result<(InviteExpiry, Option<i32>), (StatusCode, Json<Value>)> {
+    let expiry = match (request.never_expires, request.ttl_secs) {
+        (true, Some(_)) => {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "never_expires cannot be combined with ttl_secs",
+            ))
+        }
+        (true, None) => InviteExpiry::Never,
+        (false, ttl) => InviteExpiry::After(ttl.unwrap_or(DEFAULT_INVITE_TTL_SECS)),
+    };
+    if let InviteExpiry::After(ttl) = expiry {
+        if !(MIN_INVITE_TTL_SECS..=MAX_INVITE_TTL_SECS).contains(&ttl) {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "ttl_secs must be between {} and {MAX_INVITE_TTL_SECS}",
+                    MIN_INVITE_TTL_SECS
+                ),
+            ));
+        }
     }
 
     if let Some(max_uses) = request.max_uses {
@@ -96,7 +112,7 @@ pub(crate) fn validate_mint_request(
         }
     }
 
-    Ok((ttl, request.max_uses))
+    Ok((expiry, request.max_uses))
 }
 
 /// Body for `POST /api/invites/claim`.
@@ -308,8 +324,9 @@ pub(crate) enum InviteGate {
 }
 
 /// Admission shared by the invite-management routes, in order: tenant bind,
-/// NIP-98 through NIP-FI admission for `method` and `path_and_query`, replay,
-/// relay membership and ban, the NIP-OA owner link, then `gate`.
+/// NIP-98 through NIP-FI admission for `method` and `path_and_query`, the
+/// shared API rate limit, replay, relay membership and ban, the NIP-OA owner
+/// link, then `gate`. Claim has its own limiter and does not come here.
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 pub(crate) async fn admit_invite_caller(
     state: &Arc<AppState>,
@@ -354,9 +371,10 @@ pub(crate) async fn admit_invite_caller(
     let mut caller = bridge::ProvenCaller::new(admission, slot, &tenant);
     let pubkey = caller.pubkey;
 
-    // Replay detection runs after NIP-98+assertion admission (both proofs verified).
+    // The shared per-pubkey API limit, then replay detection, after
+    // NIP-98+assertion admission (both proofs verified).
     caller
-        .replay(state, &tenant)
+        .rate_limit_and_replay(state, &tenant)
         .await
         .map_err(|e| e.into_response())?;
 
@@ -432,12 +450,12 @@ async fn mint_invite_inner(
         })?
     };
 
-    let (ttl, max_uses) = validate_mint_request(&request)?;
+    let (expiry, max_uses) = validate_mint_request(&request)?;
 
     // Mint a v2 opaque, database-backed invite.
     let invite = state
         .db
-        .mint_relay_invite_as_admin(tenant.community(), &sender_hex, ttl, max_uses)
+        .mint_relay_invite_as_admin(tenant.community(), &sender_hex, expiry, max_uses)
         .await
         .map_err(map_mint_error)?;
 
@@ -901,6 +919,13 @@ mod postgres_tests {
             media_storage,
         );
         state.nip98_replay = Arc::new(AlwaysFreshReplayGuard);
+        // Real Redis for the shared API rate limit, which fails closed.
+        let limiter = buzz_pubsub::redis_connection(
+            &std::env::var("REDIS_URL").unwrap_or("redis://127.0.0.1:6379".into()),
+        )
+        .ok()?;
+        state.admission_rate_limiter =
+            Arc::new(buzz_pubsub::rate_limiter::RedisRateLimiter::new(limiter));
         Some(Arc::new(state))
     }
 
@@ -985,26 +1010,41 @@ mod postgres_tests {
 
     #[test]
     fn mint_request_validation_enforces_bounds_without_a_database() {
-        use super::validate_mint_request;
+        use super::{validate_mint_request, InviteExpiry};
 
         for (request, expected) in [
             (
                 super::MintInviteRequest::default(),
-                (crate::invite_token::DEFAULT_INVITE_TTL_SECS, None),
+                (
+                    InviteExpiry::After(crate::invite_token::DEFAULT_INVITE_TTL_SECS),
+                    None,
+                ),
             ),
             (
                 super::MintInviteRequest {
                     ttl_secs: Some(MIN_INVITE_TTL_SECS),
                     max_uses: Some(1),
+                    ..Default::default()
                 },
-                (MIN_INVITE_TTL_SECS, Some(1)),
+                (InviteExpiry::After(MIN_INVITE_TTL_SECS), Some(1)),
             ),
             (
                 super::MintInviteRequest {
                     ttl_secs: Some(MAX_INVITE_TTL_SECS),
                     max_uses: Some(MAX_INVITE_USES),
+                    ..Default::default()
                 },
-                (MAX_INVITE_TTL_SECS, Some(MAX_INVITE_USES)),
+                (
+                    InviteExpiry::After(MAX_INVITE_TTL_SECS),
+                    Some(MAX_INVITE_USES),
+                ),
+            ),
+            (
+                super::MintInviteRequest {
+                    never_expires: true,
+                    ..Default::default()
+                },
+                (InviteExpiry::Never, None),
             ),
         ] {
             assert_eq!(
@@ -1015,24 +1055,34 @@ mod postgres_tests {
 
         for request in [
             super::MintInviteRequest {
+                ttl_secs: Some(3600),
+                max_uses: None,
+                never_expires: true,
+            },
+            super::MintInviteRequest {
                 ttl_secs: None,
                 max_uses: Some(0),
+                ..Default::default()
             },
             super::MintInviteRequest {
                 ttl_secs: None,
                 max_uses: Some(-1),
+                ..Default::default()
             },
             super::MintInviteRequest {
                 ttl_secs: None,
                 max_uses: Some(MAX_INVITE_USES + 1),
+                ..Default::default()
             },
             super::MintInviteRequest {
                 ttl_secs: Some(MIN_INVITE_TTL_SECS - 1),
                 max_uses: None,
+                ..Default::default()
             },
             super::MintInviteRequest {
                 ttl_secs: Some(MAX_INVITE_TTL_SECS + 1),
                 max_uses: None,
+                ..Default::default()
             },
         ] {
             assert_eq!(
@@ -1077,6 +1127,7 @@ mod postgres_tests {
             serde_json::json!({ "max_uses": MAX_INVITE_USES + 1 }),
             serde_json::json!({ "ttl_secs": MIN_INVITE_TTL_SECS - 1 }),
             serde_json::json!({ "ttl_secs": MAX_INVITE_TTL_SECS + 1 }),
+            serde_json::json!({ "never_expires": true, "ttl_secs": 3600 }),
         ] {
             let response = post_json(
                 state.clone(),
@@ -1096,6 +1147,7 @@ mod postgres_tests {
             serde_json::json!({ "max_uses": MAX_INVITE_USES }),
             serde_json::json!({ "ttl_secs": MIN_INVITE_TTL_SECS }),
             serde_json::json!({ "ttl_secs": MAX_INVITE_TTL_SECS }),
+            serde_json::json!({ "never_expires": true }),
         ] {
             let response = post_json(
                 state.clone(),

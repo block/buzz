@@ -146,7 +146,12 @@ mod postgres_tests {
         // never enroll the caller into the extra (host is authoritative).
         let invite = state
             .db
-            .mint_relay_invite_as_admin(extra_id, &owner.public_key().to_hex(), 3600, Some(1))
+            .mint_relay_invite_as_admin(
+                extra_id,
+                &owner.public_key().to_hex(),
+                buzz_db::relay_invite::InviteExpiry::After(3600),
+                Some(1),
+            )
             .await
             .expect("invite fixture");
         let joiner = Keys::generate();
