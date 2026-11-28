@@ -18,6 +18,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import 'hosted_http_fixture.dart';
+
 // The sockets that check a community before it is joined belong to a member
 // who is not active yet, so what they report goes out only while reports name
 // that member or no one.
@@ -155,7 +157,7 @@ void main() {
           () => container
               .read(hostedFlowProvider)
               .enterCommunity(link, 'owner', keys.public, () => true),
-          _Loopback(server.port),
+          LoopbackHttpOverrides(server.port),
         );
 
         expect(diagnostics.operations, [
@@ -192,40 +194,6 @@ class _Account extends BuilderlabAccountClient {
   Future<Map<String, dynamic>> currentIdentity({String? signer}) async => {
     'identity': {'pubkey_hex': bound},
   };
-}
-
-/// Sends every connection to the loopback relay on [port], whatever address
-/// it was made for.
-class _Loopback extends HttpOverrides {
-  _Loopback(this.port);
-
-  final int port;
-
-  @override
-  HttpClient createHttpClient(SecurityContext? context) =>
-      _LoopbackClient(super.createHttpClient(context), port);
-}
-
-class _LoopbackClient extends Fake implements HttpClient {
-  _LoopbackClient(this._inner, this._port);
-
-  final HttpClient _inner;
-  final int _port;
-
-  @override
-  String? get userAgent => _inner.userAgent;
-
-  @override
-  set userAgent(String? value) => _inner.userAgent = value;
-
-  @override
-  Future<HttpClientRequest> openUrl(String method, Uri url) => _inner.openUrl(
-    method,
-    url.replace(scheme: 'http', host: '127.0.0.1', port: _port),
-  );
-
-  @override
-  void close({bool force = false}) => _inner.close(force: force);
 }
 
 /// A reporter that records the operation of each report. The member is

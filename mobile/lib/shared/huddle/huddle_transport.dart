@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/io.dart';
@@ -29,6 +30,11 @@ enum HuddleTransportErrorCode {
   handshakeTimeout,
   authenticationFailed,
   relayRejected,
+
+  /// The relay refused this join for now: it can't check authorization yet
+  /// (for example while it restores its revocation list) or it is at its
+  /// connection limit. The same join can succeed shortly.
+  temporarilyUnavailable,
   protocolViolation,
   socketClosed,
   sendFailed,
@@ -123,7 +129,9 @@ abstract interface class HuddleTransportClient {
   Stream<HuddlePeerEvent> get peerEvents;
   Stream<HuddleTransportError> get issues;
 
-  Future<void> connect();
+  /// Opens the socket. [freshDiscovery] rereads the relay's NIP-FI discovery
+  /// before authenticating; a retry of the same join can reuse the last read.
+  Future<void> connect({bool freshDiscovery = true});
   void sendOpusFrame({
     required HuddleAudioHeader header,
     required Uint8List opusPayload,
@@ -137,7 +145,7 @@ final class HuddleTransport implements HuddleTransportClient {
   final Duration connectTimeout;
   final Duration handshakeTimeout;
   final HuddleWebSocketFactory? _channelFactory;
-  final Future<Map<String, String>> Function()? headers;
+  final Future<Map<String, String>> Function({required bool fresh})? headers;
 
   final StreamController<HuddleTransportState> _stateController =
       StreamController.broadcast(sync: true);
@@ -185,7 +193,7 @@ final class HuddleTransport implements HuddleTransportClient {
   Stream<HuddleTransportError> get issues => _issueController.stream;
 
   @override
-  Future<void> connect() async {
+  Future<void> connect({bool freshDiscovery = true}) async {
     if (_disposed) {
       throw const HuddleTransportError(
         code: HuddleTransportErrorCode.disposed,
@@ -231,7 +239,7 @@ final class HuddleTransport implements HuddleTransportClient {
     try {
       final deadline = Stopwatch()..start();
       final authentication =
-          await headers?.call().timeout(connectTimeout) ??
+          await headers?.call(fresh: freshDiscovery).timeout(connectTimeout) ??
           const <String, String>{};
       if (!_isCurrent(generation)) return;
       final channel =
@@ -282,11 +290,17 @@ final class HuddleTransport implements HuddleTransportClient {
     } on HuddleTransportError {
       rethrow;
     } catch (error) {
-      final failure = HuddleTransportError(
-        code: HuddleTransportErrorCode.connectionFailed,
-        message: 'Unable to connect to the Huddle audio relay.',
-        cause: error,
-      );
+      final failure = _upgradeUnavailable(error)
+          ? HuddleTransportError(
+              code: HuddleTransportErrorCode.temporarilyUnavailable,
+              message: 'The Huddle audio relay is temporarily unavailable.',
+              cause: error,
+            )
+          : HuddleTransportError(
+              code: HuddleTransportErrorCode.connectionFailed,
+              message: 'Unable to connect to the Huddle audio relay.',
+              cause: error,
+            );
       _fail(failure, generation);
       throw failure;
     }
@@ -345,7 +359,14 @@ final class HuddleTransport implements HuddleTransportClient {
     await subscription?.cancel();
     final channel = _channel;
     _channel = null;
-    await channel?.sink.close();
+    if (subscription == null) {
+      // The upgrade is still pending. A channel whose upgrade then fails never
+      // completes sink.close(), so don't wait for it; the channel still closes
+      // a socket that opens late.
+      unawaited(channel?.sink.close().catchError((Object _) {}));
+    } else {
+      await channel?.sink.close();
+    }
     _handshakeCompleter = null;
     _emitState(HuddleTransportState(phase: HuddleTransportPhase.disconnected));
   }
@@ -399,6 +420,8 @@ final class HuddleTransport implements HuddleTransportClient {
         _handleRoster(message, generation);
       case 'error':
         _handleRelayError(message, generation);
+      case 'restricted':
+        _handleRestricted(message, generation);
       default:
         _handleProtocolProblem('Unknown Huddle control message.', generation);
     }
@@ -872,6 +895,34 @@ final class HuddleTransport implements HuddleTransportClient {
     if (_audioIngress.isNotEmpty) {
       _audioIngressTimer = Timer(Duration.zero, _drainAudioIngress);
     }
+  }
+
+  /// A 503 upgrade is the HTTP form of the same temporary refusal. The audio
+  /// route also answers 503 when it is at its connection limit, and dart:io
+  /// discards the body that tells them apart, so the copy stays neutral.
+  /// Both are temporary.
+  static bool _upgradeUnavailable(Object error) {
+    final inner = error is WebSocketChannelException ? error.inner : error;
+    return inner is WebSocketException &&
+        inner.httpStatusCode == HttpStatus.serviceUnavailable;
+  }
+
+  /// NIP-FI's audio refusal frame. Only `authorization unavailable` is
+  /// temporary; any other refusal is final for this join.
+  void _handleRestricted(Map<String, dynamic> message, int generation) {
+    final unavailable =
+        message['message'] == 'restricted: authorization unavailable';
+    _fail(
+      HuddleTransportError(
+        code: unavailable
+            ? HuddleTransportErrorCode.temporarilyUnavailable
+            : HuddleTransportErrorCode.relayRejected,
+        message: unavailable
+            ? 'Huddle authorization is temporarily unavailable.'
+            : 'Huddle access was denied.',
+      ),
+      generation,
+    );
   }
 
   void _handleProtocolProblem(String message, int generation) {

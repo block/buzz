@@ -296,8 +296,12 @@ final class MobileHuddleController extends Notifier<bool> {
       }
       rethrow;
     }
+    // A join cancelled by a hang-up can return after the next one is admitted;
+    // the session it would read then belongs to that newer Huddle.
     final session = ref.read(huddleSessionProvider);
-    if (session.wasAdmitted) {
+    if (admissionEpoch == _admissionEpoch &&
+        session.ephemeralChannelId == ephemeralChannelId &&
+        session.wasAdmitted) {
       _admissionToken = _HuddleAdmissionToken(
         admissionEpoch,
         ephemeralChannelId,
@@ -404,12 +408,18 @@ final class MobileHuddleController extends Notifier<bool> {
     if (startFuture != null) {
       ++_generation;
       state = false;
+      // Stop local audio first, so the microphone and any pending admission
+      // retry end now rather than when the start gives up on the old relay.
+      final localLeave = _leaveLocalAudio();
+      // Its error is still delivered by the await below, after the rollback.
+      localLeave.ignore();
       try {
         await startFuture;
       } catch (_) {
         // Cancellation is observed by the in-flight start, whose rollback must
         // settle before the relay is rebound to the next community.
       }
+      await localLeave;
     }
     ++_generation;
     state = false;

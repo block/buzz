@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:buzz/shared/huddle/huddle_auth.dart';
@@ -50,7 +51,7 @@ void main() {
     var opened = false;
     final waiting = HuddleTransport(
       parameters: transport.parameters,
-      headers: () => stalled.future,
+      headers: ({required fresh}) => stalled.future,
       channelFactory: (_) {
         opened = true;
         return _ControlledWebSocketChannel();
@@ -406,6 +407,118 @@ void main() {
     );
     expect(transport.state.phase, HuddleTransportPhase.failed);
   });
+
+  // NIP-FI refuses audio at the upgrade or with a frame after AUTH; only
+  // `authorization unavailable` is temporary. A 503 can also mean the relay
+  // is at its connection limit, so its copy doesn't blame authorization.
+  for (final (refusal, upgradeError, frame, code, message) in [
+    (
+      'a 503 upgrade',
+      const WebSocketException('503', 503),
+      null,
+      HuddleTransportErrorCode.temporarilyUnavailable,
+      'The Huddle audio relay is temporarily unavailable.',
+    ),
+    (
+      'a 403 upgrade',
+      const WebSocketException('403', 403),
+      null,
+      HuddleTransportErrorCode.connectionFailed,
+      'Unable to connect to the Huddle audio relay.',
+    ),
+    (
+      'authorization unavailable',
+      null,
+      'restricted: authorization unavailable',
+      HuddleTransportErrorCode.temporarilyUnavailable,
+      'Huddle authorization is temporarily unavailable.',
+    ),
+    (
+      'authorization denied',
+      null,
+      'restricted: authorization denied',
+      HuddleTransportErrorCode.relayRejected,
+      'Huddle access was denied.',
+    ),
+  ]) {
+    test('$refusal fails the join as ${code.name}', () async {
+      final channel = _ControlledWebSocketChannel()
+        ..readyError = upgradeError == null
+            ? null
+            : WebSocketChannelException.from(upgradeError);
+      final transport = _transport(channel);
+      addTearDown(transport.dispose);
+
+      final connect = transport.connect();
+      if (frame != null) {
+        await _waitForPhase(transport, HuddleTransportPhase.awaitingChallenge);
+        channel.emitText(jsonEncode({'type': 'challenge', 'challenge': 'abc'}));
+        await _waitForPhase(transport, HuddleTransportPhase.authenticating);
+        channel.emitText(jsonEncode({'type': 'restricted', 'message': frame}));
+      }
+
+      await expectLater(
+        connect,
+        throwsA(
+          isA<HuddleTransportError>()
+              .having((e) => e.code, 'code', code)
+              .having((e) => e.message, 'message', message),
+        ),
+      );
+      expect(transport.state.phase, HuddleTransportPhase.failed);
+    });
+  }
+
+  // A channel whose upgrade fails never completes `sink.close()`, so leaving
+  // during a pending upgrade must not wait for it, and a socket that opens
+  // after the leave must still be closed.
+  for (final upgradeAccepted in [false, true]) {
+    test('dispose during a pending upgrade completes when the upgrade '
+        '${upgradeAccepted ? 'succeeds late' : 'is refused'}', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final requestSeen = Completer<void>();
+      final respond = Completer<void>();
+      final serverSocketClosed = Completer<void>();
+      server.listen((request) async {
+        requestSeen.complete();
+        await respond.future;
+        if (!upgradeAccepted) {
+          request.response.statusCode = HttpStatus.forbidden;
+          await request.response.close();
+          return;
+        }
+        final socket = await WebSocketTransformer.upgrade(request);
+        socket.listen(
+          (_) {},
+          onDone: serverSocketClosed.complete,
+          onError: (Object _) {},
+        );
+      });
+      final transport = HuddleTransport(
+        parameters: HuddleConnectionParameters(
+          relayWebSocketUrl: 'ws://127.0.0.1:${server.port}',
+          nsec: _privateKey,
+          parentChannelId: _parentChannelId,
+          ephemeralChannelId: _ephemeralChannelId,
+        ),
+        connectTimeout: const Duration(seconds: 5),
+      );
+      final connect = transport.connect().then<Object?>(
+        (_) => null,
+        onError: (Object error) => error,
+      );
+      await requestSeen.future;
+
+      final disposed = transport.dispose();
+      respond.complete();
+      await disposed.timeout(const Duration(seconds: 2));
+      expect(await connect, isA<HuddleTransportError>());
+      if (upgradeAccepted) {
+        await serverSocketClosed.future.timeout(const Duration(seconds: 2));
+      }
+    });
+  }
 
   test('bounds transport audio ingress', () async {
     final channel = _ControlledWebSocketChannel();
@@ -873,8 +986,12 @@ final class _ControlledWebSocketChannel implements WebSocketChannel {
   void emitBinary(Uint8List value) => _streamController.add(value);
   void emitError(Object error) => _streamController.addError(error);
 
+  /// What the upgrade fails with, if it does.
+  Object? readyError;
+
   @override
-  Future<void> get ready => Future.value();
+  Future<void> get ready =>
+      readyError == null ? Future.value() : Future.error(readyError!);
 
   @override
   Stream<dynamic> get stream => _streamController.stream;
