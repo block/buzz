@@ -13,10 +13,13 @@ import 'package:buzz/shared/push/push_subscription.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../../helpers/hosted_journey_fixture.dart';
+import '../../helpers/strict_nip_fi_relay.dart';
 import '../community/community_storage_test.dart';
 
 void main() {
@@ -45,31 +48,18 @@ void main() {
       final overrides = HttpOverrides.current;
       HttpOverrides.global = null;
       addTearDown(() => HttpOverrides.global = overrides);
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final relay = StrictNipFiRelay();
+      final server = await relay.serve(
+        (origin) => _descriptorJson(origin, nostr.Keys.generate().public),
+      );
       addTearDown(() => server.close(force: true));
       final origin = 'ws://127.0.0.1:${server.port}';
-      final upgrades = <HttpHeaders>[];
-      server.listen((request) async {
-        if (WebSocketTransformer.isUpgradeRequest(request)) {
-          upgrades.add(request.headers);
-          final socket = await WebSocketTransformer.upgrade(request);
-          socket.add(jsonEncode(['AUTH', 'challenge']));
-          socket.listen((message) {
-            final frame = jsonDecode(message as String) as List<dynamic>;
-            if (frame.first == 'AUTH' || frame.first == 'EVENT') {
-              final event = frame[1] as Map<String, dynamic>;
-              socket.add(jsonEncode(['OK', event['id'], true, '']));
-            }
-          });
-          return;
-        }
-        request.response
-          ..headers.contentType = ContentType('application', 'nostr+json')
-          ..write(
-            jsonEncode(_descriptorJson(origin, nostr.Keys.generate().public)),
-          )
-          ..close();
-      });
+      final upgrades = relay.upgrades;
+      relay.issue(
+        'hosted-token',
+        relayUrl: origin,
+        expiresAt: DateTime.now().millisecondsSinceEpoch ~/ 1000 + 3600,
+      );
       final auth = _AssertingRelayAuth();
       addTearDown(auth.dispose);
 
@@ -101,33 +91,7 @@ void main() {
       expect(auth.freshes.single, isTrue);
 
       // Removing the community publishes its tombstone the same way.
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-      addTearDown(() => debugDefaultTargetPlatformOverride = null);
-      final messenger =
-          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-      messenger.setMockMethodCallHandler(const MethodChannel('buzz/push'), (
-        call,
-      ) async {
-        expect(call.method, 'endpointGrants');
-        return [
-          {
-            'relayOrigin': origin,
-            'relayPubkey': 'a' * 64,
-            'installationId': 'c' * 32,
-            'endpointGrant': 'grant',
-            'endpointHash': 'b' * 64,
-            'endpointEpoch': 1,
-            'generation': 1,
-            'expiresAt': 1752624000,
-          },
-        ];
-      });
-      addTearDown(
-        () => messenger.setMockMethodCallHandler(
-          const MethodChannel('buzz/push'),
-          null,
-        ),
-      );
+      _mockEndpointGrant(origin);
       final container = ProviderContainer(
         overrides: [hostedRelayAuthProvider.overrideWithValue(auth)],
       );
@@ -153,6 +117,57 @@ void main() {
       expect(auth.configs.last.baseUrl, 'http://127.0.0.1:${server.port}');
       expect(auth.configs.last.nsec, keys.nsec);
       expect(auth.backgrounds.last, isTrue);
+    },
+  );
+
+  test(
+    'tombstone gets its own assertion from an enforcing relay\'s issuer',
+    () async {
+      // The removed community's relay is not the live session's, so nothing
+      // cached covers it; production auth must mint one for this relay.
+      FlutterSecureStorage.setMockInitialValues({});
+      final overrides = HttpOverrides.current;
+      HttpOverrides.global = null;
+      addTearDown(() => HttpOverrides.global = overrides);
+      final f = HostedJourneyFixture()..organizationBound = keys.public;
+      final server = await f.relay.serve(
+        (origin) => _descriptorJson(origin, nostr.Keys.generate().public),
+      );
+      addTearDown(() => server.close(force: true));
+      final origin = 'ws://127.0.0.1:${server.port}';
+      await f.signInOrganization();
+      final organization = BuilderlabAccountClient(
+        accountOrigin: HostedJourneyFixture.organizationOrigin,
+        httpClient: f.organizationClient(),
+      );
+      addTearDown(organization.dispose);
+      final auth = HostedRelayAuth(
+        BuilderlabAccountClient(),
+        organization: organization,
+        organizationRelay: (relay) => relay.host == '127.0.0.1',
+        enabled: true,
+      );
+      addTearDown(auth.dispose);
+      _mockEndpointGrant(origin);
+      final container = ProviderContainer(
+        overrides: [hostedRelayAuthProvider.overrideWithValue(auth)],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(communityPushLeaseDeactivatorProvider)(
+        Community(
+          id: 'removed',
+          name: 'Removed',
+          addedAt: DateTime.utc(2026),
+          relayUrl: origin,
+          pubkey: keys.public,
+          nsec: keys.nsec,
+        ),
+        generation: 9,
+      );
+
+      expect(f.relay.upgrades, hasLength(1));
+      expect(f.relay.refusals, isEmpty);
     },
   );
 
@@ -609,6 +624,37 @@ class _WakeScheduler {
 
 class _ScheduledWake {
   bool cancelled = false;
+}
+
+/// An iOS installation holding one push grant on [origin]'s relay.
+void _mockEndpointGrant(String origin) {
+  debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+  addTearDown(() => debugDefaultTargetPlatformOverride = null);
+  final messenger =
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+  messenger.setMockMethodCallHandler(const MethodChannel('buzz/push'), (
+    call,
+  ) async {
+    expect(call.method, 'endpointGrants');
+    return [
+      {
+        'relayOrigin': origin,
+        'relayPubkey': 'a' * 64,
+        'installationId': 'c' * 32,
+        'endpointGrant': 'grant',
+        'endpointHash': 'b' * 64,
+        'endpointEpoch': 1,
+        'generation': 1,
+        'expiresAt': 1752624000,
+      },
+    ];
+  });
+  addTearDown(
+    () => messenger.setMockMethodCallHandler(
+      const MethodChannel('buzz/push'),
+      null,
+    ),
+  );
 }
 
 class _AssertingRelayAuth extends HostedRelayAuth {

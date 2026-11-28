@@ -35,7 +35,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
 import '../../helpers/hosted_journey_fixture.dart';
-import '../../helpers/test_assertion.dart';
 
 void main() {
   // Bottom banners over Home must stay above its floating tab bar, which the
@@ -707,7 +706,7 @@ void main() {
       expect(f.socketHeaders.length, greaterThan(connects));
       expect(
         f.socketHeaders.last['Nostr-Federated-Identity'],
-        'Bearer ${testAssertion('organization-assertion')}',
+        f.bearer('organization-assertion'),
       );
       expect(
         f.container.read(relaySessionProvider).status,
@@ -775,8 +774,12 @@ void main() {
 
       // Unreachable discovery fails transiently, never as a denial.
       f.nipFiRequired = null;
+      final connects = f.socketHeaders.length;
       await session.reconnect();
       await f.settle(tester);
+      // A new connection waits for discovery instead of guessing from the
+      // last answer, so no socket opens during the outage.
+      expect(f.socketHeaders, hasLength(connects));
       expect(f.container.read(hostedRelayAuthProvider).failure, isNull);
       // Requests keep the last answer instead of failing with discovery.
       await session.queryRelay(const []);
@@ -790,15 +793,13 @@ void main() {
       await f.settle(tester);
       expect(f.discoveries, greaterThan(discoveries));
       expect(f.socketHeaders.last, {
-        'Nostr-Federated-Identity':
-            'Bearer ${testAssertion('synthetic-assertion')}',
+        'Nostr-Federated-Identity': f.bearer('synthetic-assertion'),
       });
       expect(f.sent('/identity/assertions'), hasLength(1));
       await session.queryRelay(const []);
       expect(f.sent('/identity/assertions'), hasLength(1));
       expect(auth.cachedHeaders(config), {
-        'Nostr-Federated-Identity':
-            'Bearer ${testAssertion('synthetic-assertion')}',
+        'Nostr-Federated-Identity': f.bearer('synthetic-assertion'),
       });
     },
     requiresAuthDomain: true,
@@ -907,7 +908,7 @@ void main() {
         expect(
           request.headers['Nostr-Federated-Identity'],
           origin.contains('communities.buzz.xyz')
-              ? 'Bearer ${testAssertion('synthetic-assertion')}'
+              ? f.bearer('synthetic-assertion')
               : isNull,
         );
         if (origin.contains('communities.buzz.xyz')) {

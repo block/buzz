@@ -35,6 +35,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import 'strict_nip_fi_relay.dart';
 import 'widget_helpers.dart';
 import 'test_assertion.dart';
 
@@ -78,6 +79,19 @@ class HostedJourneyFixture {
   int secondRelayFailures = 0;
   DateTime assertionNow = DateTime.now();
   bool relayAuthEnabled = false;
+
+  /// Enforces NIP-FI on every protected relay request and socket, as a real
+  /// relay does. A mounted journey that a relay refused fails at teardown,
+  /// after its own failures, unless it clears the refusals it expects.
+  late final relay = StrictNipFiRelay(now: () => assertionNow);
+  bool _checksRefusals = false;
+  final _latest = <String, String>{};
+  var _mints = 0;
+
+  /// The header carrying the assertion an issuer last minted under [label]
+  /// (`synthetic-assertion` or `organization-assertion`). Every mint has its
+  /// own bytes, so a header captured before a renewal no longer matches.
+  String bearer(String label) => 'Bearer ${_latest[label]}';
 
   /// What hosted relays' NIP-FI discovery answers; null fails discovery.
   bool? nipFiRequired = true;
@@ -191,33 +205,34 @@ class HostedJourneyFixture {
         return http.Response('{}', 403);
       }
       bound ??= body['nostr_pubkey'] as String;
-      result = {
-        'assertion': testAssertion('synthetic-assertion'),
-        'nostr_pubkey': bound,
-        'expires_at':
-            assertionNow
-                .add(const Duration(minutes: 5))
-                .millisecondsSinceEpoch ~/
-            1000,
-      };
-    } else if (path == '/auth-transport') {
-      return http.Response(
-        '',
-        302,
-        headers: {'location': 'https://outside.example'},
-      );
-    } else if (path == '/query' || path == '/profiles/search') {
-      if (relayAuthEnabled &&
-          HostedEnvironment.requiresAuth(request.url.host)) {
-        expect(
-          request.headers['Nostr-Federated-Identity'],
-          nipFiRequired == true
-              ? 'Bearer ${testAssertion('synthetic-assertion')}'
-              : isNull,
-        );
-        expect(request.headers.containsKey('X-BB-Session-Credential'), isFalse);
+      result = _assertion('synthetic-assertion', body, bound);
+    } else if (_relayPaths.contains(path) || path.startsWith('/media/')) {
+      final assertion = request.headers[StrictNipFiRelay.header];
+      if (enforces(request.url)) {
+        if (!relay.admits(request.url, assertion)) {
+          return http.Response('', 401);
+        }
+      } else if (relayAuthEnabled) {
+        expect(assertion, isNull);
       }
-      result = <Object>[];
+      expect(request.headers.containsKey('X-BB-Session-Credential'), isFalse);
+      if (path == '/auth-transport') {
+        return http.Response(
+          '',
+          302,
+          headers: {'location': 'https://outside.example'},
+        );
+      }
+      if (path.startsWith('/media/')) return http.Response.bytes([0], 200);
+      result = path == '/upload'
+          ? {
+              'url': '${request.url.origin}/media/${'a' * 64}',
+              'sha256': 'a' * 64,
+              'size': request.bodyBytes.length,
+              'type': request.headers['content-type'],
+              'uploaded': 1,
+            }
+          : <Object>[];
     } else if (path.endsWith('/current')) {
       if (expiredSession) return http.Response('{}', 401);
       result = {
@@ -357,6 +372,35 @@ class HostedJourneyFixture {
     );
   });
 
+  static const _relayPaths = {
+    '/query',
+    '/profiles/search',
+    '/upload',
+    '/auth-transport',
+  };
+
+  /// Whether [url]'s relay refuses requests without a valid assertion: the
+  /// organization relay, and hosted relays whose discovery requires NIP-FI.
+  bool enforces(Uri url) =>
+      relayAuthEnabled &&
+      ((organizationEnabled && url.host == organizationRelayHost) ||
+          (HostedEnvironment.requiresAuth(url.host) && nipFiRequired == true));
+
+  Map<String, Object?> _assertion(String label, Map body, String? pubkey) {
+    final expiresAt =
+        assertionNow.add(const Duration(minutes: 5)).millisecondsSinceEpoch ~/
+        1000;
+    return {
+      'assertion': _latest[label] = relay.issue(
+        testAssertion('$label-${++_mints}'),
+        relayUrl: body['relay_url'] as String,
+        expiresAt: expiresAt,
+      ),
+      'nostr_pubkey': pubkey,
+      'expires_at': expiresAt,
+    };
+  }
+
   http.Client organizationClient() => MockClient((request) async {
     requests.add(request);
     expect(request.url.origin, organizationOrigin.origin);
@@ -382,15 +426,7 @@ class HostedJourneyFixture {
         return http.Response('{}', 403);
       }
       organizationBound ??= body['nostr_pubkey'] as String;
-      result = {
-        'assertion': testAssertion('organization-assertion'),
-        'nostr_pubkey': organizationBound,
-        'expires_at':
-            assertionNow
-                .add(const Duration(minutes: 5))
-                .millisecondsSinceEpoch ~/
-            1000,
-      };
+      result = _assertion('organization-assertion', body, organizationBound);
     } else {
       return http.Response('{}', 404);
     }
@@ -427,13 +463,22 @@ class HostedJourneyFixture {
     },
   );
 
+  /// Pumps the app over the synthetic boundaries. [realUploads] keeps the
+  /// app's own upload service instead of the stand-in that counts uploads.
   Future<void> mount(
     WidgetTester tester, {
     bool openEntry = true,
     bool addingCommunity = true,
+    bool realUploads = false,
     PairingCredentialValidator? pairingValidator,
     PairingSocketFactory? pairingSocketFactory,
   }) async {
+    if (!_checksRefusals) {
+      _checksRefusals = true;
+      addTearDown(
+        () => expect(relay.refusals, isEmpty, reason: 'A relay refused these'),
+      );
+    }
     await tester.binding.setSurfaceSize(const Size(440, 1100));
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       const MethodChannel('buzz/browser_auth'),
@@ -453,11 +498,12 @@ class HostedJourneyFixture {
         disableAnimations: true,
         overrides: [
           hostedFlowProvider.overrideWith(createFlow),
-          mediaUploadServiceProvider.overrideWith((ref) {
-            final uploads = _Uploads(this);
-            ref.onDispose(uploads.dispose);
-            return uploads;
-          }),
+          if (!realUploads)
+            mediaUploadServiceProvider.overrideWith((ref) {
+              final uploads = _Uploads(this);
+              ref.onDispose(uploads.dispose);
+              return uploads;
+            }),
           if (pairingValidator != null || pairingSocketFactory != null)
             pairingProvider.overrideWith(
               () => PairingNotifier(
@@ -784,18 +830,14 @@ class _RelaySocket extends RelaySocket {
   @override
   Future<void> connect() async {
     fixture.socketHeaders.add(Map.of(headers));
-    final host = Uri.parse(url).host;
-    expect(
-      headers['Nostr-Federated-Identity'],
-      fixture.organizationEnabled &&
-              host == HostedJourneyFixture.organizationRelayHost
-          // Signed out connects without one and lets the relay decide.
-          ? anyOf(isNull, 'Bearer ${testAssertion('organization-assertion')}')
-          : HostedEnvironment.requiresAuth(host) &&
-                fixture.nipFiRequired != false
-          ? 'Bearer ${testAssertion('synthetic-assertion')}'
-          : isNull,
-    );
+    final relay = Uri.parse(url);
+    final assertion = headers[StrictNipFiRelay.header];
+    if (!fixture.enforces(relay)) {
+      expect(assertion, isNull);
+    } else if (!fixture.relay.admits(relay, assertion, route: 'connect')) {
+      _disconnected(const WebSocketException('unauthorized', 401));
+      return;
+    }
     if (fixture.refuseUpgrade) {
       _disconnected(const WebSocketException('refused', 403));
     } else {
