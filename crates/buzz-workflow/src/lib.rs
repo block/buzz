@@ -31,6 +31,7 @@
 //! ```
 
 pub mod action_sink;
+pub mod approver;
 pub mod error;
 pub mod executor;
 pub mod schema;
@@ -52,7 +53,7 @@ use buzz_core::kind::{event_kind_u32, is_workflow_execution_kind, KIND_REACTION}
 use buzz_core::tenant::CommunityId;
 use buzz_db::workflow::RunStatus;
 use buzz_db::Db;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use dashmap::DashMap;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
@@ -287,6 +288,61 @@ impl WorkflowEngine {
         schema::parse_yaml(yaml)
     }
 
+    /// Persist a WF-08 approval gate and park the run in `WaitingApproval`.
+    ///
+    /// Looks the run up for its workflow id, inserts the approval record
+    /// (the token is hashed inside `create_approval`), then flips the run
+    /// status. Returns `Err(message)` for the caller to record as a failure.
+    ///
+    /// Follow-up: emit a kind-46010 approval event so mobile/desktop feeds
+    /// surface the gate. That needs a design for engine-authored event
+    /// signing first — there is deliberately no system key plumbed here yet.
+    #[allow(clippy::too_many_arguments)] // one call site; each argument is a gate column
+    async fn persist_approval_gate(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+        token: &str,
+        step_id: &str,
+        step_index: i32,
+        approver_spec: &str,
+        expires_in_secs: u64,
+        trace_json: &serde_json::Value,
+    ) -> Result<(), String> {
+        let run = self
+            .db
+            .get_workflow_run(community_id, run_id)
+            .await
+            .map_err(|e| format!("read run for gate persist: {e}"))?;
+        let expires_at = Utc::now()
+            + Duration::seconds(expires_in_secs.min(schema::MAX_APPROVAL_TIMEOUT_SECS) as i64);
+        self.db
+            .create_approval(buzz_db::workflow::CreateApprovalParams {
+                community_id,
+                token,
+                workflow_id: run.workflow_id,
+                run_id,
+                step_id,
+                step_index,
+                approver_spec,
+                expires_at,
+            })
+            .await
+            .map_err(|e| format!("create approval record: {e}"))?;
+        self.db
+            .update_workflow_run(
+                community_id,
+                run_id,
+                RunStatus::WaitingApproval,
+                step_index,
+                trace_json,
+                None,
+            )
+            .await
+            .map_err(|e| format!("park run in WaitingApproval: {e}"))?;
+        Ok(())
+    }
+
     /// Finalize a workflow run after execution completes or fails.
     ///
     /// This is the **single** place that maps an executor result to a DB status
@@ -311,33 +367,60 @@ impl WorkflowEngine {
                 let trace_json = serde_json::Value::Array(full_trace);
                 let step_count = result.step_index as i32;
 
-                if result.approval_token.is_some() {
-                    // Approval gates are not yet implemented (WF-08).
-                    // Fail explicitly rather than creating unreachable WaitingApproval rows.
-                    tracing::warn!(
+                if let Some(token) = result.approval_token {
+                    // WF-08: the gate is real — persist it and park the run in
+                    // WaitingApproval until the decide endpoint resumes or fails it.
+                    tracing::info!(
                         run_id = %run_id,
                         step_index = result.step_index,
-                        "Workflow hit approval gate — not yet implemented, marking as failed"
+                        "Workflow suspended at approval gate — persisting gate state"
                     );
-                    if let Err(e) = self
-                        .db
-                        .update_workflow_run(
-                            community_id,
-                            run_id,
-                            RunStatus::Failed,
-                            step_count,
-                            &trace_json,
-                            Some(buzz_db::workflow::WorkflowRunFailure {
-                                code: "approval_not_supported",
-                                message: "approval gates not yet implemented — see WF-08",
-                            }),
-                        )
-                        .await
-                    {
+                    // Never default the approver: an empty or missing spec must
+                    // not reach storage, where it would be read back at decision
+                    // time. Fail the run instead.
+                    let gate_result = match (result.approval_step_id, result.approver_spec) {
+                        (Some(step_id), Some(approver_spec)) => {
+                            self.persist_approval_gate(
+                                community_id,
+                                run_id,
+                                &token,
+                                &step_id,
+                                step_count,
+                                &approver_spec,
+                                result.approval_expires_in_secs.unwrap_or(86_400),
+                                &trace_json,
+                            )
+                            .await
+                        }
+                        _ => {
+                            Err("suspended step is missing its gate step id or approver".to_owned())
+                        }
+                    };
+                    if let Err(message) = gate_result {
                         tracing::error!(
                             run_id = %run_id,
-                            "Failed to update run to Failed (approval gate): {e}"
+                            "Failed to persist approval gate: {message}"
                         );
+                        if let Err(e) = self
+                            .db
+                            .update_workflow_run(
+                                community_id,
+                                run_id,
+                                RunStatus::Failed,
+                                step_count,
+                                &trace_json,
+                                Some(buzz_db::workflow::WorkflowRunFailure {
+                                    code: "approval_persist_error",
+                                    message: &message,
+                                }),
+                            )
+                            .await
+                        {
+                            tracing::error!(
+                                run_id = %run_id,
+                                "Failed to update run to Failed (approval gate): {e}"
+                            );
+                        }
                     }
                 } else {
                     tracing::info!(run_id = %run_id, "Workflow run completed");

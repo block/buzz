@@ -1280,36 +1280,31 @@ async fn handle_workflow_trigger(
     })
 }
 
-/// Enforce the approver_spec field against the requesting pubkey.
+/// Authorize a Nostr grant/deny command through the shared decision check.
 ///
-/// Accepted specs:
-/// - `""` or `"any"` — any authenticated user may approve.
-/// - 64-char lowercase hex string — only that exact pubkey may approve.
-///
-/// All other formats are rejected (fail-closed).
-fn check_approver_spec(approver_spec: &str, requester_hex: &str) -> Result<(), IngestError> {
-    let spec = approver_spec.trim();
-
-    // Empty or "any" — anyone may approve
-    if spec.is_empty() || spec == "any" {
-        return Ok(());
-    }
-
-    // Exact pubkey match (64-char hex, case-insensitive)
-    if spec.len() == 64 && spec.chars().all(|c| c.is_ascii_hexdigit()) {
-        if requester_hex.to_lowercase() == spec.to_lowercase() {
-            return Ok(());
+/// Same policy as the HTTP decide endpoint
+/// ([`crate::api::workflows::authorize_approval_decision`]): the requester
+/// must read the workflow's channel and satisfy the gate's approver spec.
+/// An unreadable workflow answers like a missing approval.
+async fn authorize_approval_command(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    approval: &buzz_db::workflow::ApprovalRecord,
+    requester: &nostr::PublicKey,
+) -> Result<(), IngestError> {
+    use crate::api::workflows::{authorize_approval_decision, ApprovalDecisionError};
+    match authorize_approval_decision(state, tenant.community(), approval, requester).await {
+        Ok(()) => Ok(()),
+        Err(ApprovalDecisionError::WorkflowNotReadable) => {
+            Err(IngestError::Rejected("invalid: approval not found".into()))
         }
-        return Err(IngestError::Rejected(
-            "forbidden: not the designated approver for this request".into(),
-        ));
+        Err(ApprovalDecisionError::Denied(denied)) => {
+            Err(IngestError::Rejected(format!("forbidden: {denied}")))
+        }
+        Err(ApprovalDecisionError::Internal(error)) => {
+            Err(IngestError::Internal(format!("error: {error}")))
+        }
     }
-
-    // Role-based or unrecognised — fail closed
-    Err(IngestError::Rejected(format!(
-        "forbidden: approver spec '{}' is not yet supported",
-        spec
-    )))
 }
 
 async fn handle_approval_grant(
@@ -1319,7 +1314,6 @@ async fn handle_approval_grant(
     auth: &IngestAuth,
 ) -> Result<IngestResult, IngestError> {
     let self_bytes = auth.pubkey().to_bytes().to_vec();
-    let self_hex = hex::encode(&self_bytes);
 
     // 1. Extract approval reference from `e` tag (references the approval-requested event)
     //    or `d` tag (contains the token hash hex)
@@ -1339,7 +1333,12 @@ async fn handle_approval_grant(
         .await
         .map_err(|_| IngestError::Rejected("invalid: approval not found".into()))?;
 
-    // 3. Validate approval is pending and not expired
+    // 3. Validate caller is authorized approver, before any write and before
+    //    revealing the gate's state: an unauthorized caller learns nothing
+    //    about whether it is still pending (same order as the HTTP path).
+    authorize_approval_command(tenant, state, &approval, auth.pubkey()).await?;
+
+    // 4. Validate approval is pending and not expired
     if approval.status != ApprovalStatus::Pending {
         return Err(IngestError::Rejected(format!(
             "invalid: approval already {}",
@@ -1351,9 +1350,6 @@ async fn handle_approval_grant(
             "invalid: approval token has expired".into(),
         ));
     }
-
-    // 4. Validate caller is authorized approver
-    check_approver_spec(&approval.approver_spec, &self_hex)?;
 
     // Persist the command event — returns open transaction
     let tx = match persist_command_event(&state.db, tenant, event, None).await? {
@@ -1450,7 +1446,12 @@ async fn handle_approval_deny(
         .await
         .map_err(|_| IngestError::Rejected("invalid: approval not found".into()))?;
 
-    // 3. Validate approval is pending and not expired
+    // 3. Validate caller is authorized approver, before any write and before
+    //    revealing the gate's state: an unauthorized caller learns nothing
+    //    about whether it is still pending (same order as the HTTP path).
+    authorize_approval_command(tenant, state, &approval, auth.pubkey()).await?;
+
+    // 4. Validate approval is pending and not expired
     if approval.status != ApprovalStatus::Pending {
         return Err(IngestError::Rejected(format!(
             "invalid: approval already {}",
@@ -1462,9 +1463,6 @@ async fn handle_approval_deny(
             "invalid: approval token has expired".into(),
         ));
     }
-
-    // 4. Validate caller is authorized approver
-    check_approver_spec(&approval.approver_spec, &self_hex)?;
 
     // Persist the command event — returns open transaction
     let tx = match persist_command_event(&state.db, tenant, event, None).await? {

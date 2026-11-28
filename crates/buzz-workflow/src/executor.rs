@@ -466,11 +466,28 @@ pub fn resolve_step_templates(
             from,
             message,
             timeout,
-        } => Ok(RequestApproval {
-            from: t(from)?,
-            message: t(message)?,
-            timeout: timeout.clone(),
-        }),
+        } => {
+            // The resolved approver is what the gate persists and what every
+            // decision path authorizes against, so pin it here: a templated
+            // `from` must resolve to a pubkey and a concrete one must be a
+            // supported spec. Fails the run instead of parking a gate that is
+            // either undecidable or decidable by the wrong people.
+            let resolved = t(from)?;
+            let from =
+                crate::approver::resolve_gate_approver(from, &resolved).map_err(|e| match e {
+                    crate::approver::ApproverSpecError::TemplateNotPubkey => {
+                        WorkflowError::TemplateError(format!("step '{}': {e}", step.id))
+                    }
+                    other => {
+                        WorkflowError::InvalidDefinition(format!("step '{}': {other}", step.id))
+                    }
+                })?;
+            Ok(RequestApproval {
+                from,
+                message: t(message)?,
+                timeout: timeout.clone(),
+            })
+        }
         Delay { duration } => Ok(Delay {
             duration: duration.clone(),
         }),
@@ -486,6 +503,12 @@ pub enum StepResult {
     Suspended {
         /// Token used to resume or reject this approval gate.
         approval_token: String,
+        /// ID of the step that requested approval.
+        step_id: String,
+        /// Approver spec from the `RequestApproval` action (`from`).
+        approver_spec: String,
+        /// Gate lifetime in seconds from suspension.
+        expires_in_secs: u64,
     },
     /// Step was skipped due to `if:` condition being false.
     Skipped,
@@ -884,12 +907,13 @@ pub async fn dispatch_action(
                     );
 
                     let token = generate_approval_token(run_id, step_id);
-
-                    // TODO (WF-08): create approval record in DB, emit kind:46010.
-                    // For now, return Suspended with the token so the caller can persist state.
+                    let expires_in_secs = parse_duration_secs(timeout_str)?;
 
                     Ok(StepResult::Suspended {
                         approval_token: token,
+                        step_id: step_id.to_string(),
+                        approver_spec: from.clone(),
+                        expires_in_secs,
                     })
                 }
 
@@ -942,37 +966,37 @@ fn generate_approval_token(_run_id: Uuid, _step_id: &str) -> String {
     Uuid::new_v4().to_string()
 }
 
-/// Parse a duration string like "5m", "1h", "30s" into seconds.
+/// Parse a duration string like "5m", "1h", "7d", "30s" into seconds.
+///
+/// Grammar: optional surrounding whitespace, ASCII digits, optional unit
+/// suffix `s`, `m`, `h`, or `d` (no suffix means seconds). Signs, decimals,
+/// and other units are rejected; a value that overflows `u64` seconds is an
+/// error rather than a wrap. Range policy (zero, maxima) is enforced by the
+/// caller (`WorkflowDef::validate`).
 ///
 /// Exposed as `pub(crate)` so `schema.rs` can use it for interval validation.
 pub(crate) fn parse_duration_secs(duration: &str) -> Result<u64, WorkflowError> {
     let duration = duration.trim();
-    if let Some(n) = duration.strip_suffix('h') {
-        let hours: u64 = n.trim().parse().map_err(|_| {
-            WorkflowError::InvalidDefinition(format!("invalid duration: {duration}"))
-        })?;
-        return hours.checked_mul(3600).ok_or_else(|| {
-            WorkflowError::InvalidDefinition(format!("duration overflow: {duration}"))
-        });
+    let invalid = || WorkflowError::InvalidDefinition(format!("invalid duration: {duration}"));
+    let (number, multiplier) = if let Some(n) = duration.strip_suffix('d') {
+        (n, 86_400)
+    } else if let Some(n) = duration.strip_suffix('h') {
+        (n, 3_600)
+    } else if let Some(n) = duration.strip_suffix('m') {
+        (n, 60)
+    } else if let Some(n) = duration.strip_suffix('s') {
+        (n, 1)
+    } else {
+        (duration, 1)
+    };
+    let number = number.trim();
+    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid());
     }
-    if let Some(n) = duration.strip_suffix('m') {
-        let mins: u64 = n.trim().parse().map_err(|_| {
-            WorkflowError::InvalidDefinition(format!("invalid duration: {duration}"))
-        })?;
-        return mins.checked_mul(60).ok_or_else(|| {
-            WorkflowError::InvalidDefinition(format!("duration overflow: {duration}"))
-        });
-    }
-    if let Some(n) = duration.strip_suffix('s') {
-        let secs: u64 = n.trim().parse().map_err(|_| {
-            WorkflowError::InvalidDefinition(format!("invalid duration: {duration}"))
-        })?;
-        return Ok(secs);
-    }
-    // Plain number — assume seconds.
-    duration
-        .parse()
-        .map_err(|_| WorkflowError::InvalidDefinition(format!("invalid duration: {duration}")))
+    let value: u64 = number.parse().map_err(|_| invalid())?;
+    value
+        .checked_mul(multiplier)
+        .ok_or_else(|| WorkflowError::InvalidDefinition(format!("duration overflow: {duration}")))
 }
 
 // is_private_ip is provided by buzz_core::network::is_private_ip
@@ -1186,6 +1210,12 @@ pub struct ExecutionResult {
     /// Set when execution suspended at a `RequestApproval` step.
     /// `None` means the run completed normally.
     pub approval_token: Option<String>,
+    /// Step ID that suspended (WF-08 gate context).
+    pub approval_step_id: Option<String>,
+    /// Approver spec from the `RequestApproval` action.
+    pub approver_spec: Option<String>,
+    /// Gate lifetime in seconds from suspension.
+    pub approval_expires_in_secs: Option<u64>,
     /// Index of the step that suspended (or the total step count on completion).
     pub step_index: usize,
     /// Accumulated step outputs at the point of suspension or completion.
@@ -1437,7 +1467,12 @@ async fn execute_steps(
                 }));
                 step_outputs.insert(step.id.clone(), output);
             }
-            StepResult::Suspended { approval_token } => {
+            StepResult::Suspended {
+                approval_token,
+                step_id,
+                approver_spec,
+                expires_in_secs,
+            } => {
                 info!(
                     run_id = %run_id, step = %step.id,
                     "Step suspended — awaiting approval (token: <redacted>)"
@@ -1446,6 +1481,9 @@ async fn execute_steps(
                 // approval record and update the run's execution trace.
                 return Ok(ExecutionResult {
                     approval_token: Some(approval_token),
+                    approval_step_id: Some(step_id),
+                    approver_spec: Some(approver_spec),
+                    approval_expires_in_secs: Some(expires_in_secs),
                     step_index: i,
                     step_outputs,
                     trace,
@@ -1464,6 +1502,9 @@ async fn execute_steps(
     info!(run_id = %run_id, "Workflow run completed");
     Ok(ExecutionResult {
         approval_token: None,
+        approval_step_id: None,
+        approver_spec: None,
+        approval_expires_in_secs: None,
         step_index: def.steps.len(),
         step_outputs,
         trace,
@@ -1653,6 +1694,79 @@ mod tests {
         }
     }
 
+    fn approval_step(from: &str) -> Step {
+        Step {
+            id: "gate".to_owned(),
+            name: None,
+            if_expr: None,
+            timeout_secs: None,
+            action: ActionDef::RequestApproval {
+                from: from.to_owned(),
+                message: "Approve?".to_owned(),
+                timeout: None,
+            },
+        }
+    }
+
+    fn resolved_approver(step: &Step, ctx: &TriggerContext) -> Result<String, WorkflowError> {
+        match resolve_step_templates(step, ctx, &HashMap::new())? {
+            ActionDef::RequestApproval { from, .. } => Ok(from),
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    /// The gate persists the resolved approver, so resolution is where a
+    /// templated `from` is pinned to a pubkey. Attacker-influenced template
+    /// input (message text, webhook fields) must never widen the gate.
+    #[test]
+    fn templated_approver_resolves_only_to_a_pubkey() {
+        let author = nostr::Keys::generate().public_key().to_hex();
+        let mut ctx = make_trigger();
+        ctx.author = author.to_uppercase();
+        assert_eq!(
+            resolved_approver(&approval_step("{{trigger.author}}"), &ctx).unwrap(),
+            author,
+            "canonical lowercase pubkey is persisted"
+        );
+
+        for text in ["any", "", "@manager", "not-a-key"] {
+            ctx.text = text.to_owned();
+            let err = resolved_approver(&approval_step("{{trigger.text}}"), &ctx).unwrap_err();
+            assert!(
+                matches!(err, WorkflowError::TemplateError(_)),
+                "{text:?}: {err}"
+            );
+            assert!(err.to_string().contains("step 'gate'"), "{err}");
+            if !text.is_empty() {
+                assert!(
+                    !err.to_string().contains(text),
+                    "untrusted value echoed: {err}"
+                );
+            }
+        }
+        // An unknown variable stays literal and therefore fails closed too.
+        let err = resolved_approver(&approval_step("{{trigger.nope}}"), &ctx).unwrap_err();
+        assert!(matches!(err, WorkflowError::TemplateError(_)), "{err}");
+    }
+
+    /// A definition stored before definition-time validation (e.g. with
+    /// `from: '@manager'`) fails the run instead of parking a gate.
+    #[test]
+    fn legacy_unsupported_approver_fails_at_gate_creation() {
+        let ctx = make_trigger();
+        for from in ["@manager", "", "manager"] {
+            let err = resolved_approver(&approval_step(from), &ctx).unwrap_err();
+            assert!(
+                matches!(err, WorkflowError::InvalidDefinition(_)),
+                "{from:?}: {err}"
+            );
+        }
+        assert_eq!(
+            resolved_approver(&approval_step(" any "), &ctx).unwrap(),
+            "any"
+        );
+    }
+
     #[tokio::test]
     async fn condition_or_expression() {
         let ctx = make_trigger(); // text contains "P1"
@@ -1740,8 +1854,58 @@ mod tests {
     }
 
     #[test]
+    fn parse_duration_days() {
+        assert_eq!(parse_duration_secs("1d").unwrap(), 86_400);
+        assert_eq!(parse_duration_secs("7d").unwrap(), 7 * 86_400);
+        assert_eq!(parse_duration_secs(" 2d ").unwrap(), 2 * 86_400);
+    }
+
+    #[test]
+    fn parse_duration_overflow() {
+        assert!(parse_duration_secs("99999999999999999999d").is_err());
+        assert!(parse_duration_secs("99999999999999999999h").is_err());
+    }
+
+    #[test]
     fn parse_duration_invalid() {
         assert!(parse_duration_secs("not-a-duration").is_err());
+        assert!(parse_duration_secs("").is_err());
+        assert!(parse_duration_secs("h").is_err());
+        assert!(parse_duration_secs("1x").is_err());
+        assert!(parse_duration_secs("1.5h").is_err());
+        assert!(parse_duration_secs("+5m").is_err());
+        assert!(parse_duration_secs("-5m").is_err());
+        assert!(parse_duration_secs("5ms").is_err());
+        assert!(parse_duration_secs("5H").is_err());
+        assert!(parse_duration_secs("1d1h").is_err());
+    }
+
+    #[test]
+    fn parse_duration_units_and_boundaries() {
+        assert_eq!(parse_duration_secs("0").unwrap(), 0);
+        assert_eq!(parse_duration_secs("90s").unwrap(), 90);
+        assert_eq!(parse_duration_secs("2m").unwrap(), 120);
+        assert_eq!(parse_duration_secs("3h").unwrap(), 10_800);
+        assert_eq!(parse_duration_secs("7d").unwrap(), 604_800);
+        assert_eq!(parse_duration_secs(" 5 m ").unwrap(), 300);
+        assert_eq!(
+            parse_duration_secs(&u64::MAX.to_string()).unwrap(),
+            u64::MAX
+        );
+        assert_eq!(
+            parse_duration_secs(&format!("{}s", u64::MAX)).unwrap(),
+            u64::MAX
+        );
+        // Largest day count that fits, and the first that does not.
+        let max_days = u64::MAX / 86_400;
+        assert_eq!(
+            parse_duration_secs(&format!("{max_days}d")).unwrap(),
+            max_days * 86_400
+        );
+        let err = parse_duration_secs(&format!("{}d", max_days + 1)).unwrap_err();
+        assert!(err.to_string().contains("duration overflow"), "{err}");
+        let err = parse_duration_secs("18446744073709551616").unwrap_err();
+        assert!(err.to_string().contains("invalid duration"), "{err}");
     }
 
     #[test]
@@ -2166,7 +2330,7 @@ mod tests {
         )));
 
         for other in [
-            "  - id: approve\n    action: request_approval\n    from: '@manager'\n    message: ok?\n",
+            "  - id: approve\n    action: request_approval\n    from: any\n    message: ok?\n",
             "  - id: react\n    action: add_reaction\n    emoji: eyes\n",
             "  - id: dm\n    action: send_dm\n    to: '{{trigger.author}}'\n    text: hi\n",
             "  - id: topic\n    action: set_channel_topic\n    topic: hi\n",
