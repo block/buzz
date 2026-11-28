@@ -79,6 +79,7 @@ void main() {
         'status': 2,
         'model_id': 'old-model',
         'reasoning_effort': 'low',
+        'agent_instructions': 'old instructions',
       },
     ];
     final controller = await _controller(registry);
@@ -98,6 +99,20 @@ void main() {
       pubkey: key ?? fakeAgent,
       model: model,
       effort: effort,
+      isCurrent: () => current,
+    );
+  }
+
+  Future<bool> saveInstructions(
+    RelayFakeController controller, {
+    String instructions = 'Updated test instructions',
+    bool current = true,
+    String? key,
+  }) async {
+    return controller.updateInstructions(
+      community: _community(),
+      pubkey: key ?? fakeAgent,
+      instructions: instructions,
       isCurrent: () => current,
     );
   }
@@ -163,6 +178,61 @@ void main() {
     ];
     expect(controller.modelCatalog(), throwsStateError);
   });
+
+  test(
+    'instruction changes save text and confirm server readback',
+    () async {
+      final (controller, registry) = await editableAgent();
+      expect(await saveInstructions(controller), isTrue);
+      expect(registry.bodies['/v3/beekeeper/update-agent'], {
+        'agent_pubkey': fakeAgent,
+        'agent_instructions': 'Updated test instructions',
+      });
+      expect(
+        controller.agents.single['agent_instructions'],
+        'Updated test instructions',
+      );
+    },
+  );
+
+  test(
+    'rejected instruction writes preserve saved instructions and surface failure',
+    () async {
+      final (controller, registry) = await editableAgent();
+      registry.failInstructions = true;
+      expect(await saveInstructions(controller), isFalse);
+      expect(
+        controller.agents.single['agent_instructions'],
+        'old instructions',
+      );
+      expect(controller.failure, contains('instructions unavailable'));
+    },
+  );
+
+  test('unconfirmed instruction write does not report success', () async {
+    final (controller, registry) = await editableAgent();
+    registry.ignoreInstructionsUpdate = true;
+    expect(await saveInstructions(controller), isFalse);
+    expect(controller.failure, contains('not confirmed'));
+    expect(
+      controller.agents.single['agent_instructions'],
+      'old instructions',
+    );
+  });
+
+  test(
+    'instruction writes reject texts exceeding 20000 characters or stale community',
+    () async {
+      final (controller, registry) = await editableAgent();
+      expect(await saveInstructions(controller, current: false), isFalse);
+      expect(await saveInstructions(controller, key: 'a' * 64), isFalse);
+      expect(
+        await saveInstructions(controller, instructions: 'x' * 20001),
+        isFalse,
+      );
+      expect(registry.calls, isNot(contains('update-agent')));
+    },
+  );
 
   test(
     'reconnect adopts only the server-bound saved community identity',
