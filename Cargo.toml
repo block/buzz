@@ -2,6 +2,7 @@
 members = [
     "crates/buzz-relay",
     "crates/buzz-core",
+    "crates/buzz-git-gate",
     "crates/ifc-core",
     "crates/buzz-conformance",
     "crates/buzz-push-gateway",

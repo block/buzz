@@ -392,6 +392,7 @@ pub async fn handle_side_effects(
     kind: u32,
     event: &Event,
     state: &Arc<AppState>,
+    repo_reservation: Option<bool>,
 ) -> anyhow::Result<()> {
     match kind {
         0 => handle_kind0_profile(tenant, event, state).await,
@@ -415,8 +416,11 @@ pub async fn handle_side_effects(
         }
         9021 => handle_join_request(tenant, event, state).await,
         9022 => handle_leave_request(tenant, event, state).await,
-        // NIP-34: Git repo announcement → reserve name + seed manifest pointer.
-        KIND_GIT_REPO_ANNOUNCEMENT => handle_git_repo_announcement(tenant, event, state).await,
+        KIND_GIT_REPO_ANNOUNCEMENT => {
+            let reserved = repo_reservation
+                .ok_or_else(|| anyhow::anyhow!("missing committed repo announcement"))?;
+            seed_repo_announcement(tenant, event, state, reserved, &Default::default()).await
+        }
         KIND_AGENT_PROFILE => handle_agent_profile(tenant, event, state).await,
         // kind:7 (reaction) handled inline in ingest_event() before storage.
         _ => Ok(()),
@@ -3898,35 +3902,18 @@ fn delete_tombstone_content(
 
 /// Validate a git repo identifier (d-tag value from kind:30617).
 ///
-/// Rules: `[a-zA-Z0-9._-]{1,64}`, no leading dots, no `..`.
-fn validate_repo_id(repo_id: &str) -> bool {
+/// Rules: `[a-zA-Z0-9._-]{1,64}`, no leading dots, no `..`, no `.git` suffix:
+/// the Git routes strip one `.git`, so a name ending in it could never be
+/// reached as itself.
+pub(super) fn validate_repo_id(repo_id: &str) -> bool {
     !repo_id.is_empty()
         && repo_id.len() <= 64
         && !repo_id.starts_with('.')
         && !repo_id.contains("..")
+        && !repo_id.ends_with(".git")
         && repo_id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
-}
-
-/// Handle kind:30617 (NIP-34 Git Repository Announcement).
-///
-/// Reserves the repo name and seeds its empty-manifest pointer when a repo
-/// announcement event is stored. The event's `d` tag is the repo identifier;
-/// the pubkey is the owner. No bare repo is created on disk — runtime reads
-/// and writes hydrate an ephemeral repo from object storage per request.
-///
-/// Security hardening:
-/// - Repo name validated: `[a-zA-Z0-9._-]{1,64}`, no leading dots, no `..`
-/// - Name reserved atomically in Postgres (`git_repo_names`), unique per community
-/// - Per-pubkey repo count limit enforced
-async fn handle_git_repo_announcement(
-    tenant: &TenantContext,
-    event: &Event,
-    state: &Arc<AppState>,
-) -> anyhow::Result<()> {
-    handle_git_repo_announcement_inner(tenant, event, state, &GitRepoAnnouncementHooks::default())
-        .await
 }
 
 #[derive(Default)]
@@ -3942,112 +3929,18 @@ pub(crate) struct GitRepoAnnouncementGate {
     pub(crate) resume: tokio::sync::Notify,
 }
 
-pub(crate) async fn handle_git_repo_announcement_inner(
+pub(crate) async fn seed_repo_announcement(
     tenant: &TenantContext,
     event: &Event,
     state: &Arc<AppState>,
+    reserved_by_this_attempt: bool,
     hooks: &GitRepoAnnouncementHooks,
 ) -> anyhow::Result<()> {
     #[cfg(not(test))]
     let _ = hooks;
-    // Extract repo identifier from d tag (required for NIP-33 parameterized replaceable events).
-    let repo_id =
-        extract_tag_value(event, "d").ok_or_else(|| anyhow::anyhow!("kind:30617 missing d tag"))?;
-
-    if !validate_repo_id(&repo_id) {
-        return Err(anyhow::anyhow!(
-            "invalid repo identifier: must be [a-zA-Z0-9._-]{{1,64}}, no leading dots, no '..'"
-        ));
-    }
-
+    let repo_id = buzz_db::event::extract_d_tag(event).unwrap_or_default();
     let owner_hex = hex::encode(event.pubkey.to_bytes());
-
-    // The relay holds no persistent per-repo disk state: runtime reads and
-    // writes hydrate an ephemeral bare repo from object storage per request
-    // (see `api::git::hydrate`). Announce only (1) reserves the repo name and
-    // (2) seeds the empty-manifest pointer that makes the repo clone-able.
-    //
-    // The `git_repo_names` table (Postgres) is the relay's name registry,
-    // keyed `(community_id, repo_id)`. It serves three jobs at once inside the
-    // server-resolved community boundary:
-    //   - uniqueness: `INSERT … ON CONFLICT DO NOTHING` is atomic, so
-    //     concurrent kind:30617 events for the same community/name can't both
-    //     claim it (TOCTOU-free — the DB PK is the race guard);
-    //   - idempotent re-announce: a reservation owned by the same pubkey is an
-    //     update, not a collision;
-    //   - per-pubkey quota: `COUNT` reservations owned by this pubkey.
-    //
-    // This replaces the v1 local-disk `.names/` index. Moving it into Postgres
-    // (which the relay already requires) removes the last persistent local-disk
-    // state, so separate replicas no longer need a shared ReadWriteMany volume
-    // to agree on name ownership. Actual ref-state safety remains the
-    // object-store pointer CAS (`api::git::cas_publish`, `Inv_NoFork`); this
-    // registry only governs name allocation.
     let community = tenant.community();
-    use buzz_db::git_repo::ReserveOutcome;
-
-    // Classify the name first: same-owner re-announce is idempotent; a name
-    // held by anyone else is a collision (the relay signs kind:30618 with
-    // d-tag = repo_name, so a shared name would let one owner overwrite
-    // another's ref state). For a not-yet-owned name we must check quota
-    // *before* claiming, so we peek the current holder rather than inserting
-    // blindly.
-    //
-    // Crucially, we do NOT return early on a same-owner existing row: the row
-    // proves name *ownership*, not that the manifest pointer was actually
-    // seeded. A concurrent same-owner announce could hold the row while its
-    // seed is still in flight (or failed and rolled back), so trusting the row
-    // alone would let this handler "accept" an uncloneable repo. Instead we
-    // fall through to `seed_manifest_pointer`, which is idempotent under
-    // concurrency (create-only `put_pointer(IfNoneMatchStar)`; a `LostRace` on
-    // the same empty digest is success, a different non-empty pointer is a
-    // hard error). So re-announce *ensures* the pointer rather than assuming it.
-    let outcome =
-        if let Some(existing_owner) = state.db.repo_name_owner(community, &repo_id).await? {
-            if existing_owner != owner_hex {
-                return Err(anyhow::anyhow!(
-                    "repo name '{repo_id}' already taken by another owner"
-                ));
-            }
-            // Same owner: the reservation already exists (this attempt did not
-            // create it), so it must never be rolled back by this attempt, and the
-            // per-pubkey quota is unchanged (re-announce never grows the count).
-            ReserveOutcome::AlreadyOwned
-        } else {
-            // Not yet owned by anyone we saw: enforce the per-pubkey quota, then
-            // claim the name atomically. The `ON CONFLICT` guard resolves a
-            // concurrent announce even though the peek above missed it —
-            // `Reserved` means *this attempt* won the insert, `AlreadyOwned` means
-            // a same-owner sibling won it, `TakenByOther` is a cross-owner
-            // collision.
-            let limit = state.config.git_max_repos_per_pubkey as i64;
-            let owned = state
-                .db
-                .count_repos_for_owner(community, &owner_hex)
-                .await?;
-            if owned >= limit {
-                return Err(anyhow::anyhow!("repo limit exceeded: {owned} >= {limit}"));
-            }
-            match state
-                .db
-                .reserve_repo_name(community, &repo_id, &owner_hex)
-                .await?
-            {
-                outcome @ (ReserveOutcome::Reserved | ReserveOutcome::AlreadyOwned) => outcome,
-                ReserveOutcome::TakenByOther => {
-                    return Err(anyhow::anyhow!(
-                        "repo name '{repo_id}' already taken by another owner"
-                    ));
-                }
-            }
-        };
-
-    // Only a genuinely fresh claim by *this* attempt may be rolled back on a
-    // pointer failure. An `AlreadyOwned` outcome means the row is owned by some
-    // other attempt (a same-owner sibling, or a prior announce that has since
-    // pushed), and deleting it here would strand a repo whose pointer that
-    // other attempt already established.
-    let reserved_by_this_attempt = matches!(outcome, ReserveOutcome::Reserved);
 
     // The event row and name registry are ordinary database state: if deletion
     // quiescing wins before they commit, the DB write fence rejects them; if
@@ -5018,6 +4911,18 @@ mod tests {
 
     fn tag(name: &str, value: &str) -> Vec<String> {
         vec![name.to_string(), value.to_string()]
+    }
+
+    /// An announced name the Git routes could only reach by stripping it is
+    /// refused: `x.git` would be served as `x`.
+    #[test]
+    fn a_repo_name_ending_in_dot_git_is_refused() {
+        for name in ["x", "x.gitx", "x.git-1", "a.b"] {
+            assert!(validate_repo_id(name), "{name}");
+        }
+        for name in ["x.git", ".git", "x.git.git"] {
+            assert!(!validate_repo_id(name), "{name}");
+        }
     }
 
     #[test]

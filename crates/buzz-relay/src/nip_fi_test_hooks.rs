@@ -205,6 +205,9 @@ make_hook!(audio_membership_check_hook, before_membership_check);
 // immediately before the relay membership lookup. Closing the pool here makes
 // that lookup fail with the tenant already bound.
 make_hook!(git_membership_hook, before_git_membership);
+// `after_git_read_decided`: fires when a read record has found its
+// repository ungoverned, before the door serves what it picked.
+make_hook!(git_read_decided_hook, after_git_read_decided);
 // `before_auto_join_channel`: fires in the admission auto-join before each
 // default channel's effect permit. Cancelling the socket here proves that
 // channel is not joined.

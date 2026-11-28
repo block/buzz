@@ -42,7 +42,7 @@ use buzz_core::TenantContext;
 /// Manifests should stay small after ref/pack cardinality validation. Bound
 /// the object read itself so malformed historical state cannot allocate an
 /// arbitrary JSON body before validation runs.
-const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
+pub(super) const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 
 /// A bare repo hydrated to a temporary directory.
 ///
@@ -128,8 +128,30 @@ pub async fn hydrate_for_read(
     repo: &str,
     options: HydrationOptions<'_>,
 ) -> Result<Option<HydratedRepo>, HydrateError> {
+    observe_read(hydrate_for_read_inner(store, ctx, owner, repo, options)).await
+}
+
+/// [`hydrate_for_read`] of an already-resolved manifest, such as the
+/// committed state the governed land reads. `None` hydrates nothing.
+pub async fn hydrate_manifest_for_read(
+    store: &GitStore,
+    manifest: Option<Manifest>,
+    options: HydrationOptions<'_>,
+) -> Result<Option<HydratedRepo>, HydrateError> {
+    observe_read(async {
+        match manifest {
+            Some(manifest) => Ok(Some(materialize_manifest(store, &manifest, options).await?)),
+            None => Ok(None),
+        }
+    })
+    .await
+}
+
+async fn observe_read(
+    hydrate: impl std::future::Future<Output = Result<Option<HydratedRepo>, HydrateError>>,
+) -> Result<Option<HydratedRepo>, HydrateError> {
     let started_at = std::time::Instant::now();
-    let result = hydrate_for_read_inner(store, ctx, owner, repo, options).await;
+    let result = hydrate.await;
     let outcome = match &result {
         Ok(Some(repo)) => {
             metrics::histogram!("buzz_git_hydrate_bytes").record(repo.hydrated_bytes() as f64);
@@ -211,7 +233,18 @@ pub async fn hydrate_for_write(
     repo: &str,
     options: HydrationOptions<'_>,
 ) -> Result<(HydratedRepo, ParentState), HydrateError> {
-    match load_pointer(store, ctx, owner, repo).await? {
+    let loaded = load_pointer(store, ctx, owner, repo).await?;
+    hydrate_loaded_for_write(store, loaded, options).await
+}
+
+/// [`hydrate_for_write`] from an already-resolved `(ETag, digest, manifest)`,
+/// such as the committed state the governed land reads.
+pub async fn hydrate_loaded_for_write(
+    store: &GitStore,
+    loaded: Option<(ETag, String, Manifest)>,
+    options: HydrationOptions<'_>,
+) -> Result<(HydratedRepo, ParentState), HydrateError> {
+    match loaded {
         Some((etag, digest, manifest)) => {
             let repo = materialize_manifest(store, &manifest, options).await?;
             let parent = ParentState::from_loaded(etag, digest, manifest);

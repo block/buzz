@@ -1687,6 +1687,8 @@ pub struct AppState {
     /// See `crates/buzz-conformance/` and `crate::conformance` for the
     /// schema, emitter helpers, and the independent checker.
     pub tracer: Arc<dyn buzz_conformance::Tracer>,
+    /// The Git land's conformance trace (`buzz_conformance::git_land`).
+    pub land_tracer: Arc<dyn buzz_conformance::git_land::LandTracer>,
 
     /// Inter-relay mesh handle, set once by `main.rs` after `mesh_boot` (never
     /// a constructor parameter, so `AppState::new` call sites are untouched).
@@ -1989,6 +1991,7 @@ impl AppState {
             // construction (see test helpers in
             // `crates/buzz-test-client` once those land).
             tracer: Arc::new(crate::conformance::NoopTracer),
+            land_tracer: Arc::new(buzz_conformance::git_land::NoopLandTracer),
             mesh: Arc::new(std::sync::OnceLock::new()),
             nip_fi_verifier,
             nip_fi_policy,

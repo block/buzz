@@ -73,8 +73,7 @@ pub(crate) async fn community_ban_verdict(
     state: &AppState,
     community: buzz_core::CommunityId,
     pubkey: nostr::PublicKey,
-    auth_tag_json: Option<&str>,
-    signed_auth_created_at: Option<u64>,
+    oa: crate::api::relay_members::NipOa<'_>,
     token_owner: Option<nostr::PublicKey>,
     cached: bool,
 ) -> BanVerdict {
@@ -92,14 +91,7 @@ pub(crate) async fn community_ban_verdict(
     }
     // A NIP-FI agent assertion's verified owner cascades unconditionally,
     // whether the agent is a member itself or admitted through that owner.
-    let owner = token_owner.or_else(|| {
-        crate::api::relay_members::extract_nip_oa_owner(
-            pubkey.as_bytes(),
-            auth_tag_json,
-            signed_auth_created_at,
-        )
-    });
-    match owner {
+    match token_owner.or_else(|| oa.owner(pubkey.as_bytes())) {
         Some(owner) => BanVerdict {
             outcome: principal_ban_outcome(state, community, &owner, cached).await,
             source: BanSource::Owner,
@@ -324,8 +316,7 @@ pub(crate) async fn final_admission_denial(
         state,
         community,
         pubkey,
-        auth_tag_json,
-        signed_auth_created_at,
+        crate::api::relay_members::NipOa::Tag(auth_tag_json, signed_auth_created_at),
         token_owner,
         false,
     )
@@ -652,8 +643,10 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     &state,
                     conn.tenant.community(),
                     pubkey,
-                    auth_tag_json.as_deref(),
-                    Some(signed_auth_created_at),
+                    crate::api::relay_members::NipOa::Tag(
+                        auth_tag_json.as_deref(),
+                        Some(signed_auth_created_at),
+                    ),
                     token_owner,
                     false,
                 )

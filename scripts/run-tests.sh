@@ -204,6 +204,9 @@ run_unit_tests() {
   run_test_step "buzz-conformance tests" \
     cargo test -p buzz-conformance -- --nocapture
 
+  run_test_step "buzz-git-gate tests" \
+    cargo test -p buzz-git-gate -- --nocapture
+
   run_test_step "buzz-push-gateway tests" \
     cargo test -p buzz-push-gateway -- --nocapture
   run_test_step "buzz-push-gateway personal development tests" \

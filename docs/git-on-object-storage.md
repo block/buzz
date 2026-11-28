@@ -84,8 +84,9 @@ materialized from the current manifest.
 The accepted v1 tradeoff: under concurrent same-repo pushes, every contender
 hydrates and runs receive-pack, and the CAS losers' subprocess work is
 discarded. This is wasted CPU/IO under contention, not a correctness bug —
-`Inv_NoFork` (Theorem 3) holds because the CAS is the only writer
-serialization. Same-ref concurrent push is rare; the alternative (a
+`Inv_NoFork` (Theorem 3) holds because one conditional write serializes
+writers: the pointer CAS here, or the repository row's swap for a governed
+land (§Governed lands). Same-ref concurrent push is rare; the alternative (a
 cross-instance lock service) is the kind of dependency this protocol exists
 to avoid. If contention ever shows up in metrics the fix is a short
 best-effort *local* lock as a latency optimization, never a correctness
@@ -170,21 +171,17 @@ HTTP API.
 - Both methods require request-specific NIP-98 (exact host-derived URL/method,
   timestamp, signature, shared fail-closed replay check). POST also requires a
   payload hash. Reusable Smart HTTP credentials are insufficient.
-- GET requires current membership of the channel bound by the current 30617
-  announcement. POST additionally requires a non-archived channel and the repo
-  author, a named maintainer, or the recorded human owner of an agent-authored
-  repo. Push permission, channel admin status and project membership alone do
-  not grant management. Relay admission and signer/attested-owner bans apply.
-- An agent may inherit management from a verified NIP-OA owner who is also a
-  current channel member and manager. Kind-restricted credentials cannot grant
-  this HTTP authority (there is no event kind); temporal restrictions still
-  apply. Direct signer authority does not depend on an optional owner's channel
-  membership. A stored agent-owner relationship is an ownership lookup, not a
-  live delegation credential.
-- Authorization is **admission-time**: later membership/maintainer removal,
-  rebinding or archival does not cancel an already admitted write. This is
-  narrower than the vision's instantaneous-revocation aspiration. The shared
-  serving-write lease separately fences community deletion through the write.
+- GET requires read access to the repository's bound channel: membership, or
+  an owned agent's live read grant capped by its owner's role.
+- POST is a governed land (`api/git/land.rs`): it needs credited admin in the
+  bound channel, either as a channel admin or as an owned agent with a live
+  manage grant capped by an owner who is one. The channel must not be
+  archived. Relay admission and the signer's and recorded owner's bans apply.
+- Authorization is judged **at commit**, under the land's locks, in the same
+  transaction that moves the pointer and writes the receipt. A membership
+  removal, rebind, archive or grant expiry that commits first refuses the
+  change. The shared serving-write lease separately fences community deletion
+  through the write.
 
 GET returns `{branch, head, manifest}`. POST accepts only
 `{branch, expected_manifest}` (maximum 4096 bytes) and returns the same snapshot
@@ -251,6 +248,23 @@ assumption for any S3-compatible backend.
 A3 is the single load-bearing backend assumption. It replaces the POSIX
 `rename()` atomicity that reftable relies on. See §Conformance for how a backend
 is *admitted* against it.
+
+**Governed lands.** A governed relay moves the commit point from the pointer
+to the repository's Postgres row (`git_repo_names.manifest`), which a
+conditional `UPDATE` swaps in the transaction that reads the authority, decides
+the push and writes its receipt (`docs/spec/GitGovernanceLand.tla`, protocol
+"row"). There the row plays the part A3 gives the pointer: at most one swap
+predicated on the same manifest commits. The pointer becomes a cache written
+after commit, still by CAS. Each manifest names its parent, so a reader tells a
+cache one land behind (advanced on the next read or write) from a pointer
+written outside the land, on which writes are refused. A3 still governs the
+cache and every write from a relay that predates the land. A refused land
+answers with git's own report, every `ok` for a ref the push changed rewritten
+to `ng <ref> <reason>`, so the client prints why and is never told `ok` for a
+change that was not published.
+`MCGitGovernanceLand.tla` checks that the row protocol refines `GitRefDB.tla`
+with the commit as the linearization point, so the theorems below hold of a
+governed land with "pointer" read as "the row".
 
 ## Protocol
 

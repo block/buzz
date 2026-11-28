@@ -6,6 +6,16 @@ use std::str::FromStr;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditAction {
+    /// An authorized governance command replaced a document.
+    GovernanceChanged,
+    /// A signed approval, withdrawal or check statement.
+    GitEvidence,
+    /// A Git change landed: the receipt of the decision that let it.
+    GitLanded,
+    /// A Git change was refused at the land: the receipt of that decision.
+    GitRefused,
+    /// A governed repository's content or state was shown to a key.
+    GitRead,
     /// A Nostr event was created.
     EventCreated,
     /// A Nostr event was deleted.
@@ -34,6 +44,11 @@ impl AuditAction {
     /// Stable string representation used in hash computation and DB storage.
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::GitEvidence => "git_evidence",
+            Self::GovernanceChanged => "governance_changed",
+            Self::GitLanded => "git_landed",
+            Self::GitRefused => "git_refused",
+            Self::GitRead => "git_read",
             Self::EventCreated => "event_created",
             Self::EventDeleted => "event_deleted",
             Self::ChannelCreated => "channel_created",
@@ -49,6 +64,11 @@ impl AuditAction {
     }
 
     const ALL: &'static [Self] = &[
+        Self::GitEvidence,
+        Self::GovernanceChanged,
+        Self::GitLanded,
+        Self::GitRefused,
+        Self::GitRead,
         Self::EventCreated,
         Self::EventDeleted,
         Self::ChannelCreated,

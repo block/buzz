@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 buzz-core = { workspace = true }
 buzz-conformance = { workspace = true }
+buzz-git-gate = { path = "../buzz-git-gate" }
 buzz-db = { workspace = true }
 # The relay chooses its flag provider at startup (BUZZ_FEATURE_FLAGS_PROVIDER),
 # so every build carries the LaunchDarkly adapter; it is inert unless selected.
@@ -88,6 +89,8 @@ lru             = { workspace = true }
 metrics         = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 metrics-util    = { workspace = true }
+# The secret scan at the git door (api::git::scan); already in the graph.
+regex = "1"
 pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 async-compression = { version = "0.4.42", features = ["tokio", "gzip"] }
 

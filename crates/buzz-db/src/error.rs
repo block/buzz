@@ -34,6 +34,10 @@ pub enum DbError {
     #[error("an open channel named \"{0}\" already exists")]
     ChannelNameTaken(String),
 
+    /// A repository announcement conflicts with the name registry or binding.
+    #[error("{0}")]
+    GitAnnouncementRejected(String),
+
     /// The requested member is not in the channel.
     #[error("member not found in channel {0}")]
     MemberNotFound(uuid::Uuid),

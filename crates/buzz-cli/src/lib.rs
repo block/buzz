@@ -326,8 +326,11 @@ enum Cmd {
     #[command(subcommand)]
     Notes(NotesCmd),
     /// Announce and discover git repositories (NIP-34)
-    #[command(subcommand)]
+    #[command(subcommand, visible_alias = "repo")]
     Repos(ReposCmd),
+    /// Publish community Git governance
+    #[command(subcommand)]
+    Gov(GovCmd),
     /// Create and manage multi-repo projects (NIP-MP)
     #[command(subcommand)]
     Projects(ProjectsCmd),
@@ -1788,7 +1791,85 @@ pub enum NotesCmd {
 }
 
 #[derive(Subcommand)]
+pub enum GovCmd {
+    /// Read or publish the community floor
+    #[command(subcommand)]
+    Floor(GovernanceDocumentCmd),
+    /// Read or publish trusted check identities
+    #[command(subcommand)]
+    Trusted(GovernanceDocumentCmd),
+}
+
+#[derive(Subcommand)]
+pub enum GovernanceDocumentCmd {
+    /// Read the signed current head (or authenticated absence)
+    Get,
+    /// Replace the whole document at an exact head
+    Set {
+        /// JSON document file
+        #[arg(long)]
+        file: std::path::PathBuf,
+        /// Current event ID, or 'absent' for first publication
+        #[arg(long)]
+        expected: String,
+    },
+}
+
+#[derive(clap::Args)]
+pub struct RepoGovernanceArgs {
+    /// Exact 30617:<owner-pubkey>:<repository-id> coordinate
+    #[arg(long)]
+    repo: String,
+    #[command(subcommand)]
+    command: GovernanceDocumentCmd,
+}
+
+#[derive(clap::Args)]
+pub struct RepoGrantArgs {
+    /// Exact 30617:<owner-pubkey>:<repository-id> coordinate
+    #[arg(long, required_unless_present = "all", conflicts_with = "all")]
+    repo: Option<String>,
+    /// Cover every repository the owner can reach
+    #[arg(long)]
+    all: bool,
+    /// Agent's lowercase hexadecimal public key
+    #[arg(long)]
+    agent: String,
+    /// Maximum Git authority (each level includes the levels below it)
+    #[arg(long, value_parser = ["read", "push", "manage"])]
+    git: String,
+    /// Signed window such as 30m, 2h, 7d or 1w; omit for no time bounds.
+    /// Must exceed 60s. Starts 60s ago for clock skew, so remaining lifetime is 60s shorter.
+    #[arg(long = "for")]
+    duration: Option<String>,
+}
+
+#[derive(Subcommand)]
 pub enum ReposCmd {
+    /// Read current governance and legacy protection policy with source heads
+    Effective {
+        /// Original repository coordinate (30617:author:name)
+        #[arg(long)]
+        repo: String,
+    },
+    /// Read recorded Git successes and refusals under current repository access
+    Receipts {
+        /// Original repository coordinate (30617:author:name)
+        #[arg(long)]
+        repo: String,
+        /// Exclusive audit sequence cursor from the previous page
+        #[arg(long)]
+        before: Option<i64>,
+        /// Maximum receipts per page (1..200)
+        #[arg(long, default_value_t = 30)]
+        limit: u32,
+    },
+    /// Read or replace additional repository rules
+    Rules(RepoGovernanceArgs),
+    /// Read or replace protected labels (community admin required)
+    Labels(RepoGovernanceArgs),
+    /// Print an owner-signed Git grant tag JSON (no relay write)
+    Grant(RepoGrantArgs),
     /// Announce a git repository (NIP-34)
     Create {
         /// Repository identifier: [a-zA-Z0-9._-]{1,64}
@@ -1835,15 +1916,16 @@ pub enum ReposCmd {
     },
     /// Bind (or rebind) one of your repositories to a channel.
     ///
-    /// The `buzz-channel` tag on the announcement is the git ACL: the relay
-    /// authorizes clone/fetch/push by membership in the bound channel. A
-    /// repo announced without it (e.g. by a vanilla NIP-34 client) returns
-    /// 404 for everyone until its author binds it here.
+    /// The relay authorizes clone/fetch/push by membership in the bound
+    /// channel. A repo announced without a `buzz-channel` tag (e.g. by a
+    /// vanilla NIP-34 client) returns 404 for everyone until its author binds
+    /// it here. Moving a bound repo is a governed bind: you must be an admin
+    /// of both its channel and the new one.
     Bind {
         /// Repository identifier (d-tag).
         #[arg(long)]
         id: String,
-        /// Channel UUID to bind. Replaces any existing binding.
+        /// Channel UUID to bind.
         #[arg(long)]
         channel: String,
     },
@@ -2772,6 +2854,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
         Cmd::Notes(sub) => commands::notes::dispatch(sub, &client).await,
         Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
+        Cmd::Gov(sub) => commands::governance::dispatch(sub, &client).await,
         Cmd::Projects(sub) => commands::projects::dispatch(sub, &client).await,
         Cmd::Patches(sub) => commands::patches::dispatch(sub, &client).await,
         Cmd::Issues(sub) => commands::issues::dispatch(sub, &client).await,
@@ -3047,6 +3130,46 @@ mod tests {
     }
 
     #[test]
+    fn governance_set_requires_explicit_expected_and_repo_alias_works() {
+        assert!(
+            Cli::try_parse_from(["buzz", "gov", "floor", "set", "--file", "floor.json"]).is_err()
+        );
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "gov",
+            "floor",
+            "set",
+            "--file",
+            "floor.json",
+            "--expected",
+            "absent"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "repo",
+            "rules",
+            "--repo",
+            "30617:owner:repo",
+            "get"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "repo",
+            "grant",
+            "--repo",
+            "30617:owner:repo",
+            "--agent",
+            "key",
+            "set",
+            "--file",
+            "grant.json"
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
             "agents",
@@ -3057,6 +3180,7 @@ mod tests {
             "emoji",
             "feed",
             "gifs",
+            "gov",
             "huddles",
             "issues",
             "media",
@@ -3206,7 +3330,19 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "repos"),
-            vec!["bind", "create", "default-branch", "get", "list", "protect"]
+            vec![
+                "bind",
+                "create",
+                "default-branch",
+                "effective",
+                "get",
+                "grant",
+                "labels",
+                "list",
+                "protect",
+                "receipts",
+                "rules"
+            ]
         );
         let repos = cmd
             .get_subcommands()
@@ -3287,7 +3423,8 @@ mod tests {
             ("projects", 8),
             ("raw", 2),
             ("reactions", 3),
-            ("repos", 6),
+            ("repos", 11),
+            ("gov", 2),
             ("social", 7),
             ("upload", 1),
             ("users", 6),

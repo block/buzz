@@ -219,6 +219,11 @@ pub(crate) fn build_create_announcement(
     channel: Option<&str>,
 ) -> Result<EventBuilder, CliError> {
     validate_repo_id(repo_id)?;
+    // The relay strips one `.git` from a Git URL, so it refuses a new id
+    // ending in one; refuse it here first.
+    if repo_id.ends_with(".git") {
+        return Err(CliError::Usage("repo ID must not end in '.git'".into()));
+    }
 
     let clone_refs: Vec<&str> = clone_urls.iter().map(|s| s.as_str()).collect();
     let relay_refs: Vec<&str> = relays.iter().map(|s| s.as_str()).collect();
@@ -398,26 +403,57 @@ async fn cmd_protect_remove(
     submit_repo_update(client, builder).await
 }
 
-/// Bind (or rebind) a repository to a channel — the fix path for issue
-/// #3527's permanently-404 repos. Publishes a read-modify-write update of
-/// the caller's own kind:30617 with exactly one `buzz-channel` tag; all
-/// other metadata (protections, name, description, future tags) is
-/// preserved by the same machinery `repos protect` uses.
+/// Bind (or rebind) a repository to a channel.
 ///
-/// The UUID is validated for *shape* only — deliberately. Channel existence
-/// and the caller's membership are the relay's authority at git-access
-/// time; a CLI-side network pre-check would just be TOCTOU with extra
-/// latency.
+/// The relay's pin is the binding; the announcement's `buzz-channel` tag
+/// only seeds it. A bound repository moves by a governed bind (an admin of
+/// both channels), which is the result; its announcement is then
+/// republished to name the new channel, and a failure there is only a
+/// warning, since the move has committed. An unbound repository
+/// (issue #3527) just gains the tag, which pins it. The UUID is checked for
+/// shape here; channel existence and roles are the relay's.
 async fn cmd_bind_repo(client: &BuzzClient, repo_id: &str, channel: &str) -> Result<(), CliError> {
     let event = current_repo(client, repo_id).await?;
     let builder =
         build_updated_repo_announcement(&event, RepoChange::BindChannel(channel.to_string()))?;
+    let bound = event
+        .tags
+        .iter()
+        .find(|tag| has_tag_name(tag, "buzz-channel"))
+        .and_then(|tag| tag.as_slice().get(1))
+        .is_some_and(|value| uuid::Uuid::parse_str(value).is_ok());
+    if bound {
+        let repo = format!(
+            "{KIND_GIT_REPO_ANNOUNCEMENT}:{}:{repo_id}",
+            event.pubkey.to_hex()
+        );
+        let moved = super::governance::bind(&repo, channel, client).await?;
+        let event = client.sign_event(builder).await?;
+        let republished = match client.submit_event(event).await {
+            Ok(raw) => validate_write_response(&raw).map(drop),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = republished {
+            eprintln!("warning: the repository moved, but its announcement still names the old channel: {error}");
+        }
+        println!("{moved}");
+        return Ok(());
+    }
     submit_repo_update(client, builder).await
 }
 
 pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::{ReposCmd, ReposProtectCmd};
     match cmd {
+        ReposCmd::Effective { repo } => super::governance::effective(repo, client).await,
+        ReposCmd::Receipts {
+            repo,
+            before,
+            limit,
+        } => super::governance::receipts(repo, before, limit, client).await,
+        ReposCmd::Rules(args) => super::governance::repo("rules", args, client).await,
+        ReposCmd::Labels(args) => super::governance::repo("labels", args, client).await,
+        ReposCmd::Grant(args) => super::repo_grant::grant(args, client),
         ReposCmd::Create {
             id,
             name,
@@ -820,6 +856,13 @@ mod tests {
                 .any(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz-channel")),
             "no --channel means no binding tag (vanilla NIP-34 stays possible)"
         );
+    }
+
+    #[test]
+    fn create_rejects_a_git_suffixed_id() {
+        let error = build_create_announcement("demo.git", None, None, &[], None, &[], None)
+            .expect_err("the relay refuses a .git-suffixed announcement");
+        assert!(matches!(error, crate::error::CliError::Usage(_)));
     }
 
     #[test]

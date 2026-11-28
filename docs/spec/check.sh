@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Model-checks the Git-on-object-storage protocol (docs/git-on-object-storage.md).
+# Model-checks the Git-on-object-storage protocol (docs/git-on-object-storage.md),
+# the governance of Git repositories (GitGovernance.tla), how a governed push
+# lands (GitGovernanceLand.tla), and that the landing refines both
+# (MCGitGovernanceLand.tla).
 #
 #   docs/spec/check.sh            run the whole suite
 #   docs/spec/check.sh NAME...    run only the named checks; a name that is
@@ -23,7 +26,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 # Reject names that are not checks before doing any work.  Otherwise a
 # misspelled name selects nothing and the run reports success without having
 # checked anything.  The names are read from the `check` lines of this file.
-known=$({ echo refdb; sed -nE 's/^check +([a-z0-9-]+) .*/\1/p' "$here/$(basename "$0")"; })
+known=$({ echo refdb; sed -nE 's/^[glm]?check +([a-z0-9-]+) .*/\1/p' "$here/$(basename "$0")"; })
 for name in "$@"; do
   if ! printf '%s\n' "$known" | grep -qxF -- "$name"; then
     echo "error: unknown check '$name'" >&2
@@ -118,6 +121,80 @@ check() {
   report "$name" "$expect" "$verdict" "$states" $(( $(date +%s) - start ))
 }
 
+# temporal NAME MODULE: is the definition of NAME in MODULE an action
+# property ([][...]_vars) rather than a state predicate?  The definition is
+# its first line and the indented lines that follow it.
+temporal() {
+  awk -v name="$1" '
+    $0 ~ "^" name " ==" { inside = 1; print; next }
+    inside && /^[ \t]/ { print; next }
+    { inside = 0 }' "$2" | grep -q "\]_vars"
+}
+
+# gcheck NAME EXPECT SCENARIO [FAULT]
+#   A check of GitGovernance: MCGitGovernance.cfg with the scenario and, if
+#   given, the seeded error; EXPECT as for check.
+gcheck() {
+  local name=$1 expect=$2 scenario=$3 fault=${4:-} cfg="$out/$1.cfg" result start
+  local args=(-e '/^\\\*/d' -e "s/Scenario = \"authority\"/Scenario = \"$scenario\"/")
+  wanted "$name" || return 0
+  [ -n "$fault" ] && args+=(-e "s/Faults = {}/Faults = {\"$fault\"}/")
+  [ "$expect" != pass ] && args+=(-e '/^INVARIANT /d' -e '/^PROPERTY /d')
+  sed "${args[@]}" MCGitGovernance.cfg >"$cfg"
+  if [ "$expect" != pass ]; then
+    if temporal "$expect" GitGovernance.tla; then
+      echo "PROPERTY $expect" >>"$cfg"
+    else
+      echo "INVARIANT $expect" >>"$cfg"
+    fi
+  fi
+  start=$(date +%s)
+  result=$(tlc "$name" MCGitGovernance.tla "$cfg")
+  report "$name" "$expect" "${result% *}" "${result#* }" $(( $(date +%s) - start ))
+}
+
+# lcheck NAME EXPECT [sed-expression...]
+#   A check of GitGovernanceLand: GitGovernanceLand.cfg rewritten by the
+#   expressions; EXPECT as for check.
+lcheck() {
+  local name=$1 expect=$2 cfg="$out/$1.cfg" e result start
+  local args=(-e '/^\\\*/d')
+  shift 2
+  wanted "$name" || return 0
+  for e in "$@"; do args+=(-e "$e"); done
+  [ "$expect" != pass ] && args+=(-e '/^INVARIANT /d' -e '/^PROPERTY /d')
+  sed "${args[@]}" GitGovernanceLand.cfg >"$cfg"
+  if [ "$expect" != pass ]; then
+    if temporal "$expect" GitGovernanceLand.tla; then
+      echo "PROPERTY $expect" >>"$cfg"
+    else
+      echo "INVARIANT $expect" >>"$cfg"
+    fi
+  fi
+  start=$(date +%s)
+  result=$(tlc "$name" GitGovernanceLand.tla "$cfg")
+  report "$name" "$expect" "${result% *}" "${result#* }" $(( $(date +%s) - start ))
+}
+
+# mcheck NAME EXPECT [sed-expression...]
+#   A check of the refinement in MCGitGovernanceLand.tla; EXPECT as for
+#   check.  A seeded check keeps only the property it names, so any
+#   violation TLC reports is of that property.
+mcheck() {
+  local name=$1 expect=$2 cfg="$out/$1.cfg" e result verdict start
+  local args=(-e '/^\\\*/d')
+  shift 2
+  wanted "$name" || return 0
+  for e in "$@"; do args+=(-e "$e"); done
+  [ "$expect" != pass ] && args+=(-e '/^INVARIANT /d' -e '/^PROPERTY /d')
+  sed "${args[@]}" MCGitGovernanceLand.cfg >"$cfg"
+  [ "$expect" != pass ] && echo "PROPERTY $expect" >>"$cfg"
+  start=$(date +%s)
+  result=$(tlc "$name" MCGitGovernanceLand.tla "$cfg")
+  case "$result" in violated:*) verdict="violated:$expect" ;; *) verdict=${result%% *} ;; esac
+  report "$name" "$expect" "$verdict" "${result##* }" $(( $(date +%s) - start ))
+}
+
 report() {
   local name=$1 expect=$2 verdict=$3 states=$4 secs=$5 want status
   if [ "$expect" = pass ]; then want=pass; else want="violated:$expect"; fi
@@ -187,6 +264,134 @@ check no-connectivity      PublishedClosed           "$(fault no-connectivity)" 
 echo
 echo "Coverage (a behavior of the protocol as specified that must be reachable)"
 check relayed-ok           NeverRelaysOk             "$NO_SETTER"
+
+echo
+echo "Governance as specified (must satisfy every property)"
+gcheck gov-authority     pass authority
+gcheck gov-review        pass review
+gcheck gov-fresh-target  pass fresh
+gcheck gov-stale-allowed pass staleok
+gcheck gov-check         pass check
+gcheck gov-codeowners    pass owners
+gcheck gov-rules         pass rules
+gcheck gov-secrets       pass secrets
+gcheck gov-reads         pass reads
+gcheck gov-governance    pass governance
+gcheck gov-roles         pass roles
+gcheck gov-repush        pass repush
+gcheck gov-fence         pass fence
+gcheck gov-attest        pass attest
+
+echo
+echo "Seeded governance errors (each must violate the property named)"
+gcheck announcer-is-owner        LandsUnderCurrentAuthority    authority  announcer-is-owner
+gcheck owner-borrows-agent-repo  LandsUnderCurrentAuthority    authority  owner-borrows-agent-repo
+gcheck agent-uses-owner          LandsUnderCurrentAuthority    authority  agent-uses-owner
+gcheck grant-uncapped            LandsUnderCurrentAuthority    authority  grant-uncapped
+gcheck grant-any-repo            LandsUnderCurrentAuthority    authority  grant-any-repo
+gcheck grant-level-ignored       LandsUnderCurrentAuthority    authority  grant-level-ignored
+gcheck owner-ban-ignored         LandsUnderCurrentAuthority    authority  owner-ban-ignored
+gcheck authority-at-receive      LandsUnderCurrentAuthority    authority  authority-at-receive
+gcheck unowned-agent-unattributed ReceiptsMatchDecisions authority unowned-agent-unattributed
+gcheck owner-replaceable         OwnerPinned                   authority  owner-replaceable
+gcheck no-receipt-on-refusal     ReceiptsMatchDecisions        authority  no-receipt-on-refusal
+gcheck agent-is-own-principal    LandsUnderCurrentAuthority    review     agent-is-own-principal
+gcheck self-approval             LandsUnderCurrentAuthority    review     self-approval
+gcheck agent-approves            LandsUnderCurrentAuthority    review     agent-approves
+gcheck evidence-drops-owner      LandsUnderCurrentAuthority    attest     evidence-drops-owner
+gcheck ci-as-human               LandsUnderCurrentAuthority    review     ci-as-human
+gcheck stale-approval            LandsUnderCurrentAuthority    review     stale-approval
+gcheck evidence-any-repo         LandsUnderCurrentAuthority    review     evidence-any-repo
+gcheck evidence-any-ref          LandsUnderCurrentAuthority    review     evidence-any-ref
+gcheck eligibility-at-approve    LandsUnderCurrentAuthority    review     eligibility-at-approve
+gcheck target-tip-ignored        LandsUnderCurrentAuthority    fresh      target-tip-ignored
+gcheck untrusted-check           LandsUnderCurrentAuthority    check      untrusted-check
+gcheck trusted-for-any-check     LandsUnderCurrentAuthority    check      trusted-for-any-check
+gcheck first-pass-wins           LandsUnderCurrentAuthority    check      first-pass-wins
+gcheck codeowners-from-change    LandsUnderCurrentAuthority    owners     codeowners-from-change
+gcheck skip-unknown              LandsUnderCurrentAuthority    rules      skip-unknown
+gcheck repo-overrides-floor      LandsUnderCurrentAuthority    rules      repo-overrides-floor
+gcheck branches-only             LandsUnderCurrentAuthority    rules      branches-only
+gcheck tag-history-unguarded     GuardedHistoryKept            rules      branches-only
+gcheck scan-tip-only             SecretsNeverShown             secrets    scan-tip-only
+gcheck scan-governed-only        SecretsNeverShown             secrets    scan-governed-only
+gcheck release-on-refusal        SecretsNeverShown             secrets    release-on-refusal
+gcheck visible-before-scan       QuarantineHolds               secrets    visible-before-scan
+gcheck evidence-shows-quarantine QuarantineHolds               secrets    evidence-shows-quarantine
+gcheck any-ref-decides           LandsUnderCurrentAuthority    secrets    any-ref-decides
+gcheck evidence-for-community    ReadsAreGovernedAndRecorded   reads      evidence-for-community
+gcheck state-for-community       ReadsAreGovernedAndRecorded   reads      state-for-community
+gcheck unrecorded-read           ReadsAreGovernedAndRecorded   reads      unrecorded-read
+gcheck read-skips-owner-admission ReadsAreGovernedAndRecorded authority read-skips-owner-admission
+gcheck archive-drops-record      RecordOnlyGrows               reads      archive-drops-record
+gcheck archive-ignored          LandsUnderCurrentAuthority    reads      archive-ignored
+gcheck repo-admin-floor          GovernanceByCurrentAuthority  governance repo-admin-floor
+gcheck repo-admin-labels         GovernanceByCurrentAuthority  governance repo-admin-labels
+gcheck head-by-maintainer        GovernanceByCurrentAuthority  governance head-by-maintainer
+gcheck announcer-rebinds         GovernanceByCurrentAuthority  governance announcer-rebinds
+gcheck bind-dest-by-grant        GovernanceByCurrentAuthority  governance bind-dest-by-grant
+gcheck authority-at-sign         GovernanceByCurrentAuthority  governance authority-at-sign
+gcheck channel-tags-protect      GovernedDocsOnlyByCommand     governance channel-tags-protect
+gcheck freshness-window-only     CommandsApplyOnceWhereMeant   governance freshness-window-only
+gcheck command-unbound           CommandsApplyOnceWhereMeant   governance command-unbound
+gcheck unrecorded-governance     EveryGovernanceChangeRecorded governance unrecorded-governance
+gcheck grant-admins-channel      RoleChangesByCurrentAuthority roles      grant-admins-channel
+gcheck pusher-of-new-only        LandsUnderCurrentAuthority    repush     pusher-of-new-only
+gcheck receipt-omits-evidence    ReceiptsMatchDecisions        review     receipt-omits-evidence
+gcheck receipt-omits-checks      ReceiptsMatchDecisions        check      receipt-omits-checks
+gcheck receipt-at-accept         ReceiptsMatchDecisions        fence      receipt-at-accept
+gcheck receipt-at-publish        ReceiptsMatchDecisions        check      receipt-at-publish
+gcheck unfenced-accept           RefsMoveOnlyByLanding         fence      unfenced-accept
+gcheck ban-unfenced              ReservationsFenced            fence      ban-unfenced
+gcheck fence-nominal             ReservationsFenced            fence      fence-nominal
+gcheck abort-receipted           ReceiptsMatchDecisions        fence      abort-receipted
+gcheck accept-after-expiry       LandsUnderCurrentAuthority    fence      authority-at-receive
+
+echo
+echo "Governance coverage (behaviors of the design that must be reachable)"
+gcheck lands-reviewed      NeverLandsReviewed review
+gcheck lands-checked       NeverLandsChecked  check
+gcheck lands-owned         NeverLandsOwned    owners
+gcheck lands-by-agent      NeverLandsByAgent  review
+gcheck lands-member-agent-no-grant NeverLandsByMemberAgentWithoutGrant authority
+gcheck lands-grant-only-agent NeverLandsByGrantOnlyAgent fence
+gcheck lands-over-lower-grant NeverLandsOverLowerGrant authority
+gcheck lands-owner-outside NeverLandsWithOwnerOutside authority
+gcheck lands-by-unowned-agent NeverLandsByUnownedAgent authority
+gcheck reads-by-grant-only-agent NeverReadsByGrantOnlyAgent fence
+gcheck reads-archived       NeverReadsArchived reads
+gcheck rebinds             NeverRebinds       governance
+gcheck owned-by-approval   NeverOwnedByApproval attest
+gcheck stale-base-counts   NeverCountsOldBase staleok
+gcheck aborts              NeverAborts               fence
+gcheck publish-after-expiry NeverPublishesAfterExpiry fence
+gcheck governs-while-reserved NeverGovernsWhileReserved fence
+
+echo
+echo "Landing a decision (protocol \"row\" is the design)"
+LOCK='s/Protocol = "row"/Protocol = "lock"/'
+NO_DEATH='s/MayCrash = TRUE/MayCrash = FALSE/'
+NO_EXPIRY='s/Expiry = 1/Expiry = 9/'
+lcheck land-row             pass
+lcheck land-lock-ideal      pass                       "$LOCK" "$NO_DEATH" "$NO_EXPIRY"
+lcheck land-lock-death      LandsUnderCurrentAuthority "$LOCK" "$NO_EXPIRY"
+lcheck land-lock-unrecorded EveryLandRecorded          "$LOCK" "$NO_EXPIRY"
+lcheck land-lock-expiry     LandsUnderCurrentAuthority "$LOCK" "$NO_DEATH"
+lcheck unlocked-read        LandsUnderCurrentAuthority 's/Faults = {}/Faults = {"unlocked-read"}/'
+lcheck expiry-at-read       LandsUnderCurrentAuthority 's/Faults = {}/Faults = {"expiry-at-read"}/'
+lcheck blind-swap           NoLostUpdate               's/Faults = {}/Faults = {"blind-swap"}/'
+lcheck land-reachable       NeverLands
+lcheck commit-after-expiry  CommitsBeforeExpiry
+
+echo
+echo "The row protocol refines GitGovernance and GitRefDB"
+mcheck refines-row                  pass
+mcheck refines-unlocked-read        GovRefined   's/Faults = {}/Faults = {"unlocked-read"}/'
+mcheck refines-expiry-at-read       GovRefined   's/Faults = {}/Faults = {"expiry-at-read"}/'
+mcheck refines-blind-swap           GovRefined   's/Faults = {}/Faults = {"blind-swap"}/'
+mcheck refines-blind-swap-refdb     RefDBRefined 's/Faults = {}/Faults = {"blind-swap"}/'
+mcheck refines-publish-after-expiry GovNeverPublishesAfterExpiry
+mcheck refines-aborts               GovNeverAborts
 
 echo
 if [ "$failures" -ne 0 ]; then

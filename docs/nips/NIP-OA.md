@@ -43,7 +43,7 @@ The domain separator string is exactly `nostr:agent-auth:`.
 The signed message is `SHA256(preimage)`.
 The owner MUST produce `<sig-hex>` as a BIP-340 Schnorr signature over the signed message with the owner's secret key.
 
-Each clause in `<conditions>` MUST be one of:
+Except in a Git grant (see Git Grants), each clause in `<conditions>` MUST be one of:
 
 - `kind=<decimal>`
 - `created_at<unix-timestamp`
@@ -68,6 +68,30 @@ An event satisfies `created_at>t` if and only if `event.created_at > t`.
 Clause order is part of the signed preimage and verifiers MUST use the exact `<conditions>` string from the tag when verifying the signature.
 Implementers MUST NOT reorder, deduplicate, normalize, or canonicalize the `<conditions>` string before computing the preimage.
 Verifiers MUST NOT reinterpret a valid `auth` tag as an identity override.
+
+## Git Grants
+
+An owner MAY sign an `auth` tag that grants an agent Git authority over repositories, instead of event provenance.
+Its `<conditions>` string MUST contain exactly one `repo=` clause and exactly one `git=` clause, MAY contain at most one `created_at<` clause and at most one `created_at>` clause, and MUST NOT contain any other clause.
+The clauses MAY appear in any order; the signed string is used exactly as written.
+
+- `repo=<author-pubkey-hex>:<repository-id>` names one NIP-34 repository by the 64-character lowercase hex key of its announcement's author (not the owner signing the grant) and its `d` identifier, with the identifier limited to `[A-Za-z0-9._-]{1,64}`, not starting with `.` and not containing `..`.
+- `repo=*` names every repository the owner can reach.
+- `git=read`, `git=push`, or `git=manage` names the highest action granted. Each level includes the ones below it: `read` < `push` < `manage`.
+
+A tag carrying `repo=` or `git=` is a Git grant and nothing else.
+Verifiers other than a Git authorization check MUST reject it as containing an unsupported clause, so a Git grant never establishes provenance, relay admission, or owner consent.
+A Git authorization check MUST reject a tag without these clauses as a Git grant; it MAY still use such a tag to identify the agent's owner.
+
+A Git grant is verified against the signed authentication event of the Git request (for example NIP-98), not against a published event.
+Its time clauses are evaluated against that event's `created_at`, and the verifier MUST independently require that event to be fresh, which makes them a wall-clock bound.
+A Git grant never grants more than the owner currently holds.
+A Git grant only adds authority: a verifier MUST NOT use it to reduce what the agent's own key holds, and a tag that fails to verify as a Git grant MUST NOT by itself deny a request the agent's own key is authorized for.
+A verifier that bounds grant lifetimes SHOULD reject a Git grant that lacks either time clause or whose window `t_before - t_after` exceeds the bound.
+
+```text
+conditions=repo=79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798:ledger&git=push&created_at>1713956400&created_at<1714561200
+```
 
 ## Relay Behavior
 

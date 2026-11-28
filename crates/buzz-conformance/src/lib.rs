@@ -39,6 +39,7 @@
 #![warn(missing_docs)]
 
 pub mod checker;
+pub mod git_land;
 pub mod transitions;
 
 use serde::{Deserialize, Serialize};

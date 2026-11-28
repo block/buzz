@@ -16,11 +16,13 @@
 //! idempotent re-announce (same owner) from a collision (different owner), and
 //! backs the per-pubkey quota via `COUNT`.
 
+use buzz_core::{governance::RepoCoordinate, StoredEvent};
 use buzz_datastore_tracing::datastore_span;
-use sqlx::{PgPool, Row as _};
+use sqlx::{PgConnection, PgPool, Row as _};
 
 use crate::error::Result;
-use crate::{CommunityId, Db};
+use crate::replaceable::{ParameterizedReplacePrecondition, ParameterizedReplaceStatus};
+use crate::{AdmittedTx, CommunityId, Db, DbError};
 
 /// Outcome of a name-reservation attempt.
 ///
@@ -96,10 +98,17 @@ pub async fn reserve_repo_name(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
-    // Atomic claim: insert only if the (community, repo) is free. RETURNING is
-    // non-empty exactly when *this* statement inserted the row, so it cleanly
-    // distinguishes "I claimed it" from "someone already holds it" without a
-    // separate read (TOCTOU-free, the same guarantee `create_dir` gave).
+    let outcome = reserve_repo_name_in_transaction(&mut tx, repo_id, owner_pubkey).await?;
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+async fn reserve_repo_name_in_transaction(
+    tx: &mut AdmittedTx,
+    repo_id: &str,
+    owner_pubkey: &str,
+) -> Result<ReserveOutcome> {
+    let community = tx.community();
     let inserted = sqlx::query(
         "INSERT INTO git_repo_names (community_id, repo_id, owner_pubkey) \
          VALUES ($1, $2, $3) \
@@ -113,7 +122,6 @@ pub async fn reserve_repo_name(
     .await?;
 
     if inserted.is_some() {
-        tx.commit().await?;
         return Ok(ReserveOutcome::Reserved);
     }
 
@@ -121,13 +129,12 @@ pub async fn reserve_repo_name(
     // re-announce vs cross-owner collision.
     let existing = sqlx::query(
         "SELECT owner_pubkey FROM git_repo_names \
-         WHERE community_id = $1 AND repo_id = $2",
+         WHERE community_id = $1 AND repo_id = $2 FOR UPDATE",
     )
     .bind(community.as_uuid())
     .bind(repo_id)
     .fetch_optional(tx.conn())
     .await?;
-    tx.commit().await?;
     match existing {
         Some(row) => {
             let holder: String = row
@@ -162,13 +169,21 @@ pub async fn count_repos_for_owner(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    count_owner_on(&mut connection, community, owner_pubkey).await
+}
+
+async fn count_owner_on(
+    connection: &mut PgConnection,
+    community: CommunityId,
+    owner_pubkey: &str,
+) -> Result<i64> {
     let row = sqlx::query(
         "SELECT COUNT(*) AS n FROM git_repo_names \
          WHERE community_id = $1 AND owner_pubkey = $2",
     )
     .bind(community.as_uuid())
     .bind(owner_pubkey)
-    .fetch_one(&mut *connection)
+    .fetch_one(connection)
     .await?;
     row.try_get("n").map_err(crate::error::DbError::from)
 }
@@ -179,6 +194,11 @@ pub async fn count_repos_for_owner(
 /// [`ReserveOutcome::Reserved`], so the announce is all-or-nothing. Scoped to
 /// `owner_pubkey` so a rollback can never delete a name a *different* owner
 /// concurrently holds. Returns the number of rows removed (0 or 1).
+///
+/// A late rollback must not undo what others committed since: a row with a
+/// landed manifest or a governed authority write is kept. The delete waits
+/// for any land holding the row and re-checks this on the committed row, so
+/// a land that commits first always survives.
 pub async fn release_repo_name(
     pool: &PgPool,
     community: CommunityId,
@@ -193,7 +213,8 @@ pub async fn release_repo_name(
     .await?;
     let result = sqlx::query(
         "DELETE FROM git_repo_names \
-         WHERE community_id = $1 AND repo_id = $2 AND owner_pubkey = $3",
+         WHERE community_id = $1 AND repo_id = $2 AND owner_pubkey = $3 \
+           AND manifest IS NULL AND authority_version = 0",
     )
     .bind(community.as_uuid())
     .bind(repo_id)
@@ -205,6 +226,69 @@ pub async fn release_repo_name(
 }
 
 impl Db {
+    /// Store a kind:30617 with its validated `repo_id` and resolved binding.
+    /// Returns the event, whether it was inserted, and whether it reserved the name.
+    #[datastore_span(name = "store_git_repo_announcement", system = "postgresql")]
+    pub async fn store_git_repo_announcement(
+        &self,
+        community: CommunityId,
+        event: &nostr::Event,
+        repo_id: &str,
+        announced: Option<uuid::Uuid>,
+        limit: i64,
+    ) -> Result<(StoredEvent, bool, bool)> {
+        let mut tx = self.begin_event_write_transaction(community).await?;
+        // As in git_land::hold: community, repository row, replacement key.
+        crate::governance::fence_community_shared(&mut tx, community).await?;
+        let repo = RepoCoordinate {
+            owner: event.pubkey.to_hex(),
+            name: repo_id.to_owned(),
+        };
+        let reservation = reserve_repo_name_in_transaction(&mut tx, repo_id, &repo.owner).await?;
+        if reservation == ReserveOutcome::TakenByOther {
+            return Err(DbError::GitAnnouncementRejected(format!(
+                "repo name '{repo_id}' already taken by another owner"
+            )));
+        }
+        let reserved = reservation == ReserveOutcome::Reserved;
+        if reserved {
+            // Serialize fresh names for the same owner, counting our row last.
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(format!("buzz_git_repo_quota:{community}:{}", repo.owner))
+                .execute(tx.conn())
+                .await?;
+            let owned = count_owner_on(tx.conn(), community, &repo.owner).await? - 1;
+            if owned >= limit {
+                return Err(DbError::GitAnnouncementRejected(format!(
+                    "repo limit exceeded: {owned} >= {limit}"
+                )));
+            }
+        }
+        let pin = crate::git_land::bind_channel(&mut tx, &repo, announced).await?;
+        if let Some(pin) = pin.filter(|pin| Some(*pin) != announced) {
+            return Err(DbError::GitAnnouncementRejected(format!(
+                "repository is bound to channel {pin}; announce that buzz-channel, \
+                 or move it with a governed bind first"
+            )));
+        }
+        let result = self
+            .replace_parameterized_event_in_transaction(
+                &mut tx,
+                event,
+                repo_id,
+                None,
+                ParameterizedReplacePrecondition::Unconditional,
+            )
+            .await?;
+        let inserted = result.status == ParameterizedReplaceStatus::Inserted;
+        if inserted {
+            tx.commit().await?;
+        } else {
+            tx.rollback().await?;
+        }
+        Ok((result.event, inserted, inserted && reserved))
+    }
+
     /// Return the current owner of git repo name `repo_id` in `community`, or
     /// `None` if unreserved. See [`repo_name_owner`].
     #[datastore_span(name = "repo_name_owner", system = "postgresql")]

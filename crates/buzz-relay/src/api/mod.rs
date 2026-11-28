@@ -192,6 +192,57 @@ pub mod relay_members {
         value.to_str().ok()
     }
 
+    /// The NIP-OA owner a request offers: a tag still to verify, or an owner
+    /// a Git door already proved with [`git_owner`].
+    #[derive(Clone, Copy)]
+    pub(crate) enum NipOa<'a> {
+        /// A tag and its signed auth time, checked by the plain verifier.
+        Tag(Option<&'a str>, Option<u64>),
+        /// An owner already proved, if any.
+        Proven(Option<nostr::PublicKey>),
+    }
+
+    impl NipOa<'_> {
+        pub(crate) fn owner(self, pubkey_bytes: &[u8]) -> Option<nostr::PublicKey> {
+            match self {
+                Self::Tag(tag, at) => extract_nip_oa_owner(pubkey_bytes, tag, at),
+                Self::Proven(owner) => owner,
+            }
+        }
+    }
+
+    /// The one owner, and the Git grant if any, that a Git request proves.
+    ///
+    /// A verified agent token names the owner, and a Git grant alongside it
+    /// must name the same one. A plain tag (an owner with no grant) carries
+    /// no authority of its own, so a verified token's owner wins over it.
+    /// Without a token the tag names the owner: a Git grant, or a plain tag.
+    /// An unverifiable tag supplies no authority; independent membership and
+    /// a verified token remain usable.
+    pub(crate) fn git_owner(
+        agent: &nostr::PublicKey,
+        tag: Option<&str>,
+        signed_auth_created_at: Option<u64>,
+        token_owner: Option<nostr::PublicKey>,
+    ) -> Result<GitOwner, &'static str> {
+        let Some(tag) = tag else {
+            return Ok((token_owner, None));
+        };
+        let Some(at) = signed_auth_created_at else {
+            return Ok((token_owner, None));
+        };
+        if let Ok(grant) = buzz_sdk::nip_oa::verify_git_grant(tag, agent, at) {
+            return match token_owner {
+                Some(owner) if owner != grant.owner => Err(OWNER_MISMATCH),
+                _ => Ok((Some(grant.owner), Some(grant))),
+            };
+        }
+        match buzz_sdk::nip_oa::verify_auth_tag_for_auth_event(tag, agent, at) {
+            Ok(owner) => Ok((token_owner.or(Some(owner)), None)),
+            Err(_) => Ok((token_owner, None)),
+        }
+    }
+
     /// Check relay membership without committing to an HTTP response shape.
     ///
     /// `community` is the server-resolved tenant of the request; membership is
@@ -212,8 +263,7 @@ pub mod relay_members {
             state,
             community,
             pubkey_bytes,
-            auth_tag_header,
-            signed_auth_created_at,
+            NipOa::Tag(auth_tag_header, signed_auth_created_at),
             token_owner,
             false,
         )
@@ -235,8 +285,7 @@ pub mod relay_members {
             state,
             community,
             pubkey_bytes,
-            auth_tag_header,
-            signed_auth_created_at,
+            NipOa::Tag(auth_tag_header, signed_auth_created_at),
             token_owner,
             true,
         )
@@ -260,8 +309,7 @@ pub mod relay_members {
         state: &AppState,
         community: CommunityId,
         pubkey_bytes: &[u8],
-        auth_tag_header: Option<&str>,
-        signed_auth_created_at: Option<u64>,
+        oa: NipOa<'_>,
         token_owner: Option<nostr::PublicKey>,
         writer: bool,
     ) -> Result<MembershipDecision, String> {
@@ -292,36 +340,37 @@ pub mod relay_members {
         }
 
         if state.config.allow_nip_oa_auth {
-            if let Some(tag_json) = auth_tag_header {
-                let agent_pubkey = nostr::PublicKey::from_slice(pubkey_bytes)
-                    .map_err(|e| format!("invalid agent pubkey for NIP-OA check: {e}"))?;
-                let Some(auth_created_at) = signed_auth_created_at else {
-                    info!(agent = %pubkey_hex, "NIP-OA auth tag has no verified signed auth timestamp");
-                    return Ok(MembershipDecision::Denied);
-                };
-
-                match buzz_sdk::nip_oa::verify_auth_tag_for_auth_event(
-                    tag_json,
-                    &agent_pubkey,
-                    auth_created_at,
-                ) {
-                    Ok(owner_pubkey) => {
-                        let owner_hex = owner_pubkey.to_hex();
-                        let owner_is_member = read_membership(state, community, &owner_hex, writer)
-                            .await
-                            .map_err(|e| format!("relay membership check (owner) failed: {e}"))?;
-                        if owner_is_member {
-                            debug!(
-                                agent = %pubkey_hex,
-                                owner = %owner_hex,
-                                "NIP-OA membership granted via owner"
-                            );
-                            return Ok(MembershipDecision::ViaOwner(owner_pubkey));
-                        }
-                    }
-                    Err(e) => {
-                        info!(agent = %pubkey_hex, "NIP-OA auth tag invalid: {e}");
-                    }
+            let owner = match oa {
+                NipOa::Tag(Some(tag_json), signed_auth_created_at) => {
+                    let agent_pubkey = nostr::PublicKey::from_slice(pubkey_bytes)
+                        .map_err(|e| format!("invalid agent pubkey for NIP-OA check: {e}"))?;
+                    let Some(auth_created_at) = signed_auth_created_at else {
+                        info!(agent = %pubkey_hex, "NIP-OA auth tag has no verified signed auth timestamp");
+                        return Ok(MembershipDecision::Denied);
+                    };
+                    buzz_sdk::nip_oa::verify_auth_tag_for_auth_event(
+                        tag_json,
+                        &agent_pubkey,
+                        auth_created_at,
+                    )
+                    .inspect_err(|e| info!(agent = %pubkey_hex, "NIP-OA auth tag invalid: {e}"))
+                    .ok()
+                }
+                NipOa::Tag(None, _) => None,
+                NipOa::Proven(owner) => owner,
+            };
+            if let Some(owner_pubkey) = owner {
+                let owner_hex = owner_pubkey.to_hex();
+                let owner_is_member = read_membership(state, community, &owner_hex, writer)
+                    .await
+                    .map_err(|e| format!("relay membership check (owner) failed: {e}"))?;
+                if owner_is_member {
+                    debug!(
+                        agent = %pubkey_hex,
+                        owner = %owner_hex,
+                        "NIP-OA membership granted via owner"
+                    );
+                    return Ok(MembershipDecision::ViaOwner(owner_pubkey));
                 }
             }
         }
@@ -352,9 +401,69 @@ pub mod relay_members {
             state,
             tenant,
             pubkey_bytes,
-            auth_tag_header,
-            signed_auth_created_at,
+            NipOa::Tag(auth_tag_header, signed_auth_created_at),
             token_owner,
+        )
+        .await
+    }
+
+    /// [`enforce_relay_membership`] for a Git door: the one owner, and the
+    /// Git grant, that [`git_owner`] proves from `auth_tag`. Returns them.
+    pub(crate) async fn enforce_git_membership(
+        state: &AppState,
+        tenant: &TenantContext,
+        pubkey: &nostr::PublicKey,
+        auth_tag: Option<&str>,
+        signed_auth_created_at: Option<u64>,
+        token_owner: Option<nostr::PublicKey>,
+    ) -> Result<GitOwner, MembershipRefusal> {
+        let (owner, grant) = git_owner(pubkey, auth_tag, signed_auth_created_at, token_owner)
+            .map_err(|refusal| {
+                let reason = match refusal {
+                    OWNER_MISMATCH => AuthReason::OwnerMismatch,
+                    _ => AuthReason::Restricted,
+                };
+                match token_owner {
+                    None => MembershipRefusal::Api(
+                        reason,
+                        super::api_error(StatusCode::FORBIDDEN, refusal),
+                    ),
+                    Some(_) => MembershipRefusal::NipFi(reason, DenialClass::AuthorizationDenied),
+                }
+            })?;
+        enforce_membership(
+            state,
+            tenant,
+            pubkey.as_bytes(),
+            NipOa::Proven(owner),
+            token_owner,
+        )
+        .await?;
+        Ok((owner, grant))
+    }
+
+    /// The owner and Git grant a Git request proves.
+    pub(crate) type GitOwner = (
+        Option<nostr::PublicKey>,
+        Option<buzz_core::governance::GitGrant>,
+    );
+
+    /// [`check_relay_membership`] for a Git door, with the owner
+    /// [`git_owner`] proved.
+    pub(crate) async fn check_git_membership(
+        state: &AppState,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        owner: Option<nostr::PublicKey>,
+        token_owner: Option<nostr::PublicKey>,
+    ) -> Result<MembershipDecision, String> {
+        check_membership(
+            state,
+            community,
+            pubkey_bytes,
+            NipOa::Proven(owner),
+            token_owner,
+            false,
         )
         .await
     }
@@ -364,19 +473,10 @@ pub mod relay_members {
         state: &AppState,
         tenant: &TenantContext,
         pubkey_bytes: &[u8],
-        auth_tag_header: Option<&str>,
-        signed_auth_created_at: Option<u64>,
+        oa: NipOa<'_>,
         token_owner: Option<nostr::PublicKey>,
     ) -> Result<Option<nostr::PublicKey>, MembershipRefusal> {
-        let result = admit_member(
-            state,
-            tenant,
-            pubkey_bytes,
-            auth_tag_header,
-            signed_auth_created_at,
-            token_owner,
-        )
-        .await;
+        let result = admit_member(state, tenant, pubkey_bytes, oa, token_owner).await;
         // An agent token's owner-decided refusal is its request's NIP-FI
         // verdict, as shadow's verdict includes it.
         if let (Some(_), Err((_, refusal, Some(owner_reason)))) = (token_owner, &result) {
@@ -400,60 +500,41 @@ pub mod relay_members {
         state: &AppState,
         tenant: &TenantContext,
         pubkey_bytes: &[u8],
-        auth_tag_header: Option<&str>,
-        signed_auth_created_at: Option<u64>,
+        oa: NipOa<'_>,
         token_owner: Option<nostr::PublicKey>,
     ) -> Result<Option<nostr::PublicKey>, Refused> {
         let community = tenant.community();
-        let owner = match check_relay_membership(
-            state,
-            community,
-            pubkey_bytes,
-            auth_tag_header,
-            signed_auth_created_at,
-            token_owner,
-        )
-        .await
-        {
-            Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => None,
-            Ok(MembershipDecision::ViaOwner(owner)) => Some(owner),
-            Ok(MembershipDecision::Denied) => {
-                return Err((
-                    AuthReason::NotRelayMember,
-                    (
-                        StatusCode::FORBIDDEN,
-                        Json(serde_json::json!({
-                            "error": "relay_membership_required",
-                            "message": "You must be a relay member to access this relay"
-                        })),
-                    ),
-                    None,
-                ))
-            }
-            Err(e) => {
-                tracing::error!("relay membership check errored: {e}");
-                return Err((
-                    AuthReason::MembershipUnavailable,
-                    super::internal_error(&e),
-                    None,
-                ));
-            }
-        };
-        deny_banned(
-            state,
-            community,
-            pubkey_bytes,
-            auth_tag_header,
-            signed_auth_created_at,
-            token_owner,
-        )
-        .await?;
+        let owner =
+            match check_membership(state, community, pubkey_bytes, oa, token_owner, false).await {
+                Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => None,
+                Ok(MembershipDecision::ViaOwner(owner)) => Some(owner),
+                Ok(MembershipDecision::Denied) => {
+                    return Err((
+                        AuthReason::NotRelayMember,
+                        (
+                            StatusCode::FORBIDDEN,
+                            Json(serde_json::json!({
+                                "error": "relay_membership_required",
+                                "message": "You must be a relay member to access this relay"
+                            })),
+                        ),
+                        None,
+                    ))
+                }
+                Err(e) => {
+                    tracing::error!("relay membership check errored: {e}");
+                    return Err((
+                        AuthReason::MembershipUnavailable,
+                        super::internal_error(&e),
+                        None,
+                    ));
+                }
+            };
+        deny_banned(state, community, pubkey_bytes, oa, token_owner).await?;
         // Every admitted request records its verified owner here, whatever
         // the relay mode or how it was admitted: removing or banning the owner
         // reaches the agent only through that record.
-        let recorded = token_owner.or(owner).or_else(|| {
-            extract_nip_oa_owner(pubkey_bytes, auth_tag_header, signed_auth_created_at)
-        });
+        let recorded = token_owner.or(owner).or_else(|| oa.owner(pubkey_bytes));
         if let Some(recorded) = recorded {
             let Ok(agent) = nostr::PublicKey::from_slice(pubkey_bytes) else {
                 return Err((
@@ -497,8 +578,7 @@ pub mod relay_members {
         state: &AppState,
         community: CommunityId,
         pubkey_bytes: &[u8],
-        auth_tag_header: Option<&str>,
-        signed_auth_created_at: Option<u64>,
+        oa: NipOa<'_>,
         token_owner: Option<nostr::PublicKey>,
     ) -> Result<(), Refused> {
         let Ok(pubkey) = nostr::PublicKey::from_slice(pubkey_bytes) else {
@@ -512,8 +592,7 @@ pub mod relay_members {
             state,
             community,
             pubkey,
-            auth_tag_header,
-            signed_auth_created_at,
+            oa,
             token_owner,
             true,
         )
@@ -785,6 +864,71 @@ pub mod relay_members {
                 extract_nip_oa_owner(&agent_pubkey.to_bytes(), Some(&in_window), None),
                 None,
                 "a credential without a verified signed auth timestamp must fail closed"
+            );
+        }
+
+        /// A Git request proves one owner, and a grant only from a Git tag.
+        #[test]
+        fn a_git_request_proves_one_owner() {
+            let (agent, owner, other) = (Keys::generate(), Keys::generate(), Keys::generate());
+            let at = 1_000;
+            let git = |keys: &Keys, conditions: &str| {
+                buzz_sdk::nip_oa::compute_git_grant(keys, &agent.public_key(), conditions).unwrap()
+            };
+            let grant = git(&owner, "repo=*&git=push&created_at>900&created_at<1100");
+            let plain =
+                buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "").unwrap();
+            let prove =
+                |tag: Option<&str>, token| git_owner(&agent.public_key(), tag, Some(at), token);
+            let ok = prove(Some(&grant), None).unwrap();
+            assert_eq!(
+                (ok.0, ok.1.map(|g| g.owner)),
+                (Some(owner.public_key()), Some(owner.public_key()))
+            );
+            assert_eq!(
+                prove(Some(&plain), None).map(|(o, g)| (o, g.is_none())),
+                Ok((Some(owner.public_key()), true))
+            );
+            assert_eq!(
+                prove(None, None).map(|(o, g)| (o, g.is_none())),
+                Ok((None, true))
+            );
+            assert_eq!(
+                prove(None, Some(other.public_key())).map(|(o, _)| o),
+                Ok(Some(other.public_key()))
+            );
+            // A token's owner and a Git grant's must agree.
+            assert_eq!(
+                prove(Some(&grant), Some(other.public_key())).err(),
+                Some(OWNER_MISMATCH)
+            );
+            assert!(prove(Some(&grant), Some(owner.public_key())).is_ok_and(|(_, g)| g.is_some()));
+            // An unverifiable tag contributes nothing; it does not deny membership.
+            for bad in [
+                git(&owner, "repo=*&git=push&created_at>1000&created_at<1100"),
+                git(&owner, "repo=*&git=push&created_at<1000"),
+                buzz_sdk::nip_oa::compute_git_grant(&owner, &other.public_key(), "repo=*&git=push")
+                    .unwrap(),
+                buzz_sdk::nip_oa::compute_auth_tag(&other, &agent.public_key(), "")
+                    .unwrap()
+                    .replace(&other.public_key().to_hex(), &owner.public_key().to_hex()),
+            ] {
+                assert_eq!(
+                    prove(Some(&bad), None).map(|(o, g)| (o, g.is_none())),
+                    Ok((None, true)),
+                    "{bad}"
+                );
+                assert_eq!(
+                    prove(Some(&bad), Some(owner.public_key())).map(|(o, g)| (o, g.is_none())),
+                    Ok((Some(owner.public_key()), true)),
+                    "bad tag must preserve the verified token owner: {bad}"
+                );
+            }
+            assert_eq!(
+                git_owner(&agent.public_key(), Some(&grant), None, None)
+                    .map(|(o, g)| (o, g.is_none())),
+                Ok((None, true)),
+                "no signed auth time"
             );
         }
 

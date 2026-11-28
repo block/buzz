@@ -597,6 +597,7 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
 /// Returns `Err` for unknown kinds — the relay rejects them.
 fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static str> {
     match kind {
+        buzz_core::kind::KIND_GOVERNANCE_COMMAND | buzz_core::kind::KIND_GIT_EVIDENCE => Ok(Scope::ReposWrite),
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM | buzz_core::kind::KIND_ARTIFACT => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
@@ -858,6 +859,8 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // direct commands, same model as the NIP-43 9030-series. A stray
             // `h` tag must never channel-scope them (pinned contract —
             // handlers/moderation_commands.rs routing docs).
+            | buzz_core::kind::KIND_GOVERNANCE_COMMAND
+            | buzz_core::kind::KIND_GIT_EVIDENCE
             | KIND_MODERATION_BAN
             | KIND_MODERATION_UNBAN
             | KIND_MODERATION_TIMEOUT
@@ -2789,6 +2792,27 @@ async fn ingest_event_inner(
         });
     }
 
+    if matches!(
+        kind_u32,
+        buzz_core::kind::KIND_GOVERNANCE_COMMAND | buzz_core::kind::KIND_GIT_EVIDENCE
+    ) {
+        if auth.channel_ids().is_some() {
+            return Err(IngestError::AuthFailed(
+                "restricted: governance requires an unscoped credential".into(),
+            ));
+        }
+        if kind_u32 == buzz_core::kind::KIND_GIT_EVIDENCE {
+            super::governance::evidence(tenant, state, &event).await?;
+        } else {
+            super::governance::apply(tenant, state, &event).await?;
+        }
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: String::new(),
+        });
+    }
+
     // Community moderation commands (9040–9044) are direct, community-global
     // mutations. They are never stored or fanned out as ordinary events; the
     // handler writes the durable audit/enforcement rows after its own capability
@@ -3640,6 +3664,7 @@ async fn ingest_event_inner(
     };
     let mut dm_snapshots = Vec::new();
     let mut message = String::new();
+    let mut repo_reservation = None;
     let (stored_event, was_inserted) = if let Some(create) = channel_create.as_ref() {
         let creator = event.pubkey.to_bytes();
         let channel = buzz_db::channel::NewChannel {
@@ -3771,6 +3796,39 @@ async fn ingest_event_inner(
             .replace_addressable_event(tenant.community(), &event, channel_id)
             .await
             .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?
+    } else if kind_u32 == KIND_GIT_REPO_ANNOUNCEMENT {
+        use crate::api::git::binding::{resolve_repo_binding, RepoBinding};
+
+        let repo_id = buzz_db::event::extract_d_tag(&event).unwrap_or_default();
+        if !super::side_effects::validate_repo_id(&repo_id) {
+            return Err(IngestError::Rejected(
+                "invalid: repository identifier must be 1–64 letters, digits, dots, underscores \
+                 or hyphens, with no leading dot, '..', or '.git' suffix"
+                    .into(),
+            ));
+        }
+        let announced = match resolve_repo_binding(&event) {
+            RepoBinding::Bound(channel) => Some(channel),
+            RepoBinding::NotBound | RepoBinding::Broken => None,
+        };
+        let (stored, inserted, reserved) = state
+            .db
+            .store_git_repo_announcement(
+                tenant.community(),
+                &event,
+                &repo_id,
+                announced,
+                i64::from(state.config.git_max_repos_per_pubkey),
+            )
+            .await
+            .map_err(|e| match e {
+                buzz_db::DbError::GitAnnouncementRejected(reason) => {
+                    IngestError::Rejected(format!("invalid: {reason}"))
+                }
+                _ => IngestError::Internal(format!("error: {}", e.kind())),
+            })?;
+        repo_reservation = Some(reserved);
+        (stored, inserted)
     } else if is_parameterized_replaceable(kind_u32) {
         // NIP-33 parameterized replaceable — keyed by (kind, pubkey, d_tag).
         let d_tag = buzz_db::event::extract_d_tag(&event).unwrap_or_default();
@@ -3888,9 +3946,8 @@ async fn ingest_event_inner(
         || kind_u32 == KIND_NIP29_EDIT_METADATA
         || kind_u32 == KIND_SOLO_MEMBER_ROLE;
     if !persisted_atomically && crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
-        if let Err(e) =
-            crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
-                .await
+        use super::side_effects::handle_side_effects;
+        if let Err(e) = handle_side_effects(tenant, kind_u32, &event, state, repo_reservation).await
         {
             // error!, not warn!: the event was accepted but its side effects
             // (channel creation, git repo seeding, …) did not run — the relay

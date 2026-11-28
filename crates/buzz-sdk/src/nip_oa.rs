@@ -27,6 +27,8 @@ use nostr::{Keys, PublicKey, Tag, SECP256K1};
 use serde_json::Value;
 
 use crate::SdkError;
+pub use buzz_core::governance::GitGrant;
+use buzz_core::governance::{GrantAction, RepoCoordinate};
 
 /// Validate the `conditions` string per the NIP-OA spec.
 ///
@@ -176,6 +178,13 @@ struct ParsedAuthTag {
 /// verifier from accepting non-canonical values that the structural parser
 /// rejects.
 fn parse_auth_tag_fields(json_str: &str) -> Result<ParsedAuthTag, SdkError> {
+    parse_fields(json_str, validate_conditions)
+}
+
+fn parse_fields(
+    json_str: &str,
+    validate: fn(&str) -> Result<(), SdkError>,
+) -> Result<ParsedAuthTag, SdkError> {
     let arr = parse_json_array(json_str)?;
 
     if arr.len() != 4 {
@@ -207,7 +216,7 @@ fn parse_auth_tag_fields(json_str: &str) -> Result<ParsedAuthTag, SdkError> {
     let conditions = arr[2]
         .as_str()
         .ok_or_else(|| SdkError::InvalidInput("element 2 (conditions) must be a string".into()))?;
-    validate_conditions(conditions)?;
+    validate(conditions)?;
 
     let sig_hex = arr[3]
         .as_str()
@@ -342,6 +351,125 @@ pub fn parse_auth_tag(json_str: &str) -> Result<Tag, SdkError> {
         &parsed.sig_hex,
     ])
     .map_err(|e| SdkError::InvalidInput(format!("failed to construct Tag: {e}")))
+}
+
+/// Parse Git grant conditions: exactly one `repo=` and one `git=`, at most
+/// one of each time bound, nothing else. Order is free (it is signed as is).
+fn parse_git_clauses(conditions: &str) -> Result<GitConditions, SdkError> {
+    let bad = |m: &str| SdkError::InvalidInput(format!("invalid git grant: {m}"));
+    let mut c = GitConditions::default();
+    if conditions.is_empty() || conditions.bytes().any(|b| b.is_ascii_whitespace()) {
+        return Err(bad("conditions"));
+    }
+    for clause in conditions.split('&') {
+        let dup = || bad(&format!("duplicate or invalid clause {clause:?}"));
+        if let Some(v) = clause.strip_prefix("repo=") {
+            let repo = match v {
+                "*" => None,
+                v => Some(format!("30617:{v}").parse().map_err(|_| dup())?),
+            };
+            if c.repo.replace(repo).is_some() {
+                return Err(dup());
+            }
+        } else if let Some(v) = clause.strip_prefix("git=") {
+            let level = match v {
+                "read" => GrantAction::Read,
+                "push" => GrantAction::Push,
+                "manage" => GrantAction::Manage,
+                _ => return Err(dup()),
+            };
+            if c.level.replace(level).is_some() {
+                return Err(dup());
+            }
+        } else if let Some(v) = clause.strip_prefix("created_at<") {
+            validate_canonical_decimal(v, 0, 4294967295, "created_at<")?;
+            if c.before.replace(v.parse().map_err(|_| dup())?).is_some() {
+                return Err(dup());
+            }
+        } else if let Some(v) = clause.strip_prefix("created_at>") {
+            validate_canonical_decimal(v, 0, 4294967295, "created_at>")?;
+            if c.after.replace(v.parse().map_err(|_| dup())?).is_some() {
+                return Err(dup());
+            }
+        } else {
+            return Err(dup());
+        }
+    }
+    if c.repo.is_none() || c.level.is_none() {
+        return Err(bad("needs one repo= and one git="));
+    }
+    Ok(c)
+}
+
+#[derive(Default)]
+struct GitConditions {
+    repo: Option<Option<RepoCoordinate>>,
+    level: Option<GrantAction>,
+    after: Option<u64>,
+    before: Option<u64>,
+}
+
+/// Verify a NIP-OA Git grant for a Git request signed by `agent_pubkey` at
+/// `auth_event_created_at` (a NIP-98 event the relay has checked is fresh).
+/// Both time bounds are strict, as in [`verify_auth_tag_for_auth_event`].
+///
+/// # Errors
+///
+/// Returns [`SdkError::InvalidInput`] for a malformed tag, a tag without Git
+/// clauses, a bad signature, or a request outside the signed window.
+pub fn verify_git_grant(
+    auth_tag_json: &str,
+    agent_pubkey: &PublicKey,
+    auth_event_created_at: u64,
+) -> Result<GitGrant, SdkError> {
+    let parsed = parse_fields(auth_tag_json, |c| parse_git_clauses(c).map(|_| ()))?;
+    let owner = verify_parsed_auth_tag(&parsed, agent_pubkey)?;
+    let c = parse_git_clauses(&parsed.conditions)?;
+    if c.before.is_some_and(|t| auth_event_created_at >= t)
+        || c.after.is_some_and(|t| auth_event_created_at <= t)
+    {
+        return Err(SdkError::InvalidInput(format!(
+            "auth event created_at {auth_event_created_at} is outside the git grant's window"
+        )));
+    }
+    let level = c
+        .level
+        .ok_or_else(|| SdkError::InvalidInput("invalid git grant: no git= level".into()))?;
+    Ok(GitGrant {
+        owner,
+        repo: c.repo.flatten(),
+        level,
+        after: c.after,
+        before: c.before,
+    })
+}
+
+/// Sign a Git grant (see [`verify_git_grant`]) for `agent_pubkey`.
+///
+/// # Errors
+///
+/// Returns [`SdkError::InvalidInput`] for self-attestation or conditions that
+/// are not a Git grant.
+pub fn compute_git_grant(
+    owner_keys: &Keys,
+    agent_pubkey: &PublicKey,
+    conditions: &str,
+) -> Result<String, SdkError> {
+    if owner_keys.public_key() == *agent_pubkey {
+        return Err(SdkError::InvalidInput(
+            "owner and agent pubkeys must differ (self-attestation rejected)".into(),
+        ));
+    }
+    parse_git_clauses(conditions)?;
+    let message = hash_preimage(&build_preimage(agent_pubkey, conditions));
+    let sig = owner_keys.sign_schnorr(&message);
+    Ok(serde_json::json!([
+        "auth",
+        owner_keys.public_key().to_hex(),
+        conditions,
+        sig.to_string()
+    ])
+    .to_string())
 }
 
 #[cfg(test)]
@@ -697,5 +825,67 @@ mod tests {
         let bad =
             serde_json::json!(["auth", OWNER_PUBKEY_HEX, "kind=1&", "a".repeat(128)]).to_string();
         assert!(parse_auth_tag(&bad).is_err());
+    }
+
+    #[test]
+    fn a_git_grant_verifies_only_as_a_git_grant() {
+        let owner = Keys::generate();
+        let agent = Keys::generate().public_key();
+        let repo = format!("{}:ledger", "a".repeat(64));
+        let conditions = format!("repo={repo}&git=push&created_at>100&created_at<200");
+        let tag = compute_git_grant(&owner, &agent, &conditions).unwrap();
+        let grant = verify_git_grant(&tag, &agent, 150).unwrap();
+        let coord: RepoCoordinate = format!("30617:{repo}").parse().unwrap();
+        assert_eq!(grant.owner, owner.public_key());
+        assert_eq!(grant.repo.as_ref(), Some(&coord));
+        assert_eq!(grant.window(), Some(100));
+        assert!(grant.allows(&coord, GrantAction::Read));
+        assert!(grant.allows(&coord, GrantAction::Push));
+        assert!(
+            !grant.allows(&coord, GrantAction::Manage),
+            "levels include only those below"
+        );
+        let other: RepoCoordinate = format!("30617:{}:ledger", "b".repeat(64)).parse().unwrap();
+        assert!(
+            !grant.allows(&other, GrantAction::Read),
+            "another owner's repo of the same name"
+        );
+        // Never owner consent anywhere else, and no plain signer mints one.
+        assert!(verify_auth_tag(&tag, &agent).is_err());
+        assert!(verify_auth_tag_for_auth_event(&tag, &agent, 150).is_err());
+        assert!(parse_auth_tag(&tag).is_err());
+        assert!(compute_auth_tag(&owner, &agent, &conditions).is_err());
+        // Strict window, wrong agent, and a plain tag at the Git door.
+        assert!(verify_git_grant(&tag, &agent, 100).is_err());
+        assert!(verify_git_grant(&tag, &agent, 200).is_err());
+        assert!(verify_git_grant(&tag, &Keys::generate().public_key(), 150).is_err());
+        let plain = compute_auth_tag(&owner, &agent, "").unwrap();
+        assert!(verify_git_grant(&plain, &agent, 150).is_err());
+    }
+
+    #[test]
+    fn a_git_grant_names_one_repo_and_one_level() {
+        let owner = Keys::generate();
+        let agent = Keys::generate().public_key();
+        let all = compute_git_grant(&owner, &agent, "git=manage&repo=*").unwrap();
+        let grant = verify_git_grant(&all, &agent, 0).unwrap();
+        assert_eq!((grant.window(), grant.repo), (None, None));
+        let r = format!("{}:x", "a".repeat(64));
+        for bad in [
+            "repo=*".to_string(),
+            "git=push".to_string(),
+            format!("repo={r}&repo=*&git=push"),
+            format!("repo={r}&git=push&git=read"),
+            format!("repo={r}&git=admin"),
+            format!("repo={r}&git=push&kind=1"),
+            format!("repo={r}&git=push&created_at<9&created_at<8"),
+            format!("repo={r}&git=push&created_at<09"),
+            format!("repo={}:x&git=push", "A".repeat(64)),
+            format!("repo={r}/y&git=push"),
+            format!("repo={r}&git=push&"),
+            format!("repo={r} &git=push"),
+        ] {
+            assert!(compute_git_grant(&owner, &agent, &bad).is_err(), "{bad}");
+        }
     }
 }

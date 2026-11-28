@@ -948,8 +948,10 @@ async fn run_active_audio_connection(
                 &state,
                 tenant.community(),
                 pubkey,
-                auth_tag_json.as_deref(),
-                Some(signed_auth_created_at),
+                crate::api::relay_members::NipOa::Tag(
+                    auth_tag_json.as_deref(),
+                    Some(signed_auth_created_at),
+                ),
                 token_owner,
                 false,
             )

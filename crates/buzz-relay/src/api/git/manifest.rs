@@ -198,12 +198,12 @@ pub fn is_pack_key(s: &str) -> bool {
 /// The canonical pointer key for a repo: `repos/<community>/<owner>/<repo>/pointer`.
 ///
 /// Single source of truth shared by `cas_publish` (write side) and `hydrate`
-/// (read side). Strips a trailing `.git` if the caller passed it. The
+/// (read side). `repo` is the repository id, never stripped here: `repo`
+/// and `repo.git` are different keys, as they are different coordinates. The
 /// `repos/<community>/<owner>/<repo>/` namespace keeps the existing repo-local
 /// subtree intact under the server-resolved community boundary, while shared
 /// pack/manifest CAS objects remain outside that scoped pointer namespace.
 pub fn pointer_key(community: CommunityId, owner: &str, repo: &str) -> String {
-    let repo = repo.strip_suffix(".git").unwrap_or(repo);
     format!("repos/{community}/{owner}/{repo}/pointer")
 }
 
@@ -512,15 +512,15 @@ mod tests {
     }
 
     #[test]
-    fn pointer_key_strips_dot_git() {
+    fn pointer_key_never_strips_dot_git() {
         let c = CommunityId::from_uuid(uuid::Uuid::from_u128(1));
         assert_eq!(
             pointer_key(c, "alice", "myrepo"),
             format!("repos/{c}/alice/myrepo/pointer")
         );
-        assert_eq!(
+        assert_ne!(
             pointer_key(c, "alice", "myrepo.git"),
-            format!("repos/{c}/alice/myrepo/pointer")
+            pointer_key(c, "alice", "myrepo")
         );
     }
 

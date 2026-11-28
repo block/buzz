@@ -22,10 +22,6 @@ fn log_timestamp() -> DateTime<Utc> {
     to_storage_precision(Utc::now())
 }
 
-/// Per-community audit-chain advisory lock key. Admission takes the community
-/// deletion lock first; this key then serializes appends within that community.
-const AUDIT_LOCK_NAMESPACE: &str = "buzz_audit:";
-
 /// Append-only, per-community hash-chain audit log backed by Postgres.
 ///
 /// Each community has an independent chain keyed `(community_id, seq)`. Writes
@@ -52,34 +48,40 @@ impl AuditService {
         fields(action = %entry.action)
     )]
     pub async fn log(&self, entry: NewAuditEntry) -> Result<AuditEntry, AuditError> {
-        let mut tx = self.pool.begin().await?;
-        buzz_db::deletion::guard_community_write(&mut tx, entry.community_id).await?;
-        let lock_key = format!("{AUDIT_LOCK_NAMESPACE}{}", entry.community_id);
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(&lock_key)
-            .execute(&mut *tx)
-            .await?;
+        let db = buzz_db::Db::from_pool(self.pool.clone());
+        let mut tx = db.begin_event_write_transaction(entry.community_id).await?;
+        let result = Self::log_in_transaction(&mut tx, entry).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
 
+    /// Append to an already-admitted transaction, committing with its caller.
+    /// The caller takes its domain locks before entering the audit chain.
+    pub async fn log_in_transaction(
+        tx: &mut buzz_db::AdmittedTx,
+        entry: NewAuditEntry,
+    ) -> Result<AuditEntry, AuditError> {
+        Self::log_in_transaction_before(tx, entry, None).await
+    }
+
+    /// Append only if the insertion statement precedes the authorization expiry.
+    pub async fn log_in_transaction_before(
+        tx: &mut buzz_db::AdmittedTx,
+        entry: NewAuditEntry,
+        valid_until: Option<i64>,
+    ) -> Result<AuditEntry, AuditError> {
+        if entry.community_id != tx.community() {
+            return Err(buzz_db::DbError::AccessDenied("audit community mismatch".into()).into());
+        }
         // The stored row keys on the raw UUID; the typed `CommunityId` on the
         // input is the provenance fence, dereferenced here at the DB boundary.
         let community_id = *entry.community_id.as_uuid();
 
         // Head of THIS community's chain — scoped by community_id.
-        let head = sqlx::query(
-            "SELECT seq, hash FROM audit_log
-             WHERE community_id = $1
-             ORDER BY seq DESC LIMIT 1",
-        )
-        .bind(community_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        let (prev_seq, prev_hash): (i64, Option<Vec<u8>>) = match head {
-            Some(row) => (
-                row.get::<i64, _>("seq"),
-                Some(row.get::<Vec<u8>, _>("hash")),
-            ),
-            None => (0, None), // community's first entry
+        let head = buzz_db::audit::lock_head(tx).await?;
+        let (prev_seq, prev_hash) = match head {
+            Some((seq, hash)) => (seq, Some(hash)),
+            None => (0, None),
         };
         let seq = prev_seq + 1;
 
@@ -102,27 +104,22 @@ impl AuditService {
 
         debug!(seq, "writing audit entry");
 
-        sqlx::query(
-            r#"
-            INSERT INTO audit_log
-                (community_id, seq, hash, prev_hash, action, actor_pubkey, object_id, detail, created_at, hash_version)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            "#,
+        buzz_db::audit::append(
+            tx,
+            buzz_db::audit::Append {
+                seq: audit_entry.seq,
+                hash_version: audit_entry.hash_version,
+                hash: &audit_entry.hash,
+                prev_hash: audit_entry.prev_hash.as_deref(),
+                action: audit_entry.action.as_str(),
+                actor: audit_entry.actor_pubkey.as_deref(),
+                object: audit_entry.object_id.as_deref(),
+                detail: &audit_entry.detail,
+                created_at: audit_entry.created_at,
+                valid_until,
+            },
         )
-        .bind(audit_entry.community_id)
-        .bind(audit_entry.seq)
-        .bind(&audit_entry.hash)
-        .bind(audit_entry.prev_hash.as_deref())
-        .bind(audit_entry.action.as_str())
-        .bind(audit_entry.actor_pubkey.as_deref())
-        .bind(audit_entry.object_id.as_deref())
-        .bind(&audit_entry.detail)
-        .bind(audit_entry.created_at)
-        .bind(audit_entry.hash_version)
-        .execute(&mut *tx)
         .await?;
-
-        tx.commit().await?;
 
         Ok(audit_entry)
     }
@@ -340,6 +337,81 @@ mod postgres_tests {
             .await
             .expect("active audit append succeeds");
         assert_eq!(entry.seq, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn caller_transaction_rollback_removes_governance_head_and_audit() {
+        let url = std::env::var("DATABASE_URL").expect("isolated Postgres lane database");
+        let pool = PgPool::connect(&url).await.expect("connect test database");
+        let community = CommunityId::from_uuid(make_community(&pool).await);
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let mut tx = db.begin_event_write_transaction(community).await.unwrap();
+        let mut input = new_entry(*community.as_uuid(), AuditAction::GovernanceChanged);
+        input.detail = serde_json::json!({"document": "floor", "state": {"test": true}});
+        let row = AuditService::log_in_transaction(&mut tx, input.clone())
+            .await
+            .unwrap();
+        assert_eq!(row.seq, 1);
+        tx.rollback().await.unwrap();
+        let service = AuditService::new(pool);
+        assert!(service
+            .get_entries(community, 1, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        let mut tx = db.begin_event_write_transaction(community).await.unwrap();
+        let row = AuditService::log_in_transaction(&mut tx, input)
+            .await
+            .unwrap();
+        assert_eq!(row.seq, 1);
+        tx.commit().await.unwrap();
+        assert_eq!(
+            service.get_entries(community, 1, 10).await.unwrap().len(),
+            1
+        );
+        assert!(service.verify_chain(community, 1, 1).await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn governance_expiry_is_checked_by_the_audit_insert() {
+        let url = std::env::var("DATABASE_URL").expect("isolated Postgres lane database");
+        let pool = PgPool::connect(&url).await.unwrap();
+        let community = CommunityId::from_uuid(make_community(&pool).await);
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let mut tx = db.begin_event_write_transaction(community).await.unwrap();
+        let error = AuditService::log_in_transaction_before(
+            &mut tx,
+            new_entry(*community.as_uuid(), AuditAction::GovernanceChanged),
+            Some(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            AuditError::Admission(buzz_db::DbError::AccessDenied(_))
+        ));
+        tx.commit().await.unwrap();
+        let service = AuditService::new(pool);
+        assert!(service
+            .get_entries(community, 1, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        let mut tx = db.begin_event_write_transaction(community).await.unwrap();
+        AuditService::log_in_transaction_before(
+            &mut tx,
+            new_entry(*community.as_uuid(), AuditAction::GovernanceChanged),
+            Some(Utc::now().timestamp() + 3600),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(
+            service.get_entries(community, 1, 10).await.unwrap().len(),
+            1
+        );
     }
 
     fn new_entry(community_id: Uuid, action: AuditAction) -> NewAuditEntry {

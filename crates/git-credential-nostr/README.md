@@ -38,6 +38,24 @@ export NOSTR_PRIVATE_KEY=nsec1...
 git clone https://relay.example.com/git/owner/repo.git
 ```
 
+## Agents
+
+An agent proves its owner with a NIP-OA tag that the helper signs into each
+request. It reads the tag from `$BUZZ_AUTH_TAG`, else from git config
+`nostr.authtag`. An agent in the repo's channel needs nothing more: its own
+role there decides. An agent outside it can act under a Git grant from its
+owner, a tag naming the repo and level, capped by the owner's own role in the
+repo's channel. The owner mints one with `buzz repos grant`, signing with the
+owner's key, and the agent passes it to the command it is for:
+
+```bash
+BUZZ_AUTH_TAG="$(buzz repos grant --agent <agent-hex> --repo 30617:<owner-hex>:<repo> --git push --for 2h)" \
+  git push origin feature
+```
+
+A grant is good only for the window it states. To stop it early, an admin
+bans the agent's key; a ban on the owner stops it too.
+
 ## How It Works
 
 When a Buzz git server returns `HTTP 401` with a
