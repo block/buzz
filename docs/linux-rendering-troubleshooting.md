@@ -7,8 +7,36 @@ This guide covers the most common rendering failures on Linux and how to resolve
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | Blank or transparent window, then `SIGABRT` with `colrv1_configure_skpaint` in the output | COLRv1 color emoji font (AppImage only) | Upgrade to the latest AppImage (v0.5.2+) |
+| Window disappears and `WebKitWebProcess` reports `SIGILL` on an older x86_64 CPU | WebKitGTK 2.52 JavaScriptCore emits AVX instructions on a CPU without AVX | Buzz automatically sets `JSC_useJIT=0`; set it manually when running an older build |
 | Blank window on startup / SIGSEGV when switching workspaces | dmabuf renderer incompatibility (NVIDIA or AppImage) | Prefer `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` (shipped automatically) or `--safe-rendering`. Do **not** set `WEBKIT_DISABLE_DMABUF_RENDERER=1` on current WebKitGTK — see [#3654](https://github.com/block/buzz/issues/3654). On Debian/Ubuntu with the proprietary NVIDIA driver the crash can persist (distro WebKit patch) — [#3654](https://github.com/block/buzz/issues/3654) stays open for that path. |
 | Blank window on any hardware, no crash output | Unknown GPU/driver combination | `--safe-rendering` flag (see below) |
+
+---
+
+## Crash: `WebKitWebProcess` `SIGILL` on an AVX-less CPU
+
+**Affected hardware:** Older x86_64 CPUs that do not advertise the AVX feature, when used with affected WebKitGTK 2.52 builds. Issue [#3747](https://github.com/block/buzz/issues/3747).
+
+**Symptom:** Buzz starts and its WebKit child process exits with `SIGILL` (illegal instruction), often at an AVX `vmovaps` instruction in JavaScriptCore.
+
+**Automatic fix:** On Linux x86_64 only, Buzz reads `/proc/cpuinfo`, finds a `flags` line, and checks its whitespace-separated feature tokens for `avx`. If the line is found and `avx` is absent, Buzz sets `JSC_useJIT=0` before WebKit starts. Other architectures, AVX-capable CPUs, and missing, unreadable, or malformed CPU information leave JavaScriptCore unchanged. An explicitly provided `JSC_useJIT` value, including an empty value, is always preserved.
+
+**Support diagnostic:** Run this command in the same environment where Buzz is launched:
+
+```bash
+flags=$(awk -F: 'tolower($1) ~ /^[[:space:]]*flags[[:space:]]*$/ { print $2; exit }' /proc/cpuinfo 2>/dev/null)
+if [ -z "$flags" ]; then
+  echo "AVX status unknown: no readable flags line"
+elif printf '%s\n' "$flags" | grep -qiw avx; then
+  echo "AVX present: Buzz leaves JSC unchanged"
+else
+  echo "AVX absent: Buzz automatically sets JSC_useJIT=0"
+fi
+```
+
+`AVX absent` confirms the automatic fallback applies in current builds. `AVX present` means this workaround is not selected. `AVX status unknown` means Buzz also leaves JSC unchanged because it cannot safely determine that AVX is missing.
+
+**Manual workaround for older builds:** Launch with `JSC_useJIT=0 buzz-desktop`, or prefix the AppImage command, for example `JSC_useJIT=0 ./Buzz.AppImage`. Current builds do not overwrite any user-provided `JSC_useJIT` setting, so this explicit workaround and other deliberate values remain in effect.
 
 ---
 
