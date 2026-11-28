@@ -1129,3 +1129,69 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     navigation.removeFromParent()
   }
 }
+
+
+final class ProfileVibrantLabelFactory: NSObject, FlutterPlatformViewFactory {
+  func createArgsCodec() -> FlutterMessageCodec & NSObjectProtocol {
+    FlutterStandardMessageCodec.sharedInstance()
+  }
+
+  func create(withFrame frame: CGRect, viewIdentifier viewId: Int64, arguments args: Any?) -> FlutterPlatformView {
+    ProfileVibrantLabel(frame: frame, parameters: args as? [String: Any] ?? [:])
+  }
+}
+
+private final class ProfileVibrantLabel: NSObject, FlutterPlatformView {
+  private let container: UIView
+
+  init(frame: CGRect, parameters: [String: Any]) {
+    container = UIView(frame: frame)
+    super.init()
+    container.overrideUserInterfaceStyle = parameters["dark"] as? Bool == true ? .dark : .light
+    container.isUserInteractionEnabled = false
+    container.accessibilityElementsHidden = true
+
+    let label = UILabel(frame: container.bounds)
+    label.text = parameters["text"] as? String
+    label.font = .systemFont(ofSize: parameters["size"] as? CGFloat ?? 12, weight: .semibold)
+    label.textAlignment = parameters["rtl"] as? Bool == true ? .right : .left
+    label.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    label.numberOfLines = 0
+    if UIAccessibility.isReduceTransparencyEnabled {
+      label.textColor = .label
+      container.addSubview(label)
+      return
+    }
+
+    let material = UIBlurEffect(style: .systemUltraThinMaterial)
+    let backdrop = ProfileLabelMaterial(effect: material)
+    backdrop.frame = container.bounds
+    backdrop.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    container.addSubview(backdrop)
+    let vibrancy = UIVisualEffectView(effect: UIVibrancyEffect(blurEffect: material, style: .label))
+    vibrancy.frame = backdrop.bounds
+    vibrancy.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    backdrop.contentView.addSubview(vibrancy)
+    let ink = UIView(frame: vibrancy.bounds)
+    ink.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    ink.backgroundColor = .label
+    vibrancy.contentView.addSubview(ink)
+    // Limit the material and its vibrant foreground to the letterforms.
+    backdrop.glyphs = label
+    backdrop.setNeedsLayout()
+  }
+
+  func view() -> UIView { container }
+}
+
+
+private final class ProfileLabelMaterial: UIVisualEffectView {
+  var glyphs: UILabel?
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    guard let glyphs, mask == nil || glyphs.frame != bounds else { return }
+    glyphs.frame = bounds
+    mask = glyphs
+  }
+}

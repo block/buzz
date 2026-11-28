@@ -1,3 +1,5 @@
+import 'package:buzz/features/profile/profile_edit_page.dart';
+import 'package:buzz/shared/widgets/profile_action_chip.dart';
 import 'dart:async';
 
 import 'package:buzz/features/channels/channel.dart';
@@ -20,6 +22,49 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   final peer = 'a' * 64;
+
+  testWidgets(
+    'Edit profile closes the sheet before opening the full-screen editor',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            currentPubkeyProvider.overrideWith((ref) => peer),
+            userCacheProvider.overrideWith(
+              () => _UserCache({
+                peer: UserProfile(pubkey: peer, displayName: 'My profile'),
+              }),
+            ),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: Builder(
+              builder: (context) => Scaffold(
+                body: TextButton(
+                  onPressed: () => showUserProfileSheet(context, peer),
+                  child: const Text('Open profile'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open profile'));
+      await tester.pumpAndSettle();
+      for (final label in ['Edit profile', 'Set a status']) {
+        final chip = find.widgetWithText(ProfileActionChip, label);
+        expect(tester.widget<ProfileActionChip>(chip).leading, isNull);
+      }
+      await tester.tap(find.text('Edit profile'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ProfileEditPage), findsOneWidget);
+      expect(find.byType(UserProfileSheet, skipOffstage: false), findsNothing);
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(find.text('Open profile'), findsOneWidget);
+    },
+  );
 
   for (final nativeSheet in [false, true]) {
     testWidgets(

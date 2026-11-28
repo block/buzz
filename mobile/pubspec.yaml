@@ -67,6 +67,7 @@ dependencies:
   path: ^1.9.1
   sentry_flutter: ^10.5.0
   sqlite3: 3.9.1
+  timezone: ^0.11.2
 
 dev_dependencies:
   leak_tracker: ^11.0.2
@@ -90,6 +91,7 @@ flutter:
     - shaders/toast_island.frag
     - shaders/onboarding_wordmark.frag
   assets:
+    - assets/images/profile-world.svg
     - assets/images/welcome-bee.svg
     - assets/images/buzz-icon.png
     - assets/images/shell-gradient.png

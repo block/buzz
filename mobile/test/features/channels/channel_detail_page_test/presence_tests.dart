@@ -142,7 +142,8 @@ void presenceTests() {
     }.entries) {
       cache.setPresence(entry.key);
       await tester.pumpAndSettle();
-      expect(find.text(entry.value), findsOneWidget);
+      // Profile artwork uses a compact badge with a spoken presence label.
+      expect(find.text(entry.value), findsNothing);
       expect(find.bySemanticsLabel('Presence: ${entry.value}'), findsOneWidget);
       if (entry.key != 'offline') expect(find.text('Offline'), findsNothing);
       await _capturePresence(tester, 'profile-${entry.value}');

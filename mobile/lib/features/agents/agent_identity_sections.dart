@@ -40,6 +40,8 @@ class AgentIdentitySections extends HookConsumerWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         AppListCard(
+          outlined: true,
+          labelOverArtwork: true,
           label: 'Instructions',
           horizontalPadding: 0,
           children: [
@@ -53,6 +55,8 @@ class AgentIdentitySections extends HookConsumerWidget {
           ],
         ),
         AppListCard(
+          outlined: true,
+          labelOverArtwork: true,
           label: 'Management',
           horizontalPadding: 0,
           children: [

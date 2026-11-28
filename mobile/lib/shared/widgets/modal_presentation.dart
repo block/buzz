@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../theme/theme.dart';
 import 'buzz_sheet_header.dart';
+import 'native_profile_sheet.dart';
 import 'ios_composition_layer.dart';
 import 'duo_toolbar.dart';
 import 'ios_navigation_bar.dart';
@@ -44,6 +45,7 @@ Future<T?> showBuzzModalBottomSheet<T>({
   BoxConstraints? constraints,
   Color? barrierColor,
   bool nativeIosBarrier = false,
+  bool detentCorners = false,
   bool isScrollControlled = false,
   double scrollControlDisabledMaxHeightRatio = 9.0 / 16.0,
   bool useRootNavigator = false,
@@ -89,6 +91,10 @@ Future<T?> showBuzzModalBottomSheet<T>({
         DuoToolbarScope.maybeOf(sheetContext)?.strip ??
         FoldGeometry.of(sheetContext).strip;
     final fullWidth = strip != null && useDuoFullWidth;
+    final currentTheme = detentCorners ? Theme.of(sheetContext) : sheetTheme;
+    final currentSurface = detentCorners
+        ? utilitySurfaceThemeData(currentTheme).scaffoldBackgroundColor
+        : surfaceColor;
     final content = _SheetLocalSafeArea(
       localize: strip != null && !fullWidth,
       child: DuoToolbarScope(
@@ -109,10 +115,11 @@ Future<T?> showBuzzModalBottomSheet<T>({
             inRail:
                 isIos && fullWidth && (showCloseButton || showRailCloseButton),
             child: Theme(
-              data: sheetTheme,
+              data: currentTheme,
               child: Builder(
                 builder: (themedContext) => ConcentricSheetSurface(
                   enabled: isIos,
+                  detentCorners: detentCorners,
                   padding: fullWidth
                       ? EdgeInsets.zero
                       : const EdgeInsets.only(
@@ -120,7 +127,7 @@ Future<T?> showBuzzModalBottomSheet<T>({
                           right: Grid.xxs,
                           bottom: Grid.xxs,
                         ),
-                  color: surfaceColor,
+                  color: currentSurface,
                   child: SafeArea(
                     top: false,
                     bottom: false,
@@ -130,7 +137,7 @@ Future<T?> showBuzzModalBottomSheet<T>({
                       title: title,
                       showCloseButton: showCloseButton,
                       showDragHandle: showDragHandle == true,
-                      surfaceColor: surfaceColor,
+                      surfaceColor: currentSurface,
                       // Keep the entire scroll viewport above gesture navigation. The
                       // inner builder sees a consumed bottom inset, so sheet-local safe
                       // areas and scroll padding do not reserve that system inset twice.
@@ -195,64 +202,77 @@ Future<T?> showBuzzModalBottomSheet<T>({
     );
   }
 
-  if (isIos && nativeIosBarrier) {
-    final navigator = Navigator.of(context, rootNavigator: true);
-    final localizations = MaterialLocalizations.of(context);
-    return navigator.push(
-      _NativeBarrierSheetRoute<T>(
-        builder: buildSheet,
-        capturedThemes: InheritedTheme.capture(
-          from: context,
-          to: navigator.context,
+  Future<T?> flutterSheet() {
+    if (isIos && nativeIosBarrier) {
+      final navigator = Navigator.of(context, rootNavigator: true);
+      final localizations = MaterialLocalizations.of(context);
+      return navigator.push(
+        _NativeBarrierSheetRoute<T>(
+          builder: buildSheet,
+          capturedThemes: InheritedTheme.capture(
+            from: context,
+            to: navigator.context,
+          ),
+          isScrollControlled: isScrollControlled,
+          isDismissible: isDismissible,
+          enableDrag: enableDrag,
+          barrierLabel: barrierLabel ?? localizations.scrimLabel,
+          barrierOnTapHint: localizations.scrimOnTapHint(
+            localizations.bottomSheetLabel,
+          ),
+          scrimColor:
+              barrierColor ??
+              theme.bottomSheetTheme.modalBarrierColor ??
+              Colors.black54,
+          sheetAnimationStyle: reduceMotion
+              ? AnimationStyle.noAnimation
+              : (sheetAnimationStyle ?? buzzModalAnimationStyle),
         ),
-        isScrollControlled: isScrollControlled,
-        isDismissible: isDismissible,
-        enableDrag: enableDrag,
-        barrierLabel: barrierLabel ?? localizations.scrimLabel,
-        barrierOnTapHint: localizations.scrimOnTapHint(
-          localizations.bottomSheetLabel,
-        ),
-        scrimColor:
-            barrierColor ??
-            theme.bottomSheetTheme.modalBarrierColor ??
-            Colors.black54,
-        sheetAnimationStyle: reduceMotion
-            ? AnimationStyle.noAnimation
-            : (sheetAnimationStyle ?? buzzModalAnimationStyle),
-      ),
+      );
+    }
+    return showModalBottomSheet<T>(
+      context: context,
+      builder: buildSheet,
+      backgroundColor: isIos || title != null
+          ? Colors.transparent
+          : surfaceColor,
+      barrierLabel: barrierLabel,
+      elevation: elevation,
+      shape: shape,
+      clipBehavior: clipBehavior,
+      // The route must permit expansion; the builder owns the live width cap.
+      constraints: isIos && useDuoFullWidth
+          ? const BoxConstraints(maxWidth: double.infinity)
+          : constraints,
+      barrierColor: barrierColor,
+      isScrollControlled: isScrollControlled,
+      scrollControlDisabledMaxHeightRatio: scrollControlDisabledMaxHeightRatio,
+      useRootNavigator:
+          (isIos && useDuoFullWidth) || startsFullWidth || useRootNavigator,
+      isDismissible: isDismissible,
+      enableDrag: enableDrag,
+      // The shared header owns the handle so Android does not reserve a second
+      // handle band above the title row and iOS keeps it inside its native inset.
+      showDragHandle: false,
+      useSafeArea: isIos && useDuoFullWidth ? false : useSafeArea,
+      routeSettings: routeSettings,
+      transitionAnimationController: transitionAnimationController,
+      anchorPoint: anchorPoint,
+      sheetAnimationStyle: reduceMotion
+          ? AnimationStyle.noAnimation
+          : (sheetAnimationStyle ?? buzzModalAnimationStyle),
+      requestFocus: requestFocus,
     );
   }
-  return showModalBottomSheet<T>(
-    context: context,
-    builder: buildSheet,
-    backgroundColor: isIos || title != null ? Colors.transparent : surfaceColor,
-    barrierLabel: barrierLabel,
-    elevation: elevation,
-    shape: shape,
-    clipBehavior: clipBehavior,
-    // The route must permit expansion; the builder owns the live width cap.
-    constraints: isIos && useDuoFullWidth
-        ? const BoxConstraints(maxWidth: double.infinity)
-        : constraints,
-    barrierColor: barrierColor,
-    isScrollControlled: isScrollControlled,
-    scrollControlDisabledMaxHeightRatio: scrollControlDisabledMaxHeightRatio,
-    useRootNavigator:
-        (isIos && useDuoFullWidth) || startsFullWidth || useRootNavigator,
-    isDismissible: isDismissible,
-    enableDrag: enableDrag,
-    // The shared header owns the handle so Android does not reserve a second
-    // handle band above the title row and iOS keeps it inside its native inset.
-    showDragHandle: false,
-    useSafeArea: isIos && useDuoFullWidth ? false : useSafeArea,
-    routeSettings: routeSettings,
-    transitionAnimationController: transitionAnimationController,
-    anchorPoint: anchorPoint,
-    sheetAnimationStyle: reduceMotion
-        ? AnimationStyle.noAnimation
-        : (sheetAnimationStyle ?? buzzModalAnimationStyle),
-    requestFocus: requestFocus,
-  );
+
+  if (isIos && detentCorners && !startsFullWidth) {
+    return showNativeProfileSheet<T>(
+      context: context,
+      builder: builder,
+      fallback: flutterSheet,
+    );
+  }
+  return flutterSheet();
 }
 
 /// Paint the section sheet's dimming in the barrier entry, above Home's

@@ -230,15 +230,24 @@ class _AgentsNavigation extends HookConsumerWidget {
                                 View.of(listContext).physicalSize /
                                 View.of(listContext).devicePixelRatio,
                           );
+                      final directoryAvatar = ref
+                          .read(ownedAgentDirectoryProvider)
+                          .asData
+                          ?.value
+                          .where((entry) => entry.pubkey == pubkey)
+                          .firstOrNull
+                          ?.avatarUrl;
                       Widget profile({
                         ValueChanged<Channel>? onOpenChannel,
                         EdgeInsets contentPadding = EdgeInsets.zero,
                       }) => UserProfileSheet(
                         onOpenChannel: onOpenChannel,
                         embedded: onOpenChannel != null,
+                        sheetControls: onOpenChannel == null,
                         contentPadding: contentPadding,
                         pubkey: pubkey,
                         agentPresentation: true,
+                        initialAvatarUrl: directoryAvatar,
                         agentSubtitleIcon:
                             controller.agents.any(
                               (agent) => agent['agent_pubkey'] == pubkey,
@@ -299,10 +308,15 @@ class _AgentsNavigation extends HookConsumerWidget {
                       }
                       final channel = await showBuzzModalBottomSheet<Channel>(
                         context: listContext,
+                        useSafeArea: true,
                         isScrollControlled: true,
                         showDragHandle: false,
                         showCloseButton: false,
                         showRailCloseButton: true,
+                        detentCorners: true,
+                        backgroundColor: utilitySurfaceThemeData(
+                          Theme.of(listContext),
+                        ).scaffoldBackgroundColor,
                         padHorizontal: false,
                         padBottom: false,
                         builder: (_) => profile(),

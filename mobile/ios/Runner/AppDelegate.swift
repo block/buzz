@@ -3,6 +3,7 @@ import AVFoundation
 import BuzzPushKit
 import DeclaredAgeRange
 import Flutter
+import MapKit
 import UIKit
 import UserNotifications
 import os.log
@@ -52,6 +53,7 @@ import os.log
   private var conversationMenu: ConversationMenu?
   private var nativePhotoZoomCoordinator: NativePhotoZoomCoordinator?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
+  private var profileSheets: ProfileSheetPresenter?
   private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
   private var nativeCreateChannelSheetCoordinator: NativeCreateChannelSheetCoordinator?
   private var nativeChannelActionsSheetCoordinator: NativeChannelActionsSheetCoordinator?
@@ -141,6 +143,8 @@ import os.log
     deviceTranscriptionPlugin = DeviceTranscriptionPlugin(messenger: messenger)
     huddleMediaPlugin = HuddleMediaPlugin(messenger: messenger)
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "BuzzIosNavigationBar") {
+      registrar.register(ProfileGlobeFactory(messenger: messenger), withId: "buzz/profile_globe")
+      registrar.register(ProfileVibrantLabelFactory(), withId: "buzz/profile_vibrant_label")
       registrar.register(IosNavigationBarFactory(messenger: messenger, parent: registrar.viewController), withId: "buzz/ios_navigation_bar")
     }
     mediaUploadChannel = FlutterMethodChannel(
@@ -375,6 +379,7 @@ import os.log
     let nativeEmojiPickerRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzNativeEmojiPicker"
     )
+    profileSheets = ProfileSheetPresenter(messenger: messenger)
     nativeEmojiPickerCoordinator = NativeEmojiPickerCoordinator(
       messenger: messenger,
       parentViewController: nativeEmojiPickerRegistrar?.viewController
@@ -1269,6 +1274,174 @@ import os.log
           )
         }
       }
+    }
+  }
+}
+
+private final class ProfileGlobeFactory: NSObject, FlutterPlatformViewFactory {
+  let messenger: FlutterBinaryMessenger
+  init(messenger: FlutterBinaryMessenger) { self.messenger = messenger }
+
+  func createArgsCodec() -> FlutterMessageCodec & NSObjectProtocol {
+    FlutterStandardMessageCodec.sharedInstance()
+  }
+
+  func create(withFrame frame: CGRect, viewIdentifier viewId: Int64, arguments args: Any?) -> FlutterPlatformView {
+    ProfileGlobe(channel: FlutterMethodChannel(name: "buzz/profile_globe/\(viewId)", binaryMessenger: messenger), frame: frame, parameters: args as? [String: Any] ?? [:])
+  }
+}
+
+private final class ProfileGlobe: NSObject, FlutterPlatformView {
+  private let map: ProfileCityMap
+  private let viewport = UIView()
+
+  private let channel: FlutterMethodChannel
+
+  init(channel: FlutterMethodChannel, frame: CGRect, parameters: [String: Any]) {
+    self.channel = channel
+    let city = CLLocationCoordinate2D(latitude: parameters["latitude"] as? Double ?? 0,
+                                      longitude: parameters["longitude"] as? Double ?? 0)
+    map = ProfileCityMap(frame: .zero, city: city)
+    super.init()
+    viewport.overrideUserInterfaceStyle = parameters["dark"] as? Bool == true ? .dark : .light
+    configureImagery(map)
+    map.isScrollEnabled = false
+    map.isZoomEnabled = false
+    map.isPitchEnabled = false
+    map.isRotateEnabled = false
+    map.showsCompass = false
+    map.insetsLayoutMarginsFromSafeArea = false
+    viewport.frame = frame
+    viewport.clipsToBounds = true
+    viewport.addSubview(map)
+    map.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([
+      map.widthAnchor.constraint(equalTo: viewport.widthAnchor),
+      map.heightAnchor.constraint(equalTo: viewport.widthAnchor, multiplier: 0.9),
+      map.centerXAnchor.constraint(equalTo: viewport.centerXAnchor),
+      map.centerYAnchor.constraint(equalTo: viewport.centerYAnchor),
+    ])
+    viewport.backgroundColor = .black
+    channel.setMethodCallHandler { [weak self] call, result in
+      guard call.method == "open" else { result(FlutterMethodNotImplemented); return }
+      let data = (call.arguments as? FlutterStandardTypedData)?.data
+      self?.openMap(pin: data.flatMap { UIImage(data: $0, scale: UIScreen.main.scale) })
+      result(nil)
+    }
+  }
+
+  deinit { channel.setMethodCallHandler(nil) }
+
+  private func configureImagery(_ map: MKMapView) {
+    if #available(iOS 16.0, *) {
+      map.preferredConfiguration = MKImageryMapConfiguration(elevationStyle: .realistic)
+    } else {
+      map.mapType = .satelliteFlyover
+    }
+  }
+
+  private func openMap(pin: UIImage?) {
+    var responder: UIResponder? = viewport
+    while responder != nil && !(responder is UIViewController) { responder = responder?.next }
+    guard var presenter = responder as? UIViewController else { return }
+    while let presented = presenter.presentedViewController { presenter = presented }
+    let detail = ProfileMapDetail(pin: pin, city: map.city)
+    let interactiveMap = MKMapView()
+    configureImagery(interactiveMap)
+    interactiveMap.delegate = detail
+    detail.view = interactiveMap
+    detail.title = "Location"
+    let marker = MKPointAnnotation()
+    marker.coordinate = map.city
+    marker.title = "Profile location"
+    if pin == nil { interactiveMap.addAnnotation(marker) }
+    let sheet = UINavigationController(rootViewController: detail)
+    sheet.modalPresentationStyle = .pageSheet
+    // Satellite space behind the navigation bar is dark in both app themes.
+    sheet.navigationBar.overrideUserInterfaceStyle = .dark
+    let bar = UINavigationBarAppearance()
+    bar.configureWithTransparentBackground()
+    bar.titleTextAttributes = [.foregroundColor: UIColor.white,
+                               .strokeColor: UIColor.black, .strokeWidth: -2]
+    sheet.navigationBar.standardAppearance = bar
+    sheet.navigationBar.scrollEdgeAppearance = bar
+    sheet.navigationBar.tintColor = .white
+    detail.navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .done, primaryAction:
+      UIAction { [weak sheet] _ in sheet?.dismiss(animated: true) })
+    presenter.present(sheet, animated: true)
+    interactiveMap.setCamera(MKMapCamera(lookingAtCenter: map.city,
+      fromDistance: map.camera.centerCoordinateDistance, pitch: 0, heading: 0), animated: false)
+  }
+
+  func view() -> UIView { viewport }
+}
+
+private final class ProfileMapDetail: UIViewController, MKMapViewDelegate {
+  private let portrait: UIImageView
+  private let city: CLLocationCoordinate2D
+
+  init(pin: UIImage?, city: CLLocationCoordinate2D) {
+    self.city = city
+    portrait = UIImageView(image: pin)
+    super.init(nibName: nil, bundle: nil)
+  }
+  required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
+
+  override func viewDidLayoutSubviews() {
+    super.viewDidLayoutSubviews()
+    guard let map = view as? MKMapView else { return }
+    if portrait.superview == nil { map.addSubview(portrait) }
+    mapViewDidChangeVisibleRegion(map)
+  }
+
+  func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
+    let point = mapView.convert(city, toPointTo: mapView)
+    guard point.x.isFinite, point.y.isFinite, mapView.bounds.contains(point) else {
+      portrait.isHidden = true
+      return
+    }
+    // A city on the far side of the globe can project inside the visible disc.
+    let visible = mapView.convert(point, toCoordinateFrom: mapView)
+    portrait.isHidden = !CLLocationCoordinate2DIsValid(visible)
+      || MKMapPoint(visible).distance(to: MKMapPoint(city)) > 1000
+    portrait.center = CGPoint(x: point.x, y: point.y - portrait.bounds.height / 2)
+    mapView.bringSubviewToFront(portrait)
+  }
+}
+
+private final class ProfileCityMap: MKMapView {
+  let city: CLLocationCoordinate2D
+  private var framedSize = CGSize.zero
+  init(frame: CGRect, city: CLLocationCoordinate2D) {
+    self.city = city
+    super.init(frame: frame)
+  }
+
+  required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    guard !bounds.isEmpty, bounds.size != framedSize else { return }
+    framedSize = bounds.size
+    // Keep the native Maps attribution inside the visible wide slice.
+    let inset = max(0, (bounds.height - bounds.width * 60 / 160) / 2)
+    layoutMargins = UIEdgeInsets(top: inset, left: 0, bottom: inset, right: 0)
+    frameCity()
+  }
+
+  private func frameCity() {
+    let camera = MKMapCamera(lookingAtCenter: city, fromDistance: 18_536_380, pitch: 0, heading: 0)
+    setCamera(camera, animated: false)
+    // Anchor the 52-point marker tip half a marker below the visual center.
+    // Adjust geographic center so MapKit can use the whole viewport for lighting.
+    let targetY = bounds.midY + 26
+    for _ in 0..<5 {
+      let delta = convert(city, toPointTo: self).y - targetY
+      guard abs(delta) > 0.2 else { break }
+      let center = convert(CGPoint(x: bounds.midX, y: bounds.midY + delta), toCoordinateFrom: self)
+      guard CLLocationCoordinate2DIsValid(center) else { break }
+      camera.centerCoordinate = center
+      setCamera(camera, animated: false)
     }
   }
 }
