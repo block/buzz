@@ -90,7 +90,59 @@ const evictionFloorByAgent = new Map<
 // events — separation is strict so loading deep history can never evict live frames
 // or vice versa. UI consumers merge the raw events from both sources, then derive
 // TranscriptState once over the combined window.
+//
+// Bounded by channel, not by event: a panel hydrates ~2000 frames per channel
+// and pages older on demand, so trimming events would undo loads the pager has
+// already moved its cursor past. Mounted panels register as viewers
+// (`retainArchivedChannel`), and a viewed channel is never evicted. Of the
+// channels nobody is viewing, only the MAX_ARCHIVED_CHANNELS most recently used
+// are kept (Map insertion order is the recency order), so a quick revisit is
+// instant. An evicted channel re-hydrates when a panel opens it again.
 const archiveEventsByChannel = new Map<string, ObserverEvent[]>();
+const archiveViewersByChannel = new Map<string, number>();
+const MAX_ARCHIVED_CHANNELS = 4;
+
+function markArchivedChannelUsed(key: string) {
+  const events = archiveEventsByChannel.get(key);
+  if (events) {
+    archiveEventsByChannel.delete(key);
+    archiveEventsByChannel.set(key, events);
+  }
+}
+
+function evictUnviewedArchivedChannels() {
+  for (const key of archiveEventsByChannel.keys()) {
+    if (archiveEventsByChannel.size <= MAX_ARCHIVED_CHANNELS) return;
+    if (!archiveViewersByChannel.has(key)) archiveEventsByChannel.delete(key);
+  }
+}
+
+/**
+ * Keep a channel's archive resident while a panel shows it. Returns the release
+ * function; the channel becomes the most recently used unviewed one when its
+ * last viewer releases it.
+ */
+export function retainArchivedChannel(
+  agentPubkey: string,
+  channelId: string,
+): () => void {
+  const key = archiveChannelKey(agentPubkey, channelId);
+  const retainedGeneration = generation;
+  archiveViewersByChannel.set(key, (archiveViewersByChannel.get(key) ?? 0) + 1);
+  return () => {
+    // A reset already dropped every viewer; a late release must not touch the
+    // counts of panels mounted after it.
+    if (retainedGeneration !== generation) return;
+    const viewers = (archiveViewersByChannel.get(key) ?? 1) - 1;
+    if (viewers > 0) {
+      archiveViewersByChannel.set(key, viewers);
+      return;
+    }
+    archiveViewersByChannel.delete(key);
+    markArchivedChannelUsed(key);
+    evictUnviewedArchivedChannels();
+  };
+}
 
 // Per-agent, per-channel latest-live-session-id.
 // Key: `${normalizePubkey(agentPubkey)}:${channelId}`.
@@ -349,9 +401,9 @@ function archiveChannelKey(agentPubkey: string, channelId: string): string {
 
 /**
  * Append a decoded archived observer event to the channel-scoped archive
- * event journal. Unlike `appendAgentEvent`, this path does NOT cap or trim —
- * the channel archive window grows only by explicit paged loads from SQLite,
- * so unbounded growth from live relay events is impossible.
+ * event journal. Unlike `appendAgentEvent`, this path never trims a channel's
+ * window — it grows only by explicit paged loads from SQLite. Memory is bounded
+ * by evicting whole least-recently-used channels that no panel is viewing.
  *
  * Deduplicates on `(seq, timestamp)` — identical to `appendAgentEvent` — so
  * events that arrive on the live relay before the archive page is loaded are
@@ -367,6 +419,7 @@ function appendArchivedChannelEvent(
   event: ObserverEvent,
 ): boolean {
   const key = archiveChannelKey(agentPubkey, channelId);
+  markArchivedChannelUsed(key);
   const current = archiveEventsByChannel.get(key) ?? [];
 
   // Dedup: skip if (seq, timestamp) already present in the archive window.
@@ -384,6 +437,7 @@ function appendArchivedChannelEvent(
   // order for consumers that call buildTranscriptState over the window.
   const sorted = [...current, event].sort(compareObserverEvents);
   archiveEventsByChannel.set(key, sorted);
+  evictUnviewedArchivedChannels();
   return true;
 }
 
@@ -866,8 +920,9 @@ export async function ingestArchivedObserverEvents(
     try {
       const parsed = (await _decryptFn(event)) as ObserverEvent;
       for (const inner of unwrapObserverBatch(parsed)) {
-        // Route archived events to the channel-scoped archive window (no cap)
-        // rather than the per-agent live-relay store (MAX_OBSERVER_EVENTS cap).
+        // Route archived events to the channel-scoped archive window (bounded
+        // by channel count) rather than the per-agent live-relay store
+        // (MAX_OBSERVER_EVENTS cap).
         // Events without a channelId fall through to the live store so they
         // remain visible in the agent's general transcript.
         if (inner.channelId) {
@@ -938,6 +993,7 @@ export function resetAgentObserverStore() {
   evictionFloorByAgent.clear();
   snapshotByAgent.clear();
   archiveEventsByChannel.clear();
+  archiveViewersByChannel.clear();
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
   pendingUnknownAgentFrames.length = 0;
