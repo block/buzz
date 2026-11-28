@@ -107,12 +107,37 @@ extension ReadStateJournal on ReadStateManager {
         stored.contexts.entries.where(
           (entry) =>
               stored.publishableContextIds.contains(entry.key) &&
-              !isOverrideContext(entry.key) &&
+              isReadStateSlotContext(entry.key) &&
               !entry.key.startsWith(msgContextPrefix),
         ),
       );
     }
     _persistLocalState();
+  }
+
+  /// Save the visit's hints in one batch. The channel cutoff rides the next
+  /// read-state publish or flush without scheduling its own snapshot.
+  void markChannelRowSeen(Map<String, int> marks) {
+    final floor = readStateFloor(_now());
+    var changed = false;
+    for (final MapEntry(:key, :value) in marks.entries) {
+      if (value <= floor) continue;
+      if (_advanceContext(
+        key,
+        value,
+        publishable: !isSeenMessageContext(key),
+      )) {
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    // Expired receipts have already fallen behind the read floor. Retire
+    // them in memory as well as on disk.
+    _effectiveState.removeWhere(
+      (key, value) => isSeenMessageContext(key) && value <= floor,
+    );
+    _persistLocalState();
+    _onChanged();
   }
 
   /// The journal field that keeps a retained packet for coordinate [key].

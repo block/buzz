@@ -1093,6 +1093,27 @@ void main() {
     return manager;
   }
 
+  test('a row-only visit waits for the next read-state flush', () {
+    fakeAsync((async) {
+      final session = _FakeRelaySession();
+      final relay = _FakeSignedEventRelay();
+      final manager = recoveryManager(async, session, relay);
+
+      manager.markChannelRowSeen({'seen:room': 1990});
+      expect(manager.getEffectiveTimestamp('seen:room'), 1990);
+      expect(manager.getEffectiveTimestamp('room'), isNull);
+      async.elapse(const Duration(seconds: 6));
+      expect(session.fetchCount, 1, reason: 'only the initial snapshot');
+      expect(relay.submitCount, 0);
+
+      manager.flush();
+      async.flushMicrotasks();
+      expect(session.fetchCount, 2);
+      expect(relay.submitCount, 1);
+      manager.dispose(flushPending: false);
+    });
+  });
+
   test('a read that recovers on the same socket sends the marks the retry '
       'would have', () {
     fakeAsync((async) {
@@ -1341,13 +1362,18 @@ void main() {
     final manager = create();
     manager.markContextRead('msg:one', 100);
     manager.markContextRead('room', 90);
+    // Row hints: the channel's syncs, a message receipt stays here.
+    manager.markChannelRowSeen({'seen:msg:two': 100, 'seen:room': 95});
     await manager.flush();
     manager.dispose(flushPending: false);
     final restarted = create();
     expect(restarted.getEffectiveTimestamp('msg:one'), 100);
+    expect(restarted.getEffectiveTimestamp('seen:msg:two'), 100);
+    expect(relay.contents, isNotEmpty);
     for (final content in relay.contents) {
       expect(decodeReadStateBlob(crypto.decrypt(content))!.contexts, {
         'room': 90,
+        'seen:room': 95,
       });
     }
     restarted.dispose(flushPending: false);

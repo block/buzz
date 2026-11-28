@@ -583,7 +583,7 @@ class ReadStateManager {
         }
       }
       for (final entry in decoded.blob.contexts.entries) {
-        if (isOverrideContext(entry.key)) continue;
+        if (!isReadStateSlotContext(entry.key)) continue;
         if (_applyRemoteContextTimestamp(
               contextId: entry.key,
               timestamp: entry.value,

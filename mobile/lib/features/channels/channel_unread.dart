@@ -1,3 +1,6 @@
+import 'dart:math';
+
+import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import 'channel.dart';
 import 'channels_provider.dart';
@@ -139,9 +142,7 @@ int _channelHighlights({
   if (channelReadAt != null && latestObserved <= channelReadAt) return flags;
   if (observedEvents == null) return flags;
 
-  final seenAt = separateAttention
-      ? readState.contexts['seen:${channel.id}']
-      : null;
+  final applyRowMarks = separateAttention && !forced && !channel.isDm;
   for (final event in observedEvents.values) {
     final readAt = observedUnreadEventReadAt(
       event,
@@ -149,19 +150,53 @@ int _channelHighlights({
       readState.effectiveTimestamp,
     );
     if (readAt != null && event.createdAt <= readAt) continue;
+    final rowShowsEvent =
+        !applyRowMarks ||
+        !rowSawObservedUnreadEvent(event, channel.id, readState.contexts);
     if (!separateAttention || channel.isDm || !event.attention) {
       flags |= _unread;
-      if (separateAttention &&
-          (channel.isDm || seenAt == null || event.createdAt > seenAt)) {
-        flags |= _rowUnread;
-      }
+      if (separateAttention && rowShowsEvent) flags |= _rowUnread;
     }
-    if (separateAttention && (channel.isDm || event.attention)) {
+    if (separateAttention &&
+        rowShowsEvent &&
+        (channel.isDm || event.attention)) {
       flags |= _attention;
     }
     if (flags == decided) break;
   }
   return flags;
+}
+
+/// The marks earned by a visit. Attention uses per-message receipts so it
+/// can light up the row even when it arrives later with an older timestamp.
+Map<String, int> channelRowSeenMarks(
+  String channelId,
+  Map<String, ObservedUnreadEvent> events,
+  ReadStateState readState,
+) {
+  final marks = <String, int>{};
+  var newest = 0;
+  var ordinary = false;
+  for (final event in events.values) {
+    final readAt = observedUnreadEventReadAt(
+      event,
+      channelId,
+      readState.effectiveTimestamp,
+    );
+    if (readAt != null && event.createdAt <= readAt) continue;
+    if (rowSawObservedUnreadEvent(event, channelId, readState.contexts)) {
+      continue;
+    }
+
+    newest = max(newest, event.createdAt);
+    if (event.channelCatchUp) {
+      ordinary = true;
+    } else {
+      marks[seenMessageContextKey(event.id)] = event.createdAt;
+    }
+  }
+  if (ordinary) marks[seenContextKey(channelId)] = newest;
+  return marks;
 }
 
 typedef _MemoEntry = ({

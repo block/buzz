@@ -1,5 +1,6 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../../shared/me/me_sync.dart';
 import '../channels_provider.dart';
 import '../../../shared/read_state/read_state_provider.dart';
 import 'observed_unread_event.dart';
@@ -17,6 +18,11 @@ class UnreadBadgeState {
 final unreadBadgeProvider = Provider<UnreadBadgeState>((ref) {
   final channelsAsync = ref.watch(channelsProvider);
   final readState = ref.watch(readStateProvider);
+  final legacySoloIds = ref.watch(
+    meGroupsProvider.select(
+      (groups) => groups.value?.channels ?? const <String>[],
+    ),
+  );
 
   return channelsAsync.when(
     data: (channels) {
@@ -38,12 +44,24 @@ final unreadBadgeProvider = Provider<UnreadBadgeState>((ref) {
         if (!latestObservedByChannel.containsKey(channel.id)) continue;
 
         final observedEvents = observedEventsByChannel[channel.id];
-        int? readAtForObservedEvent(ObservedUnreadEvent event) =>
-            observedUnreadEventReadAt(
-              event,
-              channel.id,
-              readState.effectiveTimestamp,
-            );
+        // Match Home and Me, which display raw unread for Solo chats.
+        final applyRowMarks =
+            !channel.isDm && !channel.isSoloChat(legacySoloIds);
+        int? readAtForObservedEvent(ObservedUnreadEvent event) {
+          if (applyRowMarks &&
+              rowSawObservedUnreadEvent(
+                event,
+                channel.id,
+                readState.contexts,
+              )) {
+            return event.createdAt;
+          }
+          return observedUnreadEventReadAt(
+            event,
+            channel.id,
+            readState.effectiveTimestamp,
+          );
+        }
 
         final unreadCount = countUnreadObservedEvents(
           observedEvents,
@@ -67,21 +85,7 @@ final unreadBadgeProvider = Provider<UnreadBadgeState>((ref) {
             observedEvents,
             readAtForObservedEvent,
           );
-          if (badgeCount > 0) {
-            general += badgeCount;
-          } else {
-            // Only ordinary backlog is left. Count it when its row is bold:
-            // a synced `seen:<channel>` mark quiets backlog at or before it.
-            final seenAt = readState.contexts['seen:${channel.id}'];
-            final rowShowsBacklog =
-                seenAt == null ||
-                observedEvents!.values.any((event) {
-                  if (event.createdAt <= seenAt) return false;
-                  final readAt = readAtForObservedEvent(event);
-                  return readAt == null || event.createdAt > readAt;
-                });
-            if (rowShowsBacklog) general++;
-          }
+          general += badgeCount > 0 ? badgeCount : 1;
         }
       }
 

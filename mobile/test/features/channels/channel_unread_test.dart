@@ -143,9 +143,7 @@ _Highlights _fullScan({
     final latest = observed.values.map((event) => event.createdAt).reduce(max);
     final channelReadAt = readState.effectiveTimestamp(channel.id);
     if (channelReadAt != null && latest <= channelReadAt) continue;
-    final seenAt = separateAttention
-        ? readState.contexts['seen:${channel.id}']
-        : null;
+    final seenAt = readState.contexts['seen:${channel.id}'];
     for (final event in observed.values) {
       final readAt = observedUnreadEventReadAt(
         event,
@@ -153,14 +151,17 @@ _Highlights _fullScan({
         readState.effectiveTimestamp,
       );
       if (readAt != null && event.createdAt <= readAt) continue;
-      if (!separateAttention || channel.isDm || event.channelCatchUp) {
+      final seen =
+          !channel.isDm &&
+          !forced.contains(channel.id) &&
+          (event.channelCatchUp
+              ? seenAt != null && event.createdAt <= seenAt
+              : readState.contexts.containsKey('seen:msg:${event.id}'));
+      if (!separateAttention || channel.isDm || !event.attention) {
         unread.add(channel.id);
-        if (separateAttention &&
-            (channel.isDm || seenAt == null || event.createdAt > seenAt)) {
-          rowUnread.add(channel.id);
-        }
+        if (separateAttention && !seen) rowUnread.add(channel.id);
       }
-      if (separateAttention && (channel.isDm || !event.channelCatchUp)) {
+      if (separateAttention && !seen && (channel.isDm || event.attention)) {
         attention.add(channel.id);
       }
     }
@@ -299,6 +300,51 @@ void main() {
     expect(highlights.unread, isEmpty);
     expect(highlights.attention, isEmpty);
   });
+  test('a visit quiets the row and leaves underlying unread intact', () {
+    final listed = [_channel('c')];
+    final notifier = _StampedChannels()
+      ..add('c', _eventAt('ordinary', 10))
+      ..add('c', _eventAt('mention', 20, mention: true))
+      ..add('c', _eventAt('reply', 19, root: 'root'));
+    final events = notifier.events['c']!;
+    final marks = channelRowSeenMarks('c', events, _reads({}));
+    expect(marks, {'seen:c': 20, 'seen:msg:mention': 20, 'seen:msg:reply': 19});
+    final seen = _reads(marks);
+    expect(channelRowSeenMarks('c', events, seen), isEmpty);
+
+    final quiet = computeChannelListHighlights(
+      channels: listed,
+      readState: seen,
+      channelsNotifier: notifier,
+    );
+    expect(quiet.unread, {'c'});
+    expect(quiet.rowUnread, isEmpty);
+    expect(quiet.attention, isEmpty);
+    expect(
+      computeUnreadChannelIds(
+        channels: listed,
+        readState: seen,
+        channelsNotifier: notifier,
+      ),
+      {'c'},
+    );
+    _expectMatchesFullScan(notifier, listed, _reads(marks, forced: {'c'}));
+
+    // Attention that arrives late needs its own receipt, regardless of time.
+    notifier.add('c', _eventAt('late-mention', 15, mention: true));
+    expect(
+      computeChannelListHighlights(
+        channels: listed,
+        readState: seen,
+        channelsNotifier: notifier,
+      ).attention,
+      {'c'},
+    );
+    expect(channelRowSeenMarks('c', events, seen), {
+      'seen:msg:late-mention': 15,
+    });
+  });
+
   group('memoized, early-exiting pass', () {
     final listed = [
       _channel('stream'),

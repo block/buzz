@@ -218,11 +218,15 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
   }
 
-  void _notifyUnreadReadinessChanged() {
-    final previous = _unreadReadinessChanged;
-    _unreadReadinessChanged = Completer<void>();
-    previous.complete();
-  }
+  /// Unread evidence changes for [channelId], without scanning the registry.
+  int observedUnreadRevisionFor(String channelId) =>
+      _observedUnreadRevisions.of(channelId);
+
+  /// [channelId]'s observed evidence for the active visit.
+  Map<String, ObservedUnreadEvent> observedUnreadEventsFor(String channelId) =>
+      UnmodifiableMapView(
+        _observedUnreadEventsByChannel[channelId] ?? const {},
+      );
 
   Map<String, Map<String, ObservedUnreadEvent>>
   get observedUnreadEventsByChannel => ObservedUnreadSnapshot({
@@ -969,15 +973,6 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _participatedRootIds = {};
       _authoredRootIds = {};
     }
-  }
-
-  /// Adds [event]'s thread to the in-memory interest sets; true when new.
-  /// Callers persist with [_writeThreadInterestStores], once per batch: each
-  /// write re-encodes both whole sets on the main thread.
-  bool _addSelfThreadInterest(NostrEvent event) {
-    final ref = event.threadReference;
-    final target = ref.rootId != null ? _participatedRootIds : _authoredRootIds;
-    return target.add(ref.rootId ?? event.id);
   }
 
   void _writeThreadInterestStores(String pubkey) {

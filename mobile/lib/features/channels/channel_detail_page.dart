@@ -77,6 +77,7 @@ import '../forum/forum_posts_view.dart';
 import '../forum/forum_provider.dart';
 import 'android_ime_lift.dart';
 import 'channel.dart';
+import 'channel_unread.dart';
 import 'channel_actions_sheet.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_member_profile_actions.dart';
@@ -622,6 +623,33 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
             .clearObservedUnreadCoveredByRead(channel.id, openReadTimestamp);
       });
     }, [channel.id, readState.isReady, openReadActive, openReadTimestamp]);
+
+    // Row hints follow the same active visit as open-read. DMs, forums and
+    // Solo keep their own unread behavior.
+    final rowSeenActive =
+        openReadActive &&
+        !resolvedChannel.isDm &&
+        !resolvedChannel.isForum &&
+        !resolvedChannel.isSolo &&
+        !personalChat;
+    final observedRevision = ref.watch(
+      channelsProvider.select(
+        (_) => channelsNotifier.observedUnreadRevisionFor(channel.id),
+      ),
+    );
+    useEffect(() {
+      if (!rowSeenActive || !readState.isReady) return null;
+      return deferReadStateUpdate(context, () {
+        final marks = channelRowSeenMarks(
+          channel.id,
+          channelsNotifier.observedUnreadEventsFor(channel.id),
+          ref.read(readStateProvider),
+        );
+        if (marks.isNotEmpty) {
+          ref.read(readStateProvider.notifier).markChannelRowSeen(marks);
+        }
+      });
+    }, [channel.id, rowSeenActive, readState.isReady, observedRevision]);
 
     final headerMembers = ref.watch(
       latestChannelMembersProvider(resolvedChannel.id),

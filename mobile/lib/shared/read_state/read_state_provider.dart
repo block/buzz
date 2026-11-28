@@ -255,6 +255,11 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     if (explicit) clearCovered(scope: contextId);
   }
 
+  /// Saves channel row hints without advancing any read frontier.
+  void markChannelRowSeen(Map<String, int> marks) {
+    _currentManager?.markChannelRowSeen(marks);
+  }
+
   /// Ends the device-local marks a read covers, whether or not a frontier
   /// moved (NIP-RS Clearing): [displayed] messages, and for a catch-up or
   /// explicit read [scope], a channel's top-level messages or a

@@ -40,6 +40,25 @@ String threadContextKey(String rootId) => '$threadContextPrefix$rootId';
 String activityContextKey(String channelId) => 'activity:$channelId';
 String threadActivityContextKey(String rootId) => 'thread-activity:$rootId';
 
+/// Row hints, written by this app and `buzz-app` when the reader opens a
+/// channel (`buzz-app`'s `docs/unread.md`). They quiet the channel's row in
+/// the channel list and app badge. `seen:<channel>` is the visit's timestamp
+/// cutoff for ordinary activity and syncs to the user's other devices.
+String seenContextKey(String channelId) => 'seen:$channelId';
+const _seenMessagePrefix = 'seen:msg:';
+
+/// Local receipt for attention observed during a channel visit.
+String seenMessageContextKey(String messageId) =>
+    '$_seenMessagePrefix$messageId';
+
+/// Whether [contextId] is a device-local row receipt.
+bool isSeenMessageContext(String contextId) =>
+    contextId.startsWith(_seenMessagePrefix);
+
+/// Whether a read-position slot can carry this context.
+bool isReadStateSlotContext(String contextId) =>
+    !isOverrideContext(contextId) && !isSeenMessageContext(contextId);
+
 /// Whether `activity:<channel>` reads a message: an ordinary top-level
 /// message, not a reply, mention, broadcast or DM. Callers pass a message
 /// with the broadcast tag as [isReply], with or without a parent:

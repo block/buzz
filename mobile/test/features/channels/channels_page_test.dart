@@ -54,6 +54,7 @@ import 'package:buzz/features/channels/channel_sort/channel_sort_provider.dart';
 import 'package:buzz/features/channels/channel_sort/channel_sort_storage.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_actions_sheet.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
@@ -111,7 +112,8 @@ Future<void> _chooseSectionOption(
 void main() {
   setUpAll(() async {
     if (Platform.environment.containsKey('COMMUNITY_SCREENSHOTS') ||
-        Platform.environment.containsKey('CREATE_SHEET_SCREENSHOTS')) {
+        Platform.environment.containsKey('CREATE_SHEET_SCREENSHOTS') ||
+        Platform.environment.containsKey('CHANNEL_SEEN_SCREENSHOTS')) {
       for (final font in {
         'Inter': 'assets/fonts/InterVariable.ttf',
         'BuzzTabler': 'assets/fonts/TablerIcons.ttf',
@@ -4702,6 +4704,88 @@ void main() {
     );
   }
 
+  testWidgets('a channel visit quiets the Home row on return', (tester) async {
+    tester.view.physicalSize = const Size(390, 720);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+
+    final readState = _FakeReadStateNotifier(
+      const ReadStateState(
+        isReady: true,
+        pubkey: 'aabb',
+        contexts: {},
+        version: 0,
+      ),
+    );
+    final notifier = _FakeNotifier(
+      testChannels,
+      observedEventsByChannel: {
+        '1': [
+          _observed(id: 'ordinary', createdAt: 20),
+          _observed(id: 'mention', createdAt: 21, highPriority: true),
+          _observed(
+            id: 'reply',
+            createdAt: 22,
+            rootId: threadIdRoot,
+            isThreadedReply: true,
+          ),
+        ],
+      },
+    );
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => notifier),
+          readStateProvider.overrideWith(() => readState),
+          relaySessionProvider.overrideWith(
+            () => _ReconnectingRelaySession(
+              initialStatus: SessionStatus.connected,
+            ),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final row = find.text('general');
+    final dot = find.byKey(const ValueKey('channel-attention-dot-1'));
+    Future<void> capture(String name) async {
+      final directory = Platform.environment['CHANNEL_SEEN_SCREENSHOTS'];
+      if (directory == null) return;
+      final boundary = tester
+          .element(find.byType(ChannelsPage))
+          .findAncestorRenderObjectOfType<RenderRepaintBoundary>()!;
+      await tester.runAsync(() async {
+        final image = await boundary.toImage(pixelRatio: 2);
+        final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+        await Directory(directory).create(recursive: true);
+        await File(
+          '$directory/$name.png',
+        ).writeAsBytes(bytes!.buffer.asUint8List());
+        image.dispose();
+      });
+    }
+
+    expect(tester.widget<Text>(row).style?.fontWeight, FontWeight.w600);
+    expect(dot, findsOneWidget);
+    await capture('before-opening');
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+    final detail = find.byType(ChannelDetailPage);
+    expect(detail, findsOneWidget);
+    Navigator.of(tester.element(detail)).pop();
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<Text>(row).style?.fontWeight, FontWeight.w400);
+    expect(dot, findsNothing);
+    expect(readState.markedContexts, {
+      'seen:1': 22,
+      'seen:msg:mention': 21,
+      'seen:msg:reply': 22,
+    });
+    await capture('after-opening');
+  });
+
   for (final (label, events, seenAt, bold, dot) in [
     (
       'catch-up marks read ordinary messages and thread replies',
@@ -5058,6 +5142,10 @@ class _FakeNotifier extends ChannelsNotifier {
   @override
   Map<String, Map<String, ObservedUnreadEvent>>
   get observedUnreadEventsByChannel => _observedEventsByChannel;
+
+  @override
+  Map<String, ObservedUnreadEvent> observedUnreadEventsFor(String channelId) =>
+      _observedEventsByChannel[channelId] ?? const {};
 }
 
 String _activeDirectoryScope(Ref ref) => channelDirectoryScope(
@@ -5263,6 +5351,13 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
   }) {
     markedContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);
+  }
+
+  @override
+  void markChannelRowSeen(Map<String, int> marks) {
+    for (final MapEntry(:key, :value) in marks.entries) {
+      markContextRead(key, value);
+    }
   }
 }
 

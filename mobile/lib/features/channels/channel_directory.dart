@@ -668,6 +668,21 @@ String _encodeRootIdSet(Set<String> values) => jsonEncode(values.toList());
 /// ceiling enforced by `just file-size-check`. Private members stay reachable:
 /// a part shares its parent's library.
 extension _ObservedUnreadRecording on ChannelsNotifier {
+  /// Adds [event]'s thread to the in-memory interest sets; true when new.
+  /// Callers persist with [_writeThreadInterestStores], once per batch: each
+  /// write re-encodes both whole sets on the main thread.
+  bool _addSelfThreadInterest(NostrEvent event) {
+    final ref = event.threadReference;
+    final target = ref.rootId != null ? _participatedRootIds : _authoredRootIds;
+    return target.add(ref.rootId ?? event.id);
+  }
+
+  void _notifyUnreadReadinessChanged() {
+    final previous = _unreadReadinessChanged;
+    _unreadReadinessChanged = Completer<void>();
+    previous.complete();
+  }
+
   bool _recordUnreadEvent(
     Channel channel,
     NostrEvent event,
