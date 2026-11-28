@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -141,6 +142,10 @@ class IosNavigationBar extends HookConsumerWidget {
     this.titlePresenceColor,
     this.titleRefreshing = false,
     this.onTitlePressed,
+    this.portraitCaptureKey,
+    this.onHiddenPortraitPainted,
+    this.hideSettingsSource = false,
+    this.freezeSettingsPortrait = false,
     this.largeTitle = false,
     this.externalExpandedTitle = false,
     this.alwaysFrosted = false,
@@ -175,7 +180,11 @@ class IosNavigationBar extends HookConsumerWidget {
 
   /// Shows a refresh bar along the bottom of the subtitled title capsule.
   final bool titleRefreshing;
-  final VoidCallback? onTitlePressed;
+  final ValueChanged<Rect?>? onTitlePressed;
+  final GlobalKey? portraitCaptureKey;
+  final VoidCallback? onHiddenPortraitPainted;
+  final bool hideSettingsSource;
+  final bool freezeSettingsPortrait;
   final bool largeTitle;
   final bool externalExpandedTitle;
 
@@ -214,6 +223,7 @@ class IosNavigationBar extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final channel = useState<MethodChannel?>(null);
     final viewKey = useMemoized(GlobalKey.new);
+    final portraitKey = useMemoized(GlobalKey.new);
     final reportedSlot = useState<({int layout, Rect rect})?>(null);
     final layoutCounter = useRef(0);
     final portraitHeader = IosNavigationMetrics.of(context).portraitHeaderFor(
@@ -398,6 +408,7 @@ class IosNavigationBar extends HookConsumerWidget {
       'titlePresenceColor': titlePresenceColor?.toARGB32(),
       'titleRefreshing': titleRefreshing,
       'titleRefreshColor': ChatColors.of(context).outgoing.toARGB32(),
+      'hideSettingsSource': hideSettingsSource,
       'titleEnabled': onTitlePressed != null,
       'largeTitle': largeTitle,
       'externalExpandedTitle': externalExpandedTitle,
@@ -489,11 +500,32 @@ class IosNavigationBar extends HookConsumerWidget {
           }
           return;
         }
+        if (call.method == 'titlePressed') {
+          final frame = (call.arguments as List).cast<num>();
+          final box = viewKey.currentContext?.findRenderObject();
+          final portrait = portraitKey.currentContext?.findRenderObject();
+          latest.value.onTitlePressed?.call(
+            portrait is RenderBox
+                ? Rect.fromPoints(
+                    portrait.localToGlobal(Offset.zero),
+                    portrait.localToGlobal(
+                      portrait.size.bottomRight(Offset.zero),
+                    ),
+                  )
+                : box is RenderBox
+                ? box.localToGlobal(
+                        Offset(frame[0].toDouble(), frame[1].toDouble()),
+                      ) &
+                      Size(frame[2].toDouble(), frame[3].toDouble())
+                : null,
+          );
+          return;
+        }
         if (call.method != 'action') return;
         final id = call.arguments as String;
         final config = latest.value;
         if (id == 'title') {
-          config.onTitlePressed?.call();
+          config.onTitlePressed?.call(null);
         } else if (id == 'back') {
           config.onBack?.call();
         } else {
@@ -616,6 +648,18 @@ class IosNavigationBar extends HookConsumerWidget {
       };
     }, [channel.value, offset, collapseRange, route]);
 
+    // Opacity.zero skips painting. Keep loading portraits paintable for the
+    // settings snapshot while removing their pixels from the chat.
+    Widget hidePortrait(Widget portrait) => hideSettingsSource
+        ? ColorFiltered(
+            colorFilter: const ColorFilter.mode(
+              Colors.transparent,
+              BlendMode.src,
+            ),
+            child: portrait,
+          )
+        : portrait;
+
     final nativeBar = UiKitView(
       key: viewKey,
       viewType: viewType,
@@ -627,6 +671,17 @@ class IosNavigationBar extends HookConsumerWidget {
       onPlatformViewCreated: (id) {
         channel.value = MethodChannel('$viewType/$id');
       },
+    );
+    final portraitCluster = DmHeaderCluster(
+      key: portraitKey,
+      count: titleAvatars.length,
+      builder: (i, size) => DmHeaderPortrait(
+        imageUrl: titleAvatars[i].imageUrl,
+        isAgent: titleAvatars[i].avatarIsAgent,
+        initial: titleAvatars[i].avatarInitial ?? '?',
+        size: size,
+        standalone: titleAvatars.length == 1 && !inlinePortrait,
+      ),
     );
     return Stack(
       fit: StackFit.expand,
@@ -650,17 +705,40 @@ class IosNavigationBar extends HookConsumerWidget {
                 child: GestureDetector(
                   key: const ValueKey('navigation-header-avatar-settings'),
                   behavior: HitTestBehavior.opaque,
-                  onTap: onTitlePressed,
-                  child: DmHeaderCluster(
-                    count: titleAvatars.length,
-                    builder: (i, size) => DmHeaderPortrait(
-                      imageUrl: titleAvatars[i].imageUrl,
-                      isAgent: titleAvatars[i].avatarIsAgent,
-                      initial: titleAvatars[i].avatarInitial ?? '?',
-                      size: size,
-                      standalone: titleAvatars.length == 1 && !inlinePortrait,
-                    ),
-                  ),
+                  onTap: onTitlePressed == null
+                      ? null
+                      : () {
+                          final box = portraitKey.currentContext
+                              ?.findRenderObject();
+                          onTitlePressed!(
+                            box is RenderBox
+                                ? Rect.fromPoints(
+                                    box.localToGlobal(Offset.zero),
+                                    box.localToGlobal(
+                                      box.size.bottomRight(Offset.zero),
+                                    ),
+                                  )
+                                : null,
+                          );
+                        },
+                  child:
+                      portraitCaptureKey == null &&
+                          !hideSettingsSource &&
+                          !freezeSettingsPortrait
+                      ? portraitCluster
+                      : hidePortrait(
+                          TickerMode(
+                            enabled:
+                                !freezeSettingsPortrait && !hideSettingsSource,
+                            child: _HeaderCaptureBoundary(
+                              key: portraitCaptureKey,
+                              onPaint: hideSettingsSource
+                                  ? onHiddenPortraitPainted
+                                  : null,
+                              child: portraitCluster,
+                            ),
+                          ),
+                        ),
                 ),
               ),
             ),
@@ -677,4 +755,41 @@ class _NavigationRevealObserver extends RouteAware {
 
   @override
   void didPopNext() => onReveal();
+}
+
+class _HeaderCaptureBoundary extends SingleChildRenderObjectWidget {
+  const _HeaderCaptureBoundary({
+    super.key,
+    required this.onPaint,
+    required super.child,
+  });
+  final VoidCallback? onPaint;
+
+  @override
+  _HeaderCaptureLayer createRenderObject(BuildContext context) =>
+      _HeaderCaptureLayer(onPaint);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _HeaderCaptureLayer renderObject,
+  ) {
+    renderObject.onPaint = onPaint;
+  }
+}
+
+class _HeaderCaptureLayer extends RenderRepaintBoundary {
+  _HeaderCaptureLayer(this.onPaint);
+  VoidCallback? onPaint;
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    super.paint(context, offset);
+    final callback = onPaint;
+    if (callback != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (attached && onPaint != null) callback();
+      });
+    }
+  }
 }

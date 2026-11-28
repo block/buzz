@@ -86,11 +86,59 @@ void main() {
   });
 
   testWidgets(
+    'settings owns the portrait and title until the header is restored',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      for (final hidden in [false, true, false]) {
+        await tester.pumpWidget(
+          _testApp(
+            home: IosNavigationBar(
+              key: ValueKey(hidden),
+              title: 'Chat',
+              subtitle: '',
+              titleAvatars: const [
+                IosNavigationAction(label: 'C', avatarInitial: 'C'),
+              ],
+              hideSettingsSource: hidden,
+              freezeSettingsPortrait: hidden,
+            ),
+          ),
+        );
+        final portrait = find.byType(DmHeaderPortrait);
+        expect(tester.getSize(portrait), const Size(64, 64));
+        expect(
+          tester
+              .widgetList<ColorFiltered>(
+                find.ancestor(
+                  of: portrait,
+                  matching: find.byType(ColorFiltered),
+                ),
+              )
+              .any(
+                (widget) =>
+                    widget.colorFilter ==
+                    const ColorFilter.mode(Colors.transparent, BlendMode.src),
+              ),
+          hidden,
+        );
+        expect(TickerMode.valuesOf(tester.element(portrait)).enabled, !hidden);
+        final args =
+            tester.widget<UiKitView>(find.byType(UiKitView)).creationParams
+                as Map;
+        expect(args['hideSettingsSource'], hidden);
+      }
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
     'animated DM portrait opens the same settings as the native title',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
-      var settingsOpened = 0;
+      Rect? settingsSource;
       await tester.pumpWidget(
         _testApp(
           home: MediaQuery(
@@ -103,7 +151,7 @@ void main() {
               height: 166,
               child: IosNavigationBar(
                 title: 'Agent',
-                onTitlePressed: () => settingsOpened++,
+                onTitlePressed: (bounds) => settingsSource = bounds,
                 subtitle: 'Online',
                 titleAvatars: const [
                   IosNavigationAction(
@@ -134,7 +182,7 @@ void main() {
       await tester.tap(
         find.byKey(const ValueKey('navigation-header-avatar-settings')),
       );
-      expect(settingsOpened, 1);
+      expect(settingsSource, tester.getRect(portrait));
       for (final insets in const [
         EdgeInsets.zero,
         EdgeInsets.only(left: 76),

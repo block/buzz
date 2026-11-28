@@ -5,6 +5,7 @@ import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:duo_kit/duo_kit.dart';
@@ -628,12 +629,14 @@ Future<void> _confirmAndRun(
   required String confirmLabel,
   required Future<void> Function() action,
 }) async {
-  // The action can take a relay round trip. Close only the sheet or page that
-  // offered it, and only if it is still on top: popping whatever is on top
-  // would close Home if the user dismissed this route meanwhile, and routes
-  // opened over it may still depend on its context.
+  // A relay response can arrive after Back or after another page opens.
+  // Capture the owner before opening the dialog so completion targets it.
   final ownerNavigator = Navigator.of(sheetContext);
   final ownerRoute = ModalRoute.of(sheetContext);
+  if (ownerRoute is _NativeChannelDetailsRoute &&
+      ownerRoute.lifecycleResult != null) {
+    return;
+  }
   final pageContext = Navigator.of(sheetContext, rootNavigator: true).context;
   final messenger = ScaffoldMessenger.maybeOf(sheetContext);
   final confirmed = await showBuzzDialog<bool>(
@@ -654,22 +657,34 @@ Future<void> _confirmAndRun(
     ),
   );
   if (confirmed != true || !sheetContext.mounted) return;
-  Completer<bool?>? detachedResult;
+  Completer<bool?>? lifecycleResult;
   try {
     // Resolve provider-backed dependencies before disposing their owner.
     final pending = action();
-    if (ownerRoute is _NativeChannelSheetRoute && ownerNavigator.mounted) {
-      detachedResult = Completer<bool?>();
-      ownerRoute.lifecycleResult = detachedResult.future;
+    if (ownerRoute is _NativeChannelDetailsRoute) {
+      lifecycleResult = Completer<bool?>();
+      ownerRoute.lifecycleResult = lifecycleResult.future;
+    } else if (ownerRoute is _NativeChannelSheetRoute &&
+        ownerNavigator.mounted) {
+      lifecycleResult = Completer<bool?>();
+      ownerRoute.lifecycleResult = lifecycleResult.future;
       ownerNavigator.removeRoute(ownerRoute);
     }
     await pending;
-    detachedResult?.complete(true);
-    if (ownerNavigator.mounted && ownerRoute?.isCurrent == true) {
-      ownerNavigator.pop(true);
+    lifecycleResult?.complete(true);
+    if (ownerNavigator.mounted) {
+      if (ownerRoute?.isCurrent == true) {
+        ownerNavigator.pop(true);
+      } else if (ownerRoute is _NativeChannelDetailsRoute &&
+          ownerRoute.isActive) {
+        ownerNavigator.removeRoute(ownerRoute, true);
+      }
     }
   } catch (error) {
-    detachedResult?.complete(null);
+    if (ownerRoute is _NativeChannelDetailsRoute) {
+      ownerRoute.lifecycleResult = null;
+    }
+    lifecycleResult?.complete(null);
     if (messenger == null || !messenger.mounted) return;
     messenger.showFeedbackSnackBar(
       SnackBar(

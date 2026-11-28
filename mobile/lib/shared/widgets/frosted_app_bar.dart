@@ -215,7 +215,11 @@ class FrostedAppBar extends StatelessWidget {
 
   /// Shows a refresh bar in the native iOS title capsule.
   final bool nativeTitleRefreshing;
-  final VoidCallback? onNativeTitlePressed;
+  final ValueChanged<Rect?>? onNativeTitlePressed;
+  final GlobalKey? portraitCaptureKey;
+  final VoidCallback? onHiddenPortraitPainted;
+  final bool hideSettingsSource;
+  final bool freezeSettingsPortrait;
 
   /// Whether UIKit should expand the title at the top of the page.
   final bool nativeLargeTitle;
@@ -266,6 +270,10 @@ class FrostedAppBar extends StatelessWidget {
     this.nativeTitlePresenceColor,
     this.nativeTitleRefreshing = false,
     this.onNativeTitlePressed,
+    this.portraitCaptureKey,
+    this.onHiddenPortraitPainted,
+    this.hideSettingsSource = false,
+    this.freezeSettingsPortrait = false,
     this.nativeLargeTitle = false,
     this.nativeLargeTitleWithActions = false,
     this.alignLargeTitleWithActions = false,
@@ -420,6 +428,10 @@ class FrostedAppBar extends StatelessWidget {
         titlePresenceColor: nativeTitlePresenceColor,
         titleRefreshing: nativeTitleRefreshing,
         onTitlePressed: onNativeTitlePressed,
+        portraitCaptureKey: portraitCaptureKey,
+        onHiddenPortraitPainted: onHiddenPortraitPainted,
+        hideSettingsSource: hideSettingsSource,
+        freezeSettingsPortrait: freezeSettingsPortrait,
         largeTitle: nativeLargeTitle,
         alwaysFrosted: alwaysFrosted || strip != null,
         foregroundColor: iconColor,

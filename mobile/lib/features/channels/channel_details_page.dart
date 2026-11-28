@@ -14,20 +14,103 @@ Future<bool?> showChannelDetailsPage({
   String? sectionId,
   Widget Function(Widget)? soloSettings,
   bool personalChat = false,
-}) => Navigator.of(context).push<bool>(
-  MaterialPageRoute<bool>(
-    builder: (_) => CoveredRouteKeyboardInsets(
-      child: ChannelDetailsPage(
-        channel: channel,
-        currentPubkey: currentPubkey,
-        onMemberTap: onMemberTap,
-        sectionId: sectionId,
-        personalChat: personalChat,
-        soloSettings: soloSettings,
-      ),
-    ),
-  ),
-);
+  Widget? headerArtwork,
+  Widget Function(Widget, Widget Function(MeChatSettings))? sheetSoloSettings,
+  Rect? source,
+  Uint8List? zoomArtwork,
+  ValueListenable<Uint8List?>? portraitUpdates,
+  ValueChanged<bool>? setZoomSourceHidden,
+}) async {
+  Widget buildSettings(BuildContext _, {bool native = false}) =>
+      CoveredRouteKeyboardInsets(
+        child: ChannelDetailsPage(
+          headerArtwork: headerArtwork,
+          nativePresentation: native,
+          zoomSource: native ? source : null,
+          zoomArtwork: zoomArtwork,
+          portraitUpdates: portraitUpdates,
+          setZoomSourceHidden: setZoomSourceHidden,
+          sheetSoloSettings: native ? sheetSoloSettings : null,
+          channel: channel,
+          currentPubkey: currentPubkey,
+          onMemberTap: onMemberTap,
+          sectionId: sectionId,
+          personalChat: personalChat,
+          soloSettings: soloSettings,
+        ),
+      );
+  final navigator = Navigator.of(context);
+  if (!kIsWeb &&
+      defaultTargetPlatform == TargetPlatform.iOS &&
+      source != null &&
+      !source.isEmpty &&
+      !MediaQuery.disableAnimationsOf(context)) {
+    final covered = ModalRoute.of(context);
+    final release = covered == null
+        ? null
+        : BottomUpPageRoute.retainControlsForSheet(covered);
+    final route = _NativeChannelDetailsRoute(
+      (context) => buildSettings(context, native: true),
+      release,
+    );
+    final result = await navigator.push(route);
+    return route.lifecycleResult == null ? result : await route.lifecycleResult;
+  }
+  return navigator.push(MaterialPageRoute<bool>(builder: buildSettings));
+}
+
+// UIKit animates the opening while the chat is visible underneath. If an
+// action hands off to Flutter, the same route becomes a normal full page.
+class _NativeChannelDetailsRoute extends PageRoute<bool>
+    with MaterialRouteTransitionMixin<bool> {
+  _NativeChannelDetailsRoute(this._builder, this._releaseControls)
+    : super(allowSnapshotting: false);
+
+  final WidgetBuilder _builder;
+  VoidCallback? _releaseControls;
+  bool _presentingNative = true;
+  Future<bool?>? lifecycleResult;
+
+  @override
+  bool get opaque => !_presentingNative;
+
+  @override
+  bool get maintainState => true;
+
+  @override
+  Duration get transitionDuration => Duration.zero;
+
+  @override
+  bool canTransitionFrom(TransitionRoute<dynamic> previousRoute) =>
+      !_presentingNative && super.canTransitionFrom(previousRoute);
+
+  @override
+  Widget buildContent(BuildContext context) => _builder(context);
+
+  @override
+  Widget buildTransitions(
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) => _presentingNative
+      ? child
+      : super.buildTransitions(context, animation, secondaryAnimation, child);
+
+  void showFlutterPage() {
+    _presentingNative = false;
+    overlayEntries.first.opaque = true;
+    _releaseControls?.call();
+    _releaseControls = null;
+    changedInternalState();
+  }
+
+  @override
+  void dispose() {
+    _releaseControls?.call();
+    super.dispose();
+  }
+}
 
 /// Opens the channel settings page as a bottom sheet, presented like the
 /// channel list's long-press actions sheet.
@@ -80,6 +163,11 @@ class ChannelDetailsPage extends HookConsumerWidget {
     this.inSheet = false,
     this.isUnread = false,
     this.nativePresentation = false,
+    this.headerArtwork,
+    this.zoomSource,
+    this.zoomArtwork,
+    this.portraitUpdates,
+    this.setZoomSourceHidden,
   });
 
   final Channel channel;
@@ -100,6 +188,11 @@ class ChannelDetailsPage extends HookConsumerWidget {
   final Widget Function(Widget, Widget Function(MeChatSettings))?
   sheetSoloSettings;
   final bool nativePresentation;
+  final Widget? headerArtwork;
+  final Rect? zoomSource;
+  final Uint8List? zoomArtwork;
+  final ValueListenable<Uint8List?>? portraitUpdates;
+  final ValueChanged<bool>? setZoomSourceHidden;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -120,6 +213,8 @@ class ChannelDetailsPage extends HookConsumerWidget {
     final showCollapsedTitle = useState(false);
     final headerFrostProgress = useState(0.0);
     final isJoining = useState(false);
+    final showFlutterDetails = useState(false);
+    final showingNative = nativePresentation && !showFlutterDetails.value;
     final isMuted =
         ref
             .watch(channelMutesProvider)
@@ -291,6 +386,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
     }, [previewPubkeyKey]);
 
     useEffect(() {
+      if (showingNative || inSheet) return null;
       void updateCollapsedTitle() {
         final nextFrostProgress = !scrollController.hasClients
             ? 0.0
@@ -303,7 +399,11 @@ class ChannelDetailsPage extends HookConsumerWidget {
         }
 
         final threshold = collapsedTitleOffset.value;
-        if (threshold == null || !context.mounted) return;
+        if (threshold == null ||
+            !context.mounted ||
+            !scrollController.hasClients) {
+          return;
+        }
         final nextValue = scrollController.offset >= threshold;
         if (showCollapsedTitle.value != nextValue) {
           showCollapsedTitle.value = nextValue;
@@ -315,7 +415,10 @@ class ChannelDetailsPage extends HookConsumerWidget {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         final nameContext = heroNameKey.currentContext;
         final renderBox = nameContext?.findRenderObject() as RenderBox?;
-        if (renderBox == null || !renderBox.hasSize || !context.mounted) {
+        if (renderBox == null ||
+            !renderBox.hasSize ||
+            !context.mounted ||
+            !scrollController.hasClients) {
           return;
         }
         final nameBottom = renderBox
@@ -326,7 +429,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
         updateCollapsedTitle();
       });
       return () => scrollController.removeListener(updateCollapsedTitle);
-    }, [scrollController, displayName]);
+    }, [scrollController, displayName, showingNative, inSheet]);
 
     Future<void> openMembers() => showBuzzModalBottomSheet<void>(
       context: context,
@@ -727,10 +830,20 @@ class ChannelDetailsPage extends HookConsumerWidget {
         resolvedChannel.isMember &&
         !resolvedChannel.isArchived &&
         currentMember?.role != 'guest';
-    if (nativePresentation) {
+    if (showingNative) {
       Widget present(MeChatSettings? settings) => _NativeChannelActions(
         title: displayName,
+        detailsContext: context,
         detailsChannel: resolvedChannel,
+        zoomSource: zoomSource,
+        showDetailsBehindPicker: () {
+          final route = ModalRoute.of(context);
+          if (route is _NativeChannelDetailsRoute) route.showFlutterPage();
+          showFlutterDetails.value = true;
+        },
+        setZoomSourceHidden: setZoomSourceHidden,
+        portraitUpdates: portraitUpdates,
+        zoomArtwork: zoomArtwork,
         solo: solo,
         heroAvatarUrl: counterpartProfile?.avatarUrl,
         heroIsAgent: counterpartProfile?.isAgent ?? false,
@@ -762,6 +875,15 @@ class ChannelDetailsPage extends HookConsumerWidget {
                   icon: BuzzIcons.pencil,
                   title: 'Edit',
                   onTap: canOpenEditor ? openManageChannel : null,
+                ),
+              if (zoomSource != null &&
+                  resolvedChannel.isDm &&
+                  !solo &&
+                  !isModerationDm)
+                AppListRow(
+                  icon: BuzzIcons.userPlus,
+                  title: 'Add',
+                  onTap: canAddToDm ? openAddMembers : null,
                 ),
             ],
           ),
@@ -820,7 +942,16 @@ class ChannelDetailsPage extends HookConsumerWidget {
               : _channelDetailsIcon(resolvedChannel),
           nameKey: heroNameKey,
           displayName: displayName,
-          avatar: counterpart == null
+          showPrivateLock:
+              headerArtwork != null &&
+              regularChannel &&
+              resolvedChannel.visibility == 'private',
+          avatar: headerArtwork != null
+              ? SizedBox.square(
+                  dimension: 80,
+                  child: FittedBox(child: headerArtwork),
+                )
+              : counterpart == null
               ? null
               : AvatarImage(
                   key: const ValueKey('dm-details-avatar'),

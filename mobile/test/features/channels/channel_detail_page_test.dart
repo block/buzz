@@ -35,6 +35,7 @@ import 'dart:async';
 
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/features/channels/channel_actions_sheet.dart';
+import 'package:buzz/shared/widgets/dm_header_cluster.dart';
 
 import '../profile/presence_snapshot_test.dart'
     show PresenceTestRelay, presenceEvent;
@@ -149,6 +150,7 @@ part 'channel_detail_page_test/author_visibility_tests.dart';
 part 'channel_detail_page_test/swipe_reply_tests.dart';
 part 'channel_detail_page_test/review_avatar_tests.dart';
 part 'channel_detail_page_test/archive_navigation_tests.dart';
+part 'channel_detail_page_test/chat_settings_navigation_tests.dart';
 part 'channel_detail_page_test/saved_channel_preview_tests.dart';
 
 const _channelId = '11111111-2222-4333-8444-555555555555';
@@ -6353,7 +6355,7 @@ void main() {
         if (defaultTargetPlatform == TargetPlatform.iOS) {
           tester
               .widget<IosNavigationBar>(find.byType(IosNavigationBar))
-              .onTitlePressed!();
+              .onTitlePressed!(null);
         } else {
           await tester.tap(
             find.byKey(const ValueKey('channel-header-settings-trigger')),
@@ -16906,126 +16908,7 @@ void main() {
       });
     }
 
-    for (final participants in [
-      const ['self', 'alice'],
-      const ['self', 'alice', 'bob'],
-    ]) {
-      testWidgets(
-        'native DM title opens conversation details for ${participants.length} members',
-        (tester) async {
-          debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-          addTearDown(() => debugDefaultTargetPlatformOverride = null);
-          final dm = Channel(
-            id: _channelId,
-            name: 'DM',
-            channelType: 'dm',
-            visibility: 'private',
-            description: '',
-            createdBy: 'self',
-            createdAt: DateTime(2025),
-            memberCount: participants.length,
-            participants: participants,
-            participantPubkeys: participants,
-            isMember: true,
-          );
-          await tester.pumpWidget(
-            _buildTestable(
-              messages: const [],
-              channel: dm,
-              huddleCurrentPubkey: 'self',
-              members: [
-                for (final pubkey in participants)
-                  ChannelMember(
-                    pubkey: pubkey,
-                    role: 'member',
-                    joinedAt: DateTime(2025),
-                  ),
-              ],
-              users: const {
-                'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-                'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
-              },
-            ),
-          );
-          await tester.pumpAndSettle();
-          final view = tester.widget<UiKitView>(
-            find.byWidgetPredicate(
-              (widget) =>
-                  widget is UiKitView &&
-                  widget.viewType == 'buzz/ios_navigation_bar',
-            ),
-          );
-          expect(view.creationParams, containsPair('titleEnabled', true));
-          final header = view.creationParams! as Map;
-          expect(header['subtitle'], '');
-          expect(header['titlePresenceColor'], isNull);
-          expect(
-            ((view.creationParams! as Map)['actions'] as List)
-                .cast<Map>()
-                .where(
-                  (action) =>
-                      action['symbol'] == 'person.2' ||
-                      action['symbol'] == 'ellipsis',
-                ),
-            isEmpty,
-          );
-          const bridge = MethodChannel('buzz/ios_navigation_bar/497');
-          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-            bridge,
-            (_) async => null,
-          );
-          addTearDown(
-            () => tester.binding.defaultBinaryMessenger
-                .setMockMethodCallHandler(bridge, null),
-          );
-          view.onPlatformViewCreated!(497);
-          await tester.pump();
-          await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
-            bridge.name,
-            bridge.codec.encodeMethodCall(const MethodCall('action', 'title')),
-            (_) {},
-          );
-          await tester.pumpAndSettle();
-          expect(find.byType(ChannelDetailsPage), findsOneWidget);
-          expect(
-            find.byKey(const ValueKey('channel-details-edit-action')),
-            findsNothing,
-          );
-          expect(
-            find.byKey(const ValueKey('channel-details-members-row')),
-            findsNothing,
-          );
-          expect(
-            tester
-                .widget<ChannelDetailsPage>(find.byType(ChannelDetailsPage))
-                .channel
-                .id,
-            dm.id,
-          );
-          expect(
-            find.descendant(
-              of: find.byKey(const ValueKey('channel-details-name')),
-              matching: find.text(
-                participants.length == 2 ? 'Alice' : 'Alice, Bob',
-              ),
-            ),
-            findsOneWidget,
-          );
-          expect(
-            find.byKey(const ValueKey('dm-details-avatar')),
-            participants.length == 2 ? findsOneWidget : findsNothing,
-          );
-          expect(
-            find.byKey(const ValueKey('channel-details-members-card')),
-            participants.length == 2 ? findsNothing : findsOneWidget,
-          );
-          expect(tester.takeException(), isNull);
-          await tester.pumpWidget(const SizedBox());
-          debugDefaultTargetPlatformOverride = null;
-        },
-      );
-    }
-
+    chatSettingsNavigationTests();
     testWidgets(
       'native channel header opens settings and leaves Huddle in the menu',
       (tester) async {

@@ -500,6 +500,15 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     // Keep the existing native glass and controls for identical updates.
     let arguments = args as NSDictionary
     guard configuredArguments?.isEqual(arguments) != true else { return }
+    if let previous = configuredArguments?.mutableCopy() as? NSMutableDictionary,
+       let title = floatingTitle ?? (content.navigationItem.titleView as? NavigationTitleView) {
+      previous["hideSettingsSource"] = args["hideSettingsSource"]
+      if previous.isEqual(arguments) {
+        configuredArguments = arguments
+        title.setSettingsSourceHidden(args["hideSettingsSource"] as? Bool == true)
+        return
+      }
+    }
     configuredArguments = arguments
 
     reportedPortraitHeader = nil
@@ -638,6 +647,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     item.title = largeTitle && (alignCollapsedTitleToLeading || leadingTitleRowTop != nil) && titleIsCollapsed == true ? "" : title
     if let subtitle = args["subtitle"] as? String {
       let button = NavigationTitleView(title: item.title, subtitle: subtitle, color: color, maximumWidth: titleMaxWidth)
+      button.setSettingsSourceHidden(args["hideSettingsSource"] as? Bool == true)
       button.accessibilityIdentifier = "channel-navigation-title"
       let enabled = args["titleEnabled"] as? Bool == true
       let accessibleTitle = [item.title ?? "", subtitle].filter { !$0.isEmpty }.joined(separator: ", ")
@@ -645,7 +655,13 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       button.accessibilityTraits = enabled ? .button : .header
       button.isUserInteractionEnabled = enabled
       if enabled {
-        button.onActivate = { [weak self] in self?.channel.invokeMethod("action", arguments: "title") }
+        button.onActivate = { [weak self, weak button] in
+          guard let self, let button else { return }
+          let rect = button.convert(button.bounds, to: self.container)
+          self.channel.invokeMethod("titlePressed", arguments: [
+            rect.minX, rect.minY, rect.width, rect.height,
+          ])
+        }
       }
       if let avatar = args["titleAvatar"] as? [String: Any] {
         button.setAvatar(makeItem(avatar).image,

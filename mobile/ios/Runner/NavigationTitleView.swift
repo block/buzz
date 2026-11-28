@@ -1,8 +1,46 @@
 import UIKit
 
 final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate {
+  private static let hiddenSettingsTitles = NSHashTable<NavigationTitleView>.weakObjects()
+
+  func setSettingsSourceHidden(_ hidden: Bool) {
+    if hidden { Self.hiddenSettingsTitles.add(self) }
+    else { Self.hiddenSettingsTitles.remove(self) }
+    alpha = hidden ? 0 : 1
+  }
+
+  static func revealSettingsTitle(in window: UIWindow, duration: TimeInterval) {
+    guard let title = hiddenSettingsTitles.allObjects.first(where: { $0.window === window }) else { return }
+    UIView.animate(withDuration: duration * 0.48, delay: duration * 0.52, options: [.curveEaseOut]) {
+      title.setSettingsSourceHidden(false)
+    }
+  }
+
+  static func revealSettingsTitle(in window: UIWindow, alongside coordinator: UIViewControllerTransitionCoordinator) {
+    guard let title = hiddenSettingsTitles.allObjects.first(where: { $0.window === window }) else { return }
+    if coordinator.isInteractive {
+      coordinator.notifyWhenInteractionChanges { context in
+        guard !context.isCancelled else { return }
+        let remaining = context.transitionDuration * (1 - context.percentComplete)
+        UIView.animate(withDuration: remaining * 0.65, delay: remaining * 0.2,
+                       options: [.beginFromCurrentState, .curveEaseOut]) { title.alpha = 1 }
+      }
+      coordinator.animate(alongsideTransition: nil) { context in
+        title.setSettingsSourceHidden(context.isCancelled)
+      }
+      return
+    }
+    coordinator.animate(alongsideTransition: { _ in
+      UIView.animateKeyframes(withDuration: coordinator.transitionDuration, delay: 0, options: []) {
+        UIView.addKeyframe(withRelativeStartTime: 0.45, relativeDuration: 0.55) { title.alpha = 1 }
+      }
+    }, completion: { context in
+      title.setSettingsSourceHidden(context.isCancelled)
+    })
+  }
+
   var onActivate: (() -> Void)?
-  private let titleLabel = UILabel()
+  private(set) var titleLabel = UILabel()
   private let subtitleLabel = UILabel()
   private let contentStack = UIStackView()
   private let textStack = UIStackView()

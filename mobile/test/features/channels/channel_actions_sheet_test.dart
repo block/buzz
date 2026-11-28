@@ -78,6 +78,9 @@ Widget _modalApp({
   required Channel channel,
   required Future<List<ChannelMember>> Function() loadMembers,
   required ChannelActions Function(Ref ref) createChannelActions,
+  Rect? zoomSource,
+  ValueNotifier<Uint8List?>? portraitUpdates,
+  ValueChanged<bool>? setZoomSourceHidden,
   bool soloDetails = false,
   bool details = false,
   String? canvasContent,
@@ -113,7 +116,17 @@ Widget _modalApp({
     home: Builder(
       builder: (context) => Scaffold(
         body: TextButton(
-          onPressed: () => soloDetails || details
+          onPressed: () => zoomSource != null
+              ? showChannelDetailsPage(
+                  context: context,
+                  channel: channel,
+                  currentPubkey: _currentPubkey,
+                  onMemberTap: (_, _) {},
+                  source: zoomSource,
+                  portraitUpdates: portraitUpdates,
+                  setZoomSourceHidden: setZoomSourceHidden,
+                )
+              : soloDetails || details
               ? showChannelDetailsSheet(
                   context: context,
                   channel: channel,
@@ -166,6 +179,243 @@ Future<void> selectNativeManageChannel(WidgetTester tester) async {
 }
 
 void main() {
+  testWidgets(
+    'Android opens chat settings as a regular page even with a zoom source',
+    (tester) async {
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          loadMembers: () async => [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+          zoomSource: const Rect.fromLTWH(150, 48, 64, 64),
+        ),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      final details = find.byType(ChannelDetailsPage);
+      expect(
+        ModalRoute.of(tester.element(details)),
+        isA<MaterialPageRoute<bool>>(),
+      );
+      expect(
+        tester.widget<ChannelDetailsPage>(details).nativePresentation,
+        isFalse,
+      );
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
+
+  testWidgets(
+    'native zoom tracks its hero and copies channel details in place',
+    (tester) async {
+      final channel = _channel();
+      final frames = <Map<String, Object>>[];
+      final copies = <String>[];
+      final selections = <String>[];
+      final messenger = tester.binding.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copies.add((call.arguments as Map)['text'] as String);
+        }
+        return null;
+      });
+      addTearDown(
+        () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: ChannelSheetContent(
+              data: {
+                'details': channel.toJson(),
+                'title': 'general',
+                'hasNativeHero': true,
+                'sections': [
+                  [
+                    for (final label in [
+                      'Copy channel name',
+                      'Copy channel ID',
+                    ])
+                      {'id': label, 'label': label, 'enabled': true},
+                  ],
+                  for (var i = 0; i < 32; i++)
+                    [
+                      {'id': 'row$i', 'label': 'Row $i', 'enabled': true},
+                    ],
+                ],
+              },
+              onGeometry: frames.add,
+              onSelect: selections.add,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final first = frames.last;
+      final portrait = first['portrait'] as List<double>;
+      final name = first['name'] as List<double>;
+      expect(portrait.skip(2), [80.0, 80.0]);
+      expect(name[1], greaterThan(portrait[1] + portrait[3]));
+      final scroll = tester.widget<ListView>(find.byType(ListView)).controller!;
+      scroll.jumpTo(40);
+      await tester.pump();
+      expect((frames.last['portrait'] as List<double>)[1], portrait[1] - 40);
+      expect((frames.last['name'] as List<double>)[1], name[1] - 40);
+      for (final field in ['name', 'ID']) {
+        await tester.tap(find.text('Copy channel $field'));
+        await tester.pumpAndSettle();
+        expect(find.text('Channel $field copied'), findsOneWidget);
+        expect(find.byType(ChannelSheetContent), findsOneWidget);
+      }
+      expect(copies, [channel.name, channel.id]);
+      expect(selections, isEmpty);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'chat settings sends its portrait bounds to UIKit and releases the route on dismissal',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      const bridge = MethodChannel('buzz/channel_actions_sheet');
+      final result = Completer<String?>();
+      final messenger = tester.binding.defaultBinaryMessenger;
+      final portraits = ValueNotifier<Uint8List?>(Uint8List.fromList([1]));
+      final members = Completer<List<ChannelMember>>();
+      final updates = <Map>[];
+      Map? updated;
+      Map? presented;
+      final handoff = <String>[];
+      messenger.setMockMethodCallHandler(bridge, (call) async {
+        if (call.method == 'update') {
+          updated = call.arguments as Map;
+          updates.add(updated!);
+        }
+        if (call.method == 'sourceRestored') {
+          expect((call.arguments as Map)['session'], presented?['session']);
+          handoff.add('release');
+        }
+        if (call.method != 'present') return null;
+        presented = call.arguments as Map;
+        return result.future;
+      });
+      addTearDown(() {
+        messenger.setMockMethodCallHandler(bridge, null);
+        debugDefaultTargetPlatformOverride = null;
+      });
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(type: 'dm'),
+          loadMembers: () => members.future,
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+          portraitUpdates: portraits,
+          zoomSource: const Rect.fromLTWH(150, 48, 64, 64),
+          setZoomSourceHidden: (hidden) =>
+              handoff.add(hidden ? 'hide' : 'restore'),
+        ),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      expect(presented?['zoomSource'], [150, 48, 64, 64]);
+      expect(presented?['zoomArtwork'], [1]);
+      members.complete([
+        for (final pubkey in [_currentPubkey, 'other'])
+          ChannelMember(
+            pubkey: pubkey,
+            role: 'member',
+            joinedAt: DateTime(2025),
+          ),
+      ]);
+      await tester.pumpAndSettle();
+      expect(updates, isNotEmpty);
+      expect(
+        updates.where((model) => model.containsKey('zoomArtwork')),
+        isEmpty,
+      );
+      final tiles = ((updated ?? presented)!['sections'] as List).first as List;
+      expect(tiles, contains(containsPair('symbol', 'person.badge.plus')));
+      expect(
+        tiles.singleWhere((row) => row['label'] == 'Add')['enabled'],
+        isTrue,
+      );
+      expect(handoff, isEmpty);
+      final covered = messenger.handlePlatformMessage(
+        "buzz/channel_actions_sheet/source/${presented?['session']}",
+        const StandardMethodCodec().encodeMethodCall(
+          const MethodCall('covered'),
+        ),
+        null,
+      );
+      await tester.pump();
+      await covered;
+      expect(handoff, ['hide']);
+      portraits.value = Uint8List.fromList([2, 3]);
+      await tester.pumpAndSettle();
+      expect(updated?['zoomArtwork'], [2, 3]);
+      expect(
+        updates.where((model) => model.containsKey('zoomArtwork')),
+        hasLength(1),
+      );
+      result.complete(null);
+      await tester.pumpAndSettle();
+      expect(handoff, ['hide', 'restore', 'release']);
+      expect(find.byType(ChannelDetailsPage), findsNothing);
+      expect(find.text('Open actions').hitTestable(), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  for (final failure in ['engine_failed', 'content_timeout']) {
+    testWidgets('settings opens the Flutter page after $failure', (
+      tester,
+    ) async {
+      const bridge = MethodChannel('buzz/channel_actions_sheet');
+      final messenger = tester.binding.defaultBinaryMessenger;
+      final result = Completer<String?>();
+      String? session;
+      messenger.setMockMethodCallHandler(bridge, (call) async {
+        if (call.method != 'present') return null;
+        session = (call.arguments as Map)['session'] as String;
+        return result.future;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(bridge, null));
+      final hidden = <bool>[];
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          loadMembers: () async => [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+          zoomSource: const Rect.fromLTWH(150, 48, 64, 64),
+          setZoomSourceHidden: hidden.add,
+        ),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      expect(session, isNotNull);
+      if (failure == 'content_timeout') {
+        final covered = messenger.handlePlatformMessage(
+          'buzz/channel_actions_sheet/source/$session',
+          const StandardMethodCodec().encodeMethodCall(
+            const MethodCall('covered'),
+          ),
+          null,
+        );
+        await tester.pump();
+        await covered;
+        expect(hidden, [true]);
+      }
+      result.completeError(PlatformException(code: failure));
+      await tester.pumpAndSettle();
+      expect(hidden.last, isFalse);
+      expect(find.byType(ChannelDetailsPage), findsOneWidget);
+      expect(find.text('general').hitTestable(), findsWidgets);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(find.text('Open actions').hitTestable(), findsOneWidget);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+  }
+
   for (final size in [const Size(800, 390), const Size(669, 951)]) {
     testWidgets('Duo cover or portrait $size retains the Flutter sheet', (
       tester,
