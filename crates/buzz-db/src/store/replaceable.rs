@@ -24,6 +24,9 @@ pub enum ParameterizedReplaceStatus {
     RevisionMismatch,
     /// An exact replay was required, but the event is not the live head.
     ReplayOnlyMiss,
+    /// A create-only write found the coordinate already used: a live head
+    /// other than this event, or any deleted version (including this event).
+    AlreadyExists,
 }
 
 /// Structural precondition for a parameterized-replaceable write.
@@ -35,6 +38,12 @@ pub enum ParameterizedReplacePrecondition<'a> {
     ExpectedRevision(&'a [u8]),
     /// Accept only an exact live-head replay and perform no mutation otherwise.
     ExactReplayOnly,
+    /// Insert only when the coordinate has never held an event. An exact
+    /// replay of the live head is a duplicate; any other stored version, live
+    /// or deleted, is [`ParameterizedReplaceStatus::AlreadyExists`]. Checked
+    /// under the coordinate replacement lock, which deletion also takes, so a
+    /// delete committed before this write always wins.
+    CreateOnly,
 }
 
 /// Result of a transaction-bound parameterized-replaceable event write.
@@ -175,6 +184,29 @@ async fn replace_parameterized_event_in_transaction_impl(
             channel_id,
             ParameterizedReplaceStatus::Duplicate,
         ));
+    }
+
+    if precondition == ParameterizedReplacePrecondition::CreateOnly {
+        // Deleted versions count: a create-only write must not bring back a
+        // coordinate its owner deleted, even by replaying the original event.
+        let used: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM events \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4)",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind_i32)
+        .bind(pubkey_bytes.as_slice())
+        .bind(d_tag)
+        .fetch_one(tx.conn())
+        .await?;
+        if used {
+            return Ok(ParameterizedReplaceResult::new(
+                event,
+                received_at,
+                channel_id,
+                ParameterizedReplaceStatus::AlreadyExists,
+            ));
+        }
     }
 
     if precondition == ParameterizedReplacePrecondition::ExactReplayOnly {
