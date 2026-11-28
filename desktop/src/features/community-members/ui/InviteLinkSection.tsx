@@ -140,13 +140,29 @@ export function InviteLinkSection({
   async function handleCopy() {
     if (!inviteUrl || isGenerating || copyStatus === "copying") return;
     setCopyStatus("copying");
+
+    // Two distinct failure modes: network/NIP-98/auth errors from
+    // mintInvite (leave no clipboard state behind) versus clipboard-write
+    // failures (invite was minted — and relay_invites stores only the hash
+    // — so the code is unrecoverable, but at least the user knows to fix
+    // their clipboard). See #3636.
+    let invite;
     try {
-      await writeTextToClipboard(inviteUrl);
+      invite = await mintInvite({ ttlSecs, maxUses });
+    } catch (error) {
+      setCopyStatus("idle");
+      const message =
+        error instanceof Error ? error.message : "unknown error";
+      toast.error(`Couldn’t create the invite: ${message}`);
+      return;
+    }
+    try {
+      await writeTextToClipboard(invite.url);
       setCopyStatus("copied");
       toast.success("Invite link copied");
     } catch {
       setCopyStatus("idle");
-      toast.error("Couldn’t copy the invite link. Try again.");
+      toast.error("Invite created, but copying to the clipboard failed.");
     }
   }
 
