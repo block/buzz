@@ -21,7 +21,7 @@ use uuid::Uuid;
 use buzz_core::kind::*;
 use buzz_core::tenant::{CommunityId, TenantContext};
 use buzz_datastore_tracing::datastore_span;
-use buzz_db::dm::{DmGrowth, MAX_DM_PEOPLE};
+use buzz_db::dm::{DmGrowMode, DmGrowth, MAX_DM_PEOPLE};
 use buzz_db::workflow::{ApprovalStatus, RunStatus};
 use buzz_db::DbError;
 use buzz_workflow::executor::TriggerContext;
@@ -427,6 +427,10 @@ enum History {
     /// relay needs no choice, and refuse with [`NEEDS_HISTORY_CHOICE`] when
     /// people would join a DM of two or more people.
     Ask,
+    /// `["history", "agents"]` (kind:41011 only): agents alone join this DM in
+    /// place, with its history; an add that would bring anyone else in, here
+    /// or in another DM, is refused with [`ONLY_AGENTS_JOIN`].
+    Agents,
 }
 
 fn history_tag(event: &Event, ask_allowed: bool) -> Result<History, IngestError> {
@@ -434,6 +438,7 @@ fn history_tag(event: &Event, ask_allowed: bool) -> Result<History, IngestError>
         None => Ok(History::Untagged),
         Some("include") => Ok(History::Include),
         Some("ask") if ask_allowed => Ok(History::Ask),
+        Some("agents") if ask_allowed => Ok(History::Agents),
         Some(other) => Err(IngestError::Rejected(format!(
             "invalid: history must be \"include\", got \"{other}\""
         ))),
@@ -445,6 +450,11 @@ fn history_tag(event: &Event, ask_allowed: bool) -> Result<History, IngestError>
 /// history and send the add again tagged `include`, or untagged. Clients
 /// match this exact text.
 const NEEDS_HISTORY_CHOICE: &str = "needs-choice: history";
+
+/// Why an add tagged `["history", "agents"]` was refused: someone it names
+/// is not an agent, so it could not join this DM in place. Nothing changed.
+/// Clients match this exact text.
+const ONLY_AGENTS_JOIN: &str = "invalid: only agents join this DM in place";
 
 /// Why the relay's moderation DM cannot take anyone else.
 const MODERATION_DM_REFUSAL: &str = "invalid: this DM cannot be changed";
@@ -613,14 +623,24 @@ async fn grow_with_agents(
     let policy = agent_add_policy(actor);
     match state
         .db
-        .grow_dm(tenant.community(), channel_id, actor, &refs, &policy, false)
+        .grow_dm(
+            tenant.community(),
+            channel_id,
+            actor,
+            &refs,
+            &policy,
+            DmGrowMode::Include,
+        )
         .await
         .map_err(dm_write_error)?
     {
         DmGrowth::Grown { added } => Ok(added),
-        DmGrowth::Existing(_) | DmGrowth::PeopleStartNewDm | DmGrowth::NeedsChoice => Err(
-            IngestError::Internal("error: adding agents changed the DM's people".into()),
-        ),
+        DmGrowth::Existing(_)
+        | DmGrowth::PeopleStartNewDm
+        | DmGrowth::NeedsChoice
+        | DmGrowth::NotAllAgents => Err(IngestError::Internal(
+            "error: adding agents changed the DM's people".into(),
+        )),
     }
 }
 
@@ -637,8 +657,10 @@ async fn grow_with_agents(
 /// have joined) or makes one, and adds no one to an existing DM. With
 /// `["history", "ask"]`, the relay adds agents alone and people to a DM of at
 /// most one person as with `include`, and refuses people joining any other
-/// DM with [`NEEDS_HISTORY_CHOICE`], changing nothing. An agent cannot send
-/// either tag.
+/// DM with [`NEEDS_HISTORY_CHOICE`], changing nothing. With
+/// `["history", "agents"]`, agents alone join this DM in place, and an add
+/// naming anyone else is refused with [`ONLY_AGENTS_JOIN`], changing nothing,
+/// so the add never lands in another DM. An agent cannot send any of them.
 async fn handle_dm_add_member(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -747,7 +769,11 @@ async fn handle_dm_add_member(
                     &self_bytes,
                     &addition_refs,
                     &policy,
-                    history == History::Ask,
+                    match history {
+                        History::Ask => DmGrowMode::Ask,
+                        History::Agents => DmGrowMode::AgentsOnly,
+                        _ => DmGrowMode::Include,
+                    },
                 )
                 .await
                 .map_err(dm_write_error)?,
@@ -756,6 +782,9 @@ async fn handle_dm_add_member(
         None
     };
     let (target, was_created, added, moved_elsewhere, participants) = match growth {
+        Some(DmGrowth::NotAllAgents) => {
+            return Err(IngestError::Rejected(ONLY_AGENTS_JOIN.into()));
+        }
         // Dropping `tx` uncommitted forgets this command, so the add can be
         // sent again with the caller's choice.
         Some(DmGrowth::NeedsChoice) => {

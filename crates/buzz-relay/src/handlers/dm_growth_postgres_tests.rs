@@ -518,7 +518,7 @@ async fn growing_does_not_reveal_a_dm_the_actor_is_not_in() {
             &agent.public_key().to_bytes(),
             &[c_bytes.as_slice()],
             &|_: &str, _: &[u8]| Ok(()),
-            false,
+            buzz_db::dm::DmGrowMode::Include,
         )
         .await;
 
@@ -1779,6 +1779,198 @@ async fn only_people_ask_and_only_when_adding() {
     let tags = vec![
         vec!["p".into(), hex(&b)],
         vec!["history".into(), "ask".into()],
+    ];
+    rejected(
+        submit(&state, &tenant, &a, 41010, tags).await.map(|_| ()),
+        "history",
+    );
+}
+
+/// Adds `others` to `dm` tagged `["history", "agents"]`.
+async fn agents_only(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    actor: &Keys,
+    dm: Uuid,
+    others: &[&Keys],
+) -> Result<(Uuid, bool), IngestError> {
+    let mut tags: Vec<Vec<String>> = vec![vec!["h".into(), dm.to_string()]];
+    tags.extend(others.iter().map(|k| vec!["p".into(), hex(k)]));
+    tags.push(vec!["history".into(), "agents".into()]);
+    submit(state, tenant, actor, 41011, tags)
+        .await
+        .map(|r| response_channel(&r))
+}
+
+/// Agents alone join this DM in place, in a DM of one person or of two.
+/// Mutation: refuse every agents-only add → the agents are not added → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn agents_only_adds_agents_in_place() {
+    let state = state().await;
+    let tenant = community(&state, "dm-agents-only").await;
+    let (a, b, agent, other) = (
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+    );
+    make_agent(&state, &tenant, &agent, &a, "anyone").await;
+    make_agent(&state, &tenant, &other, &a, "anyone").await;
+    let pair = open(&state, &tenant, &a, &[&b]).await.expect("open pair");
+    let solo = open(&state, &tenant, &a, &[&agent])
+        .await
+        .expect("open solo");
+
+    let grown = agents_only(&state, &tenant, &a, pair, &[&agent, &agent])
+        .await
+        .expect("add to pair");
+    assert_eq!(grown, (pair, false));
+    assert_eq!(
+        members(&state, &tenant, pair).await,
+        set_of(&[&a, &b, &agent])
+    );
+    let grown = agents_only(&state, &tenant, &a, solo, &[&other])
+        .await
+        .expect("add to solo");
+    assert_eq!(grown, (solo, false));
+    assert_eq!(
+        members(&state, &tenant, solo).await,
+        set_of(&[&a, &agent, &other])
+    );
+}
+
+/// An agents-only add that names a person is refused with the exact reason
+/// and changes nothing: not this DM, and not the DM its people already have,
+/// which `ask` would send the agents to. The refused command is not
+/// remembered, so the same event is refused again. Mutations: fork as `ask`
+/// does → the agent joins the other DM → RED; commit the command before
+/// refusing → the second send is a duplicate → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn agents_only_refuses_a_person_and_changes_nothing() {
+    let state = state().await;
+    let tenant = community(&state, "dm-agents-only-person").await;
+    let (a, b, c, agent, other) = (
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+    );
+    make_agent(&state, &tenant, &agent, &a, "anyone").await;
+    make_agent(&state, &tenant, &other, &a, "anyone").await;
+    let pair = open(&state, &tenant, &a, &[&b]).await.expect("open pair");
+    let solo = open(&state, &tenant, &a, &[&agent])
+        .await
+        .expect("open solo");
+    let theirs = open(&state, &tenant, &a, &[&c]).await.expect("open theirs");
+
+    for (dm, before) in [(pair, set_of(&[&a, &b])), (solo, set_of(&[&a, &agent]))] {
+        let event = EventBuilder::new(Kind::Custom(41011), "")
+            .tags(
+                [
+                    vec!["h".to_string(), dm.to_string()],
+                    vec!["p".into(), hex(&c)],
+                    vec!["p".into(), hex(&other)],
+                    vec!["history".into(), "agents".into()],
+                ]
+                .into_iter()
+                .map(|tag| Tag::parse(tag).expect("tag")),
+            )
+            .sign_with_keys(&a)
+            .expect("sign");
+        for _ in 0..2 {
+            match ingest_event(&state, &tenant, event.clone(), http_auth(&a)).await {
+                Err(IngestError::Rejected(message)) => {
+                    assert_eq!(message, "invalid: only agents join this DM in place")
+                }
+                Err(other) => panic!("expected the agents-only refusal, got {other:?}"),
+                Ok(result) => panic!("expected the agents-only refusal, got {:?}", result.message),
+            }
+        }
+        assert_eq!(members(&state, &tenant, dm).await, before);
+    }
+    assert_eq!(members(&state, &tenant, theirs).await, set_of(&[&a, &c]));
+}
+
+/// An agents-only add checks everyone it names, members included, before
+/// anything else: naming a person already in the DM alongside a new agent is
+/// refused, and the agent does not join.
+/// Mutation: check only those not yet in the DM → the agent joins → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn agents_only_refuses_a_person_already_in_the_dm() {
+    let state = state().await;
+    let tenant = community(&state, "dm-agents-only-member").await;
+    let (a, b, agent) = (Keys::generate(), Keys::generate(), Keys::generate());
+    make_agent(&state, &tenant, &agent, &a, "anyone").await;
+    let dm = open(&state, &tenant, &a, &[&b]).await.expect("open");
+
+    let refused = agents_only(&state, &tenant, &a, dm, &[&b, &agent]).await;
+    assert!(
+        matches!(&refused, Err(IngestError::Rejected(m)) if m == "invalid: only agents join this DM in place"),
+        "{refused:?}"
+    );
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &b]));
+}
+
+/// The person check comes before the capacity check: a full DM (nine people)
+/// asked to take a new person gives the agents-only refusal, not the limit.
+/// Mutation: check capacity first → "at most 9 people" → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn agents_only_refuses_a_person_before_the_limit() {
+    let state = state().await;
+    let tenant = community(&state, "dm-agents-only-full").await;
+    let a = Keys::generate();
+    let people: Vec<Keys> = (0..8).map(|_| Keys::generate()).collect();
+    let eight: Vec<&Keys> = people.iter().collect();
+    let dm = open(&state, &tenant, &a, &eight).await.expect("open nine");
+    let mut nine = eight.clone();
+    nine.push(&a);
+    let tenth = Keys::generate();
+
+    let refused = agents_only(&state, &tenant, &a, dm, &[&tenth]).await;
+    assert!(
+        matches!(&refused, Err(IngestError::Rejected(m)) if m == "invalid: only agents join this DM in place"),
+        "{refused:?}"
+    );
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&nine));
+}
+
+/// An agent cannot send the tag, and only adds take it.
+/// Mutations: let agents send it → the agent's add is answered → RED; accept
+/// it on kind:41010 → the open succeeds → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn only_people_add_agents_only_and_only_when_adding() {
+    let state = state().await;
+    let tenant = community(&state, "dm-agents-only-who").await;
+    let (a, b, agent, other) = (
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+    );
+    make_agent(&state, &tenant, &agent, &a, "anyone").await;
+    make_agent(&state, &tenant, &other, &a, "anyone").await;
+    let dm = open(&state, &tenant, &a, &[&b]).await.expect("open");
+    add(&state, &tenant, &a, dm, &[&agent], true)
+        .await
+        .expect("add agent");
+
+    rejected(
+        agents_only(&state, &tenant, &agent, dm, &[&other]).await,
+        "only people",
+    );
+    assert_eq!(
+        members(&state, &tenant, dm).await,
+        set_of(&[&a, &b, &agent])
+    );
+    let tags = vec![
+        vec!["p".into(), hex(&b)],
+        vec!["history".into(), "agents".into()],
     ];
     rejected(
         submit(&state, &tenant, &a, 41010, tags).await.map(|_| ()),

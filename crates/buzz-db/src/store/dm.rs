@@ -670,6 +670,22 @@ pub enum DmGrowth {
     /// first: they choose whether those people see its history. Nothing was
     /// written.
     NeedsChoice,
+    /// The caller added agents only, and someone named is not an agent, even
+    /// one already in the DM. Nothing was written.
+    NotAllAgents,
+}
+
+/// Who [`grow_dm`] lets join, and what it does when people would.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DmGrowMode {
+    /// People and agents join; people with the DM's history.
+    Include,
+    /// Agents join; people joining a DM of two or more people are
+    /// [`DmGrowth::NeedsChoice`].
+    Ask,
+    /// Everyone named must be an agent, or nothing happens:
+    /// [`DmGrowth::NotAllAgents`].
+    AgentsOnly,
 }
 
 /// Add `additions` to the DM `channel_id` in place, keeping its history.
@@ -688,10 +704,12 @@ pub enum DmGrowth {
 /// ([`release_dm_identity`]) takes a new one only when people join. Each agent
 /// that joins needs `policy`'s permission ([`check_joining_agents`]).
 ///
-/// With `ask`, people joining a DM of two or more people are not added: that
-/// is [`DmGrowth::NeedsChoice`], so the caller can ask whether they see its
-/// history. Agents alone still join, and a DM of at most one person still
-/// starts a new DM.
+/// With [`DmGrowMode::Ask`], people joining a DM of two or more people are
+/// not added: that is [`DmGrowth::NeedsChoice`], so the caller can ask whether
+/// they see its history. Agents alone still join, and a DM of at most one
+/// person still starts a new DM. With [`DmGrowMode::AgentsOnly`], every named
+/// key is checked first, under the lock and before the capacity check: if
+/// any is not an agent, that is [`DmGrowth::NotAllAgents`].
 ///
 /// `actor` must be an active member. The DM must be live and not archived, and
 /// may hold at most [`MAX_DM_PEOPLE`] people afterwards. Re-adding members is
@@ -708,7 +726,7 @@ pub async fn grow_dm(
     actor: &[u8],
     additions: &[&[u8]],
     policy: AgentAddPolicy<'_>,
-    ask: bool,
+    mode: DmGrowMode,
 ) -> Result<DmGrowth> {
     for pk in additions {
         if pk.len() != 32 {
@@ -728,6 +746,13 @@ pub async fn grow_dm(
     crate::channel_members::lock_channel_for_member_put(&mut tx, channel_id).await?;
 
     let members = locked_dm_members(tx.conn(), community_id, channel_id, actor).await?;
+    if mode == DmGrowMode::AgentsOnly {
+        let named = agents_among(tx.conn(), community_id, additions).await?;
+        if additions.iter().any(|pk| !named.contains(*pk)) {
+            tx.rollback().await?;
+            return Ok(DmGrowth::NotAllAgents);
+        }
+    }
     let stored: Option<Vec<u8>> = sqlx::query_scalar(
         "SELECT participant_hash FROM channels WHERE community_id = $1 AND id = $2",
     )
@@ -760,7 +785,7 @@ pub async fn grow_dm(
         return Ok(DmGrowth::PeopleStartNewDm);
     }
     let people_join = count_people(&grown, &agents) != count_people(&current, &agents);
-    if ask && people_join {
+    if mode == DmGrowMode::Ask && people_join {
         tx.rollback().await?;
         return Ok(DmGrowth::NeedsChoice);
     }
@@ -1441,7 +1466,7 @@ impl Db {
         actor: &[u8],
         additions: &[&[u8]],
         policy: AgentAddPolicy<'_>,
-        ask: bool,
+        mode: DmGrowMode,
     ) -> Result<DmGrowth> {
         crate::dm::grow_dm(
             &self.pool,
@@ -1450,7 +1475,7 @@ impl Db {
             actor,
             additions,
             policy,
-            ask,
+            mode,
         )
         .await
     }
