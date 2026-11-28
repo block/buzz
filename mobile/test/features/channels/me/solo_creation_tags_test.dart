@@ -26,6 +26,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:uuid/uuid.dart';
 
 class _EmptyChannels extends ChannelsNotifier {
   @override
@@ -422,12 +423,41 @@ void main() {
             contains(equals(['p', agent.public])),
           );
           expect(pending.initialMessage?.getTagValue('h'), pending.id);
+          // The first message is stamped like any composer send, once.
+          final first = pending.initialMessage!;
+          List<String> values(NostrEvent event, String name) => [
+            for (final tag in event.tags)
+              if (tag.first == name) tag[1],
+          ];
+          final clientId = values(first, 'client-id').single;
+          expect(Uuid.isValidUUID(fromString: clientId), isTrue);
+          final ms = values(first, 'ms').single;
+          expect(ms, matches(RegExp(r'^(0|[1-9][0-9]{0,2})$')));
           expect(command.kind, 9007);
           expect(command.pubkey, owner.public);
           expect(command.tags, contains(equals(['t', 'buzz.solo'])));
           expect(command.tags, contains(equals(['channel_type', 'stream'])));
           expect(command.tags, contains(equals(['visibility', 'private'])));
           expect(command.tags.where((tag) => tag.first == 'P'), isEmpty);
+
+          // Retry reuses the signed first message instead of stamping anew.
+          relay.submitted.clear();
+          await tester.tap(find.text('Retry'));
+          for (
+            var attempts = 0;
+            attempts < 100 && relay.submitted.isEmpty;
+            attempts++
+          ) {
+            await tester.pumpAndSettle();
+            await tester.runAsync(
+              () => Future<void>.delayed(const Duration(milliseconds: 50)),
+            );
+          }
+          await tester.pumpAndSettle();
+          expect(relay.submitted, isNotEmpty);
+          final retried = MeChatCreation.pending(sync)!.initialMessage!;
+          expect(retried.id, first.id);
+          expect(values(retried, 'client-id').single, clientId);
         }
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pumpAndSettle();

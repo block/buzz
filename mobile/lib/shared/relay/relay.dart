@@ -1,4 +1,5 @@
 export 'app_lifecycle_provider.dart';
+export 'client_stamp.dart';
 export 'identity_scoped_prefs.dart';
 export 'media_auth.dart';
 export 'media_disk_cache.dart';
