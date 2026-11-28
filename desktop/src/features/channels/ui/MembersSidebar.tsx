@@ -24,6 +24,7 @@ import {
   canAddChannelMembers,
   PRIVATE_CHANNEL_ADD_DENIED_MESSAGE,
 } from "@/features/channels/lib/channelMemberAdmission";
+import { canRemoveChannelMember } from "@/features/channels/lib/channelMemberRemoval";
 import {
   useFlattenedUserSearchResults,
   useInfiniteUserSearchQuery,
@@ -484,14 +485,14 @@ export function MembersSidebar({
     [bots, managedAgentByPubkey],
   );
   const canRemoveMember = React.useCallback(
-    (member: ChannelMember) => {
-      return (
-        (selfMember?.role === "admin" && member.pubkey !== currentPubkey) ||
-        (selfMember?.role === "owner" && member.role !== "owner") ||
-        Boolean(selfMember && isMyBot(member)) ||
-        member.pubkey === currentPubkey
-      );
-    },
+    (member: ChannelMember) =>
+      canRemoveChannelMember({
+        memberPubkey: member.pubkey,
+        memberRole: member.role,
+        currentPubkey,
+        selfRole: selfMember?.role,
+        isOwnAgent: isMyBot(member),
+      }),
     [currentPubkey, isMyBot, selfMember],
   );
   const removableManagedBots = React.useMemo(
