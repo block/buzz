@@ -31,6 +31,8 @@ async fn submit(
         .collect();
     let event = EventBuilder::new(Kind::Custom(kind), "")
         .tags(tags)
+        // Keep a `p` tag naming the actor: it opens their DM with themselves.
+        .allow_self_tagging()
         .sign_with_keys(actor)
         .expect("sign");
     ingest_event(state, tenant, event, http_auth(actor)).await
@@ -1784,4 +1786,78 @@ async fn only_people_ask_and_only_when_adding() {
         submit(&state, &tenant, &a, 41010, tags).await.map(|_| ()),
         "history",
     );
+}
+
+/// Naming only yourself opens your DM with yourself, a note to self: one
+/// member, found again by either kind of open, and not anyone else's.
+/// Mutation: drop the caller from the names to check → an empty open is
+/// refused → RED; refuse a lone participant in the database → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn naming_only_yourself_opens_a_dm_with_yourself() {
+    let state = state().await;
+    let tenant = community(&state, "dm-self").await;
+    let (a, b) = (Keys::generate(), Keys::generate());
+
+    let created = submit(&state, &tenant, &a, 41010, vec![vec!["p".into(), hex(&a)]])
+        .await
+        .expect("open self DM");
+    let (dm, was_created) = response_channel(&created);
+    assert!(was_created);
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a]));
+
+    assert_eq!(open(&state, &tenant, &a, &[&a]).await.expect("reopen"), dm);
+    assert_eq!(
+        open_with_history(&state, &tenant, &a, &[&a])
+            .await
+            .expect("reopen with history"),
+        dm
+    );
+    // Naming yourself beside someone is their DM, not yours alone.
+    let with_b = open(&state, &tenant, &a, &[&a, &b]).await.expect("open");
+    assert_ne!(with_b, dm);
+    assert_eq!(members(&state, &tenant, with_b).await, set_of(&[&a, &b]));
+    // Everyone's DM with themselves is their own.
+    let bs = open(&state, &tenant, &b, &[&b]).await.expect("b's own");
+    assert_ne!(bs, dm);
+    assert_eq!(members(&state, &tenant, bs).await, set_of(&[&b]));
+}
+
+/// A DM still needs someone named: no `p` tag at all is refused.
+/// Mutation: treat an empty name list as yourself → the open lands → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn opening_a_dm_without_naming_anyone_is_refused() {
+    let state = state().await;
+    let tenant = community(&state, "dm-self-unnamed").await;
+    let a = Keys::generate();
+
+    rejected(
+        submit(&state, &tenant, &a, 41010, vec![])
+            .await
+            .map(|r| (r.accepted, r.message)),
+        "at least 1 participant",
+    );
+}
+
+/// People added to a DM with yourself start a DM of everyone, as they do for
+/// any DM of at most one person: the note to self stays yours alone.
+/// Mutation: grow the DM with yourself in place → it holds B → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn adding_a_person_to_a_dm_with_yourself_starts_a_new_dm() {
+    let state = state().await;
+    let tenant = community(&state, "dm-self-grow").await;
+    let (a, b) = (Keys::generate(), Keys::generate());
+    let dm = open(&state, &tenant, &a, &[&a]).await.expect("open");
+
+    let (target, created) = add(&state, &tenant, &a, dm, &[&b], true)
+        .await
+        .expect("add");
+
+    assert_ne!(target, dm);
+    assert!(created);
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a]));
+    assert_eq!(members(&state, &tenant, target).await, set_of(&[&a, &b]));
+    assert_eq!(open(&state, &tenant, &a, &[&a]).await.expect("reopen"), dm);
 }
