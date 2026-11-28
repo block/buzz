@@ -30,7 +30,6 @@ import '../../shared/widgets/media_loading_placeholder.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/mentions/mention_bindings.dart';
-import '../../shared/mentions/mention_tags.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
 import '../../shared/relay/relay.dart';
@@ -278,7 +277,7 @@ class MessageContent extends HookConsumerWidget {
                 ))
             ?.copyWith(color: bubble && ownMessage ? ownTextColor : null);
     final resolvedMentionNames = mentionNames;
-    final signedMentionPubkeys = mentionedPubkeysFromTags(tags);
+    final signedMentionPubkeys = loadMentionProfiles(ref, tags, mentionNames);
     final mentionBindings = renderedMentionBindings(
       content,
       mentionNames,

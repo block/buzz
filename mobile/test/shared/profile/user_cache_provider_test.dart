@@ -425,6 +425,38 @@ void main() {
     expect(cache.state.keys, containsAll(['a', 'b', 'c']));
   });
 
+  test('rows naming the same people share one profile query', () async {
+    final batch = Completer<List<NostrEvent>>();
+    final session = _RecordingProfileSession(results: [batch.future]);
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    final cache = container.read(userCacheProvider.notifier);
+
+    // Every row on screen asks as it builds, repeatedly.
+    for (var row = 0; row < 20; row++) {
+      cache.requestLinked(['a', if (row.isEven) 'b']);
+    }
+    await session.firstRequest.future;
+    expect(session.requestCount, 1);
+    expect(session.requestedFilter?.authors, unorderedEquals(['a', 'b']));
+
+    // Rebuilds while the query is on the wire ask nothing more.
+    for (var row = 0; row < 20; row++) {
+      cache.requestLinked(['a', 'b']);
+    }
+    batch.complete([
+      _profileEvent(id: 'a', pubkey: 'a', createdAt: 1, name: 'A'),
+    ]);
+    await pumpEventQueue();
+    // Nor after it answers: a is cached, and b has no profile.
+    cache.requestLinked(['a', 'b']);
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(session.requestCount, 1);
+    expect(cache.state.keys, ['a']);
+  });
+
   test('a link joining a pending preload is retried after reconnect', () async {
     final firstBatch = Completer<List<NostrEvent>>();
     final session = _RecordingProfileSession(
@@ -451,6 +483,11 @@ void main() {
 
     firstBatch.completeError('offline');
     expect(await preload, isFalse);
+    // Rebuilds on the same connection don't resend the failed lookup.
+    expect(cache.needsLinkedLookup('a'), isFalse);
+    cache.requestLinked(['a']);
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(session.requestCount, 1);
     session.setStatus(SessionStatus.disconnected);
     session.setStatus(SessionStatus.connected);
     // The retry rides the next coalesced batch.
