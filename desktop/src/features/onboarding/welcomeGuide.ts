@@ -52,7 +52,10 @@ export type WelcomeTeamAgents = [ManagedAgent, ManagedAgent, ManagedAgent];
 const welcomeTeamPromises = new Map<string, Promise<WelcomeTeamAgents>>();
 
 function normalizeRelayUrl(relayUrl: string | null | undefined) {
-  return relayUrl?.trim().replace(/\/+$/, "") ?? null;
+  const normalized = relayUrl?.trim().replace(/\/+$/, "");
+  // A blank value carries no pin: treat it as absent (unscoped) so callers
+  // never have to defend against both "" and null.
+  return normalized ? normalized : null;
 }
 
 function isAgentScopedToRelay(agent: ManagedAgent, relayUrl?: string | null) {
@@ -60,7 +63,14 @@ function isAgentScopedToRelay(agent: ManagedAgent, relayUrl?: string | null) {
   if (!targetRelayUrl) {
     return true;
   }
-  return normalizeRelayUrl(agent.relayUrl) === targetRelayUrl;
+  // A record with no stored relay pin resolves to the active workspace relay
+  // at read time (create_managed_agent persists the pin "exactly as supplied"
+  // — empty stays empty and resolves to the active workspace relay), so it
+  // belongs to this deployment's relay and must match. Rejecting it made
+  // provisioning mint a duplicate starter with a fresh key instead of
+  // adopting the existing instance.
+  const agentRelayUrl = normalizeRelayUrl(agent.relayUrl);
+  return agentRelayUrl === null || agentRelayUrl === targetRelayUrl;
 }
 
 function isBuiltInWelcomeGuideAgent(agent: ManagedAgent) {

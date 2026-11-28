@@ -354,6 +354,32 @@ test("starter matching is relay scoped and normalizes trailing slashes", () => {
   );
 });
 
+test("starter matching adopts an agent with no stored relay pin", () => {
+  const honey = WELCOME_TEAM_STARTERS[1];
+  const unpinnedHoney = makeAgent({
+    personaId: honey.personaId,
+    relayUrl: "",
+    status: "running",
+  });
+
+  assert.equal(
+    pickWelcomeTeamStarterAgentForRelay([unpinnedHoney], honey, RELAY_B),
+    unpinnedHoney,
+  );
+});
+
+test("guide lookup adopts an agent with no stored relay pin", () => {
+  const unpinnedFizz = makeAgent({
+    personaId: WELCOME_GUIDE_PERSONA_ID,
+    relayUrl: "",
+  });
+
+  assert.equal(
+    pickWelcomeGuideAgentForRelay([unpinnedFizz], RELAY_B),
+    unpinnedFizz,
+  );
+});
+
 test("starter matching prefers running, then deployed instances", () => {
   const fizz = WELCOME_TEAM_STARTERS[0];
   const stopped = makeAgent({ personaId: fizz.personaId });
