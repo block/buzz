@@ -320,6 +320,7 @@ class _ThreadContent extends HookConsumerWidget {
           ComposeBar(
             channelId: channelId,
             hintText: 'Reply to this post\u2026',
+            textStyle: messageBodyTextStyle,
             onSend:
                 (
                   content,

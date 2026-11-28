@@ -4593,7 +4593,7 @@ void main() {
 
     expect(
       tester.widget<Text>(find.text('general')).style?.fontWeight,
-      FontWeight.w500,
+      FontWeight.w400,
     );
     expect(
       tester.widget<Text>(find.text('general')).style?.color,
@@ -4673,7 +4673,7 @@ void main() {
         await tester.pumpAndSettle();
         expect(
           tester.widget<Text>(find.text('general')).style?.fontWeight,
-          FontWeight.w500,
+          FontWeight.w400,
         );
         expect(
           find.byKey(const ValueKey('channel-attention-dot-1')),
@@ -4830,7 +4830,7 @@ void main() {
       if (!hiddenByUnreads) {
         expect(
           tester.widget<Text>(find.text('general')).style?.fontWeight,
-          bold ? FontWeight.w600 : FontWeight.w500,
+          bold ? FontWeight.w600 : FontWeight.w400,
         );
       }
       final attentionDot = find.byKey(

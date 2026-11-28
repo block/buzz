@@ -57,7 +57,7 @@ class BestieWelcome extends ConsumerWidget {
               ),
               MessageContent(
                 bubble: true,
-                baseStyle: messageBodyTextStyle.copyWith(
+                baseStyle: chatBodyTextStyle.copyWith(
                   color: context.colors.onSurface,
                 ),
                 content:

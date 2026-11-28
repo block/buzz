@@ -32,6 +32,10 @@ class ComposeBar extends HookConsumerWidget {
   /// The conversation's displayed messages, oldest first; prefills the agents
   /// the viewer's latest one notified. Null turns the prefill off.
   final List<TimelineMessage>? prefillScopeMessages;
+
+  /// The draft's text style. Null uses [chatBodyTextStyle], which matches chat
+  /// bubbles; Forum passes [messageBodyTextStyle] to match its published posts.
+  final TextStyle? textStyle;
   const ComposeBar({
     super.key,
     required this.channelId,
@@ -46,6 +50,7 @@ class ComposeBar extends HookConsumerWidget {
     this.onFocusRestorerChanged,
     this.onFocusRequested,
     this.prefillScopeMessages,
+    this.textStyle,
     required this.onSend,
   });
   @override
@@ -438,22 +443,8 @@ class ComposeBar extends HookConsumerWidget {
       return emojiIndex.rank(query, limit: _emojiSuggestionLimit);
     }, [emojiQuery.value, emojiIndex]);
 
-    void selectEmoji(_EmojiChoice choice) {
-      final query = _emojiQuery(controller.value);
-      if (query == null || query != emojiQuery.value) return;
-      final caret = controller.selection.end;
-      final start = caret - query.length - 1;
-      final suffix = _emojiSuffix.matchAsPrefix(controller.text, caret)!;
-      _replaceComposerRange(
-        controller,
-        start: start,
-        end: suffix.end,
-        replacement: choice.text,
-        caret: start + choice.text.length,
-      );
-      focusNode.requestFocus();
-      emojiQuery.value = null;
-    }
+    void selectEmoji(_EmojiChoice choice) =>
+        _selectComposerEmoji(controller, focusNode, emojiQuery, choice);
 
     // Insert a selected channel into the text field.
     void insertChannel(Channel channel) {
@@ -1141,6 +1132,7 @@ class ComposeBar extends HookConsumerWidget {
                     interactionLocked || (draftMembers != null && sending),
                 child: _ComposeBarLayout(
                   surfaceKey: sendSurfaceKey,
+                  textStyle: textStyle ?? chatBodyTextStyle,
                   voiceNoteRecorder: voiceNote.recorder,
                   keyboardToolbar: defaultTargetPlatform == TargetPlatform.iOS,
                   onTextTap: () {

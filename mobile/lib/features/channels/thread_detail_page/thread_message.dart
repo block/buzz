@@ -349,10 +349,9 @@ class _ThreadMessage extends HookConsumerWidget {
                                             agentMentionPubkeys,
                                         channelNames: channelNames,
                                         tags: message.tags,
-                                        baseStyle: messageBodyTextStyle
-                                            .copyWith(
-                                              color: context.colors.onSurface,
-                                            ),
+                                        baseStyle: chatBodyTextStyle.copyWith(
+                                          color: context.colors.onSurface,
+                                        ),
                                         scaleEmojiOnly: true,
                                         mediaCarouselTrailingOverflow:
                                             Grid.gutter,

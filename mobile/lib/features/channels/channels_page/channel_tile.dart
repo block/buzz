@@ -142,7 +142,7 @@ class _ChannelTile extends ConsumerWidget {
                                       ),
                                 fontWeight: boldUnread
                                     ? FontWeight.w600
-                                    : FontWeight.w500,
+                                    : FontWeight.w400,
                               ),
                             ),
                           ],

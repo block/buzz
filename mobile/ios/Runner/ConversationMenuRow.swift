@@ -46,6 +46,7 @@ final class ConversationMenu: NSObject, UIContextMenuInteractionDelegate {
   private func actions(_ labels: [String]) -> [UIAction] {
     let icons = [
       "Rename": "tabler-pencil", "Archive": "archive", "Unarchive": "archive",
+      "Pin": "pinned", "Unpin": "pin.slash",
       "Mark read": "mail", "Mark unread": "mail",
       "Change workspace": "folder", "Move to section…": "folder-input",
     ]

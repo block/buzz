@@ -186,7 +186,7 @@ class _MeChatRow extends ConsumerWidget {
                   overflow: TextOverflow.ellipsis,
                   style: navigationChatTitleTextStyle.copyWith(
                     color: color,
-                    fontWeight: isUnread ? FontWeight.w600 : FontWeight.w500,
+                    fontWeight: isUnread ? FontWeight.w600 : FontWeight.w400,
                   ),
                 ),
               ),

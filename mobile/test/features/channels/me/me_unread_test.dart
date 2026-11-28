@@ -219,7 +219,7 @@ void main() {
         await tester.pump();
         expect(
           tester.widget<Text>(find.text('solo')).style?.fontWeight,
-          FontWeight.w500,
+          FontWeight.w400,
         );
         expect(
           tester.widget<Text>(find.text('solo')).style?.color,

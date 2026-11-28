@@ -160,6 +160,7 @@ class ForumPostsView extends HookConsumerWidget {
           ComposeBar(
             channelId: channel.id,
             hintText: 'Write your post\u2026',
+            textStyle: messageBodyTextStyle,
             onSend:
                 (
                   content,
