@@ -39,6 +39,7 @@ void main() {
   ChannelSortManager manager(
     _FakeRelaySession relay,
     _RecordingSignedEventRelay signed, {
+    void Function()? onChanged,
     Duration retry = const Duration(milliseconds: 5),
   }) => ChannelSortManager(
     pubkey: keys.public,
@@ -48,7 +49,7 @@ void main() {
     relaySession: relay,
     signedEventRelay: signed,
     remoteEnabled: true,
-    onChanged: () {},
+    onChanged: onChanged ?? () {},
     startupRetryBaseDelay: retry,
     publishDelay: const Duration(milliseconds: 5),
   );
@@ -270,15 +271,26 @@ void main() {
 
   test('retries failed startup and closes fetch-subscribe gap', () async {
     final relay = _FakeRelaySession()..fetchFailures = 1;
-    final subject = manager(relay, _RecordingSignedEventRelay());
+    final applied = Completer<void>();
+    late final ChannelSortManager subject;
+    subject = manager(
+      relay,
+      _RecordingSignedEventRelay(),
+      onChanged: () {
+        if (!applied.isCompleted &&
+            subject.sortModeFor('starred') == ChannelSortMode.recent) {
+          applied.complete();
+        }
+      },
+    );
+    addTearDown(subject.dispose);
     await subject.initialize();
     relay.historyEvents = [
       event({'starred': 'recent'}, 300),
     ];
-    await Future<void>.delayed(const Duration(milliseconds: 40));
+    await applied.future.timeout(const Duration(seconds: 5));
     expect(subject.sortModeFor('starred'), ChannelSortMode.recent);
     expect(relay.fetchCount, greaterThanOrEqualTo(3));
-    subject.dispose();
   });
 
   test('setSortModeFor prunes deleted custom section keys', () async {

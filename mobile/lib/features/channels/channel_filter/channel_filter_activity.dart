@@ -9,6 +9,12 @@ import '../channels_provider.dart';
 final channelFilterActivityProvider = Provider.autoDispose
     .family<AsyncValue<int?>, String>((ref, channelId) {
       ref.watch(_activityWatchProvider(channelId));
+      return ref.watch(cachedChannelFilterActivityProvider(channelId));
+    });
+
+/// Reads existing activity without adding channels to reconnect gap queries.
+final cachedChannelFilterActivityProvider = Provider.autoDispose
+    .family<AsyncValue<int?>, String>((ref, channelId) {
       final notifier = ref.watch(channelsProvider.notifier);
       final (:known, :at) = ref.watch(
         channelsProvider.select((_) => notifier.activityFor(channelId)),

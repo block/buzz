@@ -68,8 +68,8 @@ class ChannelSortStore {
   }
 
   /// Reads a `channel-workspace-sort` payload. Register metadata, when
-  /// present, is authoritative over the plain `groups` map; a null register
-  /// clears that section's choice.
+  /// present, takes precedence over the plain `groups` map. A null register
+  /// records an explicit return to alphabetical order.
   factory ChannelSortStore.fromWorkspaceJson(Map<String, dynamic> json) {
     final meta = json['meta'];
     if (meta is! Map) return ChannelSortStore.fromJson(json);
@@ -82,7 +82,9 @@ class ChannelSortStore {
         for (final MapEntry(:key, :value)
             in (registers as Map? ?? const {}).entries)
           if (key is String && value is List && value.length == 3)
-            key: ?ChannelSortMode.fromWire(value[2]),
+            key: ?(value[2] == null
+                ? ChannelSortMode.alpha
+                : ChannelSortMode.fromWire(value[2])),
       },
     );
   }

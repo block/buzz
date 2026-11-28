@@ -245,7 +245,7 @@ class _SliverChannelsList extends HookConsumerWidget {
     final filters = ref.watch(channelFilterProvider);
     useListenable(filters);
     final display = optionsKey == null
-        ? const MessagesDisplay()
+        ? const MessagesDisplay(messages: false)
         : ref.watch(messagesDisplayProvider);
     final selectedChannel = useState<String?>(null);
     final clock = useState(0);
@@ -258,7 +258,11 @@ class _SliverChannelsList extends HookConsumerWidget {
       if (display.modeFor(filters?.store, group) != ChannelFilterMode.active) {
         continue;
       }
-      final evidence = ref.watch(channelFilterActivityProvider(id));
+      final evidence = ref.watch(
+        display.explicitlyActive(filters?.store, group)
+            ? channelFilterActivityProvider(id)
+            : cachedChannelFilterActivityProvider(id),
+      );
       activity[id] = evidence;
       // Solo uses the same evidence and handles its own row expiry.
       if (key == 'solo') continue;
@@ -519,7 +523,7 @@ class _SliverChannelsList extends HookConsumerWidget {
     Widget? sectionFor(String key) {
       final rows = buckets[key] ?? const <Channel>[];
       final group = sidebarGroupKey(key);
-      ChannelSortMode mode() => display.sort ?? sortState.sortModeFor(group);
+      ChannelSortMode mode() => display.sortFor(sortState.store, group);
       if (key == 'solo') return soloSliver;
       final previewLimit = display.limitFor(filters?.store, group);
       if (key == 'starred' || key == 'channels' || key == 'dms') {
