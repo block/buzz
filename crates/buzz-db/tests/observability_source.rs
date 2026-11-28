@@ -2031,7 +2031,7 @@ fn event_insert_hook_inventory_carries_the_insert_timestamp() {
         "event.rs: async fn insert_event_on(",
         "event.rs: pub(crate) async fn insert_event_with_thread_metadata_tx(",
         "replaceable.rs: async fn replace_parameterized_event_in_transaction_impl(",
-        "replaceable.rs: pub(crate) async fn replace_addressable_event_under_lock(",
+        "replaceable.rs: pub(crate) async fn replace_addressable_event_under_lock_checked(",
         "channel_members.rs: pub async fn replace_member_event(",
         "relay_members.rs: pub(crate) async fn write_nip43_membership_snapshot(",
         "push.rs: pub async fn accept_lease_event(",
