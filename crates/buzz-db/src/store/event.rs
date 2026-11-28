@@ -61,6 +61,11 @@ pub struct EventQuery {
     /// Restrict to events with a `p` tag mentioning this hex pubkey.
     /// Joins against `event_mentions` table (indexed).
     pub p_tag_hex: Option<String>,
+    /// The values of a multi-value `#p` filter. Not a SQL restriction: the
+    /// caller post-filters by `#p`. Returned reactions get the ones their
+    /// mention rows name as `derived_recipients`, so that post-filter matches
+    /// a reaction indexed under its target's author without a `p` tag.
+    pub p_tag_values: Option<Vec<String>>,
     /// Restrict to events with this exact `d_tag` value (NIP-33).
     /// Pushed into SQL via the `idx_events_parameterized` index.
     pub d_tag: Option<String>,
@@ -162,6 +167,7 @@ impl EventQuery {
             limit: None,
             offset: None,
             p_tag_hex: None,
+            p_tag_values: None,
             d_tag: None,
             d_tags: None,
             before_id: None,
@@ -622,11 +628,78 @@ pub(crate) async fn query_events_on(
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
+        let mentioned: Option<String> = match q.p_tag_hex {
+            Some(_) => Some(row.try_get("pubkey_hex")?),
+            None => None,
+        };
         if let Some(ev) = row_to_stored_event(row)? {
-            out.push(ev);
+            out.push(with_derived_reaction_recipient(ev, mentioned));
         }
     }
+    if let Some(recipients) = q.p_tag_values.as_deref() {
+        load_reaction_recipients(conn, q, recipients, &mut out, deadline).await?;
+    }
     Ok(out)
+}
+
+/// Sets each reaction's `derived_recipients` to the `recipients` its
+/// mention rows name, on the connection that read `events`.
+async fn load_reaction_recipients(
+    conn: &mut sqlx::PgConnection,
+    q: &EventQuery,
+    recipients: &[String],
+    events: &mut [StoredEvent],
+    deadline: ReadDeadline,
+) -> Result<()> {
+    let reaction_ids: Vec<Vec<u8>> = events
+        .iter()
+        .filter(|ev| ev.event.kind == nostr::Kind::Reaction)
+        .map(|ev| ev.event.id.as_bytes().to_vec())
+        .collect();
+    if reaction_ids.is_empty() {
+        return Ok(());
+    }
+    let recipients: Vec<String> = recipients
+        .iter()
+        .map(|recipient| recipient.to_ascii_lowercase())
+        .collect();
+    let mut qb =
+        QueryBuilder::new("SELECT event_id, pubkey_hex FROM event_mentions WHERE community_id = ");
+    qb.push_bind(q.community_id.as_uuid())
+        .push(" AND event_id = ANY(")
+        .push_bind(reaction_ids)
+        .push(") AND pubkey_hex = ANY(")
+        .push_bind(recipients)
+        .push(")");
+    let rows = fetch_with_read_deadline(conn, qb.build().persistent(true), deadline).await?;
+    let mut by_event: std::collections::HashMap<Vec<u8>, Vec<String>> =
+        std::collections::HashMap::new();
+    for row in rows {
+        by_event
+            .entry(row.try_get("event_id")?)
+            .or_default()
+            .push(row.try_get("pubkey_hex")?);
+    }
+    for ev in events.iter_mut() {
+        if let Some(found) = by_event.remove(ev.event.id.as_bytes().as_slice()) {
+            ev.derived_recipients = found;
+        }
+    }
+    Ok(())
+}
+
+/// Sets a `#p`-read reaction's `derived_recipients` to the pubkey its
+/// mention row matched, which may be its target's author rather than a `p`
+/// tag. Other kinds match `#p` by literal tags only, because their mention
+/// rows can name a pubkey no tag matches, such as a workflow owner's
+/// attribution.
+fn with_derived_reaction_recipient(ev: StoredEvent, mentioned: Option<String>) -> StoredEvent {
+    match mentioned {
+        Some(recipient) if ev.event.kind == nostr::Kind::Reaction => {
+            ev.with_derived_recipients(vec![recipient])
+        }
+        _ => ev,
+    }
 }
 
 /// The result of `q` when its shape alone decides it: an invalid query, or one
@@ -718,7 +791,7 @@ fn build_query_events_sql(
         });
         b.push(
             "SELECT e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, \
-             e.sig, e.received_at, e.channel_id \
+             e.sig, e.received_at, e.channel_id, m.pubkey_hex \
              FROM events e \
              INNER JOIN event_mentions m ON ",
         );

@@ -15,6 +15,10 @@ pub struct StoredEvent {
     pub received_at: DateTime<Utc>,
     /// Channel scope; `None` for global/DM events.
     pub channel_id: Option<Uuid>,
+    /// Hex pubkeys the relay derived from stored data as `#p` recipients of
+    /// this event, beyond its literal `p` tags. Empty except for reactions
+    /// read through a `#p` query or built at ingest. Never sent to clients.
+    pub derived_recipients: Vec<String>,
     verified: bool,
 }
 
@@ -25,6 +29,7 @@ impl StoredEvent {
             event,
             received_at: Utc::now(),
             channel_id,
+            derived_recipients: Vec::new(),
             verified: false,
         }
     }
@@ -45,8 +50,16 @@ impl StoredEvent {
             event,
             received_at,
             channel_id,
+            derived_recipients: Vec::new(),
             verified,
         }
+    }
+
+    /// Returns this event with `derived_recipients` replaced, so a `#p`
+    /// filter naming any of them matches it.
+    pub fn with_derived_recipients(mut self, derived_recipients: Vec<String>) -> Self {
+        self.derived_recipients = derived_recipients;
+        self
     }
 }
 
