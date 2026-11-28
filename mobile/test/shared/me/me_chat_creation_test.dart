@@ -9,21 +9,233 @@ import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
-  test('first-message title follows desktop plain-text rules', () {
-    for (final (message, title) in [
-      ('  Plan\n  my trip  ', 'Plan my trip'),
-      ('@Alice help me', '@Alice help me'),
+  // A first message as the composer publishes it: the trimmed text, then a
+  // line and an `imeta` tag for each attachment.
+  (String, List<List<String>>) published(
+    String text, [
+    List<BlobDescriptor> attachments = const [],
+  ]) => (
+    [text, for (final sent in attachments) sent.toMarkdownImage()].join('\n'),
+    [for (final sent in attachments) sent.toImetaTag()],
+  );
+  const media = 'https://relay.example/media';
+  BlobDescriptor upload(String type, String extension, [String? filename]) {
+    final hash = extension.codeUnitAt(1).toRadixString(16) * 32;
+    return BlobDescriptor(
+      url: '$media/$hash$extension',
+      sha256: hash,
+      size: 1024,
+      type: type,
+      uploaded: 0,
+      filename: filename,
+    );
+  }
+
+  final photo = upload('image/jpeg', '.jpg');
+  final image = upload('image/png', '.png');
+  final video = upload('video/mp4', '.mp4');
+  final pdf = upload('application/pdf', '.pdf', 'report.pdf');
+
+  test('a Solo chat is named from its first message', () {
+    final link = 'https://example.com/${'x' * 120}';
+    final source = 'buzz://message?channel=design&id=${'c' * 64}';
+    for (final ((message, tags), name) in [
+      // Text is the name as written, flattened and cut to 80 characters.
+      (published('Draft the launch checklist'), 'Draft the launch checklist'),
+      (published('  Plan\n  my trip  '), 'Plan my trip'),
+      (published('@Alice help me'), '@Alice help me'),
+      (published('### Heading'), 'Heading'),
+      (published('🐝' * 90), '🐝' * 80),
+      // A control character is flattened as whitespace is, so none is stored.
+      (published('Fix \x1b[31mred\x1b[0m output'), 'Fix [31mred [0m output'),
+      (published('a\x00b'), 'a b'),
+      (published('Hello\u0085world'), 'Hello world'),
+      (published('\x00https://example.com/a'), 'Link to example.com'),
+      // The relay trims U+0085 as whitespace, and refuses the empty name left.
+      (published('# \u0085 #'), 'Chat'),
+      // Markdown is not read: links, labels, emphasis and code stay.
+      for (final text in [
+        '[Release notes](https://example.com/notes)',
+        '[a](https://example.com/x(1(2))) [b](https://example.com)',
+        r'[literal \![logo](https://example.com/logo.png)](https://example.com)',
+        '[https://example.com/a](https://example.com/a)',
+        '![wave](https://gif.example/1.gif)',
+        r'Keep **bold**, `code` and literal \# text',
+        'Summarize https://example.com/a',
+        'Send this to <dev@example.org>',
+      ])
+        (published(text), text),
       (
-        'buzz://message?channel=source Plan the next step',
-        'Plan the next step',
+        published('Read [guide]($link) then'),
+        'Read [guide]($link) then'.substring(0, 80),
       ),
-      ('buzz://message?channel=source', 'Chat'),
-      ('### Heading', 'Heading'),
-      ('🐝' * 90, '🐝' * 80),
-      ('> Ship it Friday\n>\n> ok?\n\nSummarize this', 'Summarize this'),
-      ('> Ship it Friday\n> ok?\n\n', 'Ship it Friday ok?'),
+
+      // Only attachments: what was sent, by each tag's type.
+      (published('', [photo]), 'Image'),
+      (published('', [video]), 'Video'),
+      (published('', [pdf]), 'Attachment'),
+      (published('', [upload('audio/mp4', '.m4a')]), 'Attachment'),
+      (
+        published('', [upload('video/mp4', '.mp4', 'voice-note-1732.mp4')]),
+        'Attachment',
+      ),
+      (published('', [photo, image]), '2 images'),
+      (published('', [video, upload('video/quicktime', '.mov')]), '2 videos'),
+      (published('', [photo, video, pdf]), '3 attachments'),
+      // A file name is written into its line with its brackets escaped.
+      (
+        published('', [upload('text/plain', '.txt', 'a [1].txt')]),
+        'Attachment',
+      ),
+      // The same file attached twice has one address, and is one attachment.
+      (published('', [photo, photo]), 'Image'),
+      // A type that does not settle the kind leaves it to the file name.
+      (published('', [upload('application/octet-stream', '.png')]), 'Image'),
+      // An address whose path does not decode is still matched and typed.
+      for (final filename in [null, 'clip.mp4'])
+        (
+          (
+            '\n![video]($media/%FF%FE.mp4)',
+            [
+              [
+                'imeta',
+                'url $media/%FF%FE.mp4',
+                'm video/mp4',
+                if (filename != null) 'filename $filename',
+              ],
+            ],
+          ),
+          'Video',
+        ),
+      for (final filename in [null, 'clip.mp4'])
+        (
+          (
+            '\n[file]($media/%FF%ZZ.mp4)',
+            [
+              [
+                'imeta',
+                'url $media/%FF%ZZ.mp4',
+                if (filename != null) 'filename $filename',
+              ],
+            ],
+          ),
+          'Video',
+        ),
+      (
+        (
+          '\n[file]($media/%FF%ZZ)',
+          [
+            ['imeta', 'url $media/%FF%ZZ'],
+          ],
+        ),
+        'Attachment',
+      ),
+
+      // Text sent with attachments: the text alone.
+      (published('Look at this', [photo]), 'Look at this'),
+      (published('What is this?', [image, pdf]), 'What is this?'),
+      (
+        published('Send this to <dev@example.org>', [photo]),
+        'Send this to <dev@example.org>',
+      ),
+      (published('https://example.com/a', [photo]), 'Link to example.com'),
+      // Only lines the composer appended are removed: the trailing ones at
+      // an attachment's own address.
+      (
+        published('![image]($media/other.jpg)', [photo]),
+        '![image]($media/other.jpg)',
+      ),
+      (
+        ('${photo.toMarkdownImage()}\nLook', [photo.toImetaTag()]),
+        '${photo.toMarkdownImage()} Look'.substring(0, 80),
+      ),
+      (
+        (photo.toMarkdownImage(), const <List<String>>[]),
+        photo.toMarkdownImage().substring(0, 80),
+      ),
+      // The composer ends a message with its attachment lines, so a line
+      // with a space after it was typed, and is text.
+      (
+        ('${photo.toMarkdownImage()} ', [photo.toImetaTag()]),
+        photo.toMarkdownImage().substring(0, 80),
+      ),
+
+      // Only web addresses: the site of one, or how many.
+      (
+        published('https://www.example.com/docs/getting-started'),
+        'Link to example.com',
+      ),
+      (published('<https://example.com/a>'), 'Link to example.com'),
+      (published('HTTP://Example.COM'), 'Link to example.com'),
+      (published(link), 'Link to example.com'),
+      (published('https://bücher.example/a'), 'Link to bücher.example'),
+      (published('https://[2001:db8::1]:8080/a'), 'Link to [2001:db8::1]'),
+      (published('https://a.example/1\n<https://b.example/2>'), '2 links'),
+      (published('https://${'a' * 90}.example'), 'Link to ${'a' * 72}'),
+      // A site that cannot be read is never guessed at, and never throws.
+      for (final address in [
+        'https://%FF.example/path',
+        'https://%00.example',
+        'https://%1B%5B31m.example',
+        'https://%C2%9F.example',
+        'https://www./a',
+        'https:///a',
+        'https://[',
+      ])
+        (published(address), 'Link'),
+      for (final text in ['<https://example.com/a', 'ftp://example.com/a'])
+        (published(text), text),
+
+      // Start Solo chat seeds a source link or a block quote before the
+      // prompt. Neither is the name when a prompt follows.
+      (published('$source\n\nInvestigate this'), 'Investigate this'),
+      (published('$source\n$source Compare both'), 'Compare both'),
+      (published('$source\n\n'), 'Chat'),
+      (published('$source\n\n', [photo]), 'Image'),
+      (published('Look at $source'), 'Look at $source'.substring(0, 80)),
+      (
+        published('> Ship it Friday\n>\n> ok?\n\nSummarize this'),
+        'Summarize this',
+      ),
+      (published('> Ship it Friday\n> ok?\n\n'), 'Ship it Friday ok?'),
+      (published('> Ship it Friday\n> ok?', [photo]), 'Ship it Friday ok?'),
+
+      // Nothing to name.
+      for (final text in ['', '  \n ', '###']) (published(text), 'Chat'),
+      (published('#', [video]), 'Video'),
     ]) {
-      expect(startingMeChatTitle(message), title);
+      final title = startingMeChatTitle(message, tags: tags);
+      expect(title, name, reason: message);
+      expect(title, isNot(matches(r'[\x00-\x1f\x7f-\x9f]')), reason: message);
+    }
+  });
+
+  // The name is derived on the UI isolate in the Send tap, from a message of
+  // up to 8 KB. Reading these as Markdown took seconds.
+  test('a Solo chat name takes time linear in its first message', () {
+    for (final message in [
+      '[x](${' ' * 8000}',
+      '[x](${' ' * 8000}y',
+      r'\[' * 4000,
+      '[x](' * 2000,
+      for (final mark in ['**', '*', '_'])
+        '[${'${mark}a ' * 2000}](https://example.com)',
+      'buzz://x ' * 900,
+      '>\n' * 4000,
+      '\n' * 8000,
+    ]) {
+      final clock = Stopwatch()..start();
+      for (var run = 0; run < 20; run++) {
+        startingMeChatTitle(
+          '$message\n${photo.toMarkdownImage()}',
+          tags: [photo.toImetaTag()],
+        );
+      }
+      expect(
+        clock.elapsed,
+        lessThan(const Duration(seconds: 1)),
+        reason: message.substring(0, 40),
+      );
     }
   });
   test(

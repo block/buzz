@@ -128,6 +128,12 @@ void main() {
           ).toMap(),
         );
         const channelId = '10000000-0000-4000-8000-000000000001';
+        final media = 'https://relay.test/media/${'4a' * 32}';
+        final firstMessage = '\n![video]($media.mp4)\n[notes.txt]($media.txt)';
+        final firstMessageTags = [
+          ['imeta', 'url $media.mp4', 'm video/mp4'],
+          ['imeta', 'url $media.txt', 'm text/plain', 'filename notes.txt'],
+        ];
         final relay = _Relay(profile, [
           if (recoverExisting)
             for (final kind in [39000, 39002])
@@ -307,8 +313,12 @@ void main() {
           sections.lock();
           await tester.pumpAndSettle();
           final composer = tester.widget<ComposeBar>(find.byType(ComposeBar));
+          // Only attachments, as the composer sends them. The name comes from
+          // the `imeta` tags: without them it would be the message's source.
           unawaited(
-            composer.onSend('Mobile Solo', const []).catchError((_) {}),
+            composer
+                .onSend(firstMessage, const [], mediaTags: firstMessageTags)
+                .catchError((_) {}),
           );
         }
         for (
@@ -413,9 +423,10 @@ void main() {
           expect(find.text('Retry'), findsNothing);
         } else {
           final pending = MeChatCreation.pending(sync)!;
-          expect(pending.name, 'Mobile Solo');
+          expect(pending.name, '2 attachments');
           expect(pending.project, 'gone');
-          expect(pending.initialMessage?.content, 'Mobile Solo');
+          expect(pending.initialMessage?.content, firstMessage);
+          expect(pending.initialMessage?.tags, containsAll(firstMessageTags));
           expect(pending.initialMessage?.pubkey, owner.public);
           expect(
             pending.initialMessage?.tags,
@@ -423,6 +434,11 @@ void main() {
           );
           expect(pending.initialMessage?.getTagValue('h'), pending.id);
           expect(command.kind, 9007);
+          expect(
+            command.getTagValue('name'),
+            '2 attachments',
+            reason: 'The stored name is readable, not the message source',
+          );
           expect(command.pubkey, owner.public);
           expect(command.tags, contains(equals(['t', 'buzz.solo'])));
           expect(command.tags, contains(equals(['channel_type', 'stream'])));

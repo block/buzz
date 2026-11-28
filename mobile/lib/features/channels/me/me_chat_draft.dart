@@ -126,7 +126,7 @@ class _MeChatDraft extends HookConsumerWidget {
           ref,
           sync,
           channelId,
-          saved?.name ?? startingMeChatTitle(content),
+          saved?.name ?? startingMeChatTitle(content, tags: mediaTags),
           recipient,
           saved?.project ?? project.value,
           // A saved creation resends exactly what it froze. Older builds saved
