@@ -91,6 +91,7 @@ pub const RELAY_ADMIN_TABLES: &[(&str, &str)] = &[
 /// [`PENDING_SCOPED_TABLES`] and [`RETIRING_SCOPED_TABLES`] are accepted present
 /// or absent and are not listed here.
 pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
+    "scheduled_messages",
     "nip_fi_profile_heads",
     "api_tokens",
     "archived_identities",
@@ -181,6 +182,7 @@ pub const APPROVAL_FORWARD_TABLES: &[&str] = &[
     "identity_retirement_actions",
     "identity_retirement_holds",
     "identity_retirement_workflows",
+    "scheduled_messages",
     "search_backfill",
     "search_outbox",
     "thread_heads",
@@ -202,6 +204,7 @@ const EXCLUDED_SCOPED_TABLES: &[&str] = &[
 /// key needs the order, but the list must stay complete
 /// ([`EXPECTED_SCOPED_TABLES`] gates it).
 pub const PURGE_SCOPED_TABLES: &[&str] = &[
+    "scheduled_messages",
     "nip_fi_profile_heads",
     "personal_read_frontiers",
     "personal_read_accounts",
@@ -10068,6 +10071,12 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             .as_uuid()
             .to_owned();
         seed_relay_admin_rows(&db, bystander).await;
+        for tenant in [community, bystander] {
+            sqlx::query("INSERT INTO scheduled_messages(community_id,owner,id,event,event_id,send_at,next_attempt_at) VALUES($1,$2,$3,'{}',$4,1,1)")
+                .bind(tenant).bind([7u8;32].as_slice()).bind(Uuid::new_v4())
+                .bind([8u8;32].as_slice()).execute(&db.pool).await.unwrap();
+        }
+
         // Operator workflow history is retained even when its provenance
         // community is purged; it is not a tenant-owned serving table.
         let entity = db
@@ -10173,6 +10182,16 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             serde_json::to_value(approvals_after).unwrap()
         );
 
+        assert_eq!(deleted.get("scheduled_messages"), Some(&1));
+        let survivors: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT community_id FROM scheduled_messages WHERE community_id IN ($1,$2)",
+        )
+        .bind(community)
+        .bind(bystander)
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(survivors, vec![bystander]);
         assert_eq!(deleted.get("relay_admin_outbox"), Some(&2));
         assert_eq!(deleted.get("relay_admin_actions"), Some(&2));
         assert_eq!(relay_admin_row_counts(&db, community).await, (0, 0));

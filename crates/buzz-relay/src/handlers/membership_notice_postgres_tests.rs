@@ -680,3 +680,131 @@ async fn dm_hide_racing_a_message_lands_after_it() {
     let hidden = read_tags(&state, &tenant, &reader, filter, "h").await;
     assert_eq!(hidden, [dm], "the later hide is kept");
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn scheduled_dm_commits_message_unhide_and_queue_state() {
+    let (state, tenant) = fixture().await;
+    let reader = Keys::generate();
+    let sender = Keys::generate();
+    let owner = sender.public_key().to_bytes();
+    let (dm, _) = state
+        .db
+        .open_dm(
+            tenant.community(),
+            &[&reader.public_key().to_bytes(), &owner],
+            &reader.public_key().to_bytes(),
+            false,
+            &|_: &str, _: &[u8]| Ok(()),
+        )
+        .await
+        .expect("open DM");
+    let channel = dm.id.to_string();
+    publish(
+        &state,
+        &tenant,
+        &reader,
+        KIND_DM_HIDE as u16,
+        &[&["h", &channel]],
+    )
+    .await;
+    let filter = json!({"kinds": [KIND_DM_VISIBILITY], "#p": [reader.public_key().to_hex()]});
+    assert_eq!(
+        read_tags(&state, &tenant, &reader, filter.clone(), "h").await,
+        std::slice::from_ref(&channel)
+    );
+
+    let event = EventBuilder::new(Kind::Custom(9), "Scheduled DM")
+        .tags([Tag::parse(["h", channel.as_str()]).unwrap()])
+        .sign_with_keys(&sender)
+        .expect("sign");
+    let due = event.created_at.as_secs() as i64;
+    let id = uuid::Uuid::new_v4();
+    let value = serde_json::to_value(&event).unwrap();
+    state
+        .db
+        .scheduled_mutate(
+            tenant.community(),
+            &owner,
+            id,
+            None,
+            Some(&value),
+            due,
+            None,
+        )
+        .await
+        .unwrap();
+    let mut claim = state
+        .db
+        .scheduled_claim(tenant.community(), &owner, id, due)
+        .await
+        .unwrap()
+        .unwrap();
+    let result = super::ingest::ingest_scheduled(
+        &state,
+        &tenant,
+        &mut claim,
+        super::ingest::IngestAuth::Http {
+            pubkey: sender.public_key(),
+            scopes: buzz_auth::Scope::all_known(),
+            auth_method: super::ingest::HttpAuthMethod::Nip98,
+        },
+    )
+    .await
+    .expect("deliver scheduled DM");
+    assert!(result.accepted);
+    assert!(state
+        .db
+        .get_event_by_id_including_deleted(tenant.community(), event.id.as_bytes())
+        .await
+        .unwrap()
+        .is_some());
+    assert!(read_tags(&state, &tenant, &reader, filter, "h")
+        .await
+        .is_empty());
+    let queue = state
+        .db
+        .scheduled_list(tenant.community(), &owner)
+        .await
+        .unwrap();
+    assert_eq!(queue[0].status, "sent");
+
+    let now = chrono::Utc::now().timestamp();
+    let expired = now - buzz_db::scheduled::RELEASE_WINDOW_SECS - 1;
+    let expired_event = EventBuilder::new(Kind::Custom(9), "Missed DM")
+        .tags([Tag::parse(["h", channel.as_str()]).unwrap()])
+        .custom_created_at(nostr::Timestamp::from(expired as u64))
+        .sign_with_keys(&sender)
+        .unwrap();
+    let expired_id = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO scheduled_messages(community_id,owner,id,event,event_id,send_at,next_attempt_at)
+        VALUES($1,$2,$3,$4,$5,$6,$6)")
+        .bind(tenant.community().as_uuid()).bind(owner.as_slice()).bind(expired_id)
+        .bind(serde_json::to_value(&expired_event).unwrap())
+        .bind(expired_event.id.as_bytes().as_slice()).bind(expired)
+        .execute(state.db.pool()).await.unwrap();
+
+    assert_eq!(
+        crate::api::scheduled_messages::dispatch_due(&state)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(state
+        .db
+        .get_event_by_id(tenant.community(), expired_event.id.as_bytes())
+        .await
+        .unwrap()
+        .is_none());
+    let changed = state
+        .db
+        .scheduled_list(tenant.community(), &owner)
+        .await
+        .unwrap();
+    let row = changed.iter().find(|row| row.id == expired_id).unwrap();
+    assert_eq!(row.status, "failed");
+    assert_eq!(
+        row.error.as_deref(),
+        Some(buzz_db::scheduled::MISSED_DELIVERY)
+    );
+}

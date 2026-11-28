@@ -696,6 +696,7 @@ mod postgres_tests {
             "operator_listener_pubkeys",
             "operator_listener_outbox",
             "community_auth_upgrades",
+            "scheduled_message_disconnects",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -1062,7 +1063,10 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 108);
+        assert_eq!(migrations.len(), 109);
+        assert_eq!(migrations[108].version, 109);
+        assert!(strip_sql_comments(migrations[108].sql.as_str())
+            .contains("CREATE TABLE scheduled_messages"));
         assert_eq!(migrations[107].version, 108);
         assert!(strip_sql_comments(migrations[107].sql.as_str())
             .contains("CREATE SEQUENCE search_index_version"));
@@ -1747,6 +1751,7 @@ mod postgres_tests {
             "media_publications",
             "search_outbox",
             "search_backfill",
+            "scheduled_messages",
         ];
         for table in crate::deletion::EXPECTED_SCOPED_TABLES
             .iter()
@@ -3526,6 +3531,8 @@ mod postgres_tests {
             .expect("apply migrations for schema parity");
 
         for table in [
+            "scheduled_messages",
+            "scheduled_message_disconnects",
             "media_uploaders",
             "audit_log",
             "media_publications",

@@ -1,5 +1,8 @@
 //! Domain-owned persistence implementations.
 
+/// Durable scheduled messages.
+pub mod scheduled;
+
 /// Explicit deployment-global admin report reads.
 pub mod admin_moderation;
 /// Community-scoped authentication allowlist persistence.

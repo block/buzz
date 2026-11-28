@@ -4739,23 +4739,36 @@ pub async fn persist_dm_message(
     channel_id: Uuid,
     thread_meta: Option<buzz_db::event::ThreadMetadataParams<'_>>,
 ) -> anyhow::Result<(StoredEvent, bool, Vec<StoredEvent>)> {
-    let author = effective_message_author(event, &state.relay_keypair.public_key());
     let mut tx = state
         .db
         .begin_event_write_transaction(tenant.community())
         .await?;
+    let result =
+        persist_dm_message_in_transaction(&mut tx, state, event, channel_id, thread_meta).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+/// Store a DM and resurface it under the caller's transaction.
+pub(super) async fn persist_dm_message_in_transaction(
+    tx: &mut buzz_db::AdmittedTx,
+    state: &Arc<AppState>,
+    event: &Event,
+    channel_id: Uuid,
+    thread_meta: Option<buzz_db::event::ThreadMetadataParams<'_>>,
+) -> anyhow::Result<(StoredEvent, bool, Vec<StoredEvent>)> {
+    let author = effective_message_author(event, &state.relay_keypair.public_key());
     // Agent-only coordination (`audience: agents`) does not resurface a DM.
     let agents_only = event.tags.iter().any(|tag| {
         let tag = tag.as_slice();
         tag.first().map(String::as_str) == Some("audience")
             && tag.get(1).map(String::as_str) == Some("agents")
     });
-    let hidden =
-        !agents_only && buzz_db::dm::lock_dm_for_unhide(&mut tx, channel_id, &author).await?;
+    let hidden = !agents_only && buzz_db::dm::lock_dm_for_unhide(tx, channel_id, &author).await?;
     #[cfg(test)]
     notice_barrier::reached(channel_id, event.id.as_bytes()).await;
     let (stored, inserted) = buzz_db::event::insert_event_with_thread_metadata_in_transaction(
-        &mut tx,
+        tx,
         event,
         Some(channel_id),
         thread_meta,
@@ -4763,11 +4776,10 @@ pub async fn persist_dm_message(
     .await?;
     let mut snapshots = Vec::new();
     if hidden && inserted {
-        for viewer in buzz_db::dm::unhide_dm_for_recipients(&mut tx, channel_id, &author).await? {
-            snapshots.push(write_dm_visibility_snapshot(&mut tx, state, &viewer).await?);
+        for viewer in buzz_db::dm::unhide_dm_for_recipients(tx, channel_id, &author).await? {
+            snapshots.push(write_dm_visibility_snapshot(tx, state, &viewer).await?);
         }
     }
-    tx.commit().await?;
     Ok((stored, inserted, snapshots))
 }
 

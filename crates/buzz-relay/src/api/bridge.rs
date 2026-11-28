@@ -49,7 +49,14 @@ pub(crate) async fn authenticate_member_post(
     headers: &HeaderMap,
     path: &str,
     body: &[u8],
-) -> Result<(TenantContext, nostr::PublicKey), Response> {
+) -> Result<
+    (
+        TenantContext,
+        nostr::PublicKey,
+        Option<buzz_db::scheduled::ScheduleAdmission>,
+    ),
+    Response,
+> {
     let tenant = crate::nip_fi_shadow::bind_tenant(state, headers)
         .await
         .ok_or_else(|| {
@@ -63,6 +70,7 @@ pub(crate) async fn authenticate_member_post(
     let expected_url = nip98_expected_url(&state.config.relay_url, &tenant, path);
 
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
+    let admitted_at = chrono::Utc::now();
     let admission = admit_nip_fi_http_on_state(
         state,
         headers,
@@ -78,6 +86,14 @@ pub(crate) async fn authenticate_member_post(
         ),
     )
     .await?;
+    let authority = admission
+        .assertion()
+        .map(|assertion| buzz_db::scheduled::ScheduleAdmission {
+            issuer: assertion.identity().issuer().to_owned(),
+            owner: assertion.owner().map(|owner| owner.to_bytes()),
+            issued_at: assertion.issued_at(),
+            admitted_at,
+        });
     let mut caller = ProvenCaller::new(admission, slot, &tenant);
     caller
         .rate_limit_and_replay(state, &tenant)
@@ -97,7 +113,7 @@ pub(crate) async fn authenticate_member_post(
         .map_err(IntoResponse::into_response)?;
     let pubkey = caller.pubkey;
 
-    Ok((tenant, pubkey))
+    Ok((tenant, pubkey, authority))
 }
 
 /// A caller whose NIP-98 proof (and enterprise assertion, when enforced)
