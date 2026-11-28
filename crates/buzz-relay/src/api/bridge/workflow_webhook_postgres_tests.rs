@@ -17,14 +17,18 @@ use crate::{
     test_support::database_url,
 };
 
-async fn app_state(db: buzz_db::Db, pool: &PgPool) -> (Arc<AppState>, AuditShutdownHandle) {
+async fn app_state(
+    db: buzz_db::Db,
+    pool: &PgPool,
+    members_only: bool,
+) -> (Arc<AppState>, AuditShutdownHandle) {
     let mut config = Config::for_test();
     config.database_url = database_url();
     config.redis_url =
         std::env::var("REDIS_URL").expect("REDIS_URL must point to the isolated test Redis");
     config.relay_url = "wss://workflow-webhook-test.invalid".to_owned();
     config.require_auth_token = false;
-    config.require_relay_membership = false;
+    config.require_relay_membership = members_only;
 
     let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("create Redis pool");
     let pubsub = Arc::new(
@@ -134,6 +138,16 @@ async fn post_webhook(
     host: &str,
     secret: &str,
 ) -> (StatusCode, Value) {
+    post_webhook_body(state, workflow_id, host, secret, Bytes::new()).await
+}
+
+async fn post_webhook_body(
+    state: &Arc<AppState>,
+    workflow_id: Uuid,
+    host: &str,
+    secret: &str,
+    body: Bytes,
+) -> (StatusCode, Value) {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::HOST,
@@ -149,7 +163,7 @@ async fn post_webhook(
         Path(workflow_id.to_string()),
         Query(WebhookQuery { secret: None }),
         headers,
-        Bytes::new(),
+        body,
     )
     .await
     {
@@ -248,7 +262,7 @@ async fn webhook_admission_enforces_owner_ban_tenant_scope_and_lookup_failure() 
     )
     .await;
 
-    let (state, audit_shutdown) = app_state(db.clone(), &pool).await;
+    let (state, audit_shutdown) = app_state(db.clone(), &pool, false).await;
 
     let (status, body) = post_webhook(&state, workflow_id, &host_a, "wrong-secret").await;
     assert_eq!(
@@ -332,7 +346,7 @@ async fn webhook_admission_enforces_owner_ban_tenant_scope_and_lookup_failure() 
 
     let (failing_db, admin_pool, schema) =
         crate::test_support::restriction_lookup_failing_db().await;
-    let (failing_state, failing_audit_shutdown) = app_state(failing_db, &pool).await;
+    let (failing_state, failing_audit_shutdown) = app_state(failing_db, &pool, false).await;
     let (status, body) = post_webhook(&failing_state, workflow_id, &host_a, &secret).await;
     assert_eq!(
         status,
@@ -354,4 +368,316 @@ async fn webhook_admission_enforces_owner_ban_tenant_scope_and_lookup_failure() 
         .execute(&admin_pool)
         .await
         .expect("drop restriction lookup failure schema");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL and Redis"]
+async fn webhook_dm_routes_local_recipient_without_author_spoofing() {
+    use buzz_db::workflow::RunStatus;
+    let pool = PgPool::connect(&database_url())
+        .await
+        .expect("isolated database");
+    let db = buzz_db::Db::from_pool(pool.clone());
+    let id = Uuid::new_v4();
+    let community = buzz_core::CommunityId::from_uuid(id);
+    let host = format!("dm-{}.example.org", Uuid::new_v4().simple());
+    let owner = nostr::Keys::generate().public_key();
+    let recipient = nostr::Keys::generate().public_key();
+    let workflow_id = Uuid::new_v4();
+    let channel_id = Uuid::new_v4();
+    seed_community(&pool, id, &host).await;
+    seed_webhook_workflow(&pool, WebhookWorkflowSeed {
+        community_id: id, workflow_id, channel_id,
+        owner_pubkey: &owner.to_bytes(), owner_role: "owner", name: "dm-notify", secret: "test-secret",
+        steps: json!([{"id":"dm", "action":"send_dm", "to":"{{trigger.recipient}}", "text":"Review: {{trigger.title}}"}]),
+    }).await;
+    db.ensure_user(community, &recipient.to_bytes())
+        .await
+        .expect("recipient");
+    let handle = format!("alice@{host}");
+    db.update_user_profile(
+        community,
+        &recipient.to_bytes(),
+        None,
+        None,
+        None,
+        Some(&handle),
+    )
+    .await
+    .expect("local handle");
+    let (state, audit_shutdown) = app_state(db.clone(), &pool, true).await;
+    let _ = db
+        .add_relay_member(
+            community,
+            &recipient.to_hex(),
+            "member",
+            None,
+            &state.relay_keypair,
+        )
+        .await
+        .expect("admit recipient");
+    let outsider = nostr::Keys::generate().public_key();
+    db.ensure_user(community, outsider.as_bytes())
+        .await
+        .unwrap();
+    let outsider_handle = format!("outsider@{host}");
+    db.update_user_profile(
+        community,
+        outsider.as_bytes(),
+        None,
+        None,
+        None,
+        Some(&outsider_handle),
+    )
+    .await
+    .unwrap();
+    let other_id = Uuid::new_v4();
+    let other = buzz_core::CommunityId::from_uuid(other_id);
+    let other_host = format!("other-{}.example.org", other_id.simple());
+    seed_community(&pool, other_id, &other_host).await;
+    let foreign = nostr::Keys::generate().public_key();
+    let foreign_alias = nostr::Keys::generate().public_key();
+    for (key, handle) in [
+        (foreign, format!("elsewhere@{host}")),
+        (foreign_alias, format!("elsewhere@{other_host}")),
+    ] {
+        db.ensure_user(other, key.as_bytes()).await.unwrap();
+        db.update_user_profile(other, key.as_bytes(), None, None, None, Some(&handle))
+            .await
+            .unwrap();
+    }
+    state
+        .workflow_engine
+        .set_action_sink(Arc::new(crate::workflow_sink::RelayActionSink::new(&state)));
+    let mut dm_id = None;
+    for (address, expected) in [
+        (json!(recipient.to_hex()), RunStatus::Completed),
+        (json!(handle.to_uppercase()), RunStatus::Completed),
+        (Value::Null, RunStatus::Failed),
+        (json!("bad-key"), RunStatus::Failed),
+        (json!(format!("missing@{host}")), RunStatus::Failed),
+        (json!("alice@other.example.org"), RunStatus::Failed),
+        (json!(outsider.to_hex()), RunStatus::Failed),
+        (json!(outsider_handle), RunStatus::Failed),
+        (json!(foreign.to_hex()), RunStatus::Failed),
+        (json!(format!("elsewhere@{host}")), RunStatus::Failed),
+        (json!(format!("elsewhere@{other_host}")), RunStatus::Failed),
+    ] {
+        let payload =
+            json!({"recipient": address, "title": "Checkout", "author": recipient.to_hex()});
+        let (status, body) = post_webhook_body(
+            &state,
+            workflow_id,
+            &host,
+            "test-secret",
+            Bytes::from(payload.to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let run_id = Uuid::parse_str(body["run_id"].as_str().expect("run ID")).unwrap();
+        let run = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let run = db.get_workflow_run(community, run_id).await.expect("run");
+                if matches!(run.status, RunStatus::Completed | RunStatus::Failed) {
+                    break run;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("run must finish");
+        assert_eq!(
+            run.status, expected,
+            "recipient={address}: {:?}",
+            run.error_message
+        );
+        assert_eq!(run.trigger_context.as_ref().unwrap()["author"], "");
+        if expected == RunStatus::Completed {
+            let trace = run.execution_trace.as_array().expect("trace");
+            let event_hex = trace[0]["output"]["event_id"]
+                .as_str()
+                .expect("DM event ID");
+            let event_id = nostr::EventId::from_hex(event_hex).unwrap();
+            let stored = db
+                .get_event_by_id_for_event_write(community, event_id.as_bytes())
+                .await
+                .expect("read DM")
+                .expect("persisted DM");
+            stored.event.verify().expect("signed DM");
+            assert_eq!(stored.event.content, "Review: Checkout");
+            let channel = db
+                .list_dms_for_user(community, &recipient.to_bytes(), 10, None)
+                .await
+                .expect("recipient DMs");
+            assert_eq!(channel.len(), 1);
+            if let Some(previous) = dm_id {
+                assert_eq!(channel[0].channel_id, previous);
+            }
+            dm_id = Some(channel[0].channel_id);
+        }
+        assert_eq!(
+            db.list_dms_for_user(community, owner.as_bytes(), 10, None)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "failed address must not create a conversation: {address}"
+        );
+    }
+    // Previously stored definitions and manual runs cannot bypass trigger restrictions.
+    let def: buzz_workflow::WorkflowDef = serde_json::from_value(
+        db.get_workflow(community, workflow_id)
+            .await
+            .unwrap()
+            .definition,
+    )
+    .unwrap();
+    let context = buzz_workflow::executor::TriggerContext {
+        webhook_fields: std::collections::HashMap::from([("recipient".into(), recipient.to_hex())]),
+        ..Default::default()
+    };
+    let run_id = db
+        .create_workflow_run(
+            community,
+            workflow_id,
+            None,
+            None,
+            &buzz_db::workflow::RunCause::Manual(owner.to_bytes().to_vec()),
+        )
+        .await
+        .unwrap();
+    let failure = buzz_workflow::executor::execute_run(
+        &state.workflow_engine,
+        community,
+        run_id,
+        &def,
+        &context,
+    )
+    .await
+    .expect_err("manual run must not select a webhook recipient");
+    assert!(failure.0.to_string().contains("requires a webhook run"));
+    let mut invalid = def.clone();
+    invalid.trigger = buzz_workflow::TriggerDef::MessagePosted { filter: None };
+    let failure = buzz_workflow::executor::execute_run(
+        &state.workflow_engine,
+        community,
+        run_id,
+        &invalid,
+        &context,
+    )
+    .await
+    .expect_err("stored non-webhook definition must be revalidated");
+    assert!(failure.0.to_string().contains("requires a webhook trigger"));
+    use buzz_workflow::action_sink::ActionSink;
+    let sink = crate::workflow_sink::RelayActionSink::new(&state);
+    // Removal leaves the profile/handle intact but must revoke both address forms.
+    let _ = db
+        .remove_relay_member(community, &recipient.to_hex(), &state.relay_keypair)
+        .await
+        .unwrap();
+    for address in [recipient.to_hex(), handle.clone()] {
+        let error = sink
+            .send_dm(
+                community,
+                &address,
+                "private",
+                "private",
+                false,
+                &owner.to_hex(),
+            )
+            .await
+            .expect_err("removed member must not receive a DM");
+        assert!(error.to_string().contains("current community member"));
+    }
+    let agent_owner = nostr::Keys::generate().public_key();
+    let agent = nostr::Keys::generate().public_key();
+    db.ensure_user(community, agent_owner.as_bytes())
+        .await
+        .unwrap();
+    db.ensure_user(community, agent.as_bytes()).await.unwrap();
+    db.set_agent_owner(community, agent.as_bytes(), agent_owner.as_bytes())
+        .await
+        .unwrap();
+    let _ = db
+        .add_relay_member(
+            community,
+            &agent_owner.to_hex(),
+            "member",
+            None,
+            &state.relay_keypair,
+        )
+        .await
+        .unwrap();
+    sink.send_dm(
+        community,
+        &agent.to_hex(),
+        "agent",
+        "agent",
+        false,
+        &owner.to_hex(),
+    )
+    .await
+    .expect("agent admitted through its member owner");
+    let _ = db
+        .remove_relay_member(community, &agent_owner.to_hex(), &state.relay_keypair)
+        .await
+        .unwrap();
+    let error = sink
+        .send_dm(
+            community,
+            &agent.to_hex(),
+            "private",
+            "private",
+            false,
+            &owner.to_hex(),
+        )
+        .await
+        .expect_err("owner removal revokes agent admission");
+    assert!(error.to_string().contains("current community member"));
+    // Ban checks are independent of the membership and tenant denial cases above.
+    db.ban_community_member(
+        community,
+        recipient.as_bytes(),
+        owner.as_bytes(),
+        None,
+        None,
+    )
+    .await
+    .expect("ban recipient");
+    for address in [recipient.to_hex(), handle] {
+        let error = sink
+            .send_dm(
+                community,
+                &address,
+                "private",
+                "private",
+                false,
+                &owner.to_hex(),
+            )
+            .await
+            .expect_err("banned recipient");
+        assert!(error.to_string().contains("unbanned community user"));
+    }
+    assert_eq!(
+        db.list_dms_for_user(community, &owner.to_bytes(), 10, None)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    for (scope, key) in [
+        (community, outsider),
+        (community, foreign),
+        (other, foreign),
+        (other, foreign_alias),
+    ] {
+        assert!(db
+            .list_dms_for_user(scope, key.as_bytes(), 10, None)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+    audit_shutdown
+        .drain(std::time::Duration::from_secs(1))
+        .await;
 }

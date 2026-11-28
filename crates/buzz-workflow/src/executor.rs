@@ -432,8 +432,14 @@ pub fn resolve_step_templates(
             // Recheck stored definitions too: a workflow saved before recipient
             // validation was introduced must not route from arbitrary input.
             crate::schema::validate_dm_recipient(to)?;
+            let recipient = t(to)?;
+            if !crate::schema::valid_dm_address(&recipient) {
+                return Err(WorkflowError::InvalidDefinition(
+                    "SendDm: recipient must resolve to a pubkey or local NIP-05 handle".into(),
+                ));
+            }
             Ok(SendDm {
-                to: t(to)?,
+                to: recipient,
                 text: t(text)?,
             })
         }
@@ -755,6 +761,13 @@ pub async fn dispatch_action(
                         .map_err(|e| WorkflowError::WebhookError(format!(
                             "SendDm: failed to load workflow {}: {e}", run.workflow_id
                         )))?;
+                    if matches!(&step.action, SendDm { to, .. } if to == "{{trigger.recipient}}")
+                        && !matches!(run.cause, Some(RunCause::Webhook))
+                    {
+                        return Err(WorkflowError::InvalidDefinition(
+                            "SendDm: trigger.recipient requires a webhook run".into(),
+                        ));
+                    }
                     let withheld_reasons = agent_mentions_withheld_reasons(
                         engine.config.agent_mentions,
                         cause_may_direct_agents(run.cause.as_ref(), &workflow.owner_pubkey),
@@ -1217,6 +1230,9 @@ pub async fn execute_run(
     def: &WorkflowDef,
     trigger_ctx: &TriggerContext,
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
+    def.validate()
+        .map_err(|e| (e, crate::error::PartialProgress::default()))?;
+
     // Fail fast if all concurrency permits are in use — no queuing.
     let _permit = engine.run_semaphore.try_acquire().map_err(|_| {
         (
@@ -1486,6 +1502,39 @@ mod tests {
             is_reply: false,
             webhook_fields: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn webhook_dm_recipient_is_explicit_and_does_not_spoof_author() {
+        let step: Step = serde_json::from_value(serde_json::json!({
+            "id": "dm", "action": "send_dm", "to": "{{trigger.recipient}}", "text": "hi"
+        }))
+        .unwrap();
+        let key = nostr::Keys::generate().public_key().to_hex();
+        for (recipient, valid) in [
+            (key.as_str(), true),
+            ("alice@chat.example.org", true),
+            ("", false),
+            ("not-a-key", false),
+            ("{{trigger.author}}", false),
+        ] {
+            let ctx = TriggerContext {
+                webhook_fields: HashMap::from([
+                    ("recipient".into(), recipient.into()),
+                    ("author".into(), key.clone()),
+                ]),
+                ..Default::default()
+            };
+            assert_eq!(ctx.get_field("author"), Some(""));
+            let result = resolve_step_templates(&step, &ctx, &HashMap::new());
+            assert_eq!(result.is_ok(), valid, "recipient={recipient}");
+            if valid {
+                assert!(matches!(result.unwrap(), ActionDef::SendDm { to, .. } if to == recipient));
+            }
+        }
+        assert!(
+            resolve_step_templates(&step, &TriggerContext::default(), &HashMap::new()).is_err()
+        );
     }
 
     #[test]
