@@ -404,7 +404,10 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
     let mut nudged_event_ids: HashSet<EventId> = HashSet::new();
 
     loop {
-        let Some(buzz_event) = relay.next_event().await else {
+        let Some(buzz_event) = author_gate_ctx
+            .next_listener_event(relay.next_event(), &owner_cache, &rest_client)
+            .await
+        else {
             tracing::warn!("setup-mode: relay event stream ended — requesting reconnect");
             if let Err(e) = relay.reconnect().await {
                 tracing::error!("setup-mode: relay background task is gone: {e} — exiting");
@@ -420,6 +423,9 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION
             || kind_u32 == KIND_MEMBER_REMOVED_NOTIFICATION
         {
+            if kind_u32 == KIND_MEMBER_REMOVED_NOTIFICATION {
+                author_gate_ctx.discard_channel(buzz_event.channel_id);
+            }
             handle_setup_membership(&mut relay, &buzz_event, &config, &rules, &channel_ids).await;
             continue;
         }
