@@ -1482,6 +1482,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "buzz-audio-client",
  "buzz-core",
  "buzz-persona",
  "buzz-sdk",

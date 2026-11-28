@@ -307,7 +307,7 @@ enum Cmd {
     /// List, open, and manage direct messages
     #[command(subcommand)]
     Dms(DmsCmd),
-    /// List huddles and their participants (read-only)
+    /// List huddles and their participants, or join one and carry its audio
     #[command(subcommand)]
     Huddles(HuddlesCmd),
     /// Look up users and manage profiles and presence
@@ -1612,6 +1612,18 @@ pub enum HuddlesCmd {
         /// Huddle ID (the `huddle` field of `huddles list`)
         #[arg(long)]
         huddle: String,
+    },
+    /// Join a channel's huddle, or start one, and carry its audio over stdin and stdout
+    #[command(
+        after_help = "Examples:\n  buzz huddles connect --channel <uuid>                 # start a huddle\n  buzz huddles connect --channel <uuid> --huddle <uuid> # join one from `huddles list --active`\n\nOne JSON object per line. Out: {type:\"joined\",huddle,started,peer_index,peers}, {type:\"audio\",data} (base64: peer index, v2 header, Opus), {type:\"control\",data}, {type:\"closed\",reason}. In: {type:\"audio\",data} (base64: v2 header, Opus), {type:\"control\",data}. Closing stdin leaves."
+    )]
+    Connect {
+        /// Channel UUID the huddle is in
+        #[arg(long)]
+        channel: String,
+        /// Huddle to join (its id from `huddles list`); without it a new huddle starts
+        #[arg(long)]
+        huddle: Option<String>,
     },
 }
 
@@ -3277,7 +3289,7 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
-            ("huddles", 2),
+            ("huddles", 3),
             ("issues", 6),
             ("media", 1),
             ("messages", 9),
