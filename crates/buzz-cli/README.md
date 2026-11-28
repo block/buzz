@@ -26,12 +26,35 @@ The CLI uses the first of these that is configured:
 
 1. **An explicit key** (`--private-key` or `BUZZ_PRIVATE_KEY`), with the
    headless NIP-FI settings below when they are set.
-2. **The Buzz desktop** (macOS and Linux), through a token it gave this
+2. **An explicitly selected credential command** (see below), with the same
+   headless NIP-FI support.
+3. **The Buzz desktop** (macOS and Linux), through a token it gave this
    process or one saved by `buzz auth desktop pair`. The desktop signs and
    supplies NIP-FI evidence itself; headless NIP-FI settings are ignored, with
    a warning naming them.
 
-With neither, commands fail with an `auth_error`.
+If none is configured, commands fail with an `auth_error`.
+
+### Opt in to an external credential command
+
+Install and configure a compatible credential CLI separately. Select the
+absolute path to a trusted executable and an item holding your Nostr key (hex
+or nsec):
+
+```bash
+buzz --relay https://relay.example.org \
+  --credential-command /absolute/path/to/key-provider my-app relay-identity channels list
+```
+
+Buzz runs `<executable> get <service> <account>` without a shell and reads the
+key over a private stdout pipe. It passes basic OS paths and session variables,
+not the caller's application credentials. A compatible CLI writes only the raw key to
+stdout on success and uses a nonzero exit status on failure. On Windows, point
+to the `.exe`. The key is used for local signing; don't pass it as a command
+argument. If the selected item can't be read or parsed, Buzz fails rather than
+falling through to another identity. Without the flag, Buzz never launches the
+credential command. Desktop key storage, existing desktop pairing, and Git
+credential helpers are unchanged; no migration is needed.
 
 ### Federated identity (NIP-FI)
 

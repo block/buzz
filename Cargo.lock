@@ -1510,6 +1510,7 @@ dependencies = [
  "tokio-tungstenite 0.29.0",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
