@@ -512,10 +512,11 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     // Quiet agent messages (`audience: agents`) are coordination between
     // agents and never become Activity items, even when they tag the reader.
     final fetched = await _queryWithWebSocketFallback(session, filters);
+    final refill = await _refillPastQuiet(session, filters, fetched.events);
     final events = [
-      for (final event in fetched)
+      for (final event in fetched.events)
         if (!isQuietAgentMessage(event.tags)) event,
-      ...await _refillPastQuiet(session, filters, fetched),
+      ...refill.events,
     ];
 
     bool isFromOther(NostrEvent e) =>
@@ -594,6 +595,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
         for (final i in items)
           if (i.category == 'agent_activity') i,
       ],
+      complete: fetched.complete && refill.complete,
     );
   }
 
@@ -602,14 +604,16 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
   /// own window from the batched result (the bridge concatenates every
   /// filter's newest `limit` matches), then pages past a window that lost
   /// items to the quiet filter, a few pages at most, refilling only up to the
-  /// original limit. Returns the non-quiet events found on those pages.
-  Future<List<NostrEvent>> _refillPastQuiet(
+  /// original limit. Returns the non-quiet events found on those pages, and
+  /// whether every page read succeeded.
+  Future<({List<NostrEvent> events, bool complete})> _refillPastQuiet(
     RelaySessionNotifier session,
     List<NostrFilter> filters,
     List<NostrEvent> fetched,
   ) async {
     const maxPages = 3;
     final found = <NostrEvent>[];
+    var complete = true;
     for (final filter in filters) {
       final seen = <String>{};
       // Only the retained window is marked seen: matches past the cap came
@@ -634,17 +638,17 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
         // The relay's composite cursor, so events sharing the boundary
         // second are not skipped.
         final last = page.last;
-        page = window(
-          await _queryWithWebSocketFallback(session, [
-            NostrFilter(
-              kinds: filter.kinds,
-              tags: filter.tags,
-              limit: filter.limit,
-              until: last.createdAt,
-              extensions: {'before_id': last.id},
-            ),
-          ]),
-        );
+        final next = await _queryWithWebSocketFallback(session, [
+          NostrFilter(
+            kinds: filter.kinds,
+            tags: filter.tags,
+            limit: filter.limit,
+            until: last.createdAt,
+            extensions: {'before_id': last.id},
+          ),
+        ]);
+        complete = complete && next.complete;
+        page = window(next.events);
         final kept = page
             .where((e) => !isQuietAgentMessage(e.tags))
             .take(filter.limit - visible)
@@ -653,7 +657,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
         visible += kept.length;
       }
     }
-    return found;
+    return (events: found, complete: complete);
   }
 
   /// Newest first, ties by ascending id: the relay's history order.
@@ -676,12 +680,15 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     return true;
   }
 
-  Future<List<NostrEvent>> _queryWithWebSocketFallback(
+  /// The events for [filters], and whether every filter was read. A filter
+  /// whose HTTP and websocket reads both fail contributes no events.
+  Future<({List<NostrEvent> events, bool complete})>
+  _queryWithWebSocketFallback(
     RelaySessionNotifier session,
     List<NostrFilter> filters,
   ) async {
     try {
-      return await session.queryRelay(filters);
+      return (events: await session.queryRelay(filters), complete: true);
     } catch (error) {
       debugPrint(
         '[ActivityNotifier] batched history query failed; '
@@ -691,6 +698,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
 
     const fallbackConcurrency = 4;
     final events = <NostrEvent>[];
+    var complete = true;
     for (var start = 0; start < filters.length; start += fallbackConcurrency) {
       final end = start + fallbackConcurrency < filters.length
           ? start + fallbackConcurrency
@@ -700,6 +708,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
           try {
             return await session.fetchHistory(filter);
           } catch (_) {
+            complete = false;
             return const <NostrEvent>[];
           }
         }),
@@ -708,7 +717,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
         events.addAll(result);
       }
     }
-    return events;
+    return (events: events, complete: complete);
   }
 
   FeedItem _feedItem(NostrEvent event, {required String category}) {
@@ -746,24 +755,20 @@ final activityProvider =
       ActivityNotifier.new,
     );
 
-/// Conversation-grouped inbox rows derived from the raw feed. DM messages
-/// group by DM channel so one conversation renders as one row.
-final inboxItemsProvider = Provider<List<InboxItem>>((ref) {
-  final feed = ref.watch(activityProvider).value;
+/// Activity items for the DM messages, mentions and eligible thread replies
+/// the channel list received. Channel discovery already catches up and
+/// subscribes to joined channels, so Activity, the bell and the icon have
+/// these even when a history read fails, lags or misses them, and no extra
+/// subscription or read is needed. They always belong to the current
+/// community: the channel list resets when it changes.
+final observedActivityItemsProvider = Provider<List<FeedItem>>((ref) {
   final channels =
       ref.watch(channelsProvider).asData?.value ?? const <Channel>[];
-  final dmChannelIds = {
-    for (final channel in channels)
-      if (channel.isDm) channel.id,
-  };
   final myPk = ref.watch(myPubkeyProvider);
-  // Channel discovery already catches up and subscribes to eligible replies.
-  // Keep that one source of truth for the dots and their Activity destination,
-  // rather than opening another set of channel subscriptions here.
-  final byId = <String, FeedItem>{
+  return [
     for (final event
-        in ref.read(channelsProvider.notifier).observedThreadReplies(channels))
-      event.id: FeedItem(
+        in ref.read(channelsProvider.notifier).observedActivityEvents(channels))
+      FeedItem(
         id: event.id,
         kind: event.kind,
         pubkey: event.pubkey,
@@ -776,8 +781,38 @@ final inboxItemsProvider = Provider<List<InboxItem>>((ref) {
             ? 'mention'
             : 'activity',
       ),
-    // The addressed feed owns category precedence for overlapping events.
-    for (final item in feed?.all ?? const <FeedItem>[]) item.id: item,
-  };
-  return buildInboxItems(byId.values, isDmChannel: dmChannelIds.contains);
+  ];
 });
+
+/// Conversation-grouped inbox rows derived from the raw feed. DM messages
+/// group by DM channel so one conversation renders as one row.
+final inboxItemsProvider = Provider<List<InboxItem>>((ref) {
+  final feed = ref.watch(activityProvider).value;
+  final channelsNotifier = ref.read(channelsProvider.notifier);
+  final byId = <String, FeedItem>{
+    for (final item in ref.watch(observedActivityItemsProvider)) item.id: item,
+    // The addressed feed owns category precedence for overlapping events.
+    // The channel list applies live deletions; the feed does not see them.
+    for (final item in feed?.all ?? const <FeedItem>[])
+      if (!channelsNotifier.isUnreadDeleted(item.id, channelId: item.channelId))
+        item.id: item,
+  };
+  return _inboxRows(ref, byId.values);
+});
+
+/// Inbox rows for only the events the channel list received. The icon reads
+/// these while the feed loads, because a loading feed can still hold the
+/// previous community's rows.
+final observedInboxItemsProvider = Provider<List<InboxItem>>(
+  (ref) => _inboxRows(ref, ref.watch(observedActivityItemsProvider)),
+);
+
+List<InboxItem> _inboxRows(Ref ref, Iterable<FeedItem> items) {
+  final channels =
+      ref.watch(channelsProvider).asData?.value ?? const <Channel>[];
+  final dmChannelIds = {
+    for (final channel in channels)
+      if (channel.isDm) channel.id,
+  };
+  return buildInboxItems(items, isDmChannel: dmChannelIds.contains);
+}

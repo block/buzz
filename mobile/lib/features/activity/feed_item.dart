@@ -92,11 +92,15 @@ class HomeFeedResponse {
   final List<FeedItem> activity;
   final List<FeedItem> agentActivity;
 
+  /// False when a source failed to load, so the feed may be missing items.
+  final bool complete;
+
   HomeFeedResponse({
     required this.mentions,
     required this.needsAction,
     required this.activity,
     required this.agentActivity,
+    this.complete = true,
   });
 
   factory HomeFeedResponse.fromJson(Map<String, dynamic> json) {

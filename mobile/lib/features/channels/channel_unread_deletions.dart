@@ -86,3 +86,13 @@ extension _UnreadDeletions on ChannelsNotifier {
     );
   }
 }
+
+/// Deletion evidence for readers outside the notifier.
+extension UnreadDeletionLookup on ChannelsNotifier {
+  /// Whether relay deletion evidence removed [eventId] in [channelId].
+  /// Activity drops these rows: its feed holds no deletions of its own.
+  bool isUnreadDeleted(String eventId, {String? channelId}) =>
+      _unscopedUnreadDeletedIds.contains(eventId) ||
+      (channelId != null &&
+          _unreadDeletedIdsByChannel[channelId]?.contains(eventId) == true);
+}

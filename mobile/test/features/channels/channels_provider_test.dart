@@ -32,13 +32,15 @@ import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/saved_channel_page.dart';
 import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
-import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
 import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/activity/activity_provider.dart';
+import 'package:buzz/features/activity/inbox_unread_provider.dart';
+import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
+import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/features/activity/inbox_item.dart';
 import 'package:buzz/features/activity/inbox_read_state.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -4722,14 +4724,9 @@ void main() {
         expect(observed.attention, dotted);
         // Activity lists the thread only when the reply earns attention.
         expect(
-          notifier.observedThreadReplies(channels),
+          notifier.observedActivityEvents(channels),
           dotted ? [broadcast] : isEmpty,
         );
-        // The app icon counts it as attention only when it dots. Otherwise
-        // it is ordinary unread, the same as a new top-level post.
-        final badge = container.read(unreadBadgeProvider);
-        expect(badge.highPriorityCount, dotted ? 1 : 0);
-        expect(badge.generalUnreadCount, dotted ? 0 : 1);
 
         void expectHighlights(
           Map<String, int> contexts, {

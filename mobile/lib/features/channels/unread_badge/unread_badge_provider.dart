@@ -1,96 +1,77 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../channels_provider.dart';
+import '../../../shared/auth/auth.dart';
 import '../../../shared/read_state/read_state_provider.dart';
-import 'observed_unread_event.dart';
+import '../../activity/activity_provider.dart';
+import '../../activity/feed_item.dart';
+import '../../activity/inbox_unread_provider.dart';
+import '../channel.dart';
+import '../channels_provider.dart';
 
-class UnreadBadgeState {
-  const UnreadBadgeState({
-    this.highPriorityCount = 0,
-    this.generalUnreadCount = 0,
-  });
+/// What the app icon should show. Pending leaves the existing icon alone.
+enum UnreadBadge {
+  pending,
+  clear,
+  unread;
 
-  final int highPriorityCount;
-  final int generalUnreadCount;
+  /// The platform badge value, or null while the unread state is unknown.
+  int? get platformCount => switch (this) {
+    UnreadBadge.pending => null,
+    UnreadBadge.clear => 0,
+    UnreadBadge.unread => 1,
+  };
 }
 
-final unreadBadgeProvider = Provider<UnreadBadgeState>((ref) {
+/// Activity unread state plus explicit channel and message mark-unread flags.
+final unreadBadgeProvider = Provider<UnreadBadge>((ref) {
+  // Signed out clears without starting community-scoped providers.
+  final auth = ref.watch(authProvider);
+  final status = auth.isLoading ? null : auth.asData?.value.status;
+  if (status == AuthStatus.unauthenticated) return UnreadBadge.clear;
+  if (status != AuthStatus.authenticated) return UnreadBadge.pending;
+
   final channelsAsync = ref.watch(channelsProvider);
+  final channels = channelsAsync.isLoading ? null : channelsAsync.asData?.value;
+  final feed = ref.watch(activityProvider.select(_feedState));
+  final inbox = ref.watch(inboxUnreadProvider);
   final readState = ref.watch(readStateProvider);
-
-  return channelsAsync.when(
-    data: (channels) {
-      final notifier = ref.read(channelsProvider.notifier);
-      final observedEventsByChannel = notifier.observedUnreadEventsByChannel;
-      final latestObservedByChannel = notifier.latestObservedByChannel;
-
-      var highPriority = 0;
-      var general = 0;
-
-      for (final channel in channels) {
-        if (!channel.isMember || channel.isArchived) continue;
-
-        if (readState.locallyForcedChannelIds.contains(channel.id)) {
-          general++;
-          continue;
-        }
-
-        if (!latestObservedByChannel.containsKey(channel.id)) continue;
-
-        final observedEvents = observedEventsByChannel[channel.id];
-        int? readAtForObservedEvent(ObservedUnreadEvent event) =>
-            observedUnreadEventReadAt(
-              event,
-              channel.id,
-              readState.effectiveTimestamp,
-            );
-
-        final unreadCount = countUnreadObservedEvents(
-          observedEvents,
-          readAtForObservedEvent,
-        );
-        if (unreadCount == 0) continue;
-
-        if (channel.isDm ||
-            countUnreadHighPriorityObservedEvents(
-                  observedEvents,
-                  readAtForObservedEvent,
-                ) >
-                0) {
-          final appBadgeCount = countUnreadAppBadgeObservedEvents(
-            observedEvents,
-            readAtForObservedEvent,
-          );
-          highPriority += appBadgeCount > 0 ? appBadgeCount : 1;
-        } else {
-          final badgeCount = countUnreadBadgeObservedEvents(
-            observedEvents,
-            readAtForObservedEvent,
-          );
-          if (badgeCount > 0) {
-            general += badgeCount;
-          } else {
-            // Only ordinary backlog is left. Count it when its row is bold:
-            // a synced `seen:<channel>` mark quiets backlog at or before it.
-            final seenAt = readState.contexts['seen:${channel.id}'];
-            final rowShowsBacklog =
-                seenAt == null ||
-                observedEvents!.values.any((event) {
-                  if (event.createdAt <= seenAt) return false;
-                  final readAt = readAtForObservedEvent(event);
-                  return readAt == null || event.createdAt > readAt;
-                });
-            if (rowShowsBacklog) general++;
-          }
-        }
-      }
-
-      return UnreadBadgeState(
-        highPriorityCount: highPriority,
-        generalUnreadCount: general,
-      );
-    },
-    loading: () => const UnreadBadgeState(),
-    error: (_, _) => const UnreadBadgeState(),
-  );
+  // The current community's channels and read state must be known first:
+  // until then a value can still belong to the previous community.
+  if (channels == null || inbox == InboxUnread.pending) {
+    return UnreadBadge.pending;
+  }
+  // Known unread sets the icon even when an Activity source failed. Missing
+  // data only holds back a clear.
+  if (hasForcedUnreadChannel(channels, readState)) return UnreadBadge.unread;
+  // A loading feed can still hold the previous community's rows, so only
+  // the events the channel list received count until it loads.
+  if (feed == _FeedState.unknown) {
+    return ref.watch(observedInboxUnreadProvider) == InboxUnread.unread
+        ? UnreadBadge.unread
+        : UnreadBadge.pending;
+  }
+  if (inbox == InboxUnread.unread) return UnreadBadge.unread;
+  return feed == _FeedState.complete ? UnreadBadge.clear : UnreadBadge.pending;
 });
+
+enum _FeedState { unknown, partial, complete }
+
+/// Whether Activity has loaded, and whether every one of its sources did.
+_FeedState _feedState(AsyncValue<HomeFeedResponse> feed) {
+  final value = feed.isLoading ? null : feed.asData?.value;
+  if (value == null) return _FeedState.unknown;
+  return value.complete ? _FeedState.complete : _FeedState.partial;
+}
+
+/// Whether a member, non-archived channel has a channel or message unread flag.
+bool hasForcedUnreadChannel(
+  Iterable<Channel> channels,
+  ReadStateState readState,
+) {
+  final forced = readState.locallyForcedChannelIds;
+  if (forced.isEmpty) return false;
+  return channels.any(
+    (channel) =>
+        channel.isMember && !channel.isArchived && forced.contains(channel.id),
+  );
+}

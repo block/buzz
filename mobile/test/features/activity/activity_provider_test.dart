@@ -26,6 +26,8 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
   Completer<void>? mentionFetchGate;
   bool failNextMentionFetch = false;
   bool failNextQueryRelay = false;
+  // Both history transports fail while set, as when the relay is unreachable.
+  bool failHistory = false;
   int mentionFetchCount = 0;
   int activeMentionFetches = 0;
   int maxActiveMentionFetches = 0;
@@ -47,6 +49,7 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    if (failHistory) throw StateError('relay unavailable');
     final h = filter.tags['#h'];
     if (h != null) dmQueries.add(h);
     final isMentionFetch =
@@ -77,6 +80,7 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     queryFilterCounts.add(filters.length);
+    if (failHistory) throw StateError('relay unavailable');
     if (failNextQueryRelay) {
       failNextQueryRelay = false;
       throw StateError('transient HTTP query failure');
@@ -371,6 +375,37 @@ void main() {
     expect(session.queryFilterCounts, [3]);
     expect(session.mentionFetchCount, 1);
     expect(feed.mentions.map((item) => item.id), ['fallback-mention']);
+  });
+
+  test('a feed whose history reads fail is marked incomplete', () async {
+    final session = _RecordingSessionNotifier()
+      ..seed(_mentionEvent('mention', 1_700_000_001));
+    final container = ProviderContainer(
+      retry: (_, _) => null,
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue('me_pk'),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(
+          () => _FixedChannelsNotifier(const <Channel>[]),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    final sub = container.listen(activityProvider, (_, _) {});
+    addTearDown(sub.close);
+
+    await container.read(channelsProvider.future);
+    final loaded = await container.read(activityProvider.future);
+    expect(loaded.complete, isTrue);
+    expect(loaded.mentions.map((item) => item.id), ['mention']);
+
+    session.failHistory = true;
+    container.invalidate(activityProvider);
+    final failed = await container.read(activityProvider.future);
+
+    expect(failed.complete, isFalse);
+    expect(failed.isEmpty, isTrue);
   });
 
   test('a workflow owner attribution is not a mention of the owner', () async {

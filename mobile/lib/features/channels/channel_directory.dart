@@ -708,11 +708,12 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
         channelType: channel.channelType,
         isThreadedReply: isThreadedReply,
         isBroadcast: isBroadcast,
-        // Activity lists the thread replies that earn attention, including
-        // ones also sent to the channel, which earn it only here.
-        threadReply:
-            (isThreadedReply || (isBroadcast && isHighPriority)) &&
-                !channel.isDm
+        // Activity lists DM messages, mentions and the thread replies that
+        // earn attention, including replies also sent to the channel, which
+        // earn it only here. Ordinary channel traffic and quiet backlog
+        // markers stay out.
+        activityEvent:
+            !countQuiet && (channel.isDm || isThreadedReply || isHighPriority)
             ? event
             : null,
       ),
@@ -740,16 +741,20 @@ extension ChannelDirectoryForgetting on ChannelsNotifier {
 }
 
 /// Activity projection of the channel unread registry.
-extension ObservedThreadActivity on ChannelsNotifier {
-  /// The same eligible replies that supply channel attention dots. Consumers
-  /// watch [channelsProvider] for changes; this does not fetch extra history.
-  Iterable<NostrEvent> observedThreadReplies(Iterable<Channel> channels) sync* {
+extension ObservedActivity on ChannelsNotifier {
+  /// The received DM messages, mentions and thread replies that also supply
+  /// channel unread state. Activity lists them even when its own history read
+  /// fails or misses them. Consumers watch [channelsProvider] for changes;
+  /// this does not fetch extra history.
+  Iterable<NostrEvent> observedActivityEvents(
+    Iterable<Channel> channels,
+  ) sync* {
     for (final channel in channels) {
-      if (!channel.isMember || channel.isArchived || channel.isDm) continue;
+      if (!channel.isMember || channel.isArchived) continue;
       for (final observed
           in _observedUnreadEventsByChannel[channel.id]?.values ??
               const <ObservedUnreadEvent>[]) {
-        if (observed.threadReply case final reply?) yield reply;
+        if (observed.activityEvent case final event?) yield event;
       }
     }
   }

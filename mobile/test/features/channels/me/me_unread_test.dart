@@ -61,7 +61,6 @@ class _Channels extends ChannelsNotifier {
           rootId: 'root',
           highPriority: false,
           countsTowardBadge: true,
-          countsTowardAppBadge: false,
         ),
       },
   };
