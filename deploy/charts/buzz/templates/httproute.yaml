@@ -17,6 +17,22 @@ spec:
     {{- if .Values.httproute.rules }}
     {{- toYaml .Values.httproute.rules | nindent 4 }}
     {{- else }}
+    {{- if .Values.pairingRelay.enabled }}
+    {{- /* NIP-AB device pairing: clients resolve the pairing relay from the
+         NIP-11 `pairing_relay_url`, falling back to the legacy `/pair` path
+         on the main relay URL. Both conventions land on this host, so the
+         default route must peel `/pair` off to the pairing sidecar — the
+         main relay serves no `/pair` route and would 404 mobile pairing.
+         Gateway API prefers the most specific path match, so rule order is
+         cosmetic. */}}
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /pair
+      backendRefs:
+        - name: {{ include "buzz.fullname" . }}-pairing
+          port: {{ .Values.pairingRelay.service.port }}
+    {{- end }}
     - matches:
         - path:
             type: PathPrefix
