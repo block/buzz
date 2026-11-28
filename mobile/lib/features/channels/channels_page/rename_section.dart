@@ -139,6 +139,11 @@ class _SectionNameDialog extends HookWidget {
         ],
       ),
       actions: [
+        if (icon.value != null)
+          TextButton(
+            onPressed: () => icon.value = null,
+            child: const Text('Remove emoji'),
+          ),
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancel'),

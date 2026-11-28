@@ -102,11 +102,18 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
   }
 
   /// Files [channelId] in the new section in the same write, when given.
-  void createSection(String name, {String? channelId}) =>
-      _edit((m) => m.createSection(name, channelId: channelId));
+  void createSection(String name, {String? channelId, String? icon}) =>
+      _edit((m) => m.createSection(name, channelId: channelId, icon: icon));
 
-  void renameSection(String sectionId, String? newName, {String? icon}) =>
-      _manager?.renameSection(sectionId, newName, icon: icon);
+  void renameSection(
+    String sectionId,
+    String? newName, {
+    String? icon,
+    bool clearIcon = false,
+  }) => _edit(
+    (m) =>
+        m.renameSection(sectionId, newName, icon: icon, clearIcon: clearIcon),
+  );
 
   void deleteSection(String sectionId) {
     final manager = _manager;

@@ -437,6 +437,7 @@ class _SliverChannelsList extends HookConsumerWidget {
               section.id,
               edit.name == section.name.trim() ? null : edit.name,
               icon: edit.icon == section.icon ? null : edit.icon,
+              clearIcon: edit.icon == null && section.icon != null,
             );
       },
       onDelete: () async {

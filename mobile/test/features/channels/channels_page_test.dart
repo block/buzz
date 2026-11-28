@@ -5073,7 +5073,12 @@ class _FakeChannelSectionsNotifier extends ChannelSectionsNotifier {
   ({String? name, String? icon})? lastRename;
 
   @override
-  void renameSection(String sectionId, String? newName, {String? icon}) {
+  void renameSection(
+    String sectionId,
+    String? newName, {
+    String? icon,
+    bool clearIcon = false,
+  }) {
     lastRename = (name: newName, icon: icon);
   }
 

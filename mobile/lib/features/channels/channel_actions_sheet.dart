@@ -20,6 +20,7 @@ import '../../shared/identity_archives/identity_archives.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import 'dm_channel_labels.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
+import '../../shared/emoji/emoji_picker.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/app_list.dart';
@@ -44,6 +45,7 @@ import 'add_members_sheet.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
 import 'channel_mutes/channel_mutes_provider.dart';
+import 'channel_sections/channel_section_emoji.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_stars/channel_stars_provider.dart';
 import 'channels_provider.dart';
@@ -62,6 +64,7 @@ import '../../shared/widgets/bottom_up_page_route.dart';
 
 part 'conversation_popover.dart';
 part 'channel_details_page.dart';
+part 'channel_sections/channel_section_dialog.dart';
 part 'channel_details_rows.dart';
 part 'native_channel_actions.dart';
 part 'native_channel_sheet_app.dart';
@@ -748,7 +751,11 @@ Future<void> _showMoveSectionSheet(
               children: [
                 for (final section in sections)
                   ListTile(
-                    leading: const Icon(BuzzIcons.folder),
+                    leading: ChannelSectionEmoji(
+                      value: section.icon,
+                      size: 22,
+                      fallback: const Icon(BuzzIcons.folder),
+                    ),
                     title: Text(section.name),
                     trailing: sectionId == section.id
                         ? Icon(
@@ -766,12 +773,18 @@ Future<void> _showMoveSectionSheet(
                   title: const Text('New section…'),
                   onTap: () async {
                     Navigator.of(sheetContext).pop();
-                    final name = await _showSectionNameDialog(
+                    final section = await showChannelSectionDialog(
                       context,
                       inScope: inScope,
                     );
-                    if (name == null || name.isEmpty) return;
-                    edit((s) => s.createSection(name, channelId: channel.id));
+                    if (section == null) return;
+                    edit(
+                      (s) => s.createSection(
+                        section.name,
+                        channelId: channel.id,
+                        icon: section.icon,
+                      ),
+                    );
                   },
                 ),
                 if (sectionId != null)
@@ -807,52 +820,5 @@ void _closeOwnRoute(BuildContext context) {
     navigator.pop();
   } else {
     navigator.removeRoute(route);
-  }
-}
-
-Future<String?> _showSectionNameDialog(
-  BuildContext context, {
-  required bool Function() inScope,
-}) => showBuzzDialog<String>(
-  context: context,
-  builder: (_) => _SectionNameDialog(inScope: inScope),
-);
-
-/// Owns its controller so the field outlives the dialog's exit animation.
-class _SectionNameDialog extends HookConsumerWidget {
-  const _SectionNameDialog({required this.inScope});
-
-  /// False once the community that opened the dialog is no longer active.
-  final bool Function() inScope;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final controller = useTextEditingController();
-    ref.listen(relayConfigProvider, (_, _) {
-      if (!inScope()) _closeOwnRoute(context);
-    });
-    // A switch that landed before this first frame found no dialog to close.
-    useEffect(() {
-      if (!inScope()) {
-        WidgetsBinding.instance.addPostFrameCallback(
-          (_) => _closeOwnRoute(context),
-        );
-      }
-      return null;
-    }, const []);
-    return AlertDialog(
-      title: const Text('New Section'),
-      content: TextField(controller: controller, autofocus: true),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.of(context).pop(controller.text.trim()),
-          child: const Text('Create'),
-        ),
-      ],
-    );
   }
 }

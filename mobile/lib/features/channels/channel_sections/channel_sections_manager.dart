@@ -246,7 +246,7 @@ class ChannelSectionsManager {
   }
 
   /// Files [channelId] in the new section in the same write, when given.
-  void createSection(String name, {String? channelId}) {
+  void createSection(String name, {String? channelId, String? icon}) {
     if (!_editable) return;
     final maxOrder = _store.sections.fold<int>(
       -1,
@@ -255,6 +255,7 @@ class ChannelSectionsManager {
     final section = ChannelSection(
       id: _uuid.v4(),
       name: name.trim(),
+      icon: icon,
       order: maxOrder + 1,
     );
     _store = ChannelSectionStore(
@@ -267,7 +268,12 @@ class ChannelSectionsManager {
     markDirty();
   }
 
-  void renameSection(String sectionId, String? newName, {String? icon}) {
+  void renameSection(
+    String sectionId,
+    String? newName, {
+    String? icon,
+    bool clearIcon = false,
+  }) {
     if (!_editable) return;
     _store = ChannelSectionStore(
       sections: [
@@ -276,7 +282,7 @@ class ChannelSectionsManager {
             ChannelSection(
               id: s.id,
               name: newName?.trim() ?? s.name,
-              icon: icon ?? s.icon,
+              icon: clearIcon ? null : icon ?? s.icon,
               order: s.order,
             )
           else

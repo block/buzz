@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_manager.dart';
+import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
@@ -61,6 +62,28 @@ void main() {
       startupRetryBaseDelay: startupRetryBaseDelay,
     );
   }
+
+  test('section emoji edits preserve name and channel assignment', () async {
+    await setUpEnv();
+    final relay = _RateLimitedRelaySession(failuresBeforeSuccess: 0);
+    final manager = buildManager(relaySession: relay);
+    addTearDown(() => manager.dispose(flushPending: false));
+
+    manager.createSection('Design', icon: '🎨', channelId: 'design-chat');
+    final id = manager.store.sections.single.id;
+    manager.renameSection(id, null, icon: ':design:');
+    expect(manager.store.sections.single.name, 'Design');
+    manager.renameSection(id, 'Creative');
+    expect(manager.store.sections.single.icon, ':design:');
+    manager.renameSection(id, null, clearIcon: true);
+
+    final cached = ChannelSectionsStorage(
+      prefs,
+    ).read(manager.pubkey, manager.relayUrl);
+    expect(cached.sections.single.name, 'Creative');
+    expect(cached.sections.single.icon, isNull);
+    expect(cached.assignments, {'design-chat': id});
+  });
 
   test('startup fetch rejected by relay rate limit retries until the remote '
       'blob is adopted (cold-start regression)', () async {
