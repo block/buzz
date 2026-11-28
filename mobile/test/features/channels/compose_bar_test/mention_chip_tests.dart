@@ -427,7 +427,10 @@ void mentionChipTests() {
       ComposeDraftMention(start: 2, end: 8, pubkey: quinn.pubkey),
     ]);
     await send();
-    expect(find.text('Mention people outside this channel?'), findsOneWidget);
+    expect(
+      find.text('Mention people outside this conversation?'),
+      findsOneWidget,
+    );
     await tester.tap(
       find
           .descendant(
@@ -579,7 +582,7 @@ void mentionChipTests() {
         continue;
       }
       expect(
-        find.text('Mention people outside this channel?'),
+        find.text('Mention people outside this conversation?'),
         findsOneWidget,
         reason: name,
       );
@@ -653,7 +656,10 @@ void mentionChipTests() {
         expect(sent, [bob]);
         continue;
       }
-      expect(find.text('Mention people outside this channel?'), findsOneWidget);
+      expect(
+        find.text('Mention people outside this conversation?'),
+        findsOneWidget,
+      );
       await tester.tap(
         find
             .descendant(
@@ -881,7 +887,7 @@ void mentionChipTests() {
       expect(saved(), picked, reason: reason);
       await send();
       expect(
-        find.text('Mention people outside this channel?'),
+        find.text('Mention people outside this conversation?'),
         findsOneWidget,
         reason: reason,
       );

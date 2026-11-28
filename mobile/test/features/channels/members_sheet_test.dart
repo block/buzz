@@ -241,7 +241,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Role'), findsOneWidget);
-    expect(find.text('Remove from channel'), findsOneWidget);
+    expect(find.text('Remove from conversation'), findsOneWidget);
     // Inspect only: do not invoke a membership mutation.
     Navigator.of(tester.element(find.text('Role'))).pop();
     await tester.pumpAndSettle();

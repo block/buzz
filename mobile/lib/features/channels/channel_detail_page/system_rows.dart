@@ -52,7 +52,7 @@ class _SystemMessageRow extends HookConsumerWidget {
           TextSpan(text: resolveLabel(target))
         else
           _systemNameSpan(context, target, channelId, resolveLabel),
-        const TextSpan(text: ' from the channel'),
+        const TextSpan(text: ' from the conversation'),
       ],
       SystemEventType.topicChanged => [
         TextSpan(
@@ -64,15 +64,17 @@ class _SystemMessageRow extends HookConsumerWidget {
           text: describeChannelTextFieldChange('purpose', systemEvent.purpose),
         ),
       ],
-      SystemEventType.memberLeft => [const TextSpan(text: 'left the channel')],
+      SystemEventType.memberLeft => [
+        const TextSpan(text: 'left the conversation'),
+      ],
       SystemEventType.channelArchived => [
-        const TextSpan(text: 'archived this channel'),
+        const TextSpan(text: 'archived this conversation'),
       ],
       SystemEventType.channelUnarchived => [
-        const TextSpan(text: 'unarchived this channel'),
+        const TextSpan(text: 'unarchived this conversation'),
       ],
       SystemEventType.channelCreated => [
-        const TextSpan(text: 'created this channel'),
+        const TextSpan(text: 'created this conversation'),
       ],
       SystemEventType.huddleStarted => [
         const TextSpan(text: 'started a huddle'),
@@ -502,7 +504,9 @@ class _MembershipSystemMessageContent extends StatelessWidget {
           name(event.actorPubkey!),
           TextSpan(text: removed ? ' removed ' : ' added '),
           ..._leadingNames(context, targets, name),
-          TextSpan(text: removed ? ' from the channel' : ' to the channel'),
+          TextSpan(
+            text: removed ? ' from the conversation' : ' to the conversation',
+          ),
           ..._seeAll(
             context,
             targets,
@@ -512,7 +516,7 @@ class _MembershipSystemMessageContent extends StatelessWidget {
       }(),
       _MembershipDisplayKind.addedByMany => <InlineSpan>[
         ..._leadingNames(context, event.addedPubkeys, name),
-        const TextSpan(text: ' were added to the channel'),
+        const TextSpan(text: ' were added to the conversation'),
         ..._seeAll(context, event.addedPubkeys, 'Added members'),
       ],
       _MembershipDisplayKind.mixed => <InlineSpan>[

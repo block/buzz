@@ -153,7 +153,7 @@ Future<void> selectNativeManageChannel(WidgetTester tester) async {
     final payload = call.arguments as Map;
     final rows = (payload['sections'] as List).expand((group) => group as List);
     hasManage = rows.any(
-      (row) => row['id'] == 'Manage channel' && row['enabled'] == true,
+      (row) => row['id'] == 'Manage conversation' && row['enabled'] == true,
     );
     return call.method == 'present' ? result.future : null;
   });
@@ -161,7 +161,7 @@ Future<void> selectNativeManageChannel(WidgetTester tester) async {
   await tester.tap(find.text('Open actions'));
   await tester.pumpAndSettle();
   expect(hasManage, isTrue);
-  result.complete('Manage channel');
+  result.complete('Manage conversation');
   await tester.pumpAndSettle();
 }
 
@@ -291,7 +291,11 @@ void main() {
         expect(find.byType(BottomSheet), findsNothing);
         expect(
           calls.last.arguments.toString(),
-          isNot(contains(soloDetails ? 'Delete chat' : 'Delete channel')),
+          isNot(
+            contains(
+              soloDetails ? 'Delete conversation' : 'Delete conversation',
+            ),
+          ),
         );
         members.complete([
           ChannelMember(
@@ -303,7 +307,7 @@ void main() {
         await tester.pumpAndSettle();
         expect(
           calls.last.arguments.toString(),
-          contains(soloDetails ? 'Delete chat' : 'Delete channel'),
+          contains(soloDetails ? 'Delete conversation' : 'Delete conversation'),
         );
         final displayModel = Map<String, dynamic>.from(
           calls
@@ -367,7 +371,7 @@ void main() {
           await tester.pumpAndSettle();
           expect(calls.where((call) => call.method == 'present'), hasLength(3));
         }
-        result.complete('Copy channel ID');
+        result.complete('Copy conversation ID');
         await tester.pumpAndSettle();
         expect(clipboard, ['channel-id']);
         expect(BottomUpPageRoute.hasRetainedControls(homeRoute), isFalse);
@@ -437,22 +441,24 @@ void main() {
       'Pin',
       'Mark Unread',
       'Move to section…',
-      'Mute channel',
-      'Manage channel',
-      'Copy channel name',
-      'Copy channel ID',
-      'Leave channel',
-      'Archive channel',
-      'Delete channel',
+      'Mute conversation',
+      'Manage conversation',
+      'Copy conversation name',
+      'Copy conversation ID',
+      'Leave conversation',
+      'Archive conversation',
+      'Delete conversation',
     ]) {
       expect(find.text(label), findsOneWidget, reason: label);
     }
 
     final moveTop = tester.getTopLeft(find.text('Move to section…')).dy;
-    final muteTop = tester.getTopLeft(find.text('Mute channel')).dy;
-    final manageTop = tester.getTopLeft(find.text('Manage channel')).dy;
-    final copyNameTop = tester.getTopLeft(find.text('Copy channel name')).dy;
-    final copyIdTop = tester.getTopLeft(find.text('Copy channel ID')).dy;
+    final muteTop = tester.getTopLeft(find.text('Mute conversation')).dy;
+    final manageTop = tester.getTopLeft(find.text('Manage conversation')).dy;
+    final copyNameTop = tester
+        .getTopLeft(find.text('Copy conversation name'))
+        .dy;
+    final copyIdTop = tester.getTopLeft(find.text('Copy conversation ID')).dy;
     expect(moveTop, lessThan(muteTop));
     expect(muteTop, lessThan(manageTop));
     expect(manageTop, lessThan(copyNameTop));
@@ -567,8 +573,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Archive channel'), findsOneWidget);
-    expect(find.text('Delete channel'), findsNothing);
+    expect(find.text('Archive conversation'), findsOneWidget);
+    expect(find.text('Delete conversation'), findsNothing);
   });
 
   testWidgets('verified owner agent grants archive and delete', (tester) async {
@@ -588,8 +594,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Archive channel'), findsOneWidget);
-    expect(find.text('Delete channel'), findsOneWidget);
+    expect(find.text('Archive conversation'), findsOneWidget);
+    expect(find.text('Delete conversation'), findsOneWidget);
   });
 
   testWidgets('unresolved identity grants no lifecycle actions', (
@@ -610,8 +616,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Archive channel'), findsNothing);
-    expect(find.text('Delete channel'), findsNothing);
+    expect(find.text('Archive conversation'), findsNothing);
+    expect(find.text('Delete conversation'), findsNothing);
   });
 
   testWidgets('archived owner can unarchive but cannot delete', (tester) async {
@@ -631,11 +637,11 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Archive channel'), findsNothing);
-    expect(find.text('Unarchive channel'), findsOneWidget);
-    expect(find.text('Delete channel'), findsNothing);
+    expect(find.text('Archive conversation'), findsNothing);
+    expect(find.text('Unarchive conversation'), findsOneWidget);
+    expect(find.text('Delete conversation'), findsNothing);
 
-    await tester.tap(find.text('Unarchive channel'));
+    await tester.tap(find.text('Unarchive conversation'));
     await tester.pumpAndSettle();
     expect(find.text('Unarchive #general?'), findsOneWidget);
     await tester.tap(find.widgetWithText(FilledButton, 'Unarchive'));
@@ -663,8 +669,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Archive channel'), findsNothing);
-    expect(find.text('Delete channel'), findsNothing);
+    expect(find.text('Archive conversation'), findsNothing);
+    expect(find.text('Delete conversation'), findsNothing);
   });
 
   testWidgets('agent ownership loading keeps lifecycle actions pending', (
@@ -679,9 +685,9 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('Loading channel actions…'), findsOneWidget);
-    expect(find.text('Archive channel'), findsNothing);
-    expect(find.text('Delete channel'), findsNothing);
+    expect(find.text('Loading conversation actions…'), findsOneWidget);
+    expect(find.text('Archive conversation'), findsNothing);
+    expect(find.text('Delete conversation'), findsNothing);
   });
 
   for (final (details, early) in [
@@ -725,7 +731,7 @@ void main() {
         await tester.tap(find.text('Open actions'));
         await tester.pumpAndSettle();
       }
-      expect(find.text('Copy channel name'), findsOneWidget);
+      expect(find.text('Copy conversation name'), findsOneWidget);
       expect(find.text('Move to section…'), findsNothing);
     });
   }
@@ -945,10 +951,10 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Archive channel'), findsNothing);
-    expect(find.text('Delete channel'), findsNothing);
+    expect(find.text('Archive conversation'), findsNothing);
+    expect(find.text('Delete conversation'), findsNothing);
     expect(find.text('Move to section…'), findsOneWidget);
-    expect(find.text('Leave channel'), findsOneWidget);
+    expect(find.text('Leave conversation'), findsOneWidget);
   });
 
   testWidgets('shows loading and unavailable capability states', (
@@ -959,11 +965,11 @@ void main() {
       _app(channel: _channel(), loadMembers: () => pending.future),
     );
     await tester.pump();
-    expect(find.text('Loading channel actions…'), findsOneWidget);
+    expect(find.text('Loading conversation actions…'), findsOneWidget);
 
     pending.completeError(Exception('relay unavailable'));
     await tester.pumpAndSettle();
-    expect(find.text('Channel actions unavailable'), findsOneWidget);
+    expect(find.text('Conversation actions unavailable'), findsOneWidget);
   });
 
   testWidgets('Manage contains editing and canvas, not mute or leave', (
@@ -980,7 +986,7 @@ void main() {
     await tester.tap(find.text('Open actions'));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Manage channel'));
+    await tester.tap(find.text('Manage conversation'));
     await tester.pumpAndSettle();
 
     final manageSheet = find.byType(ManageChannelSheet);
@@ -997,11 +1003,17 @@ void main() {
       findsOneWidget,
     );
     expect(
-      find.descendant(of: manageSheet, matching: find.text('Mute channel')),
+      find.descendant(
+        of: manageSheet,
+        matching: find.text('Mute conversation'),
+      ),
       findsNothing,
     );
     expect(
-      find.descendant(of: manageSheet, matching: find.text('Leave channel')),
+      find.descendant(
+        of: manageSheet,
+        matching: find.text('Leave conversation'),
+      ),
       findsNothing,
     );
     expect(
@@ -1075,7 +1087,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Open actions'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Manage channel'));
+    await tester.tap(find.text('Manage conversation'));
     await tester.pumpAndSettle();
 
     expect(
@@ -1089,7 +1101,7 @@ void main() {
     await tester.pump();
     await tester.tap(find.byKey(const ValueKey('manage-channel-save-details')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Manage channel'));
+    await tester.tap(find.text('Manage conversation'));
     await tester.pumpAndSettle();
     final nameField = tester.widget<TextField>(
       find.byKey(const ValueKey('manage-channel-name')),
@@ -1151,7 +1163,7 @@ void main() {
         ('renamed', 'Updated description'),
       ]);
       expect(presentations, hasLength(2));
-      expect(presentations.first['title'], 'Edit channel');
+      expect(presentations.first['title'], 'Edit conversation');
       expect(presentations.first['multiline'], false);
       expect(presentations.last['initialValue'], 'renamed');
       expect(presentations.last['allowUnchangedSubmission'], true);
@@ -1313,7 +1325,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Open actions'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Manage channel'));
+      await tester.tap(find.text('Manage conversation'));
       await tester.pumpAndSettle();
       expect(find.text('Shared team notes'), findsOneWidget);
       expect(find.text('Add Canvas'), findsNothing);
@@ -1425,7 +1437,7 @@ void main() {
     },
   );
 
-  testWidgets('non-member cannot edit canvas from Manage channel', (
+  testWidgets('non-member cannot edit canvas from Manage conversation', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -1438,7 +1450,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Open actions'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Manage channel'));
+    await tester.tap(find.text('Manage conversation'));
     await tester.pumpAndSettle();
 
     final editCanvas = find.byKey(const ValueKey('manage-channel-canvas'));
@@ -1467,7 +1479,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Move to section…'), findsOneWidget);
-    await tester.tap(find.text('Manage channel'));
+    await tester.tap(find.text('Manage conversation'));
     await tester.pumpAndSettle();
 
     final nameField = find.byKey(const ValueKey('manage-channel-name'));
@@ -1498,10 +1510,10 @@ void main() {
     await tester.pumpAndSettle();
 
     for (final label in [
-      'Mute channel',
-      'Copy channel name',
+      'Mute conversation',
+      'Copy conversation name',
       'Pin',
-      'Copy channel ID',
+      'Copy conversation ID',
     ]) {
       expect(find.text(label), findsOneWidget, reason: label);
     }
@@ -1510,17 +1522,19 @@ void main() {
       'Mark Unread',
       'Mark Read',
       'Move to section…',
-      'Manage channel',
-      'Leave channel',
-      'Archive channel',
-      'Delete channel',
+      'Manage conversation',
+      'Leave conversation',
+      'Archive conversation',
+      'Delete conversation',
     ]) {
       expect(find.text(label), findsNothing, reason: label);
     }
 
-    final muteTop = tester.getTopLeft(find.text('Mute channel')).dy;
-    final copyNameTop = tester.getTopLeft(find.text('Copy channel name')).dy;
-    final copyIdTop = tester.getTopLeft(find.text('Copy channel ID')).dy;
+    final muteTop = tester.getTopLeft(find.text('Mute conversation')).dy;
+    final copyNameTop = tester
+        .getTopLeft(find.text('Copy conversation name'))
+        .dy;
+    final copyIdTop = tester.getTopLeft(find.text('Copy conversation ID')).dy;
     expect(muteTop, lessThan(copyNameTop));
     expect(copyNameTop, lessThan(copyIdTop));
   });

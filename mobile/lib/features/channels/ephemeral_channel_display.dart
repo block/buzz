@@ -34,8 +34,8 @@ EphemeralChannelDisplay? ephemeralChannelDisplay(
     return EphemeralChannelDisplay(
       detailLabel: ttlSeconds == null ? null : formatCompactTtl(ttlSeconds),
       tooltipLabel: ttlSeconds == null
-          ? 'Ephemeral channel. Cleans up automatically after inactivity.'
-          : 'Ephemeral channel. Cleans up after ${formatVerboseTtl(ttlSeconds)} of inactivity.',
+          ? 'Ephemeral conversation. Cleans up automatically after inactivity.'
+          : 'Ephemeral conversation. Cleans up after ${formatVerboseTtl(ttlSeconds)} of inactivity.',
     );
   }
 
@@ -46,8 +46,8 @@ EphemeralChannelDisplay? ephemeralChannelDisplay(
   return EphemeralChannelDisplay(
     detailLabel: compactRemaining,
     tooltipLabel: compactRemaining == 'Cleanup due'
-        ? 'Ephemeral channel. Cleanup is due now.'
-        : 'Ephemeral channel. Cleans up $verboseRemaining. Scheduled for $absoluteDeadlineLabel.',
+        ? 'Ephemeral conversation. Cleanup is due now.'
+        : 'Ephemeral conversation. Cleans up $verboseRemaining. Scheduled for $absoluteDeadlineLabel.',
   );
 }
 

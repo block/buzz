@@ -22,7 +22,9 @@ class FailedClearNotice extends ConsumerWidget {
       if (failed.difference(previous ?? const {}).isEmpty) return;
       ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
         const SnackBar(
-          content: Text('Couldn’t sync marking a channel as read. Try again.'),
+          content: Text(
+            'Couldn’t sync marking a conversation as read. Try again.',
+          ),
         ),
         kind: ToastKind.error,
       );

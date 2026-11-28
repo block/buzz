@@ -237,7 +237,7 @@ void main() {
         actorPubkey: 'pk1',
         targetPubkey: 'pk1',
       );
-      expect(event.describe(resolve), 'Alice joined the channel');
+      expect(event.describe(resolve), 'Alice joined the conversation');
     });
 
     test('member_joined by other', () {
@@ -246,7 +246,7 @@ void main() {
         actorPubkey: 'pk1',
         targetPubkey: 'pk2',
       );
-      expect(event.describe(resolve), 'Alice added Bob to the channel');
+      expect(event.describe(resolve), 'Alice added Bob to the conversation');
     });
 
     test('member_left', () {
@@ -254,7 +254,7 @@ void main() {
         type: SystemEventType.memberLeft,
         actorPubkey: 'pk1',
       );
-      expect(event.describe(resolve), 'Alice left the channel');
+      expect(event.describe(resolve), 'Alice left the conversation');
     });
 
     test('member_removed', () {
@@ -263,7 +263,10 @@ void main() {
         actorPubkey: 'pk1',
         targetPubkey: 'pk2',
       );
-      expect(event.describe(resolve), 'Alice removed Bob from the channel');
+      expect(
+        event.describe(resolve),
+        'Alice removed Bob from the conversation',
+      );
     });
 
     test('topic_changed', () {
@@ -342,7 +345,7 @@ void main() {
         type: SystemEventType.channelCreated,
         actorPubkey: 'pk1',
       );
-      expect(event.describe(resolve), 'Alice created this channel');
+      expect(event.describe(resolve), 'Alice created this conversation');
     });
 
     test('channel_archived', () {
@@ -350,7 +353,7 @@ void main() {
         type: SystemEventType.channelArchived,
         actorPubkey: 'pk1',
       );
-      expect(event.describe(resolve), 'Alice archived this channel');
+      expect(event.describe(resolve), 'Alice archived this conversation');
     });
 
     test('channel_unarchived', () {
@@ -358,7 +361,7 @@ void main() {
         type: SystemEventType.channelUnarchived,
         actorPubkey: 'pk1',
       );
-      expect(event.describe(resolve), 'Alice unarchived this channel');
+      expect(event.describe(resolve), 'Alice unarchived this conversation');
     });
 
     test('huddle_started', () {

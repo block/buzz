@@ -8,11 +8,11 @@ void actionRowTests() {
   final cases = [
     (
       payload: <String, dynamic>{'type': 'member_removed', 'target': 'bob'},
-      action: 'removed Bob from the channel',
+      action: 'removed Bob from the conversation',
     ),
     (
       payload: <String, dynamic>{'type': 'member_removed'},
-      action: 'removed Someone from the channel',
+      action: 'removed Someone from the conversation',
     ),
     for (final field in ['topic']) ...[
       (

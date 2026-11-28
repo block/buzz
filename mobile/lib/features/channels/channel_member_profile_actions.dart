@@ -121,9 +121,9 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
               .labelFor(target);
           final confirmed = await showDestructiveConfirmation(
             context: context,
-            title: isDm ? 'Remove from DM?' : 'Remove from channel?',
+            title: 'Remove from conversation?',
             message: isDm
-                ? 'Remove $label from this DM?'
+                ? 'Remove $label from this conversation?'
                 : 'Remove $label from ${currentChannel.name}?',
             confirmLabel: 'Remove',
           );
@@ -165,7 +165,7 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
             if (!isDm && member.role != 'admin')
               AppListRow(
                 icon: BuzzIcons.shieldCheck,
-                title: 'Make channel admin',
+                title: 'Make admin',
                 onTap: busy.value ? null : () => perform(role: 'admin'),
               ),
             if (!isDm && (member.role == 'admin' || member.role == 'guest'))
@@ -178,7 +178,7 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
               ),
             AppListRow(
               icon: BuzzIcons.userMinus,
-              title: isDm ? 'Remove from DM' : 'Remove from channel',
+              title: 'Remove from conversation',
               titleColor: context.colors.error,
               onTap: busy.value ? null : () => perform(),
             ),
@@ -187,7 +187,7 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
         if (busy.value)
           Semantics(
             liveRegion: true,
-            label: 'Updating channel member',
+            label: 'Updating member',
             child: const ExcludeSemantics(
               child: Center(child: Text('Updating…')),
             ),

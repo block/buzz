@@ -3101,7 +3101,7 @@ void main() {
         await settleSearch(tester);
         expect(popover(), findsOneWidget);
         expect(find.text('Mary Jane'), findsOneWidget);
-        expect(find.text('not in DM'), findsOneWidget);
+        expect(find.text('not in conversation'), findsOneWidget);
       });
 
       testWidgets('@ opens after an opening bracket', (tester) async {
@@ -7236,7 +7236,7 @@ void main() {
         await tester.pump();
         await tester.pump(mentionSearchDebounce * 2);
         expect(find.text('Mary Jane'), findsOneWidget);
-        expect(find.text('not in DM'), findsOneWidget);
+        expect(find.text('not in conversation'), findsOneWidget);
 
         await tester.enterText(find.byType(TextField), '@Pat');
         await tester.pump();

@@ -48,12 +48,12 @@ Future<bool?> showManageChannelSheet({
       try {
         result = await bridge
             .invokeMapMethod<String, dynamic>('presentChannel', {
-              'title': 'Edit channel',
+              'title': 'Edit conversation',
               'initialValue': nameDraft,
               'description': descriptionDraft,
               'originalName': channel.name,
               'originalDescription': channel.description,
-              'placeholder': 'Channel name',
+              'placeholder': 'Name',
               'multiline': false,
               'brightness': theme.brightness.name,
               'pageBackgroundArgb': theme.colorScheme.surface.toARGB32(),
@@ -124,7 +124,7 @@ Future<bool?> showManageChannelSheet({
   if (!context.mounted || !canPresent()) return false;
   return showBuzzModalBottomSheet<bool>(
     context: context,
-    title: 'Edit channel',
+    title: 'Edit conversation',
     isScrollControlled: true,
     useSafeArea: true,
     constraints: const BoxConstraints(maxWidth: 640),
@@ -150,7 +150,7 @@ Future<Channel> _saveDetails(
   final canonicalName = _channelName(name);
   final trimmedDescription = description.trim();
   if (canonicalName.isEmpty) {
-    throw const FormatException('Channel name is required.');
+    throw const FormatException('Name is required.');
   }
   await actions.updateChannel(
     channelId: channel.id,
@@ -293,7 +293,7 @@ class ManageChannelSheet extends HookConsumerWidget {
         builder: (context) => AlertDialog(
           title: const Text('Remove canvas?'),
           content: const Text(
-            'This removes the canvas content for everyone in this channel.',
+            'This removes the canvas content for everyone in this conversation.',
           ),
           actions: [
             TextButton(
@@ -339,7 +339,7 @@ class ManageChannelSheet extends HookConsumerWidget {
             enabled: canEditDetails && !busy,
             textCapitalization: TextCapitalization.sentences,
             textInputAction: TextInputAction.next,
-            decoration: const InputDecoration(hintText: 'Channel name'),
+            decoration: const InputDecoration(hintText: 'Name'),
           ),
           const SizedBox(height: Grid.xs),
           TextField(
@@ -397,9 +397,7 @@ class ManageChannelSheet extends HookConsumerWidget {
             Semantics(
               liveRegion: true,
               child: Text(
-                canonicalName.isEmpty
-                    ? 'Channel name is required.'
-                    : error.value!,
+                canonicalName.isEmpty ? 'Name is required.' : error.value!,
                 style: context.textTheme.bodySmall?.copyWith(
                   color: context.colors.error,
                 ),

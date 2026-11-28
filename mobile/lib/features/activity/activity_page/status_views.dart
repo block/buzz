@@ -133,7 +133,7 @@ class _EmptyFilterState extends StatelessWidget {
       ),
       InboxFilter.activity => (
         BuzzIcons.activity,
-        'No recent channel activity',
+        'No recent conversation activity',
       ),
       InboxFilter.agentActivity => (BuzzIcons.bot, 'No agent updates'),
       _ => (BuzzIcons.bell, 'No activity yet'),

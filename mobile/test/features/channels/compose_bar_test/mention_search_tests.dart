@@ -111,7 +111,7 @@ void mentionSearchTests() {
       await type(tester, '', '@qu');
       expect(searched.where((q) => q.isNotEmpty), ['q', 'qu']);
       expect(row('Quinn'), findsOneWidget);
-      expect(row('not in channel'), findsOneWidget);
+      expect(row('not in conversation'), findsOneWidget);
 
       // Closing punctuation after a person the directory found selects them
       // as Space does once the search has finished (recommendation 7), and
@@ -128,7 +128,10 @@ void mentionSearchTests() {
       expect(popover, findsNothing);
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
-      expect(find.text('Mention people outside this channel?'), findsOneWidget);
+      expect(
+        find.text('Mention people outside this conversation?'),
+        findsOneWidget,
+      );
       // Send without inviting: Quinn is referenced, not notified.
       await tester.tap(
         find

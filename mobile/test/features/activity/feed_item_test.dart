@@ -139,7 +139,7 @@ void main() {
       );
       expect(
         makeItem(kind: 9, category: 'activity').headline,
-        'Channel update',
+        'Conversation update',
       );
     });
   });

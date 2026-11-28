@@ -113,23 +113,24 @@ class SystemEvent {
     return switch (type) {
       SystemEventType.memberJoined => () {
         if (actorPubkey != null && actorPubkey == targetPubkey) {
-          return '$actor joined the channel';
+          return '$actor joined the conversation';
         }
         final target = resolveLabel(targetPubkey);
-        return '$actor added $target to the channel';
+        return '$actor added $target to the conversation';
       }(),
-      SystemEventType.memberLeft => '$actor left the channel',
+      SystemEventType.memberLeft => '$actor left the conversation',
       SystemEventType.memberRemoved => () {
         final target = resolveLabel(targetPubkey);
-        return '$actor removed $target from the channel';
+        return '$actor removed $target from the conversation';
       }(),
       SystemEventType.topicChanged =>
         '$actor ${describeChannelTextFieldChange('topic', topic)}',
       SystemEventType.purposeChanged =>
         '$actor ${describeChannelTextFieldChange('purpose', purpose)}',
-      SystemEventType.channelCreated => '$actor created this channel',
-      SystemEventType.channelArchived => '$actor archived this channel',
-      SystemEventType.channelUnarchived => '$actor unarchived this channel',
+      SystemEventType.channelCreated => '$actor created this conversation',
+      SystemEventType.channelArchived => '$actor archived this conversation',
+      SystemEventType.channelUnarchived =>
+        '$actor unarchived this conversation',
       SystemEventType.huddleStarted => '$actor started a huddle',
       SystemEventType.huddleEnded => '$actor ended the huddle',
     };

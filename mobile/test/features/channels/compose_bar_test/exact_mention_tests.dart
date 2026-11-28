@@ -241,7 +241,7 @@ void exactMentionTests() {
       await tester.pumpAndSettle();
       if (outsider) {
         expect(
-          find.textContaining('Renamed is not in this channel'),
+          find.textContaining('Renamed is not in this conversation'),
           findsOneWidget,
         );
         await tester.tap(find.text('Do nothing'));
@@ -497,7 +497,7 @@ void exactMentionTests() {
     Iterable<Map<String, dynamic>> messages() =>
         events.where((e) => e['kind'] == EventKind.streamMessage);
     final chip = find.byKey(const ValueKey('composer-person-mention-chip'));
-    final prompt = find.textContaining('Scout is not in this channel');
+    final prompt = find.textContaining('Scout is not in this conversation');
 
     // In code: no chip, and the send has no recipient, tag or prompt.
     await mount();

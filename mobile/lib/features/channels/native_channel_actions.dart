@@ -264,7 +264,7 @@ class _NativeChannelActions extends HookConsumerWidget {
             ScaffoldMessenger.of(context).showFeedbackSnackBar(
               SnackBar(
                 content: Text(
-                  'Could not open channel actions: ${error.message ?? error.code}',
+                  'Could not open conversation actions: ${error.message ?? error.code}',
                 ),
               ),
               kind: ToastKind.error,
@@ -276,7 +276,9 @@ class _NativeChannelActions extends HookConsumerWidget {
           } else if (context.mounted) {
             ScaffoldMessenger.of(context).showFeedbackSnackBar(
               const SnackBar(
-                content: Text('Channel actions are unavailable in this build.'),
+                content: Text(
+                  'Conversation actions are unavailable in this build.',
+                ),
               ),
               kind: ToastKind.error,
             );

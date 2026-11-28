@@ -42,7 +42,8 @@ class MentionTagException implements Exception {
 
   @override
   String toString() => switch (error) {
-    MentionTagError.notMember => 'A mentioned person is not in this channel',
+    MentionTagError.notMember =>
+      'A mentioned person is not in this conversation',
     MentionTagError.invalid => 'A mention has an invalid key',
     MentionTagError.tooMany => 'A message can mention at most 32 people',
   };

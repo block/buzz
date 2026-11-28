@@ -368,7 +368,7 @@ class _MemberTile extends ConsumerWidget {
                       color: context.colors.error,
                     ),
                     title: Text(
-                      'Remove from channel',
+                      'Remove from conversation',
                       style: TextStyle(color: context.colors.error),
                     ),
                     onTap: () async {
@@ -376,7 +376,7 @@ class _MemberTile extends ConsumerWidget {
                       final confirmed = await showDestructiveConfirmation(
                         context: context,
                         title: 'Remove member',
-                        message: 'Remove $label from this channel?',
+                        message: 'Remove $label from this conversation?',
                         confirmLabel: 'Remove',
                       );
                       if (confirmed == true) {

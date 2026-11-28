@@ -1059,7 +1059,7 @@ void main() {
       findsOneWidget,
     );
     expect(
-      tester.getTopLeft(find.text('Copy channel name')).dy,
+      tester.getTopLeft(find.text('Copy conversation name')).dy,
       lessThan(tester.getTopLeft(members).dy),
     );
     final copy = find.byIcon(BuzzIcons.copy);
@@ -1083,7 +1083,7 @@ void main() {
       expect(tester.getCenter(leading).dx, center);
     }
     await tester.scrollUntilVisible(
-      find.text('Delete chat'),
+      find.text('Delete conversation'),
       300,
       scrollable: find
           .descendant(
@@ -1094,8 +1094,8 @@ void main() {
     );
     await tester.pumpAndSettle();
     await _capturePresence(tester, 'solo-details-management');
-    expect(find.text('Leave chat'), findsNothing);
-    expect(find.text('Leave channel'), findsNothing);
+    expect(find.text('Leave conversation'), findsNothing);
+    expect(find.text('Leave conversation'), findsNothing);
     await Scrollable.ensureVisible(
       tester.element(find.text('Agent')),
       alignment: 0.5,
@@ -1139,12 +1139,12 @@ void main() {
     );
     await tester.pumpAndSettle();
     await tester.scrollUntilVisible(
-      find.text('Leave chat'),
+      find.text('Leave conversation'),
       300,
       scrollable: find.byType(Scrollable).first,
     );
-    expect(find.text('Leave chat'), findsOneWidget);
-    expect(find.text('Delete chat'), findsNothing);
+    expect(find.text('Leave conversation'), findsOneWidget);
+    expect(find.text('Delete conversation'), findsNothing);
   });
 
   for (final fromLauncher in [false, true]) {
@@ -3756,7 +3756,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
 
       expect(
-        find.text('This channel is archived and read-only on mobile.'),
+        find.text('This conversation is archived and read-only on mobile.'),
         findsOneWidget,
       );
       // Opening a Solo chat reads it through its newest message, archived or
@@ -5342,8 +5342,8 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.byType(UserProfileSheet), findsOneWidget);
-      expect(find.text('Make channel admin'), findsOneWidget);
-      expect(find.text('Remove from channel'), findsOneWidget);
+      expect(find.text('Make admin'), findsOneWidget);
+      expect(find.text('Remove from conversation'), findsOneWidget);
       Navigator.of(tester.element(find.byType(UserProfileSheet))).pop();
       await tester.pumpAndSettle();
       expect(
@@ -5943,7 +5943,7 @@ void main() {
 
       expect(find.text('Message'), findsNothing);
       expect(
-        find.text('This channel is archived and read-only on mobile.'),
+        find.text('This conversation is archived and read-only on mobile.'),
         findsOneWidget,
       );
     });
@@ -6085,19 +6085,19 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Join channel to send messages'), findsOneWidget);
+      expect(find.text('Join conversation to send messages'), findsOneWidget);
       expect(find.text('Message'), findsNothing);
 
       await tester.tap(
         find.byKey(const ValueKey('channel-header-settings-trigger')),
       );
       await tester.pumpAndSettle();
-      await _scrollDetailsTo(tester, find.text('Join channel'));
-      await tester.tap(find.text('Join channel'));
+      await _scrollDetailsTo(tester, find.text('Join conversation'));
+      await tester.tap(find.text('Join conversation'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Join channel'), findsNothing);
-      expect(find.text('Join channel to send messages'), findsNothing);
+      expect(find.text('Join conversation'), findsNothing);
+      expect(find.text('Join conversation to send messages'), findsNothing);
 
       expect(find.text('Message'), findsOneWidget);
     });
@@ -6169,7 +6169,10 @@ void main() {
 
         await tester.tap(joinButton);
         await tester.pumpAndSettle();
-        expect(find.text('Couldn’t join channel. Try again.'), findsOneWidget);
+        expect(
+          find.text('Couldn’t join conversation. Try again.'),
+          findsOneWidget,
+        );
         expect(find.widgetWithText(FilledButton, 'Join'), findsOneWidget);
         expect(tester.widget<FilledButton>(joinButton).onPressed, isNotNull);
         // The toast sits over the footer until it goes away.
@@ -6211,7 +6214,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('This channel is read-only'), findsOneWidget);
+      expect(find.text('This conversation is read-only'), findsOneWidget);
       expect(find.byKey(const ValueKey('channel-join-button')), findsNothing);
       expect(find.text('Message'), findsNothing);
     });
@@ -6240,7 +6243,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('You’re previewing this channel'), findsOneWidget);
+      expect(find.text('You’re previewing this conversation'), findsOneWidget);
       expect(find.byKey(const ValueKey('channel-join-button')), findsNothing);
     });
 
@@ -6263,8 +6266,8 @@ void main() {
         find.byKey(const ValueKey('channel-header-settings-trigger')),
       );
       await tester.pumpAndSettle();
-      await _scrollDetailsTo(tester, find.text('Leave channel'));
-      expect(find.text('Leave channel'), findsOneWidget);
+      await _scrollDetailsTo(tester, find.text('Leave conversation'));
+      expect(find.text('Leave conversation'), findsOneWidget);
     });
 
     testWidgets('Leave lives on the detail page instead of Manage', (
@@ -6289,13 +6292,13 @@ void main() {
         find.byKey(const ValueKey('channel-header-settings-trigger')),
       );
       await tester.pumpAndSettle();
-      await _scrollDetailsTo(tester, find.text('Leave channel'));
+      await _scrollDetailsTo(tester, find.text('Leave conversation'));
       final card = tester.widget<AppListCard>(
         find.byKey(const ValueKey('channel-details-lifecycle-card')),
       );
-      expect((card.children.last as AppListRow).title, 'Leave channel');
-      expect(find.text('Delete channel'), findsNothing);
-      await tester.tap(find.text('Leave channel').last);
+      expect((card.children.last as AppListRow).title, 'Leave conversation');
+      expect(find.text('Delete conversation'), findsNothing);
+      await tester.tap(find.text('Leave conversation').last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('Leave'));
       await tester.pumpAndSettle();
@@ -6360,8 +6363,8 @@ void main() {
           );
         }
         await tester.pumpAndSettle();
-        await _scrollDetailsTo(tester, find.text('Leave channel'));
-        await tester.tap(find.text('Leave channel').last);
+        await _scrollDetailsTo(tester, find.text('Leave conversation'));
+        await tester.tap(find.text('Leave conversation').last);
         await tester.pumpAndSettle();
         await tester.tap(find.widgetWithText(FilledButton, 'Leave'));
         await tester.pumpAndSettle();
@@ -6429,7 +6432,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Edit channel'), findsNothing);
+      expect(find.text('Edit conversation'), findsNothing);
     });
 
     testWidgets('Edit updates name and description without legacy fields', (
@@ -6468,12 +6471,12 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Mute'), findsOneWidget);
-      expect(find.text('Leave channel'), findsNothing);
+      expect(find.text('Leave conversation'), findsNothing);
       expect(find.text('Topic'), findsNothing);
       expect(find.text('Purpose'), findsNothing);
       expect(find.text('Add Canvas'), findsOneWidget);
 
-      expect(find.text('Edit channel'), findsOneWidget);
+      expect(find.text('Edit conversation'), findsOneWidget);
       await tester.enterText(
         find.byKey(const ValueKey('manage-channel-name')),
         '  #renamed  ',
@@ -6491,12 +6494,15 @@ void main() {
       expect(updatedDescription, 'A new description');
       expect(find.text('renamed'), findsOneWidget);
       expect(find.text('A new description'), findsOneWidget);
-      await _scrollDetailsTo(tester, find.text('Delete channel'));
+      await _scrollDetailsTo(tester, find.text('Delete conversation'));
       final lifecycle = tester.widget<AppListCard>(
         find.byKey(const ValueKey('channel-details-lifecycle-card')),
       );
-      expect((lifecycle.children.last as AppListRow).title, 'Delete channel');
-      expect(find.text('Leave channel'), findsNothing);
+      expect(
+        (lifecycle.children.last as AppListRow).title,
+        'Delete conversation',
+      );
+      expect(find.text('Leave conversation'), findsNothing);
     });
 
     testWidgets('shows empty state when no messages', (tester) async {
@@ -9341,7 +9347,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Alice'), findsOneWidget);
-      final createdAction = findRichText('created this channel');
+      final createdAction = findRichText('created this conversation');
       expect(createdAction, findsOneWidget);
       expect(
         find.descendant(
@@ -9363,7 +9369,7 @@ void main() {
       );
       final createdText = tester.widget<RichText>(createdAction);
       expect(
-        effectiveFontSizeForText(createdText.text, 'created this channel'),
+        effectiveFontSizeForText(createdText.text, 'created this conversation'),
         12,
       );
     });
@@ -13788,7 +13794,7 @@ void main() {
         find.byKey(const ValueKey('system-message-row-sys1')),
         findsNothing,
       );
-      expect(findRichText('joined the channel'), findsNothing);
+      expect(findRichText('joined the conversation'), findsNothing);
     });
 
     testWidgets('opens a profile sheet from a membership activity name', (
@@ -14325,7 +14331,7 @@ void main() {
       expect(find.text('Bob'), findsOneWidget);
       final addedAction = findRichText('added ');
       expect(addedAction, findsOneWidget);
-      expect(find.text('Alice added Bob to the channel'), findsNothing);
+      expect(find.text('Alice added Bob to the conversation'), findsNothing);
       expect(
         find.descendant(
           of: find.byKey(const ValueKey('channel-message-list')),
@@ -14349,7 +14355,7 @@ void main() {
       final actor = find.byKey(const ValueKey('system-message-author-alice'));
       final target = find.byKey(const ValueKey('system-message-author-bob'));
       expect(tester.getCenter(actor).dx, lessThan(tester.getCenter(target).dx));
-      expect(findRichText(' to the channel'), findsOneWidget);
+      expect(findRichText(' to the conversation'), findsOneWidget);
       await tester.tap(target);
       await tester.pumpAndSettle();
       expect(find.byType(UserProfileSheet), findsOneWidget);
@@ -14537,8 +14543,8 @@ void main() {
       for (final id in ['sys1', 'sys3', 'sys4', 'sys5', 'sys6']) {
         expect(find.byKey(ValueKey('system-message-row-$id')), findsNothing);
       }
-      expect(findRichText('joined the channel'), findsNothing);
-      expect(findRichText('left the channel'), findsNothing);
+      expect(findRichText('joined the conversation'), findsNothing);
+      expect(findRichText('left the conversation'), findsNothing);
       expect(findRichText(' were added · '), findsOneWidget);
       expect(findRichText(' was removed'), findsOneWidget);
       for (final name in ['bob', 'gina', '1 other']) {
@@ -14906,7 +14912,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(findRichText(' were added to the channel'), findsOneWidget);
+      expect(findRichText(' were added to the conversation'), findsOneWidget);
       expect(find.text('bob'), findsOneWidget);
       expect(find.text('dave'), findsOneWidget);
       expect(find.text('alice'), findsNothing);
@@ -17585,10 +17591,10 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Alice'), findsNWidgets(3));
-      expect(findRichText('created this channel'), findsOneWidget);
+      expect(findRichText('created this conversation'), findsOneWidget);
       expect(findRichText('Welcome everyone!'), findsOneWidget);
       expect(find.text('Bob'), findsNWidgets(2));
-      expect(findRichText(' to the channel'), findsOneWidget);
+      expect(findRichText(' to the conversation'), findsOneWidget);
       expect(findRichText('Thanks for the invite!'), findsOneWidget);
     });
   });
@@ -18897,14 +18903,19 @@ void main() {
     // metadata when the relay shares it, and otherwise says why it can't.
     for (final (name, metaVisibility, fail, toast) in [
       ('unjoined open channel opens', 'public', false, null),
-      ('channel the relay withholds', null, false, 'Channel not found here'),
+      (
+        'channel the relay withholds',
+        null,
+        false,
+        'Conversation not found here',
+      ),
       (
         'private channel stays closed',
         'private',
         false,
-        'Channel not found here',
+        'Conversation not found here',
       ),
-      ('failed lookup', 'public', true, 'Could not open the channel'),
+      ('failed lookup', 'public', true, 'Could not open the conversation'),
     ]) {
       testWidgets('unlisted channel link: $name', (tester) async {
         final relay = _ChannelMetadataRelaySession(

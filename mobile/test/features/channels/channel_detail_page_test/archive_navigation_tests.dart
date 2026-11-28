@@ -58,14 +58,14 @@ void archiveNavigationTests() {
     );
     await tester.pumpAndSettle();
     await tester.scrollUntilVisible(
-      find.text('Archive channel').hitTestable(),
+      find.text('Archive conversation').hitTestable(),
       200,
       scrollable: find.descendant(
         of: find.byKey(const ValueKey('channel-details-page-list')),
         matching: find.byType(Scrollable),
       ),
     );
-    await tester.tap(find.text('Archive channel'));
+    await tester.tap(find.text('Archive conversation'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Archive'));
     await tester.pumpAndSettle();

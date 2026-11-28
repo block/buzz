@@ -107,7 +107,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
     final resolvedChannel = displayedChannel.value;
     final solo = personalChat || resolvedChannel.isSolo;
     final regularChannel = !solo && !resolvedChannel.isDm;
-    final noun = solo ? 'chat' : 'channel';
+    const noun = 'conversation';
     final lifecycleName = solo
         ? resolvedChannel.name
         : '#${resolvedChannel.name}';
@@ -416,7 +416,9 @@ class ChannelDetailsPage extends HookConsumerWidget {
       } catch (_) {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showFeedbackSnackBar(
-            const SnackBar(content: Text('Couldn’t join channel. Try again.')),
+            const SnackBar(
+              content: Text('Couldn’t join conversation. Try again.'),
+            ),
             kind: ToastKind.error,
           );
         }
@@ -495,23 +497,23 @@ class ChannelDetailsPage extends HookConsumerWidget {
         if (!regularChannel && canFile) moveRow,
         AppListRow(
           icon: BuzzIcons.copy,
-          title: 'Copy channel name',
+          title: 'Copy conversation name',
           onTap: () {
             copyToClipboard(
               context,
               resolvedChannel.name,
-              message: 'Channel name copied',
+              message: 'Conversation name copied',
             );
           },
         ),
         AppListRow(
           icon: BuzzIcons.hash,
-          title: 'Copy channel ID',
+          title: 'Copy conversation ID',
           onTap: () {
             copyToClipboard(
               context,
               resolvedChannel.id,
-              message: 'Channel ID copied',
+              message: 'Conversation ID copied',
             );
           },
         ),
@@ -630,23 +632,25 @@ class ChannelDetailsPage extends HookConsumerWidget {
         if (canJoin)
           AppListRow(
             icon: BuzzIcons.logIn,
-            title: isJoining.value ? 'Joining channel…' : 'Join channel',
+            title: isJoining.value
+                ? 'Joining conversation…'
+                : 'Join conversation',
             onTap: isJoining.value ? null : joinChannel,
           ),
         if (canLeave && resolvedChannel.isDm && !solo) leaveRow,
         if (lifecycleCapabilitiesLoading)
           const AppListRow(
             icon: BuzzIcons.loaderCircle,
-            title: 'Loading channel actions…',
+            title: 'Loading conversation actions…',
             trailing: BuzzLoadingIndicator(
               size: 20,
-              semanticLabel: 'Loading channel actions',
+              semanticLabel: 'Loading conversation actions',
             ),
           )
         else if (lifecycleCapabilitiesUnavailable)
           const AppListRow(
             icon: BuzzIcons.triangleAlert,
-            title: 'Channel actions unavailable',
+            title: 'Conversation actions unavailable',
           )
         else ...[
           if (canArchive)

@@ -44,7 +44,7 @@ class _ReadOnlyNotice extends HookConsumerWidget {
     final isJoining = useState(false);
     // The relay accepted a join that this client could not confirm yet.
     final isUnconfirmed = useState(false);
-    final place = channel.isForum ? 'forum' : 'channel';
+    final place = channel.isForum ? 'forum' : 'conversation';
     final isOpen = channel.visibility == 'open' && !channel.isArchived;
     // Joining a guest-join channel grants a role that cannot post, so it
     // offers no Join (as on desktop).

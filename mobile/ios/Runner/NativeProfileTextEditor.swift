@@ -589,7 +589,7 @@ final class NativeProfileTextEditorViewController:
     guard canEditCanvas && hasCanvas else { return }
     let alert = UIAlertController(
       title: "Remove canvas?",
-      message: "This removes the canvas content for everyone in this channel.",
+      message: "This removes the canvas content for everyone in this conversation.",
       preferredStyle: .alert
     )
     alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))

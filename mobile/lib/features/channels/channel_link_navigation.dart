@@ -105,8 +105,8 @@ Future<Channel?> _resolve(
     SnackBar(
       content: Text(
         failure != null
-            ? 'Could not open the channel'
-            : 'Channel not found here',
+            ? 'Could not open the conversation'
+            : 'Conversation not found here',
       ),
     ),
     kind: ToastKind.error,

@@ -59,7 +59,6 @@ class _MessageEditSheet extends HookConsumerWidget {
               .read(channelsProvider.notifier)
               .cachedMembersForChannel(channelId);
     final agentOwners = ref.watch(agentOwnersProvider).asData?.value;
-    final channel = ref.watch(channelByIdProvider(channelId));
     List<MentionCandidate> memberCandidates() => _typedMemberCandidates(
       membersAsync: membersAsync,
       sessionStatus: sessionStatus,
@@ -245,7 +244,6 @@ class _MessageEditSheet extends HookConsumerWidget {
                   },
                   userCache: userCache,
                   currentPubkey: currentPubkey,
-                  isDmChannel: channel?.isDm ?? false,
                   onChannelSelect: (_) {},
                   onMentionSelect: chooser.insert,
                 ),

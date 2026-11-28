@@ -694,7 +694,7 @@ void bubbleLayoutTests() {
     final card = find.byKey(const ValueKey('activity-card-single-line'));
     final icon = find.descendant(of: card, matching: find.byType(Icon));
     expect(icon, findsNothing);
-    expect(findRichText('archived this channel'), findsOneWidget);
+    expect(findRichText('archived this conversation'), findsOneWidget);
   });
 
   testWidgets(

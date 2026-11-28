@@ -290,7 +290,7 @@ void main() {
       await pause(tester);
       expect(searched, contains('qu'));
       expect(row('Quinn'), findsOneWidget);
-      expect(row('not in channel'), findsOneWidget);
+      expect(row('not in conversation'), findsOneWidget);
       await tester.tap(row('Quinn'));
       await tester.pumpAndSettle();
       expect(controller.text, '$original cc @Bob @Quinn ');

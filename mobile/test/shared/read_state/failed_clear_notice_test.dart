@@ -32,7 +32,7 @@ class _ReadState extends ReadStateNotifier {
 }
 
 void main() {
-  const notice = 'Couldn’t sync marking a channel as read. Try again.';
+  const notice = 'Couldn’t sync marking a conversation as read. Try again.';
 
   testWidgets('reports each newly failed clear once, on any screen', (
     tester,

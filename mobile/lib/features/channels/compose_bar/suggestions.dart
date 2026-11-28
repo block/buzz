@@ -25,7 +25,6 @@ class _MentionSuggestions extends StatelessWidget {
   final VoidCallback? onRetry;
   final Map<String, UserProfile> userCache;
   final String? currentPubkey;
-  final bool isDmChannel;
   final void Function(MentionCandidate) onSelect;
 
   const _MentionSuggestions({
@@ -37,7 +36,6 @@ class _MentionSuggestions extends StatelessWidget {
     this.onRetry,
     required this.userCache,
     required this.currentPubkey,
-    required this.isDmChannel,
     required this.onSelect,
   });
 
@@ -148,7 +146,6 @@ class _MentionSuggestions extends StatelessWidget {
               context,
               candidate: candidate,
               currentPubkey: currentPubkey,
-              isDmChannel: isDmChannel,
               userCache: userCache,
             ),
             onTap: available
@@ -163,20 +160,19 @@ class _MentionSuggestions extends StatelessWidget {
 
 /// The secondary info line under a mention suggestion — mirrors desktop's
 /// `MentionAutocomplete` subtitle: bot icon + "agent" (or an "admin" badge
-/// for human admins), then "managed by …" / "not in channel" (or "not in DM").
+/// for human admins), then "managed by …" / "not in conversation".
 abstract final class _MentionSuggestionInfo {
   static Widget? build(
     BuildContext context, {
     required MentionCandidate candidate,
     required String? currentPubkey,
-    required bool isDmChannel,
     required Map<String, UserProfile> userCache,
   }) {
     final ownerLabel = candidate.isAgent
         ? formatOwnerLabel(candidate.ownerPubkey, currentPubkey, userCache)
         : null;
     final notInChannel = !candidate.isMember;
-    final outside = isDmChannel ? 'not in DM' : 'not in channel';
+    const outside = 'not in conversation';
     final isAdmin = !candidate.isAgent && candidate.role == 'admin';
 
     final String? detail;

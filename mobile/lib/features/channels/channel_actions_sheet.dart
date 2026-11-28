@@ -306,7 +306,7 @@ class ChannelActionsSheet extends HookConsumerWidget {
                 ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
                   const SnackBar(
                     content: Text(
-                      'Couldn’t mark this channel unread. Try again.',
+                      'Couldn’t mark this conversation unread. Try again.',
                     ),
                   ),
                   kind: ToastKind.error,
@@ -338,7 +338,7 @@ class ChannelActionsSheet extends HookConsumerWidget {
             ),
           _ChannelSheetRow(
             leading: Icon(isMuted ? BuzzIcons.bell : BuzzIcons.bellOff),
-            title: Text(isMuted ? 'Unmute channel' : 'Mute channel'),
+            title: Text(isMuted ? 'Unmute conversation' : 'Mute conversation'),
             onTap: () {
               close();
               final notifier = ref.read(channelMutesProvider.notifier);
@@ -350,7 +350,7 @@ class ChannelActionsSheet extends HookConsumerWidget {
           if (!channel.isDm)
             _ChannelSheetRow(
               leading: const Icon(BuzzIcons.settings),
-              title: const Text('Manage channel'),
+              title: const Text('Manage conversation'),
               onTap: () async {
                 final shouldClose = await showManageChannelSheet(
                   context: context,
@@ -389,25 +389,25 @@ class ChannelActionsSheet extends HookConsumerWidget {
           ),
           _ChannelSheetRow(
             leading: const Icon(BuzzIcons.copy),
-            title: const Text('Copy channel name'),
+            title: const Text('Copy conversation name'),
             onTap: () {
               close();
               copyToClipboard(
                 context,
                 currentChannel.name,
-                message: 'Channel name copied',
+                message: 'Conversation name copied',
               );
             },
           ),
           _ChannelSheetRow(
             leading: const Icon(BuzzIcons.hash),
-            title: const Text('Copy channel ID'),
+            title: const Text('Copy conversation ID'),
             onTap: () {
               close();
               copyToClipboard(
                 context,
                 channel.id,
-                message: 'Channel ID copied',
+                message: 'Conversation ID copied',
               );
             },
           ),
@@ -419,13 +419,14 @@ class ChannelActionsSheet extends HookConsumerWidget {
             if (canLeave)
               _ActionTile(
                 icon: BuzzIcons.logOut,
-                label: channel.isSolo ? 'Leave Solo' : 'Leave channel',
+                label: 'Leave conversation',
                 destructive: true,
                 onTap: () => _confirmAndRun(
                   context,
                   ref,
                   title: 'Leave #${currentChannel.name}?',
-                  body: 'You’ll stop receiving messages from this channel.',
+                  body:
+                      'You’ll stop receiving messages from this conversation.',
                   confirmLabel: 'Leave',
                   action: () =>
                       ref.read(channelActionsProvider).leaveChannel(channel.id),
@@ -436,27 +437,27 @@ class ChannelActionsSheet extends HookConsumerWidget {
                 enabled: false,
                 leading: BuzzLoadingIndicator(
                   size: 20,
-                  semanticLabel: 'Loading channel actions',
+                  semanticLabel: 'Loading conversation actions',
                 ),
-                title: Text('Loading channel actions…'),
+                title: Text('Loading conversation actions…'),
               )
             else if (!lifecycleCapabilitiesLoading &&
                 lifecycleCapabilitiesUnavailable)
               const _ChannelSheetRow(
                 enabled: false,
                 leading: Icon(BuzzIcons.triangleAlert),
-                title: Text('Channel actions unavailable'),
+                title: Text('Conversation actions unavailable'),
               )
             else if (!lifecycleCapabilitiesLoading) ...[
               if (canArchive)
                 _ActionTile(
                   icon: BuzzIcons.archive,
-                  label: 'Archive channel',
+                  label: 'Archive conversation',
                   onTap: () => _confirmAndRun(
                     context,
                     ref,
                     title: 'Archive #${currentChannel.name}?',
-                    body: 'The channel will become read-only.',
+                    body: 'The conversation will become read-only.',
                     confirmLabel: 'Archive',
                     action: () => ref
                         .read(channelActionsProvider)
@@ -466,12 +467,12 @@ class ChannelActionsSheet extends HookConsumerWidget {
               if (canUnarchive)
                 _ActionTile(
                   icon: BuzzIcons.archiveRestore,
-                  label: 'Unarchive channel',
+                  label: 'Unarchive conversation',
                   onTap: () => _confirmAndRun(
                     context,
                     ref,
                     title: 'Unarchive #${currentChannel.name}?',
-                    body: 'The channel will become active again.',
+                    body: 'The conversation will become active again.',
                     confirmLabel: 'Unarchive',
                     action: () => ref
                         .read(channelActionsProvider)
@@ -481,14 +482,14 @@ class ChannelActionsSheet extends HookConsumerWidget {
               if (canDelete)
                 _ActionTile(
                   icon: BuzzIcons.trash2,
-                  label: 'Delete channel',
+                  label: 'Delete conversation',
                   destructive: true,
                   onTap: () => _confirmAndRun(
                     context,
                     ref,
                     title: 'Delete #${currentChannel.name}?',
                     body:
-                        'This permanently deletes the channel and cannot be undone.',
+                        'This permanently deletes the conversation and cannot be undone.',
                     confirmLabel: 'Delete',
                     action: () => ref
                         .read(channelActionsProvider)
@@ -674,7 +675,7 @@ Future<void> _confirmAndRun(
     messenger.showFeedbackSnackBar(
       SnackBar(
         content: Text(
-          'Couldn’t ${confirmLabel.toLowerCase()} channel. Try again.',
+          'Couldn’t ${confirmLabel.toLowerCase()} conversation. Try again.',
         ),
       ),
       kind: ToastKind.error,

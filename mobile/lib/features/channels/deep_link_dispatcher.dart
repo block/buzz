@@ -384,7 +384,7 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     if (failure != null) {
       debugPrint('deep-link: channel $channelId lookup failed: $failure');
       ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
-        const SnackBar(content: Text('Could not open the channel')),
+        const SnackBar(content: Text('Could not open the conversation')),
         kind: ToastKind.error,
       );
     } else {
@@ -392,7 +392,7 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
         'deep-link: channel $channelId not found in workspace; dropping link',
       );
       ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
-        const SnackBar(content: Text('Channel not found here')),
+        const SnackBar(content: Text('Conversation not found here')),
         kind: ToastKind.error,
       );
     }

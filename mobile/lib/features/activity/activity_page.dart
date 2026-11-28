@@ -378,7 +378,7 @@ class ActivityPage extends HookConsumerWidget {
       final channelId = item.item.channelId;
       if (channelId == null) {
         ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
-          const SnackBar(content: Text('No linked channel')),
+          const SnackBar(content: Text('No linked conversation')),
           kind: ToastKind.error,
         );
         return;
@@ -426,7 +426,7 @@ class ActivityPage extends HookConsumerWidget {
       if (channel == null) {
         if (!context.mounted) return;
         ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
-          const SnackBar(content: Text('Channel not found here')),
+          const SnackBar(content: Text('Conversation not found here')),
           kind: ToastKind.error,
         );
         return;
@@ -467,7 +467,7 @@ class ActivityPage extends HookConsumerWidget {
       final channel = channelById[draft.channelId];
       if (channel == null) {
         ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
-          const SnackBar(content: Text('Draft’s channel unavailable')),
+          const SnackBar(content: Text('Draft’s conversation unavailable')),
           kind: ToastKind.error,
         );
         return;
@@ -499,7 +499,7 @@ class ActivityPage extends HookConsumerWidget {
       final channel = channelById[target.channelId];
       if (channel == null) {
         ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
-          const SnackBar(content: Text('Reminder’s channel unavailable')),
+          const SnackBar(content: Text('Reminder’s conversation unavailable')),
           kind: ToastKind.error,
         );
         return;
