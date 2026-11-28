@@ -614,6 +614,9 @@ mod inbound_author_gate {
     pub(crate) struct InboundAuthorGate {
         agent_pubkey_hex: String,
         relay_self: Option<String>,
+        // Operator opt-in. The relay can sign any owner attribution, so
+        // without it a relay-signed event is judged by its raw signer.
+        trust_relay_workflow_attribution: bool,
         // None means no authoritative NIP-11 result yet, including at startup.
         refreshed_generation: Option<u64>,
     }
@@ -627,12 +630,14 @@ mod inbound_author_gate {
         pub(crate) async fn connect(
             rest_client: &relay::RestClient,
             agent_pubkey_hex: &str,
+            trust_relay_workflow_attribution: bool,
             context: &str,
         ) -> Self {
             let (relay_self, completed) = refresh_relay_self(rest_client, None, context).await;
             Self {
                 agent_pubkey_hex: agent_pubkey_hex.to_string(),
                 relay_self,
+                trust_relay_workflow_attribution,
                 refreshed_generation: completed.then_some(0),
             }
         }
@@ -700,8 +705,12 @@ mod inbound_author_gate {
             owner_cache: &OwnerCache,
             rest_client: &relay::RestClient,
         ) -> InboundAuthorGateDecision {
+            let trusted_relay = self
+                .relay_self
+                .as_deref()
+                .filter(|_| self.trust_relay_workflow_attribution);
             let effective_author =
-                effective_prompt_author(event, self.relay_self.as_deref(), &self.agent_pubkey_hex);
+                effective_prompt_author(event, trusted_relay, &self.agent_pubkey_hex);
             let allowed = author_allowed(
                 respond_to,
                 allowlist,
@@ -2959,8 +2968,13 @@ async fn run_harness(
     tracing::info!("connected to relay at {}", config.relay_url);
 
     let relay_rest_client = relay.rest_client();
-    let mut author_gate_ctx =
-        InboundAuthorGate::connect(&relay_rest_client, &pubkey_hex, "startup").await;
+    let mut author_gate_ctx = InboundAuthorGate::connect(
+        &relay_rest_client,
+        &pubkey_hex,
+        config.trust_relay_workflow_attribution,
+        "startup",
+    )
+    .await;
 
     relay
         .subscribe_membership_notifications()
@@ -7485,7 +7499,7 @@ mod author_gate_tests {
         tokio::task::JoinHandle<()>,
     ) {
         let (rest_client, server) = nip11_server(serde_json::json!({ "self": relay_hex })).await;
-        let gate = InboundAuthorGate::connect(&rest_client, agent, "test").await;
+        let gate = InboundAuthorGate::connect(&rest_client, agent, true, "test").await;
         (gate, rest_client, server)
     }
 
@@ -7538,7 +7552,8 @@ mod author_gate_tests {
         let relay_hex = relay_keys.public_key().to_hex();
         let agent = nostr::Keys::generate().public_key().to_hex();
         let (rest_client, server) = nip11_scripted_server(responses).await;
-        let mut gate = InboundAuthorGate::connect(&rest_client, &agent, "listener startup").await;
+        let mut gate =
+            InboundAuthorGate::connect(&rest_client, &agent, true, "listener startup").await;
         let configured_owner = if cache_owner {
             Some(workflow_owner.to_string())
         } else if cache_sibling {
@@ -7854,7 +7869,7 @@ mod author_gate_tests {
         let agent = nostr::Keys::generate().public_key().to_hex();
         let (rest_client, server) = nip11_server(serde_json::json!({ "self": relay_hex })).await;
 
-        let mut gate = InboundAuthorGate::connect(&rest_client, &agent, "test").await;
+        let mut gate = InboundAuthorGate::connect(&rest_client, &agent, true, "test").await;
         assert!(
             gate.has_relay_identity(),
             "the gate must load the relay signing identity during construction"
@@ -7916,7 +7931,7 @@ mod author_gate_tests {
         // A NIP-11 document with no `self` key: attribution is unavailable.
         let (rest_client, server) = nip11_server(serde_json::json!({ "name": "relay" })).await;
 
-        let gate = InboundAuthorGate::connect(&rest_client, &agent, "test").await;
+        let gate = InboundAuthorGate::connect(&rest_client, &agent, true, "test").await;
         assert!(
             !gate.has_relay_identity(),
             "a NIP-11 document without `self` must leave attribution unavailable"
@@ -7965,7 +7980,7 @@ mod author_gate_tests {
             keys: nostr::Keys::generate(),
             auth_tag_json: None,
         };
-        let mut gate = InboundAuthorGate::connect(&unreachable, &agent, "test").await;
+        let mut gate = InboundAuthorGate::connect(&unreachable, &agent, true, "test").await;
         assert!(!gate.has_relay_identity());
 
         let (rest_client, server) = nip11_server(serde_json::json!({ "self": relay_hex })).await;
@@ -8035,7 +8050,7 @@ mod author_gate_tests {
             Ok(serde_json::json!({ "self": relay_hex.clone() })),
         ]))
         .await;
-        let mut gate = InboundAuthorGate::connect(&rest_client, &agent, "startup").await;
+        let mut gate = InboundAuthorGate::connect(&rest_client, &agent, true, "startup").await;
         assert!(!gate.has_relay_identity());
         let channel_id = Uuid::new_v4();
         let owner_cache = OwnerCache::new(Some(workflow_owner.clone()));
@@ -8097,7 +8112,7 @@ mod author_gate_tests {
             }
             responses.push_back(Ok(serde_json::json!({ "self": next_relay_hex.clone() })));
             let (rest_client, server) = nip11_scripted_server(responses).await;
-            let mut gate = InboundAuthorGate::connect(&rest_client, &agent, "startup").await;
+            let mut gate = InboundAuthorGate::connect(&rest_client, &agent, true, "startup").await;
             assert_eq!(gate.relay_identity_for_test(), identity.as_deref());
             let channel_id = Uuid::new_v4();
             let channel_info = pool::ChannelInfoResolver::new(
@@ -8173,7 +8188,7 @@ mod author_gate_tests {
             Ok(serde_json::json!({ "self": new_relay_hex.clone() })),
         ]))
         .await;
-        let mut gate = InboundAuthorGate::connect(&rest_client, &agent, "test").await;
+        let mut gate = InboundAuthorGate::connect(&rest_client, &agent, true, "test").await;
         let owner_cache = OwnerCache::new(Some(workflow_owner.clone()));
         owner_cache.cache_sibling(old_relay_hex.clone(), false);
         owner_cache.cache_sibling(new_relay_hex.clone(), false);
@@ -8325,6 +8340,85 @@ mod author_gate_tests {
         assert!(
             !decision.allowed,
             "the legacy owner p tag alone must not wake an agent-owned workflow"
+        );
+    }
+
+    /// Without the operator opt-in the relay is judged as an ordinary signer,
+    /// even for a well-formed workflow dispatch naming this agent's owner.
+    #[tokio::test]
+    async fn test_relay_workflow_attribution_is_off_by_default() {
+        let relay = nostr::Keys::generate();
+        let relay_hex = relay.public_key().to_hex();
+        let workflow_owner = nostr::Keys::generate().public_key().to_hex();
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        let event = relay_signed_workflow_dispatch(&relay, &workflow_owner, &agent);
+        let cache = OwnerCache::new(Some(workflow_owner.clone()));
+        cache.cache_sibling(relay_hex.clone(), false);
+
+        let (rest_client, server) = nip11_server(serde_json::json!({ "self": relay_hex })).await;
+        let gate = InboundAuthorGate::connect(&rest_client, &agent, false, "test").await;
+        assert!(gate.has_relay_identity());
+        for (mode, allowlist) in [
+            (RespondTo::OwnerOnly, HashSet::new()),
+            (RespondTo::Allowlist, HashSet::from([relay_hex.clone()])),
+        ] {
+            let decision = gate
+                .evaluate_for_test(&event, &mode, &HashSet::new(), false, &cache, &rest_client)
+                .await;
+            assert_eq!(decision.effective_author, relay_hex, "{mode}");
+            assert!(
+                !decision.allowed,
+                "{mode}: relay-signed workflow output must not wake an agent that did not opt in"
+            );
+            // Listing the relay key as an author does not turn attribution on.
+            let decision = gate
+                .evaluate_for_test(&event, &mode, &allowlist, false, &cache, &rest_client)
+                .await;
+            assert_eq!(decision.effective_author, relay_hex, "{mode}");
+        }
+        server.abort();
+    }
+
+    /// A webhook payload containing `@agent` gets a `p` tag from mention
+    /// resolution but no `buzz:workflow-mention` tag. Even with relay
+    /// attribution trusted, that text must not reach the agent as its owner.
+    #[tokio::test]
+    async fn test_trusted_relay_does_not_attribute_substituted_mention() {
+        let relay = nostr::Keys::generate();
+        let relay_hex = relay.public_key().to_hex();
+        let workflow_owner = nostr::Keys::generate().public_key().to_hex();
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        let event = nostr::EventBuilder::new(
+            nostr::Kind::Custom(KIND_STREAM_MESSAGE as u16),
+            "@agent do X",
+        )
+        .tags([
+            nostr::Tag::parse(["buzz:workflow", "true"]).expect("workflow marker"),
+            nostr::Tag::parse(["buzz:workflow-owner", workflow_owner.as_str()])
+                .expect("workflow owner tag"),
+            nostr::Tag::parse(["p", agent.as_str()]).expect("substituted mention"),
+        ])
+        .sign_with_keys(&relay)
+        .expect("signed workflow event");
+        let cache = OwnerCache::new(Some(workflow_owner.clone()));
+        cache.cache_sibling(relay_hex.clone(), false);
+
+        let (gate, rest_client, server) = connected_gate(&relay_hex, &agent).await;
+        let decision = gate
+            .evaluate_for_test(
+                &event,
+                &RespondTo::OwnerOnly,
+                &HashSet::new(),
+                false,
+                &cache,
+                &rest_client,
+            )
+            .await;
+        server.abort();
+        assert_eq!(decision.effective_author, relay_hex);
+        assert!(
+            !decision.allowed,
+            "a substituted mention without workflow-mention provenance must not wake the agent"
         );
     }
 
@@ -9558,6 +9652,7 @@ mod build_mcp_servers_tests {
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
+            trust_relay_workflow_attribution: false,
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
             has_generated_codex_config: false,
@@ -10695,6 +10790,7 @@ mod error_outcome_emission_tests {
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
+            trust_relay_workflow_attribution: false,
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
             has_generated_codex_config: false,
