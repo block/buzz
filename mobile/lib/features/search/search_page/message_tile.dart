@@ -223,8 +223,24 @@ class _MessageTile extends ConsumerWidget {
           isArchived: channel.isArchived,
         ),
       );
-    } else {
+    } else if (channel.isForum) {
       unawaited(_openSearchChannel(context, channel));
+    } else {
+      // A thread reply opens in its thread; a reply also sent to the channel
+      // is shown there, so it opens in the channel like Activity does.
+      final broadcast = hit.tags.any(
+        (tag) => tag.length >= 2 && tag[0] == 'broadcast' && tag[1] == '1',
+      );
+      unawaited(
+        _openSearchChannel(
+          context,
+          channel,
+          messageId: hit.eventId,
+          threadRootId: broadcast
+              ? null
+              : parseThreadReference(hit.tags).parentId,
+        ),
+      );
     }
   }
 }

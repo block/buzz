@@ -103,6 +103,10 @@ class _MessageList extends HookConsumerWidget {
     final previousLatestEntryId = useRef<String?>(null);
     final observedLocalSendIds = useRef(localSendAnimations.keys.toSet());
     final didJumpToInitialMessage = useRef(false);
+    // The target's index when last placed, kept until a scroll, navigation
+    // or local send releases it.
+    final initialMessageAnchor = useRef<int?>(null);
+    final initialMessagePlacement = useRef(0);
     final isUnreadNavigationDismissed = useState(false);
     final detachedWhileUnreadShown = useRef(false);
     final oldestUnreadMessageId = useState<String?>(null);
@@ -412,6 +416,7 @@ class _MessageList extends HookConsumerWidget {
 
     void scrollToLatest({String? targetMessageId}) {
       if (!itemScrollController.isAttached || isAutoScrolling.value) return;
+      initialMessageAnchor.value = null;
       isAutoScrolling.value = true;
       followsLatest.value = true;
       hasUserScrolled.value = false;
@@ -438,6 +443,7 @@ class _MessageList extends HookConsumerWidget {
         return;
       }
       isUnreadNavigationDismissed.value = true;
+      initialMessageAnchor.value = null;
       followsLatest.value = false;
       hasUserScrolled.value = false;
       isAtLatest.value = false;
@@ -730,23 +736,39 @@ class _MessageList extends HookConsumerWidget {
 
     _useInitialThreadRoute(context, ref);
 
+    // Older pages and live posts both move the target's index, and the list
+    // keeps its numeric position, so re-place the target whenever its index
+    // changes until the anchor is released.
+    final initialMessageIndex = reversedIndexOf(initialMessageId);
     useEffect(() {
-      final targetIndex = reversedIndexOf(initialMessageId);
+      final targetIndex = initialMessageIndex;
+      final placed = initialMessageAnchor.value;
       if (initialThreadRootId != null ||
           targetIndex == null ||
-          didJumpToInitialMessage.value) {
+          (didJumpToInitialMessage.value &&
+              (placed == null || placed == targetIndex))) {
         return null;
       }
+      final placement = ++initialMessagePlacement.value;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!context.mounted || !itemScrollController.isAttached) return;
+        if (placement != initialMessagePlacement.value ||
+            !context.mounted ||
+            !itemScrollController.isAttached) {
+          return;
+        }
+        if (didJumpToInitialMessage.value &&
+            initialMessageAnchor.value == null) {
+          return;
+        }
         didJumpToInitialMessage.value = true;
+        initialMessageAnchor.value = targetIndex;
         followsLatest.value = false;
         hasUserScrolled.value = false;
         isAtLatest.value = false;
         itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
       });
       return null;
-    }, [initialMessageId, initialThreadRootId, entries.length]);
+    }, [initialMessageId, initialThreadRootId, initialMessageIndex]);
 
     useEffect(() {
       final previous = previousLatestEntryId.value;
@@ -771,6 +793,7 @@ class _MessageList extends HookConsumerWidget {
         return null;
       }
       if (localSendId != null) {
+        initialMessageAnchor.value = null;
         followsLatest.value = true;
         hasUserScrolled.value = false;
       }
@@ -805,6 +828,7 @@ class _MessageList extends HookConsumerWidget {
       olderFetchPaused: olderFetchPaused,
       oldestNavigationGeneration: oldestNavigationGeneration,
       onStart: () {
+        initialMessageAnchor.value = null;
         followsLatest.value = false;
         hasUserScrolled.value = true;
         isAtLatest.value = false;
@@ -903,6 +927,7 @@ class _MessageList extends HookConsumerWidget {
             if (notification is UserScrollNotification &&
                 notification.direction != ScrollDirection.idle) {
               navigatingOldest.value = false;
+              initialMessageAnchor.value = null;
               oldestNavigationGeneration.value++;
               olderFetchPaused.value = false;
               viewportFillPages.value = 0;

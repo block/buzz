@@ -41,6 +41,7 @@ import '../forum/forum_thread_page.dart';
 import '../profile/profile_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
+import '../../shared/relay/thread_reference.dart';
 import 'recent_searches_provider.dart';
 import 'search_provider.dart';
 
@@ -803,13 +804,28 @@ extension on _SearchFilter {
 }
 
 /// Let the destination resolve placement once, including on a fresh launch.
-Future<void> _openSearchChannel(BuildContext context, Channel channel) async {
+Future<void> _openSearchChannel(
+  BuildContext context,
+  Channel channel, {
+  String? messageId,
+  String? threadRootId,
+}) async {
   try {
     if (!context.mounted) return;
+    // The pane keeps this builder after the tapped tile unmounts.
+    final threadRouteBehavior = ConversationPaneScope.maybeOf(context) == null
+        ? InitialThreadRouteBehavior.replaceCurrentRoute
+        : InitialThreadRouteBehavior.push;
     await openConversationPane(
       context,
-      channel.id,
-      (_) => ChannelDetailPage(channel: channel),
+      messageId ?? channel.id,
+      (_) => ChannelDetailPage(
+        channel: channel,
+        initialMessageId: messageId,
+        initialThreadRootId: threadRootId,
+        initialThreadRouteBehavior: threadRouteBehavior,
+      ),
+      reopen: messageId != null,
     );
   } catch (_) {
     if (!context.mounted) return;

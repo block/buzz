@@ -9239,6 +9239,157 @@ void main() {
       },
     );
 
+    testWidgets(
+      'keeps an older deep-linked message in view while history fills in '
+      'below it, until the user scrolls',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        NostrEvent message(int i) => _textMsg(
+          id: 'msg$i',
+          pubkey: 'alice',
+          content: i == 10 ? 'Target message' : 'Message $i',
+          createdAt: 1000 + i * 1000,
+        );
+        // The target was fetched by ID; automatic paging fills the history
+        // between it and the newest page, while a live message arrives.
+        final messagesNotifier = _FakeMessagesNotifier(
+          [message(10), for (var i = 60; i < 90; i++) message(i)],
+          olderPages: [
+            [for (var i = 40; i < 60; i++) message(i), message(90)],
+            [for (var i = 11; i < 40; i++) message(i)],
+          ],
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            messagesNotifier: messagesNotifier,
+            initialMessageId: 'msg10',
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final target = findRichText('Target message');
+        expect(messagesNotifier.fetchOlderCalls, greaterThan(0));
+        expect(findRichText('Message 11'), findsOneWidget);
+        final anchoredTop = tester.getRect(target).top;
+        expect(anchoredTop, inInclusiveRange(0, 800));
+
+        // Live posts alone move the target's index too; it stays where it was.
+        final history = [for (var i = 10; i < 91; i++) message(i)];
+        NostrEvent live(int i) => _textMsg(
+          id: 'live$i',
+          pubkey: 'alice',
+          content: 'Live $i',
+          createdAt: 100000 + i,
+        );
+        for (var i = 1; i <= 20; i++) {
+          messagesNotifier.setMessages([
+            ...history,
+            for (var j = 0; j < i; j++) live(j),
+          ]);
+          await tester.pump();
+          await tester.pump();
+        }
+        await tester.pumpAndSettle();
+        expect(tester.getRect(target).top, moreOrLessEquals(anchoredTop));
+
+        // Scrolling takes over: history arriving below the target afterwards
+        // must not pull the list back to it.
+        await tester.drag(
+          find.byKey(const ValueKey('channel-message-list')),
+          const Offset(0, -200),
+        );
+        await tester.pumpAndSettle();
+        messagesNotifier.setMessages([
+          message(10),
+          for (var i = 0; i < 5; i++)
+            _textMsg(
+              id: 'late$i',
+              pubkey: 'alice',
+              content: 'Late $i',
+              createdAt: 10500 + i,
+            ),
+          for (var i = 11; i < 91; i++) message(i),
+          for (var j = 0; j < 20; j++) live(j),
+        ]);
+        await tester.pumpAndSettle();
+        expect(
+          target.evaluate().isEmpty ||
+              tester.getRect(target).top < anchoredTop - 100,
+          isTrue,
+        );
+      },
+    );
+
+    for (final sameFrame in [false, true]) {
+      testWidgets(
+        'a local send follows the latest message after a deep link placed '
+        'before history loaded (same frame: $sameFrame)',
+        (tester) async {
+          tester.view.physicalSize = const Size(400, 600);
+          tester.view.devicePixelRatio = 1;
+          addTearDown(tester.view.reset);
+
+          final messages = [
+            for (var i = 0; i < 40; i++)
+              _textMsg(
+                id: 'msg$i',
+                pubkey: 'alice',
+                content: i == 10 ? 'Target message' : 'Message $i',
+                createdAt: 1000 + i,
+              ),
+          ];
+          // The saved page places the target before relay history is ready.
+          final messagesNotifier = _FakeMessagesNotifier(
+            messages,
+            hasLoadedMessages: false,
+          );
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: const [],
+              messagesNotifier: messagesNotifier,
+              initialMessageId: 'msg10',
+              users: const {
+                'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+                'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+              },
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(findRichText('Target message'), findsOneWidget);
+
+          if (!sameFrame) {
+            messagesNotifier.setMessages(messages);
+            await tester.pumpAndSettle();
+          }
+          final localSend = _textMsg(
+            id: 'local',
+            pubkey: 'self',
+            content: 'My reply',
+            createdAt: 2000,
+          );
+          ProviderScope.containerOf(
+                tester.element(find.byType(ChannelDetailPage)),
+              )
+              .read(localMessageSendAnimationProvider(_channelId).notifier)
+              .mark(localSend.id);
+          messagesNotifier.setMessages([...messages, localSend]);
+          await tester.pumpAndSettle();
+
+          expect(findRichText('My reply'), findsOneWidget);
+          expect(findRichText('Target message'), findsNothing);
+        },
+      );
+    }
+
     testWidgets('groups consecutive messages from same author', (tester) async {
       final messages = [
         _textMsg(
