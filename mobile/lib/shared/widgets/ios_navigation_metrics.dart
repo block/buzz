@@ -12,6 +12,8 @@ class IosNavigationMetrics {
     this.bookDivision,
     this.portraitHeader,
     this.portraitWindowSize,
+    this.laptopDivision,
+    this.laptopWindowSize,
   });
 
   final double compactHeight;
@@ -22,6 +24,15 @@ class IosNavigationMetrics {
   final Rect? bookDivision;
   final Rect? portraitHeader;
   final Size? portraitWindowSize;
+
+  /// A fold across the window, as when the device is half open like a laptop,
+  /// measured in a window of [laptopWindowSize].
+  final Rect? laptopDivision;
+  final Size? laptopWindowSize;
+
+  /// The laptop fold, when it was measured in a window of [size].
+  Rect? laptopDivisionFor(Size size) =>
+      laptopWindowSize == size ? laptopDivision : null;
 
   Rect? portraitHeaderFor(Size size) =>
       portraitWindowSize == size ? portraitHeader : null;
@@ -55,7 +66,56 @@ class IosNavigationMetrics {
       windowSize: old.windowSize,
       bookDivision: old.bookDivision,
       portraitHeader: header,
+      laptopDivision: old.laptopDivision,
+      laptopWindowSize: old.laptopWindowSize,
       portraitWindowSize: size,
+    );
+  }
+
+  /// Records the laptop fold UIKit reports for the current window.
+  static void updateLaptop(BuildContext context, Map<Object?, Object?> values) {
+    final notifier = _MetricsScope.of(context);
+    final width = (values['windowWidth'] as num?)?.toDouble();
+    final height = (values['windowHeight'] as num?)?.toDouble();
+    if (notifier == null ||
+        width == null ||
+        height == null ||
+        !width.isFinite ||
+        !height.isFinite ||
+        width <= 0 ||
+        height <= 0) {
+      return;
+    }
+    final size = Size(width, height);
+    final raw = values['division'];
+    Rect? division;
+    if (raw is List &&
+        raw.length == 4 &&
+        raw.every((value) => value is num && value.isFinite)) {
+      final v = raw.map((value) => (value as num).toDouble()).toList();
+      final candidate = Rect.fromLTWH(v[0], v[1], v[2], v[3]);
+      // Only a fold that crosses the whole window, with room on both sides.
+      if (candidate.height >= 0 &&
+          candidate.left <= 1 &&
+          candidate.right >= width - 1 &&
+          candidate.top > 0 &&
+          candidate.bottom < height) {
+        division = candidate;
+      }
+    }
+    final old = notifier.value;
+    if (old.laptopWindowSize == size && old.laptopDivision == division) return;
+    notifier.value = IosNavigationMetrics(
+      compactHeight: old.compactHeight,
+      largeTitleHeight: old.largeTitleHeight,
+      railCenterX: old.railCenterX,
+      railTopClearance: old.railTopClearance,
+      windowSize: old.windowSize,
+      bookDivision: old.bookDivision,
+      portraitHeader: old.portraitHeader,
+      portraitWindowSize: old.portraitWindowSize,
+      laptopDivision: division,
+      laptopWindowSize: size,
     );
   }
 
@@ -126,6 +186,8 @@ class IosNavigationMetrics {
       windowSize: size,
       bookDivision: division,
       portraitHeader: old.portraitHeader,
+      laptopDivision: old.laptopDivision,
+      laptopWindowSize: old.laptopWindowSize,
       portraitWindowSize: old.portraitWindowSize,
     );
   }
@@ -155,6 +217,8 @@ class IosNavigationMetrics {
       windowSize: notifier.value.windowSize,
       bookDivision: notifier.value.bookDivision,
       portraitHeader: notifier.value.portraitHeader,
+      laptopDivision: notifier.value.laptopDivision,
+      laptopWindowSize: notifier.value.laptopWindowSize,
       portraitWindowSize: notifier.value.portraitWindowSize,
     );
   }

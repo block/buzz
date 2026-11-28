@@ -457,6 +457,15 @@ class IosNavigationBar extends HookConsumerWidget {
           }
           return;
         }
+        if (call.method == 'laptopGeometry') {
+          if (context.mounted) {
+            IosNavigationMetrics.updateLaptop(
+              context,
+              call.arguments as Map<Object?, Object?>,
+            );
+          }
+          return;
+        }
         if (call.method == 'railGeometry') {
           if (context.mounted) {
             IosNavigationMetrics.updateRail(

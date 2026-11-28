@@ -162,6 +162,12 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private var offset: CGFloat = 0
   private var controlBackground = UIColor.secondarySystemBackground
   private var foldRefresh: DispatchWorkItem?
+  private var reportedLaptopDivision: LaptopDivisionReport?
+  /// The fold the keyboard was last refreshed for, shared by every bar.
+  private static var keyboardDivision: LaptopDivisionReport?
+  /// The newest fold any bar measured, and the pending keyboard refresh for it.
+  private static var latestDivision: LaptopDivisionReport?
+  private static var keyboardRefresh: DispatchWorkItem?
   private var standaloneControl = false
   private var standaloneLargeTitle = false
   private var standaloneSurface: UIView?
@@ -250,7 +256,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     }
     configure(initial)
     #if canImport(UIKit, _version: 9127.0.85)
-    if #available(iOS 27.1, *), standaloneControl || floatingTitle != nil || backdropOnly {
+    // Every bar reports a laptop fold, so every bar follows the hinge.
+    if #available(iOS 27.1, *) {
       container.addInteraction(UIHingeInteraction { [weak self] _, _ in
         guard let self else { return }
         self.container.setNeedsLayout()
@@ -267,6 +274,11 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   func view() -> UIView { container }
 
   private func layout() {
+    #if canImport(UIKit, _version: 9127.0.85)
+    if #available(iOS 27.1, *), let window = container.window {
+      reportLaptopDivision(in: window)
+    }
+    #endif
     let portraitHeader = floatingTitle == nil && !backdropOnly ? nil : duoPortraitHeader(in: container.window)
 
     if standaloneLargeTitle, let scroll = standaloneSurface as? UIScrollView,
@@ -479,6 +491,63 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     }
     #endif
   }
+
+  #if canImport(UIKit, _version: 9127.0.85)
+  /// Publishes a fold that runs across the window, as when the device is half
+  /// open like a laptop, so conversations can keep their composer below it.
+  /// Every bar reports it, since a portrait window has no strip control.
+  @available(iOS 27.1, *)
+  private func reportLaptopDivision(in window: UIWindow) {
+    let division = window.reservedRegions(kind: .division)
+      .first { $0.isActive && $0.frame.width >= window.bounds.width - 1
+        && $0.frame.minY > 0 && $0.frame.maxY < window.bounds.height }
+    let report = LaptopDivisionReport(frame: division?.frame, windowSize: window.bounds.size)
+    guard report != reportedLaptopDivision else { return }
+    reportedLaptopDivision = report
+    let fold: Any = report.frame.map { frame -> Any in
+      [frame.minX, frame.minY, frame.width, frame.height]
+    } ?? NSNull()
+    let values: [String: Any] = ["division": fold,
+                                 "windowWidth": report.windowSize.width,
+                                 "windowHeight": report.windowSize.height]
+    DispatchQueue.main.async { [weak self] in
+      self?.channel.invokeMethod("laptopGeometry", arguments: values)
+    }
+    Self.latestDivision = report
+    guard let previous = Self.keyboardDivision, previous.windowSize == report.windowSize else {
+      // The first fold, or a new window size, which iOS reports a keyboard
+      // frame for on its own.
+      Self.keyboardDivision = report
+      return
+    }
+    // The division can flip several times while the hinge moves, so wait for
+    // it to settle before refreshing the keyboard.
+    Self.keyboardRefresh?.cancel()
+    let refresh = DispatchWorkItem { Self.refreshKeyboard(attempt: 0) }
+    Self.keyboardRefresh = refresh
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: refresh)
+  }
+
+  /// When the hinge moves under an open keyboard, iOS keeps the keyboard frame
+  /// it reported for the old pose, so Flutter's keyboard inset goes stale.
+  /// Reloading the input views makes iOS report the frame again. A reload
+  /// would end a composition in progress, so it waits until the text has no
+  /// marked range, for at most a few seconds.
+  @available(iOS 27.1, *)
+  private static func refreshKeyboard(attempt: Int) {
+    guard let latest = latestDivision, latest != keyboardDivision else { return }
+    let responder = FirstResponder.current()
+    if let input = responder as? UITextInput, input.markedTextRange != nil, attempt < 10 {
+      let retry = DispatchWorkItem { refreshKeyboard(attempt: attempt + 1) }
+      keyboardRefresh = retry
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: retry)
+      return
+    }
+    keyboardDivision = latest
+    if let input = responder as? UITextInput, input.markedTextRange != nil { return }
+    responder?.reloadInputViews()
+  }
+  #endif
 
   private func reportAvatarBounds() {
     guard let avatar = trackedAvatar, avatar.window != nil, avatar.bounds.width > 0 else { return }
@@ -1128,4 +1197,28 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     navigation.view.removeFromSuperview()
     navigation.removeFromParent()
   }
+}
+
+/// Finds the first responder, which UIKit offers no direct accessor for.
+private enum FirstResponder {
+  private static weak var found: UIResponder?
+
+  static func current() -> UIResponder? {
+    found = nil
+    UIApplication.shared.sendAction(#selector(UIResponder.buzzReportFirstResponder),
+                                    to: nil, from: nil, for: nil)
+    return found
+  }
+
+  fileprivate static func report(_ responder: UIResponder) { found = responder }
+}
+
+private extension UIResponder {
+  @objc func buzzReportFirstResponder() { FirstResponder.report(self) }
+}
+
+/// The last laptop fold a navigation bar published, to skip repeats.
+private struct LaptopDivisionReport: Equatable {
+  let frame: CGRect?
+  let windowSize: CGSize
 }
