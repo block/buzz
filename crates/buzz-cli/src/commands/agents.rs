@@ -166,6 +166,28 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
         }
 
         AgentsCmd::Archived => cmd_archived(client).await,
+        AgentsCmd::Export {
+            agent,
+            out,
+            name,
+            force,
+        } => super::agent_files::export(client, &agent, out, name, force).await,
+        AgentsCmd::Import {
+            dir,
+            dry,
+            new,
+            workspace,
+            prune_channels,
+        } => {
+            let options = super::agent_files::ImportOptions {
+                dry,
+                new,
+                workspace,
+                prune_channels,
+            };
+            super::agent_files::import(client, &dir, options).await
+        }
+        AgentsCmd::Edit { agent } => super::agent_files::edit(client, &agent).await,
     }
 }
 

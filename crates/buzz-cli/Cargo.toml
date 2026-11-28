@@ -52,8 +52,11 @@ base64 = "0.22"
 # SHA-256 — NIP-98 payload hash tag, Blossom file hash, mem patch base-hash
 sha2 = "0.11"
 
-# Unified-diff parser and strict applier — `mem patch`
+# Unified-diff parser and strict applier — `mem patch`, and `agents import --dry` diffs
 diffy = "0.5"
+
+# AGENT.md front matter — `agents export` and `agents import`
+serde_yaml = { workspace = true }
 
 # Hex encoding — SHA-256 hash output for Blossom uploads
 hex = { workspace = true }
@@ -66,6 +69,9 @@ infer = "0.19"
 
 # URL parsing — extract server domain for Blossom auth tag
 url = { workspace = true }
+
+# Scratch directory for `agents edit`
+tempfile = "3"
 
 # Persona pack parsing, validation, and resolution
 buzz-persona = { path = "../buzz-persona" }
