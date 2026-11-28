@@ -1468,6 +1468,14 @@ pub(crate) fn effective_message_author(event: &Event, relay_pubkey: &nostr::Publ
 /// sender, so the error never reveals whether, or where, the target exists.
 const EDIT_TARGET_DENIED: &str = "edit target not found or not editable by you";
 
+/// Resolve the sole valid target for a newly admitted edit.
+fn single_edit_target(event: &Event) -> Result<Vec<u8>, String> {
+    if count_e_tags(event) != 1 {
+        return Err(EDIT_TARGET_DENIED.to_string());
+    }
+    buzz_core::media::first_edit_target(event).ok_or_else(|| EDIT_TARGET_DENIED.to_string())
+}
+
 /// Validate kind:40003 edit ownership — event.pubkey must match target's effective author,
 /// or the actor must be the owning human of the agent that authored the target message.
 async fn validate_edit_ownership(
@@ -1475,8 +1483,7 @@ async fn validate_edit_ownership(
     event: &Event,
     state: &AppState,
 ) -> Result<(), String> {
-    let target_bytes = buzz_core::media::first_edit_target(event)
-        .ok_or_else(|| "missing e tag for edit target".to_string())?;
+    let target_bytes = single_edit_target(event)?;
     // Kind 40003 skips the generic membership gate, so this validator is the
     // only authority: a target outside the edit's `h` channel, unreadable, or
     // not the actor's to edit is denied exactly like a missing one.
@@ -5368,6 +5375,44 @@ mod postgres_tests {
     fn count_e_tags_single_valid() {
         let event = make_event_with_tags(5, "", &[&["e", "a".repeat(64).as_str()]]);
         assert_eq!(count_e_tags(&event), 1);
+    }
+
+    #[test]
+    fn edit_admission_requires_exactly_one_valid_target() {
+        let target = "ab".repeat(32);
+        let other = "cd".repeat(32);
+        let short = "a".repeat(63);
+        let long = "a".repeat(65);
+        let non_hex = "g".repeat(64);
+        let cases: &[&[&[&str]]] = &[
+            &[],
+            &[&["h", "channel"]],
+            &[&["e"]],
+            &[&["e", ""]],
+            &[&["e", &short]],
+            &[&["e", &long]],
+            &[&["e", &non_hex]],
+            &[&["e", &target], &["e", &other]],
+            &[&["e", &target], &["e", &target]],
+            &[&["e", "invalid"], &["e", &target]],
+            &[&["e", &target], &["e", "invalid"]],
+        ];
+        for tags in cases {
+            let event = make_event_with_tags(KIND_STREAM_MESSAGE_EDIT, "edit", tags);
+            assert_eq!(
+                single_edit_target(&event),
+                Err(EDIT_TARGET_DENIED.into()),
+                "{tags:?}"
+            );
+        }
+        for value in [&target, &target.to_ascii_uppercase()] {
+            let event = make_event_with_tags(
+                KIND_STREAM_MESSAGE_EDIT,
+                "edit",
+                &[&["h", "channel"], &["e", value, "", "reply"]],
+            );
+            assert_eq!(single_edit_target(&event), Ok(vec![0xab; 32]));
+        }
     }
 
     fn make_engram(tags: &[&[&str]], content: &str) -> Event {
