@@ -276,10 +276,10 @@ for (const platform of [
       .toContain("read_clipboard_text");
     await expect(input).toHaveText("Bold and linkedlist item");
     await expect(input.locator("strong, a, ul, li")).toHaveCount(0);
-    await expect(input.locator(":scope > p")).toHaveText([
-      "Bold and linked",
-      "list item",
-    ]);
+    // One line break is a hard break, as Shift+Enter makes, so the message
+    // sends with a single newline rather than a blank line.
+    await expect(input.locator(":scope > p")).toHaveCount(1);
+    await expect(input.locator(":scope > p > br")).toHaveCount(1);
   });
 }
 
