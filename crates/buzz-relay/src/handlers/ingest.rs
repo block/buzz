@@ -2433,7 +2433,8 @@ fn write_restriction_denial(
 /// [`crate::state::RESTRICTION_CACHE_MAX_AGE`] on a pod that misses that
 /// notification. The verdict is
 /// still taken at `now`, so a cached timeout lifts on time. Fails closed on a
-/// DB error.
+/// DB error, unless a recent cached row shows no ban or timeout (see
+/// [`crate::state::RESTRICTION_FALLBACK_GRACE`]).
 pub(crate) async fn enforce_write_restriction(
     state: &AppState,
     tenant: &TenantContext,

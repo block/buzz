@@ -492,7 +492,9 @@ pub mod relay_members {
     /// HTTP. Bans only: a timeout blocks writes, and HTTP writes reach the
     /// ingest gate, while reads stay allowed. Each request's grant ends with
     /// the request, so this reads through the restriction cache (see
-    /// [`AppState::restriction_state_cached`]). Fails closed with 503.
+    /// [`AppState::restriction_state_cached`]). Fails closed with 503, unless
+    /// a recent cached row shows no ban or timeout (see
+    /// [`crate::state::RESTRICTION_FALLBACK_GRACE`]).
     async fn deny_banned(
         state: &AppState,
         community: CommunityId,

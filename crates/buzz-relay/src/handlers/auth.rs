@@ -60,14 +60,18 @@ fn classify_relay_membership(
 /// Community-ban verdict for an authenticating principal: shared by every
 /// socket auth seam (root and audio) so they cannot drift.
 ///
-/// Fails closed: a DB error is `DbError`, never `Clear`. NIP-OA cascade: a ban
-/// on the principal blocks it directly; if the principal is clear, a ban on
-/// its proven owner (extracted from the self-proving auth tag) blocks it too.
+/// Fails closed: a DB error is `DbError`, never `Clear`, unless the key's
+/// cached row shows no ban or timeout and is within
+/// [`crate::state::RESTRICTION_FALLBACK_GRACE`] of its max age. NIP-OA
+/// cascade: a ban on the principal blocks it directly; if the principal is
+/// clear, a ban on its proven owner (extracted from the self-proving auth tag)
+/// blocks it too. Each key's row falls back on its own.
 ///
 /// `cached` reads the restriction rows through
 /// [`AppState::restriction_state_cached`], for per-request gates whose grant
 /// ends with the request (HTTP requests, ephemeral pulses). Socket admission
-/// reads fresh: an admitted socket outlives the cache's staleness bound.
+/// reads fresh through [`AppState::restriction_state_fresh`]: an admitted
+/// socket outlives the cache's staleness bound.
 /// Returns the outcome with the row that decided it.
 pub(crate) async fn community_ban_verdict(
     state: &AppState,
@@ -176,8 +180,7 @@ async fn principal_ban_verdict(
             .await
     } else {
         state
-            .db
-            .moderation_restriction_state(community, key.as_bytes())
+            .restriction_state_fresh(community, key.as_bytes())
             .await
     };
     let (outcome, source) = match restriction {
@@ -5337,6 +5340,84 @@ mod tests {
             metric_counter(&snapshot, "buzz_auth_attempts_total", None),
             1
         );
+    }
+
+    /// With the restriction database unavailable, socket admission serves an
+    /// expired row that shows no ban or timeout at its ban check and moves on
+    /// to the next gate, the stored-owner read, which fails here; a key with a
+    /// ban or timeout row, or no row, still fails closed on the ban check.
+    /// Mutation: read socket admission's restriction uncached without the
+    /// fallback, or let the fallback serve a restricted row → RED.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_admits_past_a_failed_ban_check_only_on_a_recent_clear_row() {
+        use buzz_db::moderation::RestrictionState;
+        let expired = std::time::Instant::now() - crate::state::RESTRICTION_CACHE_MAX_AGE;
+        let banned = RestrictionState {
+            banned: true,
+            own_banned: true,
+            muted_until: None,
+        };
+        let muted = RestrictionState {
+            muted_until: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            ..RestrictionState::default()
+        };
+        for (row, outcome, served) in [
+            (
+                Some(RestrictionState::default()),
+                AuthOutcome::RelayMembershipCheckError,
+                1,
+            ),
+            (Some(banned), AuthOutcome::BanCheckError, 0),
+            (Some(muted), AuthOutcome::BanCheckError, 0),
+            (None, AuthOutcome::BanCheckError, 0),
+        ] {
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+            let state = crate::state::tests::test_state_with_unreachable_database_url(
+                "postgres://buzz:buzz_dev@127.0.0.1:1/buzz",
+            )
+            .await;
+            let challenge = "ban-check-fallback-challenge";
+            let (conn, _rx) = test_conn_with_auth(pending(challenge));
+            let relay_url: RelayUrl =
+                crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &conn.tenant)
+                    .parse()
+                    .expect("test relay URL");
+            let keys = Keys::generate();
+            if let Some(row) = row.clone() {
+                state.restriction_cache.seed_read_at(
+                    (
+                        conn.tenant.community(),
+                        keys.public_key().to_bytes().to_vec(),
+                    ),
+                    row,
+                    expired,
+                );
+            }
+            let event = EventBuilder::auth(challenge, relay_url)
+                .sign_with_keys(&keys)
+                .expect("sign auth event");
+
+            handle_auth(event, conn.clone(), state).await;
+
+            assert!(conn.cancel.is_cancelled(), "{row:?}: the next gate fails");
+            let snapshot = snapshotter.snapshot().into_vec();
+            assert_eq!(
+                metric_counter(
+                    &snapshot,
+                    "buzz_auth_outcomes_total",
+                    Some(outcome.as_str())
+                ),
+                1,
+                "{row:?}",
+            );
+            assert_eq!(
+                metric_counter(&snapshot, "buzz_restriction_fallback_served_total", None),
+                served,
+                "{row:?}",
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
