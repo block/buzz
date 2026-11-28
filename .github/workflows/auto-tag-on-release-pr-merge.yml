@@ -1,10 +1,9 @@
 name: Auto-tag on Release PR Merge
 
-# Four PR-driven release lanes share this workflow. Each uses an explicit branch
+# Three PR-driven release lanes share this workflow. Each uses an explicit branch
 # prefix; the main chart lane also auto-detects a Chart.yaml version bump so
 # a chart feature PR can publish its own new version when merged:
 #
-#   version-bump/<v>   → tag desktop-v<v>        → release.yml (desktop app)
 #   relay-release/<v>  → tag relay-v<v>  → docker.yml (relay image)
 #   chart-release/<v>  → tag chart-v<v>  → helm-chart.yml (main helm chart)
 #   push-chart-release/<v> → tag push-chart-v<v> → push-gateway-helm-chart.yml
@@ -38,9 +37,6 @@ jobs:
   auto-tag:
     permissions:
       contents: read
-      pull-requests: read
-      checks: read
-      statuses: read
     if: >
       github.event.pull_request.merged == true &&
       github.event.pull_request.head.repo.full_name == github.repository
@@ -61,9 +57,6 @@ jobs:
           # ordinary internal PR, publish only when Chart.yaml itself changed
           # and its version differs from the PR's base commit.
           case "$BRANCH" in
-            version-bump/*)
-              VERSION="${BRANCH#version-bump/}"
-              TAG_PREFIX="desktop-v" ;;
             relay-release/*)
               VERSION="${BRANCH#relay-release/}"
               TAG_PREFIX="relay-v" ;;
@@ -91,33 +84,9 @@ jobs:
           {
             echo "enabled=true"
             echo "tag=${TAG_PREFIX}${VERSION}"
-            if [[ "$TAG_PREFIX" == desktop-v ]]; then
-              echo "target_sha=${{ github.event.pull_request.head.sha }}"
-              echo "desktop=true"
-            else
-              echo "target_sha=$GITHUB_SHA"
-              echo "desktop=false"
-            fi
+            echo "target_sha=$GITHUB_SHA"
           } >> "$GITHUB_OUTPUT"
           echo "Tagging ${TAG_PREFIX}${VERSION}"
-
-
-      - name: Verify immutable reviewed desktop candidate
-        if: steps.release.outputs.desktop == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.release.outputs.tag }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
-          MERGED_AT: ${{ github.event.pull_request.merged_at }}
-        run: |
-          VERSION="${VERSION#desktop-v}"
-          export VERSION
-          scripts/verify-desktop-release-merge.sh
 
       - name: Create release tagger token
         if: steps.release.outputs.enabled == 'true'

@@ -6,7 +6,8 @@
     "check": "pnpm -r check"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.6"
+    "@biomejs/biome": "^2.4.6",
+    "@emoji-mart/data": "^1.2.1"
   },
   "dependencies": {
     "@tailwindcss/typography": "^0.5.19"

@@ -80,7 +80,7 @@ New message type? New kind integer. Zero breaking changes.
 
 ## Architecture
 
-Rust backend, TypeScript/React clients. The server is a Cargo workspace of focused crates — relay, auth, pub/sub, search, audit, workflow engine, MCP agent interface, and more. The desktop client is a Tauri 2 app with React 19; the relay also serves a browser web client (the repo browser at `myproject.com`). See [README.md](README.md) for the full crate map.
+Rust backend, TypeScript/React clients. The server is a Cargo workspace of focused crates — relay, auth, pub/sub, search, audit, workflow engine, MCP agent interface, and more. The desktop client lives in [block/buzz-app](https://github.com/block/buzz-app); the relay also serves a browser web client (the repo browser at `myproject.com`). See [README.md](README.md) for the full crate map.
 
 ---
 

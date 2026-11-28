@@ -4,7 +4,7 @@ name: helm chart
 # PUBLISHES it to GHCR as an OCI artifact on `chart-v*` tags.
 #
 # Publishing mirrors the relay image (see docker.yml): the chart is versioned
-# independently of the desktop app and the relay via its own `chart-v*` tags
+# independently of the relay via its own `chart-v*` tags
 # (Chart.yaml `version`, cut by merging a `chart-release/<version>` PR). Only
 # `chart-v*` tags publish — `main` pushes and PRs stay lint/render-only so we
 # never overwrite a released chart version from an in-progress `main`.
@@ -28,8 +28,8 @@ on:
   push:
     # No `paths` filter here: GitHub applies a push `paths` filter to tag
     # pushes too, so a `chart-v*` tag whose commit didn't touch a chart file
-    # would be filtered out and never publish. docker.yml / release.yml / sprig
-    # all keep `paths` out of a tag-carrying `push` for exactly this reason —
+    # would be filtered out and never publish. Other tag-triggered workflows
+    # keep `paths` out of a tag-carrying `push` for exactly this reason —
     # PR runs stay scoped via `pull_request.paths` below; main pushes lint
     # unconditionally (cheap), and tag pushes always run so publish can fire.
     branches: [main]

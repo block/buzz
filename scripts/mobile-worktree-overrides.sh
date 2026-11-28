@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Writes worktree-aware identity overrides for mobile debug builds, mirroring
-# the desktop dev experience in scripts/instance-env.sh: debug builds produced
-# from a git worktree get a unique app identifier keyed to the WORKTREE
+# Writes worktree-aware identity overrides for mobile debug builds: debug
+# builds produced from a git worktree get a unique app identifier keyed to the WORKTREE
 # DIRECTORY NAME (stable across branch switches, so installs and login state
 # are bounded by worktree count) plus a display-only branch label (short SHA
 # when detached).
@@ -30,8 +29,7 @@ ios_overrides="$repo_root/mobile/ios/Flutter/WorktreeOverrides.xcconfig"
 android_props="$repo_root/mobile/android/worktree.properties"
 
 # Worktree detection: in the main working tree --git-dir and --git-common-dir
-# are identical; in any linked worktree they differ (same check as
-# scripts/instance-env.sh).
+# are identical; in any linked worktree they differ.
 in_worktree=0
 if git -C "$repo_root" rev-parse --is-inside-work-tree &>/dev/null; then
     git_dir=$(git -C "$repo_root" rev-parse --git-dir)

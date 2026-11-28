@@ -40,7 +40,7 @@ blob-report/
 # Node modules (pnpm workspace hoists to root)
 node_modules/
 
-# Root npm lockfiles are accidental; desktop uses pnpm in /desktop.
+# Root npm lockfiles are accidental; the workspace uses pnpm.
 /package-lock.json
 
 # sqlx offline query data (generated, not portable)

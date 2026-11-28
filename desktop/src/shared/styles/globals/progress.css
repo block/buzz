@@ -1,9 +1,0 @@
-/* Indeterminate sweep for shared/ui/progress.tsx */
-@keyframes progress-indeterminate {
-  from {
-    transform: translateX(-150%);
-  }
-  to {
-    transform: translateX(400%);
-  }
-}

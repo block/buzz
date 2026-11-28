@@ -175,8 +175,8 @@ These choices have separate dimensions: local activity detection, the service th
 
 Repository observations during discovery (not desired-behavior requirements):
 
-- [Desktop presence](../desktop/src/features/presence/hooks.ts) derives automatic activity separately from manual away/offline preferences. It uses OS idle information when available and in-app activity otherwise.
-- [Presence timing](../desktop/src/features/presence/lib/presence.ts) already uses a ten-minute idle threshold, but a 60-second public-presence heartbeat.
+- Desktop presence (`src/features/presence/hooks.ts` in the legacy desktop app, since removed from this repository; the desktop app lives in [block/buzz-app](https://github.com/block/buzz-app)) derives automatic activity separately from manual away/offline preferences. It uses OS idle information when available and in-app activity otherwise.
+- Presence timing (`src/features/presence/lib/presence.ts` in the same app) already uses a ten-minute idle threshold, but a 60-second public-presence heartbeat.
 - [Relay presence storage](../crates/buzz-pubsub/src/presence.rs) is scoped by community and user, with a 180-second expiry. That existing state alone does not satisfy the 30-second, per-desktop-session suppression requirement.
 - [Push matching](../crates/buzz-relay/src/push_runtime.rs) currently happens at the relay, where event, user, community, and installation information meet.
 - [Gateway delivery requests](../crates/buzz-push-gateway/src/model.rs) carry an opaque grant, request identifier, and expiry, with no event payload. Gateway [authority](../crates/buzz-push-gateway/src/authority.rs) binds installations to relay delegations rather than maintaining desktop activity state.

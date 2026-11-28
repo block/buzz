@@ -333,8 +333,9 @@ the delete preview. It prints the member npubs and message `note`/`nevent` ids
 to paste. Rerunning it restores the seeded state, including deleted messages,
 restrictions, kicked message authors and feedback status. It refuses, writing
 nothing, while a seeded report or admin action is still in progress; finish or
-cancel it first. To use it from the desktop admin console with `just dev`, add
-these to `.env` and restart `just dev`:
+cancel it first. To use it from the desktop admin console (the desktop app
+lives in [block/buzz-app](https://github.com/block/buzz-app)), add these to
+`.env` and restart the relay:
 
 ```bash
 BUZZ_ADMIN_HOST=admin.localhost:3000

@@ -784,8 +784,8 @@ Save these. Losing any of them is data loss. See NOTES.txt printed by `helm inst
 
 The chart is published to GHCR as an OCI artifact at
 `oci://ghcr.io/block/buzz/charts/buzz` by the `helm chart` workflow
-(`.github/workflows/helm-chart.yml`), versioned independently of the desktop app
-and the relay image via its own `chart-v*` tags. Every PR/`main` push still
+(`.github/workflows/helm-chart.yml`), versioned independently of the relay
+image via its own `chart-v*` tags. Every PR/`main` push still
 lints, unit-tests, and render-checks the chart; only a `chart-v*` tag publishes,
 so an in-progress `main` can never overwrite a released version.
 

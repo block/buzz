@@ -4,7 +4,7 @@
 # =============================================================================
 # Usage: ./scripts/dev-setup.sh
 #
-# Starts Docker services, waits for healthy, runs migrations, installs desktop
+# Starts Docker services, waits for healthy, runs migrations, installs web
 # deps, and prints next steps.
 # =============================================================================
 set -euo pipefail
@@ -52,9 +52,9 @@ load_env() {
   # Smooth the local rename path for developers with a pre-Buzz .env copied
   # from .env.example. Only rewrite the old default values; custom values stay
   # untouched.
-  if [[ "${DATABASE_URL:-}" == "postgres://sprout:sprout_dev@localhost:5432/sprout" ]]; then
+  if [[ "${DATABASE_URL:-}" == "postgres://sprout:sprout_dev@localhost:5432/sprout" ]]; then # sadscan:disable np.postgres.1 -- local dev default
     warn "Migrating legacy default DATABASE_URL from sprout to buzz for this setup run"
-    DATABASE_URL="postgres://buzz:buzz_dev@localhost:5432/buzz"
+    DATABASE_URL="postgres://buzz:buzz_dev@localhost:5432/buzz" # sadscan:disable np.postgres.1 -- local dev default
   fi
   if [[ "${PGUSER:-}" == "sprout" ]]; then PGUSER="buzz"; fi
   if [[ "${PGPASSWORD:-}" == "sprout_dev" ]]; then PGPASSWORD="buzz_dev"; fi
@@ -132,23 +132,6 @@ done
 "${REPO_ROOT}/scripts/seed-local-community.sh"
 success "Database migrations complete"
 
-# ---- Install desktop dependencies -------------------------------------------
-
-DESKTOP_DIR="${REPO_ROOT}/desktop"
-
-if [[ -d "${DESKTOP_DIR}" ]]; then
-  if command -v pnpm &>/dev/null; then
-    log "Installing desktop dependencies (pnpm install)..."
-    (cd "${DESKTOP_DIR}" && pnpm install)
-    success "Desktop dependencies installed"
-  else
-    warn "pnpm not found — skipping desktop dependency install."
-    warn "Run '. ./bin/activate-hermit' to get pnpm, then 'just desktop-install'."
-  fi
-else
-  warn "Desktop directory not found at ${DESKTOP_DIR} — skipping."
-fi
-
 # ---- Install web dependencies -----------------------------------------------
 
 WEB_DIR="${REPO_ROOT}/web"
@@ -160,7 +143,7 @@ if [[ -d "${WEB_DIR}" ]]; then
     success "Web dependencies installed"
   else
     warn "pnpm not found — skipping web dependency install."
-    warn "Run '. ./bin/activate-hermit' to get pnpm, then 'just desktop-install'."
+    warn "Run '. ./bin/activate-hermit' to get pnpm, then 'pnpm install'."
   fi
 else
   warn "Web directory not found at ${WEB_DIR} — skipping."
@@ -192,7 +175,8 @@ echo -e "  ${BLUE}Keycloak${NC}    http://localhost:8180  (admin / admin — loc
 echo ""
 echo -e "  ${YELLOW}Next steps:${NC}"
 echo -e "    just relay                              # start the relay (terminal 1)"
-echo -e "    just dev                                # start the desktop app (terminal 2)"
+echo -e "    just web                                # start the web client (terminal 2)"
+echo -e "    The desktop app lives in https://github.com/block/buzz-app"
 echo ""
 echo -e "  ${YELLOW}Useful commands:${NC}"
 echo -e "    docker compose ps             # check service status"

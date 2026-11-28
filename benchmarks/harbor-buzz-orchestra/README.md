@@ -146,15 +146,16 @@ just benchmark --path <TASK_DIR> -k 1            # one local task, one attempt
 just benchmark --path benchmarks/buzz-dataset --layer regression   # Buzz k=1
 just benchmark --path benchmarks/buzz-dataset --layer workflow     # Buzz k=3
 just benchmark -i "cobol*" --attempts 3          # dataset subset
-just benchmark --gui                             # watch the run live
 ```
 
 One pinned user identity fronts the whole benchmark environment: it owns
 every trial channel (named after the task) and posts every task prompt, and
-trial channels are kept rather than archived. `--gui` adds that user to the
-relay membership list and opens the Buzz desktop app logged in as them, so
-channels fill the sidebar as the run progresses — watch, don't type; a human
-message mid-trial would taint the run. `just benchmark-down` stops the stack.
+trial channels are kept rather than archived. The script prints that user's
+key. To watch a run, add the user to the benchmark relay's membership list
+with `buzz-admin add-member` and sign in to a Buzz client as them; the desktop
+app lives in [block/buzz-app](https://github.com/block/buzz-app). Watch, don't
+type; a human message mid-trial would taint the run. `just benchmark-down`
+stops the stack.
 
 Networking: the relay is host-header tenant-bound, so agents must dial its
 canonical address (`ws://localhost:3600`) even from inside a task container.

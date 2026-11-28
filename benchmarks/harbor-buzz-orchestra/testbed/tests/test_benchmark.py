@@ -328,20 +328,14 @@ def test_bring_up_reraises_unrelated_failures(monkeypatch):
         benchmark.bring_up_stack({})
 
 
-def test_fresh_resets_volumes_and_gui_state(tmp_path, monkeypatch):
+def test_fresh_resets_volumes(monkeypatch):
     commands = []
     monkeypatch.setattr(
         benchmark.subprocess, "run", lambda cmd, check=True: commands.append(cmd)
     )
-    monkeypatch.setattr(benchmark.sys, "platform", "darwin")
-    monkeypatch.setattr(benchmark.Path, "home", classmethod(lambda cls: tmp_path))
-    gui_state = tmp_path / "Library" / "WebKit" / benchmark.GUI_BUNDLE_IDENTIFIER
-    gui_state.mkdir(parents=True)
-    (gui_state / "localstorage.sqlite3").touch()
 
     benchmark.reset_environment()
 
     assert ["down", "-v"] == commands[0][-2:]
-    assert not gui_state.exists()
     assert benchmark.parse_args(["--fresh"]).fresh
     assert not benchmark.parse_args([]).fresh

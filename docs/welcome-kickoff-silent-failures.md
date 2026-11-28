@@ -1,5 +1,9 @@
 # Welcome Kickoff — Failure Paths
 
+> **Note:** `desktop/` paths in this document refer to the legacy desktop app,
+> which has been removed from this repository. The desktop app now lives in
+> [block/buzz-app](https://github.com/block/buzz-app).
+
 Context: the Welcome-channel kickoff choreography
 (`desktop/src/features/onboarding/welcomeKickoff.ts`) where Fizz posts an
 opener, teammates introduce themselves in-thread, and Fizz posts a closer.
