@@ -444,6 +444,16 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(push(), "Early")
     XCTAssertNil(push())
 
+    // A generic wake for another event must not enrich an opted-out workflow
+    // message; an eligible newer message can still be shown instead.
+    let quiet = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+      createdAt: Self.now - 58, kind: 9,
+      tags: [["h", Self.channelID], ["buzz:workflow-notify", "false"]], content: "Quiet")
+    let afterQuiet = try message("After quiet", secondsAgo: 57)
+    relayEvents = [afterQuiet, quiet, late, early, first, history]
+    XCTAssertEqual(push(), "After quiet")
+    XCTAssertNil(push(), "a workflow step's notification opt-out survives generic wake enrichment")
+
     // Older history is never surfaced by a later push.
     let stale = try message("Stale", secondsAgo: 59 + window + 1)
     relayEvents = [late, early, stale, first, history]

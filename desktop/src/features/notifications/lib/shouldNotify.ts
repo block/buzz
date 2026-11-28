@@ -5,6 +5,19 @@ import {
 } from "@/features/messages/lib/threading";
 
 /**
+ * Whether a workflow step opted its message out of user notifications. Only
+ * alerts (toasts, sounds, dock bounce) honour it; unread and activity state
+ * still follow {@link shouldNotifyForEvent}.
+ */
+export function hasWorkflowNotificationOptOut(
+  tags: readonly (readonly string[])[],
+): boolean {
+  return tags.some(
+    (tag) => tag[0] === "buzz:workflow-notify" && tag[1] === "false",
+  );
+}
+
+/**
  * Whether the event's `p` tags address `currentPubkey`. A workflow message
  * names its owner in `["p", owner, "", "owner"]` for attribution only; that
  * tag is not a mention. A workflow that mentions its owner adds a plain `p`.

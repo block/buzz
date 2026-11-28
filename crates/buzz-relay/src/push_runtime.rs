@@ -303,6 +303,18 @@ fn match_job(
     context: &MatchContext,
 ) -> anyhow::Result<Vec<buzz_db::push::WakeRequest>> {
     let mut wakes = Vec::new();
+    // A workflow author can opt one message-sending step out of user
+    // notifications. The marker only affects push wakes; the event, mentions,
+    // unread state, and agent-direction metadata remain unchanged.
+    if job
+        .event
+        .event
+        .tags
+        .iter()
+        .any(|tag| tag.as_slice() == ["buzz:workflow-notify", "false"])
+    {
+        return Ok(wakes);
+    }
     // Collected once per event: the per-lease check below runs for every
     // non-member lease on every listed-channel message.
     let mentioned = match job.event.channel_id {
@@ -1123,6 +1135,15 @@ mod tests {
         assert_eq!(wakes(broad.clone(), open, &[mention]), 1, "broad lease");
         assert_eq!(wakes(broad.clone(), open, &[]), 0, "plain message");
         assert_eq!(
+            wakes(
+                broad.clone(),
+                open,
+                &[mention, &["buzz:workflow-notify", "false"]]
+            ),
+            0,
+            "workflow step notification opt-out"
+        );
+        assert_eq!(
             wakes(broad.clone(), open, &[&["p", &other_hex]]),
             0,
             "someone else mentioned"
@@ -1286,9 +1307,11 @@ mod postgres_tests {
 
     /// Real workflow messages from `RelayActionSink` against mobile-shaped
     /// leases. The owner's attribution `p` tag wakes no one; a mention of the
-    /// agent wakes only the agent; a mention of the owner wakes the owner.
-    /// Mutation: match push filters against the event's raw tags → RED (the
-    /// owner wakes for every message).
+    /// agent wakes only the agent; a mention of the owner wakes the owner;
+    /// a step-level notification opt-out wakes no one without removing its
+    /// mention or agent-direction metadata. Mutations: match push filters
+    /// against the event's raw tags → RED (the owner wakes for every message);
+    /// ignore `buzz:workflow-notify=false` → RED (the quiet message wakes).
     #[tokio::test]
     #[ignore = "requires Postgres and Redis"]
     async fn workflow_messages_wake_whom_they_mention_not_their_owner() {
@@ -1369,10 +1392,11 @@ mod postgres_tests {
         }
 
         let mut jobs = Vec::new();
-        for text in [
-            "@Robby read the canvas and do what it says.",
-            "nothing to see",
-            "@Kal the canvas is done.",
+        for (text, notify) in [
+            ("@Robby read the canvas and do what it says.", true),
+            ("nothing to see", true),
+            ("@Kal the canvas is done.", true),
+            ("@Robby this step is quiet.", false),
         ] {
             let event_id = crate::workflow_sink::RelayActionSink::new(&state)
                 .send_message(
@@ -1380,6 +1404,7 @@ mod postgres_tests {
                     &channel.to_string(),
                     text,
                     text,
+                    notify,
                     true,
                     &owner.public_key().to_hex(),
                     None,
@@ -1422,8 +1447,22 @@ mod postgres_tests {
             .collect();
         assert_eq!(
             woken,
-            vec![vec![agent_bytes], vec![], vec![owner_bytes]],
-            "agent mention wakes the agent; no mention wakes no one; owner mention wakes the owner"
+            vec![vec![agent_bytes], vec![], vec![owner_bytes], vec![]],
+            "agent mention wakes the agent; no mention wakes no one; owner mention wakes the owner; opted-out mention wakes no one"
+        );
+        let quiet = &batch.jobs[3].event.event;
+        assert!(quiet
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["buzz:workflow-notify", "false"]));
+        assert!(quiet.tags.iter().any(|tag| tag.kind().to_string() == "p"
+            && tag.content() == Some(agent.public_key().to_hex().as_str())));
+        assert!(
+            quiet
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice().first().map(String::as_str)
+                    == Some("buzz:workflow-mention"))
         );
 
         // A `#p` history read joins the mention index, which must agree with

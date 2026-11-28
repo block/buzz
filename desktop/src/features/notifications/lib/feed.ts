@@ -1,5 +1,6 @@
 import type { Channel, FeedItem, HomeFeedResponse } from "@/shared/api/types";
 import { formatMessageNotification } from "@/features/notifications/lib/notificationFormat";
+import { hasWorkflowNotificationOptOut } from "@/features/notifications/lib/shouldNotify";
 
 export type NotificationChannel = Pick<Channel, "id" | "name" | "channelType">;
 
@@ -71,7 +72,11 @@ export function eligibleFeedNotificationItems(
     items.push(
       ...feed.feed.mentions
         .map((item) => enrichFeedItemChannel(item, channels))
-        .filter((item) => item.channelType !== "dm"),
+        .filter(
+          (item) =>
+            item.channelType !== "dm" &&
+            !hasWorkflowNotificationOptOut(item.tags),
+        ),
     );
   }
 

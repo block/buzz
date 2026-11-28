@@ -423,18 +423,21 @@ pub fn resolve_step_templates(
             text,
             channel,
             reply_in_thread,
+            notify,
         } => Ok(SendMessage {
             text: t(text)?,
             channel: t_opt(channel)?,
             reply_in_thread: *reply_in_thread,
+            notify: *notify,
         }),
-        SendDm { to, text } => {
+        SendDm { to, text, notify } => {
             // Recheck stored definitions too: a workflow saved before recipient
             // validation was introduced must not route from arbitrary input.
             crate::schema::validate_dm_recipient(to)?;
             Ok(SendDm {
                 to: t(to)?,
                 text: t(text)?,
+                notify: *notify,
             })
         }
         SetChannelTopic { topic } => Ok(SetChannelTopic { topic: t(topic)? }),
@@ -628,6 +631,7 @@ pub async fn dispatch_action(
                     text,
                     channel,
                     reply_in_thread,
+                    notify,
                 } => {
                     // Look up workflow metadata for destination validation and
                     // attribution, scoped to the run's community — the same run/workflow
@@ -704,6 +708,7 @@ pub async fn dispatch_action(
                             &channel_id,
                             text,
                             authored_text,
+                            *notify,
                             withheld_reasons.is_empty(),
                             &owner_pubkey_hex,
                             reply_to,
@@ -740,7 +745,7 @@ pub async fn dispatch_action(
                     Ok(StepResult::Completed(output))
                 }
 
-                SendDm { to, text } => {
+                SendDm { to, text, notify } => {
                     let run = engine
                         .db
                         .get_workflow_run(community_id, run_id)
@@ -776,6 +781,7 @@ pub async fn dispatch_action(
                             to,
                             text,
                             authored_text,
+                            *notify,
                             withheld_reasons.is_empty(),
                             &hex::encode(&workflow.owner_pubkey),
                         )
@@ -1626,7 +1632,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_step_templates_carries_reply_in_thread() {
+    fn resolve_step_templates_carries_message_options() {
         let ctx = make_trigger();
         let step = Step {
             id: "reply".to_owned(),
@@ -1637,6 +1643,7 @@ mod tests {
                 text: "hi {{trigger.author}}".to_owned(),
                 channel: None,
                 reply_in_thread: true,
+                notify: false,
             },
         };
         let resolved = resolve_step_templates(&step, &ctx, &HashMap::new()).unwrap();
@@ -1644,10 +1651,12 @@ mod tests {
             ActionDef::SendMessage {
                 text,
                 reply_in_thread,
+                notify,
                 ..
             } => {
                 assert_eq!(text, "hi abc123def456");
                 assert!(reply_in_thread, "reply_in_thread must survive resolution");
+                assert!(!notify, "notify must survive resolution");
             }
             other => panic!("unexpected action: {other:?}"),
         }

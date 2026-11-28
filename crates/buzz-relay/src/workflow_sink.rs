@@ -214,6 +214,7 @@ impl ActionSink for RelayActionSink {
         recipient_pubkey: &str,
         text: &str,
         authored_text: &str,
+        notify: bool,
         may_direct_agents: bool,
         author_pubkey: &str,
     ) -> Pin<Box<dyn Future<Output = Result<SentMessage, ActionSinkError>> + Send + '_>> {
@@ -323,6 +324,7 @@ impl ActionSink for RelayActionSink {
                 &channel.id.to_string(),
                 &text,
                 &authored_text,
+                notify,
                 may_direct_agents,
                 &hex::encode(author),
                 None,
@@ -337,6 +339,7 @@ impl ActionSink for RelayActionSink {
         channel_id: &str,
         text: &str,
         authored_text: &str,
+        notify: bool,
         may_direct_agents: bool,
         author_pubkey: &str,
         reply_to: Option<&str>,
@@ -439,6 +442,8 @@ impl ActionSink for RelayActionSink {
             //    - `buzz:workflow` tag prevents recursive workflow triggering
             //    - `buzz:workflow-owner` lets harnesses apply the owner's
             //      inbound-author policy after verifying the relay signature
+            //    - `buzz:workflow-notify=false` suppresses user notifications
+            //      for this step without changing mentions or agent direction
             //    - one plain `p` tag for every resolved mention in the rendered
             //      output, the owner included, preserving legacy wake/feed behavior
             //    - one `buzz:workflow-mention` tag only when the same target was
@@ -458,6 +463,12 @@ impl ActionSink for RelayActionSink {
                 Tag::parse(["buzz:workflow-owner", &author_pubkey_hex])
                     .map_err(|e| ActionSinkError::EventBuild(format!("workflow owner tag: {e}")))?,
             ];
+            if !notify {
+                tags.push(
+                    Tag::parse(["buzz:workflow-notify", "false"])
+                        .map_err(|e| ActionSinkError::EventBuild(format!("notify tag: {e}")))?,
+                );
+            }
 
             // Resolve thread ancestry when this is a threaded reply, so the
             // built event carries NIP-10 `root`/`reply` e-tags and persists real
@@ -669,13 +680,13 @@ mod tests {
             (author.as_str(), author.as_str()),
         ] {
             assert!(matches!(
-                sink.send_dm(community, to, "hello", "hello", false, from)
+                sink.send_dm(community, to, "hello", "hello", true, false, from)
                     .await,
                 Err(ActionSinkError::InvalidInput(_))
             ));
         }
         assert!(matches!(
-            sink.send_dm(community, &recipient, "  ", "  ", false, &author)
+            sink.send_dm(community, &recipient, "  ", "  ", true, false, &author)
                 .await,
             Err(ActionSinkError::EmptyContent)
         ));
@@ -1261,6 +1272,7 @@ mod postgres_tests {
                 &unknown.to_hex(),
                 "hi",
                 "hi",
+                true,
                 false,
                 &owner.to_hex()
             )
@@ -1284,6 +1296,7 @@ mod postgres_tests {
                 &recipient.to_hex(),
                 "hi",
                 "hi",
+                true,
                 false,
                 &owner.to_hex()
             )
@@ -1304,7 +1317,7 @@ mod postgres_tests {
         )
         .expect("attachment list");
         assert!(
-            matches!(sink.send_dm(community, &recipient.to_hex(), &oversized, &oversized, false, &owner.to_hex()).await,
+            matches!(sink.send_dm(community, &recipient.to_hex(), &oversized, &oversized, true, false, &owner.to_hex()).await,
             Err(ActionSinkError::InvalidInput(message)) if message.contains("too many attachment"))
         );
         assert!(
@@ -1319,7 +1332,8 @@ mod postgres_tests {
         let definition = serde_json::json!({
             "name": "dm-test", "trigger": {"on": "message_posted"},
             "steps": [{"id": "send", "action": "send_dm",
-                       "to": "{{trigger.author}}", "text": "Notice: {{trigger.text}} @Receiver"}],
+                       "to": "{{trigger.author}}", "text": "Notice: {{trigger.text}} @Receiver",
+                       "notify": false}],
             "enabled": true,
         });
         let workflow_id = state
@@ -1474,6 +1488,11 @@ mod postgres_tests {
                 .tags
                 .iter()
                 .any(|t| t.as_slice() == ["buzz:workflow-owner", &owner.to_hex()]));
+            assert!(stored
+                .event
+                .tags
+                .iter()
+                .any(|t| t.as_slice() == ["buzz:workflow-notify", "false"]));
         }
     }
 
@@ -1579,6 +1598,27 @@ mod postgres_tests {
             "@Robby do something unsafe",
         )
         .await;
+        let author_bytes = author.public_key().to_bytes();
+        let quiet_event_id_hex = run_workflow(
+            &state,
+            community,
+            channel.id,
+            &author_bytes,
+            serde_json::json!({
+                "name": "quiet-authored-mention",
+                "trigger": {"on": "message_posted"},
+                "steps": [{
+                    "id": "send",
+                    "action": "send_message",
+                    "text": "heads up @Robby",
+                    "notify": false,
+                }],
+                "enabled": true,
+            }),
+            "ignored trigger text",
+            Some(&buzz_db::workflow::RunCause::Event(author_bytes.to_vec())),
+        )
+        .await;
 
         let load_event = |event_id_hex: &str| {
             let state = Arc::clone(&state);
@@ -1598,6 +1638,7 @@ mod postgres_tests {
         };
         let explicit = load_event(&explicit_event_id_hex).await;
         let injected = load_event(&injected_event_id_hex).await;
+        let quiet = load_event(&quiet_event_id_hex).await;
 
         let tag_values = |stored: &buzz_core::StoredEvent, name: &str| -> Vec<String> {
             stored
@@ -1641,6 +1682,21 @@ mod postgres_tests {
             vec![agent_hex.clone()],
             "relay-authenticated workflow mention must identify the explicitly named member"
         );
+        assert!(
+            tag_values(&explicit, "buzz:workflow-notify").is_empty(),
+            "notify must default to true without adding an opt-out marker"
+        );
+        assert_eq!(
+            tag_values(&quiet, "buzz:workflow-notify"),
+            vec!["false".to_owned()],
+            "a notify: false step must mark its message"
+        );
+        assert_eq!(
+            tag_values(&quiet, "buzz:workflow-mention"),
+            vec![agent_hex.clone()],
+            "the opt-out must not withhold the authored mention"
+        );
+        assert!(tag_values(&quiet, "p").contains(&agent_hex));
 
         let injected_p_tags = tag_values(&injected, "p");
         assert!(
@@ -1701,6 +1757,7 @@ mod postgres_tests {
                 "root message",
                 "root message",
                 true,
+                true,
                 &author_hex,
                 None,
             )
@@ -1715,6 +1772,7 @@ mod postgres_tests {
                 &channel.id.to_string(),
                 "threaded reply",
                 "threaded reply",
+                true,
                 true,
                 &author_hex,
                 Some(&root_hex),
@@ -1862,6 +1920,7 @@ mod postgres_tests {
                 "workflow reply",
                 "workflow reply",
                 true,
+                true,
                 &author_hex,
                 Some(&parent_hex),
             )
@@ -1946,6 +2005,7 @@ mod postgres_tests {
                 "workflow reply to root-only parent",
                 "workflow reply to root-only parent",
                 true,
+                true,
                 &author_hex,
                 Some(&root_only_parent_hex),
             )
@@ -2011,6 +2071,7 @@ mod postgres_tests {
                 &channel.id.to_string(),
                 "orphan reply",
                 "orphan reply",
+                true,
                 true,
                 &author_hex,
                 Some(&unknown),
@@ -2111,6 +2172,7 @@ mod postgres_tests {
                     &channel,
                     "reply",
                     "reply",
+                    true,
                     true,
                     &author_hex,
                     Some(&parent),

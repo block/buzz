@@ -72,6 +72,39 @@ test("accepted Form fixtures survive a semantic YAML round trip", () => {
   }
 });
 
+test("notify is a per-message-step opt-out that defaults on and round-trips", () => {
+  assert.doesNotMatch(
+    formStateToYaml(sendMessageState({ notify: true })),
+    /notify/,
+  );
+  assert.equal(accepted(acceptedFixtures[0]).steps[0].notify, true);
+
+  const state = sendMessageState({ notify: false });
+  state.steps.push({
+    id: "step_2",
+    action: "send_dm",
+    to: "{{trigger.author}}",
+    text: "quiet dm",
+    notify: false,
+  });
+  const yaml = formStateToYaml(state);
+  assert.deepEqual(
+    parseYaml(yaml).steps.map((step) => step.notify),
+    [false, false],
+  );
+  assert.deepEqual(
+    accepted(yaml).steps.map((step) => step.notify),
+    [false, false],
+  );
+  assert.deepEqual(parseYaml(formStateToYaml(accepted(yaml))), parseYaml(yaml));
+
+  for (const action of ["send_message", "send_dm"]) {
+    const recipient = action === "send_dm" ? ', to: "{{trigger.author}}"' : "";
+    const invalid = `name: Quiet\ntrigger: { on: message_posted }\nsteps: [{ id: s1, action: ${action}, text: hi${recipient}, notify: "no" }]\n`;
+    assert.match(yamlToFormState(invalid).error, /notify must be a boolean/);
+  }
+});
+
 test("recognized nodes with unknown fields are refused without touching YAML", () => {
   const fixtures = [
     `name: Test\nunknown: true\ntrigger: { on: webhook }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`,

@@ -1,5 +1,6 @@
 import { isThreadReply } from "@/features/messages/lib/threading";
 import type { DesktopNotificationTarget } from "@/features/notifications/lib/desktop";
+import { hasWorkflowNotificationOptOut } from "@/features/notifications/lib/shouldNotify";
 import type { SearchHit } from "@/shared/api/types";
 
 export type AppView =
@@ -83,7 +84,7 @@ export function isWindowDragHandleEvent(event: MouseEvent | PointerEvent) {
 }
 
 export function shouldBounceForChannelNotification(tags: string[][]): boolean {
-  return !isThreadReply(tags);
+  return !isThreadReply(tags) && !hasWorkflowNotificationOptOut(tags);
 }
 
 export function markAllReadSources({

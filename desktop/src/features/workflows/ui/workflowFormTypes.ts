@@ -75,6 +75,7 @@ export type StepFormState = {
   text?: string;
   channel?: string;
   replyInThread?: boolean;
+  notify?: boolean;
   to?: string;
   url?: string;
   method?: string;
@@ -195,10 +196,12 @@ function actionFieldsForStep(step: StepFormState): Record<string, unknown> {
       if (step.text) fields.text = step.text;
       if (step.channel) fields.channel = step.channel;
       if (step.replyInThread) fields.reply_in_thread = true;
+      if (step.notify === false) fields.notify = false;
       break;
     case "send_dm":
       if (step.to) fields.to = keyStorageValue(step.to);
       if (step.text) fields.text = step.text;
+      if (step.notify === false) fields.notify = false;
       break;
     case "call_webhook":
       if (step.url) fields.url = step.url;
@@ -325,8 +328,9 @@ const ACTION_STEP_KEYS: Record<ActionType, ReadonlySet<string>> = {
     "text",
     "channel",
     "reply_in_thread",
+    "notify",
   ]),
-  send_dm: new Set([...COMMON_STEP_KEYS, "to", "text"]),
+  send_dm: new Set([...COMMON_STEP_KEYS, "to", "text", "notify"]),
   call_webhook: new Set([
     ...COMMON_STEP_KEYS,
     "url",
@@ -639,6 +643,16 @@ export function yamlToFormState(
           };
         }
       }
+      if (
+        (action === "send_message" || action === "send_dm") &&
+        step.notify !== undefined &&
+        typeof step.notify !== "boolean"
+      ) {
+        return {
+          ok: false,
+          error: `Step ${number} notify must be a boolean — use the YAML editor`,
+        };
+      }
 
       steps.push({
         id: step.id,
@@ -652,6 +666,7 @@ export function yamlToFormState(
         text: step.text as string | undefined,
         channel: step.channel as string | undefined,
         replyInThread: step.reply_in_thread === true,
+        notify: step.notify !== false,
         to: keyDisplayValue(step.to as string | undefined),
         url: step.url as string | undefined,
         method: step.method as string | undefined,

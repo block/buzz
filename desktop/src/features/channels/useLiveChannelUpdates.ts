@@ -11,6 +11,7 @@ import {
 } from "@/features/messages/lib/threading";
 import {
   hasMentionForEvent,
+  hasWorkflowNotificationOptOut,
   shouldNotifyForEvent,
 } from "@/features/notifications/lib/shouldNotify";
 import { relayClient } from "@/shared/api/relayClient";
@@ -208,7 +209,11 @@ export function useLiveChannelUpdates(
   const handleDmEvent = React.useEffectEvent(
     (event: RelayEvent, isFirstNotificationDelivery: boolean) => {
       // Only human-visible message kinds should fire DM notifications.
-      if (!isDmNotifiableKind(event.kind) || !isFirstNotificationDelivery) {
+      if (
+        !isDmNotifiableKind(event.kind) ||
+        !isFirstNotificationDelivery ||
+        hasWorkflowNotificationOptOut(event.tags)
+      ) {
         return;
       }
 
@@ -336,7 +341,11 @@ export function useLiveChannelUpdates(
         }
       }
 
-      if (shouldNotify && isThreadedReply) {
+      if (
+        shouldNotify &&
+        isThreadedReply &&
+        !hasWorkflowNotificationOptOut(event.tags)
+      ) {
         if (
           !dmChannelMap.has(channelId) &&
           (channelId !== activeChannelId || options.notifyForActiveChannel)

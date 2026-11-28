@@ -60,14 +60,17 @@ pub trait ActionSink: Send + Sync {
     ///
     /// Creates or reuses the participants' private channel in `community_id`.
     /// `authored_text` is the stored template, as in [`Self::send_message`].
+    /// `notify` controls user notifications for this step's message only.
     /// `may_direct_agents` comes from the same per-run authority gate.
     /// Returns the sent message, including any withheld agent mentions.
+    #[allow(clippy::too_many_arguments)]
     fn send_dm(
         &self,
         community_id: CommunityId,
         recipient_pubkey: &str,
         text: &str,
         authored_text: &str,
+        notify: bool,
         may_direct_agents: bool,
         author_pubkey: &str,
     ) -> Pin<Box<dyn Future<Output = Result<SentMessage, ActionSinkError>> + Send + '_>>;
@@ -85,6 +88,8 @@ pub trait ActionSink: Send + Sync {
     ///   template. Consumers attach authority-bearing metadata only for
     ///   targets named in this text, never from trigger-controlled rendered
     ///   output alone.
+    /// - `notify`: whether this step's message may produce user notifications;
+    ///   it does not change mentions, agent direction, or message delivery.
     /// - `may_direct_agents`: whether this run may attach that metadata; when
     ///   `false`, the consumer withholds it.
     /// - `author_pubkey`: hex-encoded pubkey of the workflow owner (used for
@@ -101,6 +106,7 @@ pub trait ActionSink: Send + Sync {
         channel_id: &str,
         text: &str,
         authored_text: &str,
+        notify: bool,
         may_direct_agents: bool,
         author_pubkey: &str,
         reply_to: Option<&str>,
