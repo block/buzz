@@ -1,3 +1,5 @@
+pub mod endpoint;
+
 use std::time::Duration;
 
 pub const PROTOCOL_VERSION: u32 = 2;
@@ -639,7 +641,6 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
-        let databricks_host = env("DATABRICKS_HOST");
         let databricks_model = env("DATABRICKS_MODEL");
         let provider = resolve_provider(
             env("BUZZ_AGENT_PROVIDER").as_deref(),
@@ -660,7 +661,7 @@ impl Config {
         // Databricks borrows api_key as the *optional* `DATABRICKS_TOKEN` escape
         // hatch — empty means "use OAuth PKCE." Legacy Databricks encodes the
         // model in the URL path; Databricks v2 keeps it in the request body.
-        let (api_key, model, base_url, openai_api) = match provider {
+        let (api_key, model, openai_api) = match provider {
             Provider::Anthropic => (
                 req("ANTHROPIC_API_KEY")?,
                 resolve_model(
@@ -668,7 +669,6 @@ impl Config {
                     env("ANTHROPIC_MODEL").as_deref(),
                 )
                 .ok_or_else(|| "config: ANTHROPIC_MODEL required".to_string())?,
-                env_or("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
                 OpenAiApi::Auto, // unused for Anthropic
             ),
             Provider::OpenAi => (
@@ -678,14 +678,12 @@ impl Config {
                     env("OPENAI_COMPAT_MODEL").as_deref(),
                 )
                 .ok_or_else(|| "config: OPENAI_COMPAT_MODEL required".to_string())?,
-                env_or("OPENAI_COMPAT_BASE_URL", "https://api.openai.com/v1"),
                 parse_openai_api(env("OPENAI_COMPAT_API").as_deref())?,
             ),
             Provider::Databricks | Provider::DatabricksV2 => (
                 env("DATABRICKS_TOKEN").unwrap_or_default(),
                 resolve_model(buzz_agent_model.as_deref(), databricks_model.as_deref())
                     .ok_or_else(|| "config: DATABRICKS_MODEL required".to_string())?,
-                databricks_host.ok_or_else(|| "config: DATABRICKS_HOST required".to_string())?,
                 OpenAiApi::Chat, // only read by OpenAI/legacy Databricks dispatch
             ),
             Provider::OpenRouter => (
@@ -695,10 +693,10 @@ impl Config {
                     env("OPENROUTER_MODEL").as_deref(),
                 )
                 .ok_or_else(|| "config: OPENROUTER_MODEL required".to_string())?,
-                env_or("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
                 OpenAiApi::Chat, // OpenRouter uses Chat Completions only
             ),
         };
+        let base_url = endpoint::provider_base_url(&provider, env)?;
         let system_prompt = match (env("BUZZ_AGENT_SYSTEM_PROMPT"), env("BUZZ_AGENT_SYSTEM_PROMPT_FILE")) {
             (Some(_), Some(_)) => return Err(
                 "config: BUZZ_AGENT_SYSTEM_PROMPT and BUZZ_AGENT_SYSTEM_PROMPT_FILE are mutually exclusive".into()),
