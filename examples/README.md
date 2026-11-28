@@ -16,3 +16,16 @@ See [`countdown-bot/README.md`](countdown-bot/README.md) for usage.
 ## `meadow-core/`
 
 A persona-pack example for Buzz agents.
+
+## `demo-crew/`
+
+A four-agent persona pack for running Buzz in front of a live audience: Lead
+plans and delegates, Maker drafts and labels its assumptions, Challenger
+red-teams the draft, and Guard sorts what was shared into data-security tiers
+and names anything that should not have been typed.
+
+Where `meadow-core` shows a team reviewing code, this one shows a team being
+watched — short replies, visible handoffs, and disagreement left on screen.
+
+See [`demo-crew/README.md`](demo-crew/README.md) for the setup notes that matter
+for audience-facing agents (no shell, owner-only).
