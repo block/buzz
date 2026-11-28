@@ -490,17 +490,21 @@ async fn handle_dm_open(
     let self_bytes = auth.pubkey().to_bytes().to_vec();
     let include_history = history_tag(event, false)? == History::Include;
 
-    // 1. Decode the other participants from `p` tags (deduplicated).
+    // 1. Decode the other participants from `p` tags (deduplicated). Naming
+    //    only yourself opens your note-to-self DM; no `p` tag is still refused.
     let mut others: Vec<Vec<u8>> = Vec::new();
+    let mut names_self = false;
     for hex_str in &extract_p_tags(event) {
         let pk = decode_pubkey(hex_str)?;
-        if pk != self_bytes && !others.contains(&pk) {
+        if pk == self_bytes {
+            names_self = true;
+        } else if !others.contains(&pk) {
             others.push(pk);
         }
     }
-    if others.is_empty() {
+    if others.is_empty() && !names_self {
         return Err(IngestError::Rejected(
-            "invalid: pubkeys must contain at least 1 other participant".into(),
+            "invalid: pubkeys must contain at least 1 participant".into(),
         ));
     }
 
