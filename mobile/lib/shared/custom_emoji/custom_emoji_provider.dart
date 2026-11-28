@@ -30,10 +30,12 @@ class CustomEmojiPaletteNotifier extends AsyncNotifier<List<CustomEmoji>> {
     final client = ref.watch(relayClientProvider);
     ref.watch(relaySessionProvider.select((state) => state.status));
     if (!identical(client, _client)) {
+      final switched = _client != null;
       _client = client;
       _sets.clear();
       _readAt = null;
       _palette = const [];
+      if (switched) Future.microtask(() => _setRefreshFailed(false));
     }
     return _fetch();
   }
@@ -74,10 +76,20 @@ class CustomEmojiPaletteNotifier extends AsyncNotifier<List<CustomEmoji>> {
         }
         if (changed) _palette = unionCustomEmoji(_sets.values);
         _readAt = sentAt;
+        _setRefreshFailed(false);
       }
       return _palette;
     } catch (_) {
+      if (!identical(client, _client)) return _palette;
+      if (_readAt == null) rethrow;
+      _setRefreshFailed(true);
       return _palette;
+    }
+  }
+
+  void _setRefreshFailed(bool failed) {
+    if (ref.mounted) {
+      ref.read(customEmojiRefreshFailedProvider.notifier).set(failed);
     }
   }
 
@@ -94,6 +106,20 @@ class CustomEmojiPaletteNotifier extends AsyncNotifier<List<CustomEmoji>> {
   }
 }
 
+/// Whether the latest palette fetch failed while an earlier palette is still
+/// being shown.
+class CustomEmojiRefreshFailedNotifier extends Notifier<bool> {
+  @override
+  bool build() => false;
+
+  void set(bool failed) => state = failed;
+}
+
+final customEmojiRefreshFailedProvider =
+    NotifierProvider<CustomEmojiRefreshFailedNotifier, bool>(
+      CustomEmojiRefreshFailedNotifier.new,
+    );
+
 final customEmojiPaletteProvider =
     AsyncNotifierProvider<CustomEmojiPaletteNotifier, List<CustomEmoji>>(
       CustomEmojiPaletteNotifier.new,
@@ -103,5 +129,6 @@ final customEmojiPaletteProvider =
 /// Convenience for widgets that only need the resolved list, not the async
 /// state — renderer, autocomplete, reaction resolution.
 final customEmojiListProvider = Provider<List<CustomEmoji>>((ref) {
-  return ref.watch(customEmojiPaletteProvider).value ?? const [];
+  final palette = ref.watch(customEmojiPaletteProvider);
+  return palette.hasError ? const [] : palette.value ?? const [];
 });
