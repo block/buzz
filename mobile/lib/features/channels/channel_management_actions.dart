@@ -18,6 +18,9 @@ List<List<String>> buildDeleteChannelTags(String channelId) => [
 const _onlyPeopleShareHistory =
     "forbidden: only people can share a DM's history";
 
+/// Why the relay refuses [DmHistory.agents] when anyone named is a person.
+const _onlyAgentsJoin = 'invalid: only agents join this DM in place';
+
 /// Re-read schedule while confirming a join, matching desktop's.
 const _joinConfirmationDelays = [
   Duration.zero,
@@ -292,8 +295,50 @@ class ChannelActions {
   /// more people. When that other DM cannot be confirmed yet, throws
   /// [DmAddUnconfirmed] with its id. The relay lets only people share a DM's
   /// history, so when it refuses the history tag to a signed-in agent, the add
-  /// is resent as [DmHistory.startNew].
+  /// is resent as [DmHistory.startNew]. [DmHistory.agents] is never resent:
+  /// it adds agents to this DM or changes nothing.
   Future<Channel> addToDm({
+    required String channelId,
+    required List<String> pubkeys,
+    required DmHistory history,
+  }) async {
+    final id = await _addToDm(
+      channelId: channelId,
+      pubkeys: pubkeys,
+      history: history,
+    );
+    await _refreshChannelState(channelId);
+    if (id == channelId) {
+      return (await _ref.read(channelsProvider.future)).firstWhere(
+        (channel) => channel.id == channelId,
+        orElse: () => throw Exception('DM is not visible yet'),
+      );
+    }
+    return openAddedDm(id);
+  }
+
+  /// Adds the agents [pubkeys] to the DM [channelId] in place, or throws and
+  /// changes nothing: [DmHistory.agents]. Once this returns they are members;
+  /// a send can count them with `withConfirmedDmMembers`. Only this DM's
+  /// details are reloaded; the channel list catches up in the background, so
+  /// the send can follow at once.
+  Future<void> addAgentsToDm({
+    required String channelId,
+    required List<String> pubkeys,
+  }) async {
+    final id = await _addToDm(
+      channelId: channelId,
+      pubkeys: pubkeys,
+      history: DmHistory.agents,
+    );
+    // The relay never moves this add; anything else is not this DM.
+    if (id != channelId) throw Exception(dmAgentsOnlyMessage);
+    _invalidateChannelDetails(channelId);
+    unawaited(_ref.read(channelsProvider.notifier).refresh());
+  }
+
+  /// Submits a kind:41011 add and returns the id of the DM it landed in.
+  Future<String> _addToDm({
     required String channelId,
     required List<String> pubkeys,
     required DmHistory history,
@@ -306,7 +351,14 @@ class ChannelActions {
         ['h', channelId],
         for (final pubkey in pubkeys) ['p', pubkey],
         if (history != DmHistory.startNew)
-          ['history', history == DmHistory.ask ? 'ask' : 'include'],
+          [
+            'history',
+            switch (history) {
+              DmHistory.ask => 'ask',
+              DmHistory.agents => 'agents',
+              _ => 'include',
+            },
+          ],
       ],
     );
     NostrEvent result;
@@ -315,6 +367,7 @@ class ChannelActions {
         result = await submit(history);
       } catch (error) {
         if (history == DmHistory.startNew ||
+            history == DmHistory.agents ||
             relayErrorText(error) != _onlyPeopleShareHistory) {
           rethrow;
         }
@@ -330,6 +383,11 @@ class ChannelActions {
           (reason == 'needs-choice: history' ||
               reason == 'invalid: history must be "include", got "ask"')) {
         throw const DmNeedsHistoryChoice();
+      }
+      if (history == DmHistory.agents) {
+        if (reason == _onlyAgentsJoin) {
+          throw Exception(dmAgentsOnlyMessage);
+        }
       }
       await _throwIfAgentRefused(
         reason,
@@ -354,14 +412,7 @@ class ChannelActions {
     if (id == null || id.isEmpty) {
       throw Exception('Relay did not return a DM channel id');
     }
-    await _refreshChannelState(channelId);
-    if (id == channelId) {
-      return (await _ref.read(channelsProvider.future)).firstWhere(
-        (channel) => channel.id == channelId,
-        orElse: () => throw Exception('DM is not visible yet'),
-      );
-    }
-    return openAddedDm(id);
+    return id;
   }
 
   /// Throws [DmAgentRefused] naming the agent when [reason] is an agent's

@@ -35,6 +35,10 @@ part 'channel_management_actions.dart';
 const dmAdditionFailedMessage =
     'Couldn’t add them. A DM holds up to 9 people, not counting agents.';
 
+/// Why a mention could not add someone to a DM: only agents join that way.
+const dmAgentsOnlyMessage =
+    'Only agents can be added to a DM by mentioning them.';
+
 /// Whether the people added to a DM see its history.
 enum DmHistory {
   /// Let the relay decide: agents join this DM, and a person joining a DM of
@@ -46,6 +50,11 @@ enum DmHistory {
 
   /// Start a new DM of its people and them.
   startNew,
+
+  /// Add agents to this DM, where they can read its earlier messages. The
+  /// relay refuses the whole add, changing nothing, if anyone named is a
+  /// person, so the add never moves to another DM.
+  agents,
 }
 
 /// The relay needs the person adding to choose whether the people they add

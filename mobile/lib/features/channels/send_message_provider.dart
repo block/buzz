@@ -173,6 +173,7 @@ class SendMessage {
         if (participant.trim().isNotEmpty &&
             participant.toLowerCase() != author)
           participant.toLowerCase(),
+      ...?Zone.current[_confirmedDmMembers] as Set<String>?,
     };
   }
 
@@ -277,6 +278,22 @@ final sendMessageProvider = Provider<SendMessage>((ref) => _sender(ref));
 final meSendMessageProvider = Provider<SendMessage>(
   (ref) => _sender(ref, personal: true),
 );
+
+final _confirmedDmMembers = Object();
+
+/// Runs [send], counting [pubkeys] as members of every DM it sends to: agents
+/// the relay just confirmed joined, which a membership read may not show yet.
+Future<T> withConfirmedDmMembers<T>(
+  Iterable<String> pubkeys,
+  Future<T> Function() send,
+) => pubkeys.isEmpty
+    ? send()
+    : runZoned(
+        send,
+        zoneValues: {
+          _confirmedDmMembers: {for (final key in pubkeys) key.toLowerCase()},
+        },
+      );
 
 SendMessage _sender(Ref ref, {bool personal = false}) {
   final messages = personal ? meMessagesProvider : channelMessagesProvider;

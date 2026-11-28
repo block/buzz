@@ -409,6 +409,98 @@ void _confirmedJoinCases() {
     );
 
     test(
+      'an agents-only DM add is never resent, and its refusals become words',
+      () async {
+        final keys = nostr.Keys.generate();
+        final session = _WriterReplicaRelaySession(memberships: const [])
+          ..dmAddRefusals.addAll([
+            'invalid: only agents join this DM in place',
+            'invalid: history must be "include", got "agents"',
+            "forbidden: only people can share a DM's history",
+          ]);
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        final actions = container.read(
+          Provider<ChannelActions>(
+            (ref) => ChannelActions(
+              ref: ref,
+              session: session,
+              signedEventRelay: SignedEventRelay(
+                session: session,
+                nsec: keys.nsec,
+              ),
+              currentPubkey: 'me',
+            ),
+          ),
+        );
+        Future<void> add() => actions.addAgentsToDm(
+          channelId: _otherJoinedChannel,
+          pubkeys: const ['robin'],
+        );
+        Matcher refused(String message) => throwsA(
+          isA<Exception>().having(
+            (error) => error.toString(),
+            'message',
+            'Exception: $message',
+          ),
+        );
+
+        await expectLater(add(), refused(dmAgentsOnlyMessage));
+        await expectLater(add(), refused('Couldn’t add them. Try again.'));
+        // Resending without the tag could start another DM, so it is not.
+        await expectLater(add(), refused('Couldn’t add them. Try again.'));
+        expect(
+          session.published.map(
+            (event) =>
+                event.tags.where((tag) => tag.first == 'history').toList(),
+          ),
+          List.filled(3, [
+            ['history', 'agents'],
+          ]),
+        );
+      },
+    );
+
+    test('an add the relay moved to another DM is refused', () async {
+      final keys = nostr.Keys.generate();
+      final session = _WriterReplicaRelaySession(memberships: const []);
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      final actions = container.read(
+        Provider<ChannelActions>(
+          (ref) => ChannelActions(
+            ref: ref,
+            session: session,
+            signedEventRelay: SignedEventRelay(
+              session: session,
+              nsec: keys.nsec,
+            ),
+            currentPubkey: 'me',
+          ),
+        ),
+      );
+      Future<void> add() => actions.addAgentsToDm(
+        channelId: _otherJoinedChannel,
+        pubkeys: const ['ROBIN'],
+      );
+      session.dmAddResponse = 'response:{"channel_id":"$_otherJoinedChannel"}';
+      await add();
+
+      // A relay that moved the add did not add them to this DM.
+      session.dmAddResponse = 'response:{"channel_id":"$_joinedChannel"}';
+      await expectLater(
+        add(),
+        throwsA(
+          isA<Exception>().having(
+            (error) => error.toString(),
+            'message',
+            'Exception: $dmAgentsOnlyMessage',
+          ),
+        ),
+      );
+    });
+
+    test(
       'an agent whose history tag is refused adds again without it',
       () async {
         final keys = nostr.Keys.generate();

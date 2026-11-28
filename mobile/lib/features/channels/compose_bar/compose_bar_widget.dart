@@ -482,6 +482,7 @@ class ComposeBar extends HookConsumerWidget {
 
     // A picked row returns the composer to the keyboard, as a channel does.
     void insertMention(MentionCandidate candidate) {
+      _loadDmRelayInformation(ref, composeChannel, candidate, membersAsync);
       mentionChooser.insert(candidate);
       inputTool.value = null;
       unawaited(SystemChannels.textInput.invokeMethod<void>('TextInput.show'));
@@ -597,17 +598,10 @@ class ComposeBar extends HookConsumerWidget {
       final _NonMemberMentionScan scan;
       try {
         scan = draftMembers != null
-            ? _NonMemberMentionScan(
-                channelId: channelId,
-                outside: selectedMentions
-                    .where(
-                      (candidate) => !draftMembers!.any(
-                        (member) => member.pubkey == candidate.pubkey,
-                      ),
-                    )
-                    .toList(),
-                canAddMembers: false,
-                isDm: true,
+            ? _NonMemberMentionScan.draft(
+                channelId,
+                selectedMentions,
+                draftMembers!,
               )
             : await _scanNonMemberMentions(
                 ref,
@@ -629,38 +623,46 @@ class ComposeBar extends HookConsumerWidget {
       }
 
       // Mentioning anyone outside the channel, person or agent, prompts
-      // "Invite" / "Do nothing" (portable mention rules, section 7). Nobody
-      // can be added to a DM, so a DM sends them as references without asking.
-      if (scan.outside.isNotEmpty && scan.isDm) {
-        outgoing.resolveOutsideChoice(
-          _NonMemberMentionChoice.sendWithoutInviting,
-          scan.outside,
-        );
-      } else if (scan.outside.isNotEmpty) {
+      // "Invite" / "Do nothing" (portable mention rules, section 7). A DM
+      // asks only about agents and sends people as references.
+      final asked = scan.asked;
+      outgoing.demote([
+        for (final candidate in scan.outside)
+          if (!asked.contains(candidate)) candidate.pubkey,
+      ]);
+      if (asked.isNotEmpty) {
         if (!context.mounted) return;
         final choice = await _promptNonMemberMention(
           context,
-          names: [for (final candidate in scan.outside) candidate.label],
+          names: [for (final candidate in asked) candidate.label],
           canInvite: scan.canAddMembers,
+          isDm: scan.isDm,
         );
         if (choice == null) return; // Dismissed — keep the draft, send nothing.
-        outgoing.resolveOutsideChoice(choice, scan.outside);
+        outgoing.resolveOutsideChoice(choice, asked);
       }
 
       final queuedAttachments = List<_PendingAttachment>.of(attachments.value);
-
-      // An add that was refused doesn't block the message: it is reported and
-      // the un-added mentions are demoted to reference tags so the send lands.
-      Future<void> addMentionedNonMembers() => outgoing.addNonMembers(
-        channelActions,
-        scan: scan,
-        messenger: messenger,
-      );
 
       // Another submission may have finished the same asynchronous checks.
       if (!context.mounted || isSending.value) return;
       isSending.value = true;
       try {
+        Future<void> add() =>
+            outgoing.addNonMembers(channelActions, scan, messenger);
+        final addsFirst = scan.isDm || queuedAttachments.isEmpty;
+        if (addsFirst &&
+            !await _addBeforeSend(
+              context: context,
+              draftRevision: draftRevision,
+              submittedDraftRevision: submittedDraftRevision,
+              add: add,
+              outgoing: outgoing,
+              attachments: attachments,
+              messenger: messenger,
+            )) {
+          return;
+        }
         if (queuedAttachments.isEmpty) {
           if (!context.mounted) return;
           await _sendTextOnlyDraft(
@@ -671,7 +673,6 @@ class ComposeBar extends HookConsumerWidget {
             cleanupStoredDraft: cleanupStoredDraft,
             focusNode: focusNode,
             clearComposer: clearComposer,
-            addMentionedNonMembers: addMentionedNonMembers,
             payload: _ComposeDraftPayload.fromDraft(
               text: text,
               attachments: const [],
@@ -685,7 +686,6 @@ class ComposeBar extends HookConsumerWidget {
         }
 
         final draftText = controller.value;
-        final draftAttachments = List<_PendingAttachment>.of(attachments.value);
         final draftMentions = controller.bindings;
         final draftMentionsInvalid = controller.mentionsInvalid;
         clearComposer();
@@ -727,20 +727,18 @@ class ComposeBar extends HookConsumerWidget {
               customEmoji: customEmoji,
             );
             if (queueGeneration != uploadGeneration.value) return;
-            await addMentionedNonMembers();
+            if (!addsFirst) await add();
             if (queueGeneration != uploadGeneration.value) return;
-            await delivery(
-              payload.content,
-              outgoing.pubkeys,
-              mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
-            );
+            await outgoing.send(delivery, payload);
           } catch (error) {
             if (cancellation.isCancelled) return;
-            if (context.mounted) uploadError.value = _formatUploadError(error);
+            if (context.mounted) {
+              uploadError.value = outgoing.afterJoin(_formatUploadError(error));
+            }
             if (context.mounted &&
                 queueGeneration == uploadGeneration.value &&
                 draftRevision.value == clearedDraftRevision) {
-              attachments.value = draftAttachments;
+              attachments.value = queuedAttachments;
               retainedForRetry = true;
               controller.replaceDraft(
                 draftText,

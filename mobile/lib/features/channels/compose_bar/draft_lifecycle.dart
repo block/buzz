@@ -8,7 +8,6 @@ Future<void> _sendTextOnlyDraft({
   required VoidCallback cleanupStoredDraft,
   required FocusNode focusNode,
   required VoidCallback clearComposer,
-  required Future<void> Function() addMentionedNonMembers,
   required _ComposeDraftPayload payload,
   required _OutgoingMentions outgoing,
   required ComposeBarOnSend onSend,
@@ -38,16 +37,6 @@ Future<void> _sendTextOnlyDraft({
   }
 
   try {
-    await addMentionedNonMembers();
-    // A draft that changed while adding ran is not the draft the user sent.
-    // Keep it and send nothing.
-    if (context.mounted && draftRevision.value != submittedDraftRevision) {
-      messenger?.showFeedbackSnackBar(
-        const SnackBar(content: Text('Not sent. Message changed.')),
-        kind: ToastKind.error,
-      );
-      return;
-    }
     void clearSubmittedDraft() {
       if (!context.mounted || draftRevision.value != submittedDraftRevision) {
         return;
@@ -61,11 +50,7 @@ Future<void> _sendTextOnlyDraft({
 
     await ComposerSendOrigin.uponLocalInsertion(
       clearSubmittedDraft,
-      () => onSend(
-        payload.content,
-        outgoing.pubkeys,
-        mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
-      ),
+      () => outgoing.send(onSend, payload),
     );
     // A send destination without an optimistic timeline clears on success.
     if (clearedDraftRevision == null) {
@@ -80,10 +65,61 @@ Future<void> _sendTextOnlyDraft({
     // sent draft unless the user has already started a new one.
     restoreClearedDraft();
     messenger?.showFeedbackSnackBar(
-      SnackBar(content: Text(_sendFailureMessage(error))),
+      SnackBar(content: Text(outgoing.afterJoin(_sendFailureMessage(error)))),
       kind: ToastKind.error,
     );
   }
+}
+
+/// Runs a send's mention adds ([add]) before its draft clears or anything
+/// uploads, and returns whether the send goes on. When an add fails, or the
+/// draft changed meanwhile, it says why and the draft stays as it is.
+///
+/// While the add runs the send holds the queued [attachments], so leaving the
+/// conversation cannot delete them. They go back to the composer if the send
+/// stops while it is still open; once it has closed, the composer is left
+/// alone and they are not sent.
+Future<bool> _addBeforeSend({
+  required BuildContext context,
+  required ObjectRef<int> draftRevision,
+  required int submittedDraftRevision,
+  required Future<void> Function() add,
+  required _OutgoingMentions outgoing,
+  required ValueNotifier<List<_PendingAttachment>> attachments,
+  required ScaffoldMessengerState? messenger,
+}) async {
+  final held = attachments.value;
+  if (held.isNotEmpty) attachments.value = const [];
+  bool stop(String? message) {
+    if (message != null) {
+      messenger?.showFeedbackSnackBar(
+        SnackBar(content: Text(message)),
+        kind: ToastKind.error,
+      );
+    }
+    if (held.isNotEmpty && context.mounted) {
+      attachments.value = [...held, ...attachments.value];
+    }
+    return false;
+  }
+
+  try {
+    await add();
+  } on ActiveCommunityChangedError {
+    _reportSendCancelledByCommunitySwitch(messenger);
+    return stop(null);
+  } catch (error) {
+    return stop(_sendFailureMessage(error));
+  }
+  if (!context.mounted) {
+    return held.isEmpty ||
+        stop(outgoing.afterJoin('Not sent. You left the conversation.'));
+  }
+  // A draft that changed while adding ran is not the draft the user sent.
+  if (draftRevision.value != submittedDraftRevision) {
+    return stop(outgoing.afterJoin('Not sent. Message changed.'));
+  }
+  return true;
 }
 
 void _useComposeDraftLifecycle({
