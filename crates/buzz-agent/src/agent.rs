@@ -60,6 +60,13 @@ fn replace_unsupported_images(history: &mut [HistoryItem]) -> usize {
     replaced
 }
 
+/// Maximum consecutive rounds in which every tool call in the batch was
+/// rejected as unknown before the turn is halted with `MaxTurnRequests`.
+/// Prevents an indefinite reflection loop when a model repeatedly emits tool
+/// names the registry cannot resolve — observed on small local models that
+/// drop the `<server>__` prefix from MCP-qualified names.
+const MAX_CONSECUTIVE_UNKNOWN_TOOL_ROUNDS: u32 = 5;
+
 /// Maximum reply reminders emitted per prompt when `require_reply` is on.
 ///
 /// After this many, the turn is allowed to end whether or not anything was
@@ -344,6 +351,12 @@ impl RunCtx<'_> {
         let mut handoff_attempts: usize = 0;
 
         let mut round = 0u32;
+        // Per-prompt counter of consecutive rounds in which every tool call
+        // was rejected as unknown. Resets when a round contains at least one
+        // real (known) tool call. Halts the turn at
+        // `MAX_CONSECUTIVE_UNKNOWN_TOOL_ROUNDS` to break reflection loops
+        // caused by models that drop the server prefix from tool names.
+        let mut consecutive_unknown_rounds = 0u32;
         // Per-prompt `_Stop` objection count. Bounded per prompt (not per
         // session) so a stubborn exchange can't permanently disable the stop
         // guard for a long-lived session; `max_rounds` still caps the loop.
@@ -790,8 +803,23 @@ impl RunCtx<'_> {
                 reasoning_details: response.reasoning_details,
             });
 
-            if let Some(stop) = self.execute_calls(&calls).await {
+            let (stop, all_unknown) = self.execute_calls(&calls).await;
+            if let Some(stop) = stop {
                 return Ok(stop);
+            }
+            if all_unknown {
+                consecutive_unknown_rounds = consecutive_unknown_rounds.saturating_add(1);
+                if consecutive_unknown_rounds >= MAX_CONSECUTIVE_UNKNOWN_TOOL_ROUNDS {
+                    tracing::warn!(
+                        consecutive = consecutive_unknown_rounds,
+                        "agent: halting after {} consecutive rounds of only unknown-tool \
+                         rejections; possible model/toolset name mismatch",
+                        consecutive_unknown_rounds
+                    );
+                    return Ok(StopReason::MaxTurnRequests);
+                }
+            } else {
+                consecutive_unknown_rounds = 0;
             }
         }
     }
@@ -831,9 +859,37 @@ impl RunCtx<'_> {
     /// `max_parallel_tools = 1` makes phase 2 effectively sequential
     /// (one in-flight call at a time via the semaphore). Larger values
     /// run that many calls concurrently.
-    async fn execute_calls(&mut self, calls: &[ToolCall]) -> Option<StopReason> {
+    // Returns `(stop_reason, all_calls_were_unknown)`.
+    // `all_calls_were_unknown` is `true` when every call in this batch was
+    // rejected as unknown — used by the caller to track consecutive-unknown
+    // rounds and break reflection loops.
+    async fn execute_calls(&mut self, calls: &[ToolCall]) -> (Option<StopReason>, bool) {
         let mut results: Vec<Option<ToolResult>> = vec![None; calls.len()];
         let mut runnable: Vec<usize> = Vec::with_capacity(calls.len());
+        // Set to true when at least one call is a known non-hook MCP tool or
+        // the built-in load_skill. Used to compute the `all_unknown` return.
+        let mut any_known = false;
+
+        // Resolve suffix aliases: a model that drops the server prefix emits
+        // e.g. `shell` instead of `dev__shell`. When the bare name uniquely
+        // matches one registered non-hook tool, patch the call name so it
+        // routes correctly. Done before any name-based check; transparent to
+        // the rest of this function. The original provider_id is preserved so
+        // the tool-result pairing in history remains valid.
+        let mut calls: Vec<ToolCall> = calls.to_vec();
+        for call in &mut calls {
+            if !self.mcp.has(&call.name) {
+                if let Some(resolved) = self.mcp.resolve_suffix_match(&call.name) {
+                    tracing::info!(
+                        original = %call.name,
+                        resolved,
+                        "agent: resolved unqualified tool name via suffix match"
+                    );
+                    call.name = resolved.to_owned();
+                }
+            }
+        }
+        let calls: &[ToolCall] = &calls;
 
         for (idx, call) in calls.iter().enumerate() {
             if *self.cancel.borrow() {
@@ -849,7 +905,7 @@ impl RunCtx<'_> {
                     }
                 }
                 self.append_results(calls, &mut results);
-                return Some(StopReason::Cancelled);
+                return (Some(StopReason::Cancelled), !any_known);
             }
             emit_pending(self.wire, self.session_id, call).await;
 
@@ -860,6 +916,7 @@ impl RunCtx<'_> {
                 result.provider_id = call.provider_id.clone();
                 emit_completed(self.wire, self.session_id, call, &result).await;
                 results[idx] = Some(result);
+                any_known = true;
                 continue;
             }
 
@@ -873,6 +930,7 @@ impl RunCtx<'_> {
                 continue;
             }
             runnable.push(idx);
+            any_known = true;
         }
 
         self.execute_parallel(calls, &runnable, &mut results).await;
@@ -880,9 +938,9 @@ impl RunCtx<'_> {
         self.append_results(calls, &mut results);
 
         if *self.cancel.borrow() {
-            Some(StopReason::Cancelled)
+            (Some(StopReason::Cancelled), !any_known)
         } else {
-            None
+            (None, !any_known)
         }
     }
 

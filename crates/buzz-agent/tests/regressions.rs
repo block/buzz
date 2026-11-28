@@ -908,6 +908,118 @@ async fn hook_tools_hidden_from_llm() {
     h.shutdown().await;
 }
 
+// ---------------------------------------------------------------------------
+// Issue #9652: unknown-tool reflection loop hardening
+//
+// Two fixes:
+//   1. Suffix-match alias: a bare name (no `__`) that uniquely matches one
+//      registered tool's bare name is resolved to its qualified form so the
+//      call proceeds normally, rather than being rejected as unknown.
+//   2. Consecutive-unknown cap: after MAX_CONSECUTIVE_UNKNOWN_TOOL_ROUNDS (5)
+//      rounds in which every call was rejected as unknown, the turn halts with
+//      max_turn_requests instead of looping indefinitely.
+// ---------------------------------------------------------------------------
+
+/// When a model emits a bare tool name without the server prefix (e.g.
+/// `tool_0` instead of `fake__tool_0`), the agent resolves it via suffix
+/// match and executes the call normally rather than rejecting it as unknown.
+///
+/// Regression for issue #9652: small local models deterministically drop
+/// the `<server>__` prefix from MCP-qualified names.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_tool_suffix_match_resolves_call() {
+    // LLM emits `tool_0` (bare name, no prefix).
+    // The fake_mcp server registers it as `fake__tool_0`.
+    // After suffix-match resolution the call runs normally and the
+    // second LLM round receives the tool result, not an unknown-tool error.
+    let llm = spawn_capturing_llm(vec![
+        openai_tool_call("tc1", "tool_0", json!({})),
+        openai_text("done"),
+    ])
+    .await;
+    let mut h = Harness::spawn(&llm.url).await;
+    let sid = init_session_with_fake_mcp(&mut h, &[("FAKE_MCP_TOOL_COUNT", "1")]).await;
+
+    let p = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let r = h.recv_until_approving(|v| v["id"] == json!(p)).await;
+    assert!(r.get("result").is_some(), "errored: {r}");
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+
+    let captured = llm.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        2,
+        "expected 2 LLM calls (tool round + text round), got {}",
+        captured.len()
+    );
+    // Round 2 must carry a successful tool result, not an unknown-tool error.
+    let round2_msgs = captured[1]["messages"].as_array().unwrap();
+    let tool_result = round2_msgs
+        .iter()
+        .find(|m| m["role"] == "tool")
+        .expect("tool result message missing from round 2");
+    let content = tool_result["content"].as_str().unwrap_or("");
+    assert!(
+        !content.contains("unknown tool"),
+        "suffix-match resolution failed; tool was rejected as unknown: {content}"
+    );
+    h.shutdown().await;
+}
+
+/// When a model repeatedly emits a tool name that cannot be resolved (not in
+/// the registry and no unique suffix match), the agent halts after
+/// MAX_CONSECUTIVE_UNKNOWN_TOOL_ROUNDS (5) consecutive all-unknown rounds
+/// rather than looping indefinitely.
+///
+/// Regression for issue #9652: 975+ laps observed in production when a
+/// local model's output was deterministically rejected as unknown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_tool_consecutive_cap_halts_turn() {
+    // Supply 5 responses with an entirely unresolvable tool name and one
+    // extra "done" response that must never be requested (the cap fires
+    // after 5 consecutive unknown-only rounds).
+    let fake_call = || openai_tool_call("tc1", "xyzzy_nonexistent_tool", json!({}));
+    let llm = spawn_capturing_llm(vec![
+        fake_call(),
+        fake_call(),
+        fake_call(),
+        fake_call(),
+        fake_call(),
+        openai_text("must-not-be-requested"),
+    ])
+    .await;
+    let mut h = Harness::spawn(&llm.url).await;
+    let sid = init_session_with_fake_mcp(&mut h, &[("FAKE_MCP_TOOL_COUNT", "1")]).await;
+
+    let p = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let r = h.recv_until(|v| v["id"] == json!(p)).await;
+    assert!(r.get("result").is_some(), "errored: {r}");
+    assert_eq!(
+        r["result"]["stopReason"], "max_turn_requests",
+        "expected max_turn_requests stop after consecutive unknown-tool cap, got: {}",
+        r["result"]["stopReason"]
+    );
+
+    let captured = llm.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        5,
+        "expected exactly 5 LLM calls (consecutive-unknown cap), got {}",
+        captured.len()
+    );
+    h.shutdown().await;
+}
+
 /// `_PostCompact` hook fires after a context-handoff and its output is
 /// folded into the fresh `[Context Handoff]` user-context block as explicitly
 /// untrusted text. The next LLM request must therefore see the post-compact
