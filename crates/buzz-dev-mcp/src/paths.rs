@@ -20,6 +20,27 @@ pub(crate) const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 /// the result. Returns an error string suitable for `ErrorData::invalid_params`
 /// if the path cannot be resolved.
 pub(crate) fn resolve_path(root: &Path, path: &str) -> Result<PathBuf, String> {
+    let raw = expand_user_path(path);
+    let candidate: PathBuf = if raw.is_absolute() {
+        raw
+    } else {
+        root.join(raw)
+    };
+
+    let resolved = std::fs::canonicalize(&candidate)
+        .map_err(|e| format!("path not accessible: {} ({e})", candidate.display()))?;
+
+    Ok(resolved)
+}
+
+/// The root a call's relative paths resolve against: `workdir`, read with the
+/// same MSYS and `~` rules as a `path`, or the server's cwd when it is absent.
+pub(crate) fn workspace_root(cwd: &Path, workdir: Option<&str>) -> PathBuf {
+    workdir.map_or_else(|| cwd.to_path_buf(), expand_user_path)
+}
+
+/// Rewrite the path forms an agent writes for bash into a path the OS accepts.
+fn expand_user_path(path: &str) -> PathBuf {
     // The agent runs inside MSYS bash and naturally hands us MSYS-form absolute
     // paths (`/c/Users/...`). On Windows those are NOT `is_absolute()` (a leading
     // `/` has no drive `Prefix`), so without translation they'd take the relative
@@ -39,19 +60,7 @@ pub(crate) fn resolve_path(root: &Path, path: &str) -> Result<PathBuf, String> {
     // for un-mappable MSYS forms above. `~user...` falls through untouched and
     // fails with the clear `path not accessible` error rather than mis-mapping.
     let expanded = expand_tilde(path, home_dir().as_deref());
-    let path: &str = expanded.as_deref().unwrap_or(path);
-
-    let raw = Path::new(path);
-    let candidate: PathBuf = if raw.is_absolute() {
-        raw.to_path_buf()
-    } else {
-        root.join(raw)
-    };
-
-    let resolved = std::fs::canonicalize(&candidate)
-        .map_err(|e| format!("path not accessible: {} ({e})", candidate.display()))?;
-
-    Ok(resolved)
+    PathBuf::from(expanded.as_deref().unwrap_or(path))
 }
 
 /// Expand a leading `~` to the user's home directory, returning `Some(expanded)`
@@ -199,10 +208,7 @@ pub(crate) fn read_text_file(
     path: &str,
     workdir: Option<&str>,
 ) -> Result<(PathBuf, String), ErrorData> {
-    let workspace_root: PathBuf = match workdir {
-        Some(w) => PathBuf::from(w),
-        None => state.cwd.clone(),
-    };
+    let workspace_root = workspace_root(&state.cwd, workdir);
     let target = match resolve_path(&workspace_root, path) {
         Ok(t) => t,
         Err(e) => return Err(ErrorData::invalid_params(e, None)),
@@ -377,6 +383,37 @@ mod tests {
         let _ = fs::remove_file(&target);
     }
 
+    fn make_state(cwd: &Path) -> SharedState {
+        let shim = crate::shim::Shim::install().expect("shim install");
+        SharedState::new(cwd.to_path_buf(), shim).expect("state new")
+    }
+
+    // `workdir` is a user-named path too: `~/...` must resolve against the
+    // home directory, exactly as it does for `path`.
+    #[test]
+    fn read_text_file_expands_tilde_in_workdir() {
+        let home = match home_dir() {
+            Some(h) if !h.is_empty() => h,
+            _ => return, // No home in this environment (e.g. minimal CI) — skip.
+        };
+        let marker = tempfile::Builder::new()
+            .prefix(".dev-mcp-workdir-test-")
+            .tempdir_in(&home)
+            .expect("tempdir under home");
+        fs::write(marker.path().join("note.txt"), "hello").expect("write");
+        let name = marker.path().file_name().unwrap().to_str().unwrap();
+
+        let cwd = tempdir().expect("tempdir");
+        let state = make_state(cwd.path());
+        let (target, content) =
+            read_text_file(&state, "note.txt", Some(&format!("~/{name}"))).expect("read");
+        assert_eq!(content, "hello");
+        assert_eq!(
+            target,
+            fs::canonicalize(marker.path().join("note.txt")).expect("canon")
+        );
+    }
+
     // Windows MSYS-absolute path translation. These test `msys_to_windows`
     // directly (the pure rewrite) rather than `resolve_path`, because the latter
     // canonicalizes against the real filesystem and we want deterministic
@@ -476,6 +513,29 @@ mod tests {
                 .to_string_lossy()
                 .to_lowercase()
                 .contains(r"c:\windows"));
+        }
+
+        /// `C:\Users\x` -> `/c/Users/x`, the form bash's `pwd` prints.
+        fn to_msys(path: &Path) -> String {
+            let native = path.to_str().expect("utf-8 path");
+            let (drive, rest) = native.split_once(":\\").expect("drive-absolute path");
+            format!(
+                "/{}/{}",
+                drive.to_ascii_lowercase(),
+                rest.replace('\\', "/")
+            )
+        }
+
+        // A relative `path` under an MSYS-form `workdir` must resolve inside
+        // that directory, not under `<current drive>:\c\...`.
+        #[test]
+        fn read_text_file_translates_msys_workdir() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::write(dir.path().join("note.txt"), "hello").expect("write");
+            let state = super::make_state(dir.path());
+            let workdir = to_msys(dir.path());
+            let (_, content) = read_text_file(&state, "note.txt", Some(&workdir)).expect("read");
+            assert_eq!(content, "hello");
         }
     }
 }

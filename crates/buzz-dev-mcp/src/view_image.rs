@@ -10,7 +10,7 @@
 //! into the right provider-native shape on our behalf (see Goose's
 //! `providers::utils::convert_image` for a reference implementation).
 
-use crate::paths::resolve_path;
+use crate::paths::{resolve_path, workspace_root};
 use crate::shell::SharedState;
 use base64::Engine;
 use image::{
@@ -24,7 +24,6 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::io::Cursor;
-use std::path::PathBuf;
 use std::time::Duration;
 
 /// Hard cap on bytes we will read from disk / URL / data: URL.
@@ -139,10 +138,7 @@ async fn load_source(
             "unsupported URL scheme in `source`: {src}",
         )))
     } else {
-        let workspace_root = match p.workdir.as_deref() {
-            Some(w) => PathBuf::from(w),
-            None => state.cwd.clone(),
-        };
+        let workspace_root = workspace_root(&state.cwd, p.workdir.as_deref());
         let target = resolve_path(&workspace_root, src).map_err(invalid_params)?;
         let meta = std::fs::metadata(&target).map_err(|e| {
             ErrorData::internal_error(format!("cannot stat {}: {e}", target.display()), None)
