@@ -79,9 +79,7 @@ define_class!(
             _notification: &objc2_user_notifications::UNNotification,
             completion_handler: &Block<dyn Fn(UNNotificationPresentationOptions)>,
         ) {
-            // Preserve the prior macOS behavior: keep foreground notifications
-            // in Notification Center without interrupting the user with a banner.
-            completion_handler.call((UNNotificationPresentationOptions::List,));
+            completion_handler.call((foreground_presentation_options(),));
         }
 
         #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
@@ -122,6 +120,16 @@ impl NotificationDelegate {
 }
 
 /// Install the one application-lifetime notification response delegate.
+/// How a notification is presented while Buzz is the frontmost app.
+///
+/// The frontend already suppresses alerts for the conversation the user is
+/// viewing, so anything that reaches the delegate is worth showing even when
+/// Buzz is in front (another channel open, window behind other windows).
+/// `List` alone filed those alerts silently into Notification Center.
+fn foreground_presentation_options() -> UNNotificationPresentationOptions {
+    UNNotificationPresentationOptions::Banner | UNNotificationPresentationOptions::List
+}
+
 pub(crate) fn init(app: &AppHandle) -> tauri::Result<()> {
     if !is_bundled_application() {
         // UNUserNotificationCenter raises an Objective-C exception when the
@@ -369,12 +377,14 @@ fn parse_target(serialized: &str) -> Option<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_application_bundle_layout, is_bundled_application, notification_authorization_options,
-        parse_target, permission_state, queue_activation, register_missing_badge,
-        take_pending_activations, NotificationPermissionState, MAX_PENDING_ACTIVATIONS,
+        foreground_presentation_options, is_application_bundle_layout, is_bundled_application,
+        notification_authorization_options, parse_target, permission_state, queue_activation,
+        register_missing_badge, take_pending_activations, NotificationPermissionState,
+        MAX_PENDING_ACTIVATIONS,
     };
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNAuthorizationStatus, UNNotificationSetting,
+        UNAuthorizationOptions, UNAuthorizationStatus, UNNotificationPresentationOptions,
+        UNNotificationSetting,
     };
     use std::path::Path;
 
@@ -450,6 +460,13 @@ mod tests {
         assert!(init.contains("register_missing_badge("));
         assert!(init.contains("notification_settings_sync,"));
         assert!(init.contains("request_notification_access_sync"));
+    }
+
+    #[test]
+    fn foreground_notifications_show_a_banner_and_stay_in_the_list() {
+        let options = foreground_presentation_options();
+        assert!(options.contains(UNNotificationPresentationOptions::Banner));
+        assert!(options.contains(UNNotificationPresentationOptions::List));
     }
 
     #[test]
