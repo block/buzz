@@ -40,10 +40,12 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::io::BufReader;
 use tokio::sync::{mpsc, watch, Mutex};
+use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::agent::RunCtx;
 use crate::config::{Config, MAX_SYSTEM_PROMPT_BYTES, PROTOCOL_VERSION};
@@ -88,6 +90,8 @@ struct Session {
     history: Vec<HistoryItem>,
     cancel_tx: watch::Sender<bool>,
     busy: bool,
+    /// When the session was created or last prompted; drives idle eviction.
+    last_used: Instant,
     /// Run id of the in-flight prompt, set when a prompt starts and cleared
     /// when it ends. `None` means no active run — a steer request targeting
     /// this session is rejected. Steer-capable clients learn this value from
@@ -225,6 +229,7 @@ async fn async_main() {
     });
     let (wire_tx, wire_rx) = mpsc::channel::<WireMsg>(64);
     let mut writer = tokio::spawn(wire::writer_task(wire_rx));
+    let reaper = tokio::spawn(reap_idle_sessions(app.clone()));
     // Whichever ends first drives shutdown. The reader ending is the normal
     // path (stdin EOF/error). The writer ending while the reader still runs
     // means stdout is closed/broken: no reply can ever be written, so we must
@@ -249,6 +254,7 @@ async fn async_main() {
             cancel_all_sessions(&app).await;
         }
     }
+    reaper.abort();
 }
 
 /// Signal every live session to cancel. Run on connection teardown so in-flight
@@ -258,6 +264,49 @@ async fn cancel_all_sessions(app: &Arc<App>) {
     for session in app.sessions.lock().await.values() {
         let _ = session.cancel_tx.send(true);
     }
+}
+
+/// Drops sessions idle past `cfg.session_idle_timeout`; dropping a session kills its MCP servers.
+async fn reap_idle_sessions(app: Arc<App>) {
+    let timeout = app.cfg.session_idle_timeout;
+    if timeout.is_zero() {
+        return;
+    }
+    let mut tick = tokio::time::interval(reap_interval(timeout));
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        let evicted: Vec<Session> = {
+            let mut sessions = app.sessions.lock().await;
+            let ids = idle_session_ids(
+                sessions
+                    .values()
+                    .map(|s| (s.id.as_str(), s.busy, s.last_used)),
+                Instant::now(),
+                timeout,
+            );
+            ids.iter().filter_map(|id| sessions.remove(id)).collect()
+        };
+        // Drop outside the lock: killing MCP process groups should not block new sessions.
+        for session in evicted {
+            tracing::info!(session_id = %session.id, "evicting idle session");
+        }
+    }
+}
+
+fn reap_interval(timeout: Duration) -> Duration {
+    (timeout / 4).clamp(Duration::from_secs(1), Duration::from_secs(60))
+}
+
+fn idle_session_ids<'a>(
+    sessions: impl Iterator<Item = (&'a str, bool, Instant)>,
+    now: Instant,
+    timeout: Duration,
+) -> Vec<String> {
+    sessions
+        .filter(|(_, busy, last_used)| !busy && now.duration_since(*last_used) >= timeout)
+        .map(|(id, _, _)| id.to_owned())
+        .collect()
 }
 
 async fn read_loop<R: tokio::io::AsyncBufRead + Unpin>(
@@ -565,6 +614,7 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             history: Vec::new(),
             cancel_tx,
             busy: false,
+            last_used: Instant::now(),
             active_run_id: None,
             steer_tx: None,
             original_task: None,
@@ -837,6 +887,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
     let result = ctx.run(p.prompt).await;
     if let Some(s) = app.sessions.lock().await.get_mut(&sid) {
         s.busy = false;
+        s.last_used = Instant::now();
         // Clear run state so a late steer can't queue into a finished turn.
         s.active_run_id = None;
         s.steer_tx = None;
@@ -971,6 +1022,7 @@ async fn acquire_session(
         session_token().map_err(|_| "rng failure; retry prompt")?
     );
     s.busy = true;
+    s.last_used = Instant::now();
     let (tx, rx) = watch::channel(false);
     s.cancel_tx = tx;
     // Skills are read-only after session creation; clone the Vec so RunCtx
@@ -1020,6 +1072,38 @@ fn session_token() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn idle_session_ids_skips_busy_and_recent_sessions() {
+        let now = Instant::now();
+        let timeout = Duration::from_secs(60);
+        let sessions = [
+            ("idle-old", false, now - Duration::from_secs(61)),
+            ("idle-exact", false, now - timeout),
+            ("idle-recent", false, now - Duration::from_secs(59)),
+            ("busy-old", true, now - Duration::from_secs(3600)),
+        ];
+        let mut ids = idle_session_ids(sessions.iter().copied(), now, timeout);
+        ids.sort();
+        assert_eq!(ids, ["idle-exact", "idle-old"]);
+    }
+
+    #[test]
+    fn reap_interval_is_a_quarter_of_the_timeout_within_bounds() {
+        assert_eq!(
+            reap_interval(Duration::from_secs(1800)),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            reap_interval(Duration::from_secs(120)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            reap_interval(Duration::from_secs(1)),
+            Duration::from_secs(1)
+        );
+    }
     use crate::catalog::ModelEntry;
     use crate::types::AgentError;
 

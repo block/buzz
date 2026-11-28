@@ -712,6 +712,10 @@ pub enum TimeoutKind {
 pub enum PromptOutcome {
     Ok(StopReason),
     Error(AcpError),
+    /// The agent dropped this scope's idle provider session. The agent is
+    /// healthy; the mapping is cleared so the batch retries on a fresh session
+    /// without a retry penalty.
+    SessionEvicted,
     /// Local relay state could not establish project authority. The ACP
     /// process is healthy; preserve the batch for bounded retry.
     ProjectContextIndeterminate(String),
@@ -3605,6 +3609,23 @@ pub async fn run_prompt_task(
                 requeue_batch_if_queue(&ctx, batch),
             );
         }
+        Err(e) if is_evicted_session_error(&e) => {
+            tracing::info!(
+                target: "pool::session",
+                "agent evicted idle session {session_id}; recreating on retry"
+            );
+            agent.state.invalidate(&source);
+            // No turn ran; discard any usage so it cannot leak into the next turn.
+            let _ = agent.acp.take_turn_usage();
+            send_prompt_result(
+                &result_tx,
+                &turn_id,
+                agent,
+                source,
+                PromptOutcome::SessionEvicted,
+                requeue_batch_if_queue(&ctx, batch),
+            );
+        }
         Err(e) => {
             tracing::error!(target: "pool::prompt", "session_prompt error: {e}");
             // AgentError means the agent caught a problem before mutating
@@ -4902,6 +4923,15 @@ fn parse_nostr_dm_response(json: serde_json::Value, limit: u32) -> Option<Conver
 
 /// Return the batch for requeue only in Queue mode; drop it in Drop mode.
 #[inline]
+/// `buzz-agent` rejects prompts for a session it evicted while idle with
+/// `session/prompt: unknown session` (`INVALID_PARAMS`).
+fn is_evicted_session_error(error: &AcpError) -> bool {
+    matches!(
+        error,
+        AcpError::AgentError { code: -32602, message } if message.contains("unknown session")
+    )
+}
+
 fn requeue_batch_if_queue(ctx: &PromptContext, batch: Option<FlushBatch>) -> Option<FlushBatch> {
     match ctx.dedup_mode {
         DedupMode::Queue => batch,
@@ -5684,6 +5714,25 @@ async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>)
 pub(crate) mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+    #[test]
+    fn evicted_session_error_matches_only_the_agent_unknown_session_rejection() {
+        let evicted = AcpError::AgentError {
+            code: -32602,
+            message: "session/prompt: unknown session".into(),
+        };
+        assert!(is_evicted_session_error(&evicted));
+        let busy = AcpError::AgentError {
+            code: -32602,
+            message: "session/prompt: prompt already in flight".into(),
+        };
+        assert!(!is_evicted_session_error(&busy));
+        let other_code = AcpError::AgentError {
+            code: -32000,
+            message: "unknown session".into(),
+        };
+        assert!(!is_evicted_session_error(&other_code));
+    }
     use serde_json::json;
 
     /// Conversation scope for a channel — the scope these pool tests exercise
@@ -9250,6 +9299,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             PromptOutcome::Timeout(TimeoutKind::Idle) => "Timeout(Idle)",
             PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => "Timeout(Hard)",
             PromptOutcome::CancelDrainTimeout(_) => "CancelDrainTimeout",
+            PromptOutcome::SessionEvicted => "SessionEvicted",
             PromptOutcome::Error(_) => "Error",
             PromptOutcome::ProjectContextIndeterminate(_) => "ProjectContextIndeterminate",
             PromptOutcome::Cancelled => "Cancelled",

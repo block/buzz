@@ -162,6 +162,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `BUZZ_AGENT_TOOL_TIMEOUT_SECS` | `1260` | Per-tool call timeout in seconds |
 | `BUZZ_AGENT_MAX_PARALLEL_TOOLS` | `8` | Max concurrent tool calls per turn (1 = sequential) |
 | `BUZZ_AGENT_MAX_SESSIONS` | unlimited | Max concurrent ACP sessions. Sessions are cheap; default has no cap. |
+| `BUZZ_AGENT_SESSION_IDLE_TIMEOUT_SECS` | `1800` | Sessions idle this long are dropped and their MCP servers killed; the next prompt for them is rejected as `unknown session`. `0` disables. |
 | `BUZZ_AGENT_MAX_LINE_BYTES` | `4194304` | 4 MiB. Hard cap on inbound JSON-RPC frames. |
 | `BUZZ_AGENT_MAX_HISTORY_BYTES` | `1048576` | 1 MiB. Old turns are evicted past this. |
 | `BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES` | `51200` | 50 KiB. Per-result cap on tool-output text; oversize is middle-elided (head + tail kept) with an inline marker. Images are exempt. |
