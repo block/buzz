@@ -39,6 +39,7 @@ export const MessageComposerToolbar = React.memo(
     editor,
     extraActions,
     formattingDisabled,
+    gifCommandQuery = null,
     gifMediaController,
     isEmojiPickerOpen,
     isFormattingOpen,
@@ -54,6 +55,7 @@ export const MessageComposerToolbar = React.memo(
     onAutoPinConfirmationTurnOff,
     onEmojiPickerOpenChange,
     onEmojiSelect,
+    onGifCommandSelect,
     onFormattingToggle,
     onLinkButton,
     onOpenMentionPicker,
@@ -71,6 +73,7 @@ export const MessageComposerToolbar = React.memo(
     editor: Editor | null;
     extraActions?: React.ReactNode;
     formattingDisabled: boolean;
+    gifCommandQuery?: string | null;
     gifMediaController: Pick<MediaUploadController, "setPendingImeta">;
     isEmojiPickerOpen: boolean;
     isFormattingOpen: boolean;
@@ -86,6 +89,7 @@ export const MessageComposerToolbar = React.memo(
     onAutoPinConfirmationTurnOff?: () => void;
     onEmojiPickerOpenChange: (open: boolean) => void;
     onEmojiSelect: (emoji: string) => void;
+    onGifCommandSelect?: () => void;
     onFormattingToggle: (pressed: boolean) => void;
     onLinkButton: () => void;
     onOpenMentionPicker: () => void;
@@ -283,9 +287,11 @@ export const MessageComposerToolbar = React.memo(
                 <ComposerEmojiPicker
                   disabled={composerDisabled || isVoiceNoteRecording}
                   gifsDisabled={hasVoiceNoteAttachment}
+                  gifCommandQuery={gifCommandQuery}
                   gifMediaController={gifMediaController}
                   onClose={() => editor?.commands.focus()}
                   onEmojiSelect={onEmojiSelect}
+                  onGifCommandSelect={onGifCommandSelect}
                   onOpenChange={onEmojiPickerOpenChange}
                   onTriggerMouseDown={onCaptureSelection}
                   open={isEmojiPickerOpen}
