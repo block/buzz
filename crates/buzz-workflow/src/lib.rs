@@ -1261,6 +1261,79 @@ mod postgres_tests {
         );
     }
 
+    /// Whether a 09:00 UTC schedule with weekday field `dow` fires on `date`.
+    fn fires_at_nine_on(dow: &str, date: &str) -> bool {
+        let now = chrono::DateTime::parse_from_rfc3339(&format!("{date}T09:00:30Z"))
+            .unwrap()
+            .with_timezone(&Utc);
+        cron_fire_instant(&format!("0 9 * * {dow}"), now, 60, Uuid::new_v4()).is_some()
+    }
+
+    // 2026-06-14 is a Sunday; the week below runs through Saturday 2026-06-20.
+    const WEEK: [&str; 7] = [
+        "2026-06-14",
+        "2026-06-15",
+        "2026-06-16",
+        "2026-06-17",
+        "2026-06-18",
+        "2026-06-19",
+        "2026-06-20",
+    ];
+
+    /// The days of `WEEK` (0 = Sunday) on which weekday field `dow` fires.
+    fn days_fired(dow: &str) -> Vec<usize> {
+        (0..WEEK.len())
+            .filter(|&day| fires_at_nine_on(dow, WEEK[day]))
+            .collect()
+    }
+
+    #[test]
+    fn cron_numeric_weekdays_follow_standard_cron_numbering() {
+        // Standard cron, and the Desktop schedule picker: 0 = Sunday … 6 = Saturday.
+        for day in 0..=6 {
+            assert_eq!(days_fired(&day.to_string()), vec![day], "weekday {day}");
+        }
+        // Standard cron also accepts 7 as Sunday.
+        assert_eq!(days_fired("7"), vec![0]);
+    }
+
+    #[test]
+    fn cron_numeric_weekday_ranges_lists_and_steps_follow_standard_numbering() {
+        assert_eq!(days_fired("1-5"), vec![1, 2, 3, 4, 5], "weekdays");
+        assert_eq!(days_fired("0,6"), vec![0, 6], "weekend");
+        assert_eq!(days_fired("1,3,5"), vec![1, 3, 5]);
+        assert_eq!(
+            days_fired("5-7"),
+            vec![0, 5, 6],
+            "range ending at 7 = Sunday"
+        );
+        assert_eq!(days_fired("0-7"), vec![0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(days_fired("1-5/2"), vec![1, 3, 5], "stepped range");
+        assert_eq!(days_fired("*/2"), vec![0, 2, 4, 6], "stepped wildcard");
+    }
+
+    #[test]
+    fn cron_named_and_wildcard_weekdays_are_unaffected() {
+        assert_eq!(days_fired("MON-FRI"), vec![1, 2, 3, 4, 5]);
+        assert_eq!(days_fired("SUN"), vec![0]);
+        assert_eq!(days_fired("SAT,SUN"), vec![0, 6]);
+        assert_eq!(days_fired("MON,5"), vec![1, 5], "names and numbers mix");
+        assert_eq!(days_fired("*"), vec![0, 1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn cron_weekday_numbering_is_the_same_in_every_field_shape() {
+        let friday = chrono::DateTime::parse_from_rfc3339("2026-06-19T09:00:30Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        for expr in ["0 9 * * 5", "0 0 9 * * 5", "0 0 9 * * 5 *"] {
+            assert!(
+                cron_fire_instant(expr, friday, 60, Uuid::new_v4()).is_some(),
+                "'{expr}' should fire on a Friday"
+            );
+        }
+    }
+
     #[test]
     fn interval_fire_instant_quantizes_to_bucket_boundary() {
         // Two pods ticking at different sub-interval offsets must compute the
