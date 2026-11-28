@@ -322,7 +322,7 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
     assert!(channel_members.contains("async fn get_members_with_operation("));
     assert!(channel_members.contains("pub async fn get_members_for_event_write("));
     assert!(channel_members.contains("async fn get_users_bulk_with_operation("));
-    assert!(channel_members.contains("pub async fn get_users_bulk_for_event_write("));
+    assert!(channel_members.contains("pub async fn get_mention_names_for_event_write("));
 
     let huddle_link = event
         .split_once("async fn huddle_started_link_exists_with_operation(")
@@ -340,7 +340,7 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
 
     let workflow_sink = include_str!("../../buzz-relay/src/workflow_sink.rs");
     assert!(workflow_sink.contains(".get_members_for_event_write("));
-    assert!(workflow_sink.contains(".get_users_bulk_for_event_write("));
+    assert!(workflow_sink.contains(".get_mention_names_for_event_write("));
 
     for write_caller in [
         include_str!("../../buzz-relay/src/handlers/side_effects.rs"),

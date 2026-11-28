@@ -21,6 +21,17 @@ pub use buzz_core::channel::MemberRole;
 /// `(pubkey, channel_id)` membership rows.
 pub type PubkeyChannels = Vec<(Vec<u8>, Uuid)>;
 
+/// A community-local profile alias used to resolve workflow mentions.
+#[derive(Debug, Clone)]
+pub struct MentionName {
+    /// Display name, username, or full name as stored in the profile.
+    pub name: String,
+    /// Hex-encoded public key of the channel member.
+    pub pubkey: String,
+    /// Whether the alias comes from a relay-verified profile.
+    pub verified: bool,
+}
+
 /// A channel membership row as returned from the database.
 #[derive(Debug, Clone)]
 pub struct MemberRecord {
@@ -3007,20 +3018,70 @@ impl Db {
         get_users_bulk(&self.pool, community_id, pubkeys).await
     }
 
-    /// Bulk-fetch user names while constructing an event and its mention tags.
-    #[datastore_span(name = "get_users_bulk_for_event_write", system = "postgresql")]
-    pub async fn get_users_bulk_for_event_write(
+    /// Fetch ordinary display names and, when `include_verified`, verified
+    /// name aliases for mention tags.
+    ///
+    /// Preserve alias provenance so the caller can prefer verified names and
+    /// reject collisions between distinct keys at the same verification level.
+    #[datastore_span(name = "get_mention_names_for_event_write", system = "postgresql")]
+    pub async fn get_mention_names_for_event_write(
         &self,
         community_id: CommunityId,
         pubkeys: &[Vec<u8>],
-    ) -> Result<Vec<UserRecord>> {
-        get_users_bulk_with_operation(
+        include_verified: bool,
+    ) -> Result<Vec<MentionName>> {
+        if pubkeys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut connection = crate::observability::acquire_writer(
             &self.pool,
-            community_id,
-            pubkeys,
             crate::observability::WriterOperation::EventWrite,
         )
-        .await
+        .await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT member.pubkey, u.display_name,
+                jsonb_path_query_first(v.event, 'strict $.tags[*] ? (@[0] == "display_name")[1]', '{}', true) #>> '{}' AS verified_display_name,
+                jsonb_path_query_first(v.event, 'strict $.tags[*] ? (@[0] == "username")[1]', '{}', true) #>> '{}' AS verified_username,
+                jsonb_path_query_first(v.event, 'strict $.tags[*] ? (@[0] == "full_name")[1]', '{}', true) #>> '{}' AS verified_full_name
+            FROM unnest($2::bytea[]) AS member(pubkey)
+            LEFT JOIN users u ON u.community_id = $1 AND u.pubkey = member.pubkey
+            LEFT JOIN nip_fi_profile_heads v
+                ON $3 AND v.community_id = $1 AND v.pubkey = encode(member.pubkey, 'hex')
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(pubkeys)
+        .bind(include_verified)
+        .fetch_all(&mut *connection)
+        .await?;
+        drop(connection);
+
+        // Keep provenance even when a member's ordinary and verified names
+        // agree, or an ordinary alias could hide the verified claim.
+        let mut seen = std::collections::HashSet::new();
+        let mut names = Vec::new();
+        for row in rows {
+            let pubkey = hex::encode(row.try_get::<Vec<u8>, _>("pubkey")?);
+            for column in [
+                "display_name",
+                "verified_display_name",
+                "verified_username",
+                "verified_full_name",
+            ] {
+                if let Some(name) = row.try_get::<Option<String>, _>(column)? {
+                    let verified = column != "display_name";
+                    if seen.insert((name.to_lowercase(), pubkey.clone(), verified)) {
+                        names.push(MentionName {
+                            name,
+                            pubkey: pubkey.clone(),
+                            verified,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(names)
     }
 
     /// Returns the count of active members in a channel.
