@@ -104,6 +104,12 @@ pub fn extract_at_names(content: &str) -> Vec<String> {
 /// longest-first (case-insensitive, word-boundary-checked), then falls back
 /// to single-word tokenization. Returns lowercased names in first-seen order,
 /// deduplicated. Empty/whitespace-only entries in `known_names` are ignored.
+///
+/// A fallback token immediately followed by `/` is a filesystem path or
+/// package scope (`@biomejs/biome`, `@types/node`), not an attempt to mention
+/// a person, so it is left as plain text. Callers that fail closed on an
+/// unresolvable `@name` would otherwise refuse to send any message quoting
+/// tool output that contains such text.
 pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Vec<String> {
     if content.is_empty() || !content.contains('@') {
         return vec![];
@@ -139,6 +145,10 @@ pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Ve
                 .find(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '.' | '-' | '_'))
                 .unwrap_or(rest.len());
             if end == 0 {
+                continue;
+            }
+            // `@scope/pkg` and `@dir/file` are paths, not people.
+            if rest[end..].starts_with('/') {
                 continue;
             }
             rest[..end].to_ascii_lowercase()
@@ -441,6 +451,29 @@ mod tests {
         // which would match "Will Pfleger" only if the full name follows).
         // Falls back to single-word tokenizer → emits "will".
         assert_eq!(result, vec!["will"]);
+    }
+
+    #[test]
+    fn package_scopes_and_paths_are_not_mention_candidates() {
+        // A message quoting tool output must stay sendable: an unresolvable
+        // @name makes the whole message unacceptable to callers that fail
+        // closed, even though nothing was being mentioned.
+        let content = "Failure reason: specifiers in the lockfile don't match:\n\
+                       - @biomejs/biome (lockfile: 2.3.14, package.json: 2.2.0)\n\
+                       - @types/node and @earendil-works/pi-coding-agent\n\
+                       and @alice can still be mentioned";
+        let result = extract_at_mentions_with_known(content, &["alice"]);
+        assert_eq!(result, vec!["alice"]);
+    }
+
+    #[test]
+    fn trailing_slash_token_is_ignored_but_neighbours_survive() {
+        assert!(extract_at_mentions_with_known("@scope/pkg", &[]).is_empty());
+        assert!(extract_at_mentions_with_known("see @src/lib.rs for details", &[]).is_empty());
+        assert_eq!(
+            extract_at_mentions_with_known("@scope/pkg and @alice", &["alice"]),
+            vec!["alice"]
+        );
     }
 
     #[test]
