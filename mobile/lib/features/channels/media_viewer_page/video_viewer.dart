@@ -280,6 +280,31 @@ class MediaVideoViewerPage extends HookConsumerWidget {
       callback();
     }
 
+    Future<void> shareVideo() async {
+      final file = videoFile.value;
+      if (file == null) return;
+      final box = context.findRenderObject() as RenderBox?;
+      final origin = box == null || !box.hasSize
+          ? null
+          : box.localToGlobal(Offset.zero) & box.size;
+      try {
+        await SharePlus.instance.share(
+          ShareParams(files: [XFile(file.path)], sharePositionOrigin: origin),
+        );
+      } catch (error) {
+        debugPrint('[VideoViewer] share failed: $error');
+        if (context.mounted) {
+          showBuzzToast(
+            context,
+            'Could not share this video.',
+            kind: ToastKind.error,
+          );
+        }
+      }
+    }
+
+    // The local file exists once the download finishes, before playback.
+    final canShare = controller.value != null;
     final controls = _useVideoControlsVisibility(context, controller.value);
 
     final viewportHeight = MediaQuery.sizeOf(context).height;
@@ -332,31 +357,30 @@ class MediaVideoViewerPage extends HookConsumerWidget {
                     isDragging.value = false;
                     dragOffset.value = 0;
                   },
-                  child: Padding(
-                    padding: _mediaViewerPadding(context),
-                    child: Center(
-                      child: FutureBuilder<void>(
-                        future: initializeFuture.value,
-                        builder: (context, snapshot) {
-                          if (error.value != null || snapshot.hasError) {
-                            return const _MediaLoadFailure(
-                              message: 'Failed to load video',
-                              icon: BuzzIcons.videoOff,
-                            );
-                          }
-
-                          final videoController = controller.value;
-                          if (videoController == null ||
-                              !videoController.value.isInitialized) {
-                            return _VideoLoadingPoster(posterUrl: posterUrl);
-                          }
-
-                          return AspectRatio(
-                            aspectRatio: videoController.value.aspectRatio,
-                            child: VideoPlayer(videoController),
+                  // The video fills the screen; the chrome overlays it and
+                  // a tap on the video hides or shows it.
+                  child: Center(
+                    child: FutureBuilder<void>(
+                      future: initializeFuture.value,
+                      builder: (context, snapshot) {
+                        if (error.value != null || snapshot.hasError) {
+                          return const _MediaLoadFailure(
+                            message: 'Failed to load video',
+                            icon: BuzzIcons.videoOff,
                           );
-                        },
-                      ),
+                        }
+
+                        final videoController = controller.value;
+                        if (videoController == null ||
+                            !videoController.value.isInitialized) {
+                          return _VideoLoadingPoster(posterUrl: posterUrl);
+                        }
+
+                        return AspectRatio(
+                          aspectRatio: videoController.value.aspectRatio,
+                          child: VideoPlayer(videoController),
+                        );
+                      },
                     ),
                   ),
                 ),
@@ -384,6 +408,13 @@ class MediaVideoViewerPage extends HookConsumerWidget {
                         symbol: 'xmark',
                         onPressed: () => Navigator.of(context).maybePop(),
                       ),
+                      IosNavigationAction(
+                        label: 'Share video',
+                        symbol: 'square.and.arrow.up',
+                        onPressed: canShare
+                            ? () => unawaited(shareVideo())
+                            : null,
+                      ),
                     ],
                   ),
                 ),
@@ -409,12 +440,31 @@ class MediaVideoViewerPage extends HookConsumerWidget {
                             top: Grid.sm,
                             end: Grid.sm,
                           ),
-                          child: _MediaViewerCloseButton(
-                            key: const ValueKey(
-                              'message-media-video-viewer-close',
-                            ),
-                            tooltip: 'Close video viewer',
-                            onPressed: () => Navigator.of(context).maybePop(),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _MediaViewerCircleButton(
+                                key: const ValueKey(
+                                  'message-media-video-viewer-share',
+                                ),
+                                icon: BuzzIcons.share,
+                                tooltip: 'Share video',
+                                overVideo: true,
+                                onPressed: canShare
+                                    ? () => unawaited(shareVideo())
+                                    : null,
+                              ),
+                              const SizedBox(width: Grid.xxs),
+                              _MediaViewerCloseButton(
+                                key: const ValueKey(
+                                  'message-media-video-viewer-close',
+                                ),
+                                tooltip: 'Close video viewer',
+                                overVideo: true,
+                                onPressed: () =>
+                                    Navigator.of(context).maybePop(),
+                              ),
+                            ],
                           ),
                         ),
                       ),

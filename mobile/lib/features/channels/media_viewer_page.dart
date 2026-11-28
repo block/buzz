@@ -13,6 +13,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../shared/relay/relay.dart';
@@ -162,7 +163,9 @@ void openVideoViewer(
   String? posterUrl,
   VoidCallback? onReply,
 }) {
-  Navigator.of(context).push(
+  // The root navigator covers the whole window, so on a tablet or an unfolded
+  // foldable the video is full screen rather than inside the detail pane.
+  Navigator.of(context, rootNavigator: true).push(
     PageRouteBuilder<void>(
       transitionDuration: MediaQuery.disableAnimationsOf(context)
           ? Duration.zero
