@@ -10,6 +10,7 @@
 //! relay re-reads every hit from Postgres, so the index holds only what search
 //! needs.
 
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::time::Duration;
 
@@ -52,6 +53,9 @@ const BULK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The status OpenSearch throttles with, notably Serverless while it scales.
 const THROTTLED: u16 = 429;
+/// The status OpenSearch (or a proxy in front of it) returns when a bulk
+/// request exceeds its HTTP body size limit.
+const PAYLOAD_TOO_LARGE: u16 = 413;
 /// Item status when the index holds the document at a newer version.
 const VERSION_CONFLICT: u64 = 409;
 
@@ -63,16 +67,24 @@ const MAX_BULK_BYTES: usize = 8 * 1024 * 1024;
 /// Bytes allowed for one item's action line, and for a whole delete.
 const BULK_ITEM_OVERHEAD: usize = 256;
 
+/// Outcome of one bulk HTTP request before any 413 splitting.
+enum RequestResult {
+    Outcome(BulkOutcome),
+    PayloadTooLarge,
+}
+
 /// What a bulk write did, item by item.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BulkOutcome {
-    /// Events whose item failed: their outbox rows stay queued.
+    /// Events whose item failed transiently (5xx, 409 conflict, 429
+    /// throttled, or unsent after an earlier failure): their outbox rows
+    /// stay queued as they are.
     pub failed: Vec<[u8; 32]>,
-    /// How many of those OpenSearch refused for good (HTTP 400 or 413):
-    /// retrying them fails the same way until the document or mapping
-    /// changes.
-    pub rejected: usize,
-    /// How many of those the index already held at this version or a newer
+    /// Events OpenSearch refused for good (per-item HTTP 400 or 413, a
+    /// single-item request refused with HTTP 413, or a later request refused
+    /// with HTTP 400): their outbox rows should be parked.
+    pub rejected: Vec<[u8; 32]>,
+    /// How many of `failed` the index already held at this version or a newer
     /// one (HTTP 409). A request applied after its batch ended has no one
     /// reading its response, and a live batch holds its events' partitions,
     /// so it is their newest writer: its conflict means the version source
@@ -301,10 +313,12 @@ impl SearchIndex {
     /// Upsert `documents` and delete `removed` for one community through the
     /// alias, and report each item's result. A batch of more than
     /// [`MAX_BULK_BYTES`] goes out as several bulk requests, one after the
-    /// other; once one is throttled or fails the rest are not sent and count
-    /// as failed. After the first, a failed request's items count as failed
-    /// and a refused one's as rejected, so the items of the requests already
-    /// applied still count as written.
+    /// other; a multi-item request that still gets HTTP 413 is split in half
+    /// and retried, so only a document too large on its own is reported as
+    /// rejected. Once one request is throttled or fails transiently the rest
+    /// are not sent and count as failed. After the first completed request, a
+    /// failed request's items count as failed and a refused one's as rejected,
+    /// so the items of the requests already applied still count as written.
     /// Deleting a document that is not there succeeds. The request requires
     /// the alias, so a missing index fails the write instead of being created
     /// with a dynamic mapping.
@@ -327,9 +341,12 @@ impl SearchIndex {
             .iter()
             .map(|document| document_bytes(community, document))
             .chain(removed.iter().map(|_| BULK_ITEM_OVERHEAD));
+        let mut pending: VecDeque<Range<usize>> =
+            request_ranges(sizes, MAX_BULK_BYTES).into_iter().collect();
         let mut outcome = BulkOutcome::default();
         let mut stopped = false;
-        for range in request_ranges(sizes, MAX_BULK_BYTES) {
+        let mut any_processed = false;
+        while let Some(range) = pending.pop_front() {
             let (documents, removed) = split_items(documents, removed, &range);
             if outcome.throttled || stopped {
                 // Not sent: the cluster asked for less, or is failing.
@@ -343,20 +360,42 @@ impl SearchIndex {
                 .write_request(community, documents, removed, version)
                 .await
             {
-                Ok(part) => part,
-                // Earlier requests were applied: report this one's items as
-                // failed, so the rows of the applied ones are completed.
-                Err(error) if range.start > 0 => {
-                    let refused = matches!(error, SearchError::Rejected(_));
-                    stopped = !refused;
-                    let failed: Vec<[u8; 32]> = documents
+                Ok(RequestResult::Outcome(part)) => {
+                    any_processed = true;
+                    part
+                }
+                Ok(RequestResult::PayloadTooLarge) if range.len() > 1 => {
+                    let mid = range.start + range.len() / 2;
+                    pending.push_front(mid..range.end);
+                    pending.push_front(range.start..mid);
+                    continue;
+                }
+                Ok(RequestResult::PayloadTooLarge) => {
+                    any_processed = true;
+                    let rejected: Vec<[u8; 32]> = documents
                         .iter()
                         .map(|document| document.event_id)
                         .chain(removed.iter().copied())
                         .collect();
                     BulkOutcome {
-                        rejected: if refused { failed.len() } else { 0 },
-                        failed,
+                        rejected,
+                        reason: Some(format!("HTTP {PAYLOAD_TOO_LARGE}")),
+                        ..BulkOutcome::default()
+                    }
+                }
+                // Earlier requests were applied: report this one's items as
+                // failed (or rejected), so the rows of the applied ones are completed.
+                Err(error) if any_processed => {
+                    let refused = matches!(error, SearchError::Rejected(_));
+                    stopped = !refused;
+                    let events: Vec<[u8; 32]> = documents
+                        .iter()
+                        .map(|document| document.event_id)
+                        .chain(removed.iter().copied())
+                        .collect();
+                    BulkOutcome {
+                        failed: if refused { Vec::new() } else { events.clone() },
+                        rejected: if refused { events } else { Vec::new() },
                         reason: Some(error.kind()),
                         ..BulkOutcome::default()
                     }
@@ -364,9 +403,9 @@ impl SearchIndex {
                 Err(error) => return Err(error),
             };
             outcome.failed.extend(part.failed);
-            outcome.rejected += part.rejected;
+            outcome.rejected.extend(part.rejected);
             outcome.conflicts += part.conflicts;
-            outcome.throttled = part.throttled;
+            outcome.throttled |= part.throttled;
             if outcome.reason.is_none() {
                 outcome.reason = part.reason;
             }
@@ -381,9 +420,9 @@ impl SearchIndex {
         documents: &[SearchDocument],
         removed: &[[u8; 32]],
         version: i64,
-    ) -> Result<BulkOutcome, SearchError> {
+    ) -> Result<RequestResult, SearchError> {
         if documents.is_empty() && removed.is_empty() {
-            return Ok(BulkOutcome::default());
+            return Ok(RequestResult::Outcome(BulkOutcome::default()));
         }
         let index = &self.alias;
         let mut operations: Vec<BulkOperation<Value>> =
@@ -422,18 +461,22 @@ impl SearchIndex {
             .send()
             .await
             .map_err(transport_error)?;
-        if response.status_code().as_u16() == THROTTLED {
-            return Ok(BulkOutcome {
+        let status = response.status_code().as_u16();
+        if status == THROTTLED {
+            return Ok(RequestResult::Outcome(BulkOutcome {
                 failed: events,
-                rejected: 0,
+                rejected: Vec::new(),
                 conflicts: 0,
                 throttled: true,
                 reason: Some(format!("HTTP {THROTTLED}")),
-            });
+            }));
+        }
+        if status == PAYLOAD_TOO_LARGE {
+            return Ok(RequestResult::PayloadTooLarge);
         }
         let body = checked(response).await?;
         if body["errors"] != true {
-            return Ok(BulkOutcome::default());
+            return Ok(RequestResult::Outcome(BulkOutcome::default()));
         }
         let items = body["items"].as_array().map(Vec::as_slice).unwrap_or(&[]);
         if items.len() != events.len() {
@@ -454,9 +497,6 @@ impl SearchIndex {
                 outcome.conflicts += 1;
             }
             outcome.throttled |= status == u64::from(THROTTLED);
-            if rejects(status) {
-                outcome.rejected += 1;
-            }
             if outcome.reason.is_none() {
                 outcome.reason = Some(
                     result["error"]["type"]
@@ -465,9 +505,13 @@ impl SearchIndex {
                         .to_string(),
                 );
             }
-            outcome.failed.push(event);
+            if rejects(status) {
+                outcome.rejected.push(event);
+            } else {
+                outcome.failed.push(event);
+            }
         }
-        Ok(outcome)
+        Ok(RequestResult::Outcome(outcome))
     }
 
     /// Run a message search against the alias.
@@ -781,7 +825,7 @@ mod tests {
 
         // Mutation: propagate a later request's error → RED.
         assert_eq!(outcome.failed, [[2; 32], [3; 32]]);
-        assert_eq!(outcome.rejected, 0);
+        assert!(outcome.rejected.is_empty());
         assert_eq!(requests.load(Ordering::SeqCst), 2, "the rest is not sent");
     }
 

@@ -298,13 +298,13 @@ fn raw_client() -> OpenSearch {
     OpenSearch::new(Transport::single_node(&opensearch_url()).expect("transport"))
 }
 
-/// A bulk item the cluster rejects keeps only its own row queued: the other
-/// items of the same request are indexed and their rows removed, other
-/// communities are indexed in the same pass, and the pass does not fail, so
-/// nothing backs off.
+/// A bulk item the cluster rejects for good is parked: the other items of
+/// the same request and newer rows of the same community are indexed without
+/// delay, parked rows do not count toward the backfill threshold, and the
+/// pass does not fail.
 #[tokio::test]
 #[ignore = "requires Postgres and OpenSearch"]
-async fn a_failed_bulk_item_keeps_only_its_own_row() {
+async fn a_rejected_bulk_item_is_parked_without_blocking_its_community() {
     let db = sync_db().await;
     // An index whose `content` is a keyword: a term longer than 32766 bytes
     // is rejected per document with HTTP 400.
@@ -331,9 +331,9 @@ async fn a_failed_bulk_item_keeps_only_its_own_row() {
     let poisoned = search_suite::mk_community(db.pool(), "poisoned.example").await;
     let healthy = search_suite::mk_community(db.pool(), "healthy.example").await;
     let keys = Keys::generate();
-    let oversized = message(&keys, &"x".repeat(40_000));
-    let neighbour = message(&keys, "fine neighbour");
-    let elsewhere = message(&keys, "fine elsewhere");
+    let oversized = message_at(&keys, &"x".repeat(40_000), -20);
+    let neighbour = message_at(&keys, "fine neighbour", -10);
+    let elsewhere = message_at(&keys, "fine elsewhere", -5);
     for (community, event) in [
         (poisoned, &oversized),
         (poisoned, &neighbour),
@@ -344,14 +344,35 @@ async fn a_failed_bulk_item_keeps_only_its_own_row() {
             .expect("insert");
     }
 
+    // Batch size 1 proves the parked row is not re-claimed ahead of `neighbour`.
     let report = Indexer::new(db.clone(), index.clone())
+        .with_batch_size(1)
         .drain()
         .await
         .expect("a rejected item does not fail the pass");
-    // The refused item is tried again with its community's next batch,
-    // which holds nothing else, so that community is skipped.
-    assert_eq!((report.written, report.failed), (2, 2));
+    assert_eq!((report.written, report.failed, report.parked), (2, 0, 1));
+    assert_eq!(search_outbox::depth(db.pool()).await.expect("depth"), 0);
+    assert_eq!(
+        search_outbox::parked_depth(db.pool())
+            .await
+            .expect("parked depth"),
+        1
+    );
     assert_eq!(queued_events(&db).await, vec![*oversized.id.as_bytes()]);
+    // Parked rows do not count toward the backfill threshold.
+    assert!(
+        buzz_db::search_backfill::outbox_below(db.pool(), 1)
+            .await
+            .expect("outbox_below"),
+        "a parked row must not pause backfill"
+    );
+    let counts: std::collections::HashMap<_, _> = search_outbox::parked_counts(db.pool())
+        .await
+        .expect("parked counts")
+        .into_iter()
+        .collect();
+    assert_eq!(counts.get(&poisoned), Some(&1));
+    assert_eq!(counts.get(&healthy), None);
     for (community, event, found) in [
         (poisoned, &oversized, false),
         (poisoned, &neighbour, true),
@@ -1010,6 +1031,12 @@ enum Bulk {
     Pass,
     /// Answer HTTP 429, as Serverless does while it scales.
     Throttle,
+    /// Answer HTTP 400 for the whole request, as OpenSearch does for an
+    /// invalid bulk parameter or cluster-level rejection.
+    Reject,
+    /// Answer HTTP 413 whenever a bulk request body exceeds this byte limit,
+    /// as OpenSearch's `http.max_content_length` or a gateway limit does.
+    LimitBytes(usize),
     /// Signal `arrived`, wait for `release`, then forward it.
     Hold {
         arrived: tokio::sync::oneshot::Sender<()>,
@@ -1143,6 +1170,28 @@ async fn proxy_request(
                         r#"{"error":{"type":"too_many_requests"},"status":429}"#,
                     ))
                     .expect("throttled response");
+            }
+            Bulk::Reject => {
+                *bulk.lock().await = Bulk::Reject;
+                return axum::response::Response::builder()
+                    .status(400)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"error":{"type":"illegal_argument_exception"},"status":400}"#,
+                    ))
+                    .expect("rejected response");
+            }
+            Bulk::LimitBytes(limit) => {
+                *bulk.lock().await = Bulk::LimitBytes(limit);
+                if body.len() > limit {
+                    return axum::response::Response::builder()
+                        .status(413)
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(
+                            r#"{"error":{"type":"content_too_large"},"status":413}"#,
+                        ))
+                        .expect("413 response");
+                }
             }
             Bulk::Hold { arrived, release } => {
                 let _ = arrived.send(());
@@ -1677,5 +1726,268 @@ async fn instances_started_together_elect_one_leader() {
     for instance in instances {
         instance.abort();
     }
+    index.delete().await.expect("delete index");
+}
+
+/// Parked rows are retried at a limited rate and re-read from Postgres, so
+/// they clear without operator action once either the cluster-side cause is
+/// fixed or the message is edited or deleted.
+#[tokio::test]
+#[ignore = "requires Postgres and OpenSearch"]
+async fn parked_rows_recover_after_cluster_fix_or_message_change() {
+    let db = sync_db().await;
+    // A `keyword` mapping rejects content over 32,766 bytes with HTTP 400.
+    let prefix = format!("test-{}-", Uuid::new_v4().simple());
+    let response = raw_client()
+        .indices()
+        .create(IndicesCreateParts::Index(&format!("{prefix}messages-v1")))
+        .body(serde_json::json!({
+            "mappings": { "properties": { "content": { "type": "keyword" } } },
+            "aliases": { format!("{prefix}messages"): {} }
+        }))
+        .send()
+        .await
+        .expect("create index");
+    assert!(response.status_code().is_success());
+    let index = SearchIndex::new(&OpenSearchConfig {
+        url: opensearch_url(),
+        basic_auth: None,
+        aws_sigv4: None,
+        index_prefix: prefix.clone(),
+    })
+    .expect("client");
+
+    let community = search_suite::mk_community(db.pool(), "recover.example").await;
+    let keys = Keys::generate();
+    let chan = channel(&db, community, &keys).await;
+    let valid = channel_message(&keys, chan, 9, "short valid text", &[], 0);
+    let edited_target = channel_message(&keys, chan, 9, &"a".repeat(40_000), &[], 1);
+    let deleted_target = channel_message(&keys, chan, 9, &"b".repeat(40_000), &[], 2);
+    let cluster_fixed = channel_message(&keys, chan, 9, &"c".repeat(40_000), &[], 3);
+    for event in [&valid, &edited_target, &deleted_target, &cluster_fixed] {
+        db.insert_event(community, event, Some(chan))
+            .await
+            .expect("insert");
+    }
+
+    let indexer = Indexer::new(db.clone(), index.clone());
+    let report = indexer.drain().await.expect("drain parks rejected rows");
+    assert_eq!((report.written, report.failed, report.parked), (1, 0, 3));
+    assert_eq!(search_outbox::depth(db.pool()).await.expect("depth"), 0);
+    assert_eq!(
+        search_outbox::parked_depth(db.pool())
+            .await
+            .expect("parked depth"),
+        3
+    );
+
+    // 1) Editing the message replaces what was rejected: the new row succeeds
+    //    and clears the stale parked row as well.
+    let edit = channel_message(
+        &keys,
+        chan,
+        40003,
+        "short edited text",
+        &[&["e", &edited_target.id.to_hex()]],
+        10,
+    );
+    db.insert_event(community, &edit, Some(chan))
+        .await
+        .expect("insert edit");
+    let after_edit = indexer.drain().await.expect("drain edit");
+    assert_eq!((after_edit.written, after_edit.parked), (1, 0));
+    assert!(indexed(&prefix, community, &edited_target).await);
+    assert_eq!(
+        search_outbox::parked_depth(db.pool())
+            .await
+            .expect("parked depth"),
+        2
+    );
+
+    // 2) Deleting a parked message clears its parked row when the delete drains.
+    delete(&db, community, &keys, chan, &deleted_target).await;
+    let after_delete = indexer.drain().await.expect("drain delete");
+    assert_eq!(
+        (
+            after_delete.written,
+            after_delete.removed,
+            after_delete.parked
+        ),
+        (0, 1, 0)
+    );
+    assert_eq!(
+        search_outbox::parked_depth(db.pool())
+            .await
+            .expect("parked depth"),
+        1
+    );
+
+    // 3) Fixing the index mapping clears the remaining parked row on retry.
+    index.delete().await.expect("delete broken index");
+    index
+        .ensure()
+        .await
+        .expect("recreate index with text mapping");
+    let retry_now = indexer.clone().with_parked_retry_interval(Duration::ZERO);
+    let after_fix = retry_now
+        .retry_parked()
+        .await
+        .expect("retry_parked indexes after cluster fix");
+    assert_eq!(
+        (after_fix.written, after_fix.failed, after_fix.parked),
+        (1, 0, 0)
+    );
+    assert!(indexed(&prefix, community, &cluster_fixed).await);
+    assert_eq!(
+        search_outbox::parked_depth(db.pool())
+            .await
+            .expect("parked depth"),
+        0
+    );
+
+    index.delete().await.expect("delete index");
+}
+
+/// A whole-request HTTP 400 keeps rows queued (not parked), while a batch
+/// holding only individually oversized documents behind a 413 limit parks all
+/// of them instead of leaving them stuck in the active queue.
+#[tokio::test]
+#[ignore = "requires Postgres and OpenSearch"]
+async fn whole_request_400_stays_queued_while_oversized_only_batch_parks() {
+    let db = sync_db().await;
+    let proxy = Proxy::start().await;
+    let prefix = format!("test-{}-", Uuid::new_v4().simple());
+    let index = proxy.index(&prefix);
+    index.ensure().await.expect("create index");
+
+    let community = search_suite::mk_community(db.pool(), "cluster-reject.example").await;
+    let keys = Keys::generate();
+    let first = message_at(&keys, "clusterreject one", -20);
+    let second = message_at(&keys, "clusterreject two", -10);
+    for event in [&first, &second] {
+        db.insert_event(community, event, None)
+            .await
+            .expect("insert");
+    }
+
+    // 1) Whole-request HTTP 400 keeps rows queued, not parked.
+    proxy.set(Bulk::Reject).await;
+    let indexer = Indexer::new(db.clone(), index.clone());
+    let report = indexer
+        .drain()
+        .await
+        .expect("whole-request 400 skips community");
+    assert_eq!((report.written, report.parked), (0, 0));
+    assert_eq!(search_outbox::depth(db.pool()).await.expect("depth"), 2);
+    assert_eq!(
+        search_outbox::parked_depth(db.pool())
+            .await
+            .expect("parked depth"),
+        0
+    );
+
+    // Once the cluster stops rejecting, the queued rows index normally.
+    proxy.set(Bulk::Pass).await;
+    let report = indexer.drain().await.expect("drain after fix");
+    assert_eq!((report.written, report.parked), (2, 0));
+    assert_eq!(search_outbox::depth(db.pool()).await.expect("depth"), 0);
+
+    // 2) Two oversized documents alone in a batch behind a 413 limit are both
+    //    parked rather than remaining queued forever.
+    let bad1 = message_at(&keys, &format!("giant1 {}", "x".repeat(3_000)), -5);
+    let bad2 = message_at(&keys, &format!("giant2 {}", "y".repeat(3_000)), -4);
+    for event in [&bad1, &bad2] {
+        db.insert_event(community, event, None)
+            .await
+            .expect("insert");
+    }
+    proxy.set(Bulk::LimitBytes(2_500)).await;
+    let report = indexer
+        .drain()
+        .await
+        .expect("oversized-only batch parks both rows");
+    assert_eq!((report.written, report.failed, report.parked), (0, 0, 2));
+    assert_eq!(search_outbox::depth(db.pool()).await.expect("depth"), 0);
+    assert_eq!(
+        search_outbox::parked_depth(db.pool())
+            .await
+            .expect("parked depth"),
+        2
+    );
+
+    index.delete().await.expect("delete index");
+}
+
+/// An HTTP 413 bulk response splits the request and retries so neighbours are
+/// indexed instead of parked; only a document too large on its own is parked,
+/// and it recovers once the limit is lifted.
+#[tokio::test]
+#[ignore = "requires Postgres and OpenSearch"]
+async fn oversized_bulk_request_is_split_and_only_an_oversized_document_is_parked() {
+    let db = sync_db().await;
+    let proxy = Proxy::start().await;
+    let prefix = format!("test-{}-", Uuid::new_v4().simple());
+    let index = proxy.index(&prefix);
+    index.ensure().await.expect("create index");
+
+    let community = search_suite::mk_community(db.pool(), "split413.example").await;
+    let keys = Keys::generate();
+    // Three ~900-byte messages exceed the 2,500-byte proxy limit together,
+    // while each fits on its own; `too_large` exceeds 2,500 bytes alone.
+    let first = message_at(&keys, &format!("alpha {}", "a".repeat(900)), -40);
+    let too_large = message_at(&keys, &format!("giant {}", "z".repeat(3_000)), -30);
+    let second = message_at(&keys, &format!("bravo {}", "b".repeat(900)), -20);
+    let third = message_at(&keys, &format!("charlie {}", "c".repeat(900)), -10);
+    for event in [&first, &too_large, &second, &third] {
+        db.insert_event(community, event, None)
+            .await
+            .expect("insert");
+    }
+
+    proxy.set(Bulk::LimitBytes(2_500)).await;
+    let indexer = Indexer::new(db.clone(), index.clone());
+    let report = indexer
+        .drain()
+        .await
+        .expect("413 splits the batch instead of failing");
+    assert_eq!((report.written, report.failed, report.parked), (3, 0, 1));
+    assert_eq!(search_outbox::depth(db.pool()).await.expect("depth"), 0);
+    assert_eq!(
+        search_outbox::parked_depth(db.pool())
+            .await
+            .expect("parked depth"),
+        1
+    );
+    assert_eq!(queued_events(&db).await, vec![*too_large.id.as_bytes()]);
+    for (event, expected) in [
+        (&first, true),
+        (&too_large, false),
+        (&second, true),
+        (&third, true),
+    ] {
+        assert_eq!(
+            indexed(&prefix, community, event).await,
+            expected,
+            "event {:?}",
+            event.id
+        );
+    }
+
+    // Lift the size limit: the parked oversized document is now indexed on retry.
+    proxy.set(Bulk::Pass).await;
+    let recovered = indexer
+        .with_parked_retry_interval(Duration::ZERO)
+        .retry_parked()
+        .await
+        .expect("retry_parked");
+    assert_eq!((recovered.written, recovered.parked), (1, 0));
+    assert!(indexed(&prefix, community, &too_large).await);
+    assert_eq!(
+        search_outbox::parked_depth(db.pool())
+            .await
+            .expect("parked depth"),
+        0
+    );
+
     index.delete().await.expect("delete index");
 }

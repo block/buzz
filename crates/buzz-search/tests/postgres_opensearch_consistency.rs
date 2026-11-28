@@ -1462,9 +1462,13 @@ async fn run(db: &Db, seed: u64, ops: usize) -> Result<RunReport, Vec<String>> {
     proxy.set_faults(None);
     let mut last_error = None;
     let drained = tokio::time::timeout(Duration::from_secs(120), async {
+        let parked_retrier = first.clone().with_parked_retry_interval(Duration::ZERO);
         loop {
             let queued = first.backfill().await.expect("final backfill");
             if let Err(error) = first.drain().await {
+                last_error = Some(error.to_string());
+            }
+            if let Err(error) = parked_retrier.retry_parked().await {
                 last_error = Some(error.to_string());
             }
             let incomplete: i64 = sqlx::query_scalar(
@@ -1477,6 +1481,10 @@ async fn run(db: &Db, seed: u64, ops: usize) -> Result<RunReport, Vec<String>> {
             if queued == 0
                 && incomplete == 0
                 && search_outbox::depth(db.pool()).await.expect("depth") == 0
+                && search_outbox::parked_depth(db.pool())
+                    .await
+                    .expect("parked depth")
+                    == 0
                 && proxy.state.pending.load(Ordering::SeqCst) == 0
             {
                 break;

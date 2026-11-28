@@ -13,8 +13,9 @@
 //! fleet queues each stored event once, and only while the outbox has room,
 //! so live rows wait behind a bounded number of backfill rows.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use buzz_db::{search_backfill, search_outbox, Db, DbError};
@@ -29,6 +30,13 @@ const INDEXER_LOCK_KEY: i64 = 0x4255_5A5A_5345_4152;
 
 /// Outbox rows per batch, and so documents per bulk request.
 const BATCH_SIZE: i64 = 500;
+
+/// Parked rows retried per rate-limited retry pass, smaller than a normal
+/// batch so parked retries never starve live writes.
+const PARKED_BATCH_SIZE: i64 = 50;
+
+/// Minimum wait before retrying parked rows, and between parked retry passes.
+const PARKED_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Backfill queues keys only while the outbox holds fewer rows than this.
 const BACKFILL_OUTBOX_BOUND: i64 = 4 * BATCH_SIZE;
@@ -69,8 +77,10 @@ pub struct DrainReport {
     pub written: u64,
     /// Documents removed.
     pub removed: u64,
-    /// Items that failed; their rows stay queued.
+    /// Items that failed transiently; their rows stay queued.
     pub failed: u64,
+    /// Items OpenSearch refused for good; their rows were parked.
+    pub parked: u64,
 }
 
 impl DrainReport {
@@ -79,7 +89,15 @@ impl DrainReport {
         self.written += other.written;
         self.removed += other.removed;
         self.failed += other.failed;
+        self.parked += other.parked;
     }
+}
+
+/// How a worker should proceed after applying one batch.
+enum BatchOutcome {
+    Continue,
+    SkipCommunity,
+    Failed(SearchError),
 }
 
 /// Moves queued events from `search_outbox` into a [`SearchIndex`].
@@ -88,9 +106,12 @@ pub struct Indexer {
     db: Db,
     index: SearchIndex,
     batch_size: i64,
+    parked_batch_size: i64,
+    parked_retry_interval: Duration,
     backfill_bound: i64,
     workers: usize,
     new_index_settle: Duration,
+    published_parked: Arc<Mutex<HashSet<CommunityId>>>,
 }
 
 impl Indexer {
@@ -100,9 +121,12 @@ impl Indexer {
             db,
             index,
             batch_size: BATCH_SIZE,
+            parked_batch_size: PARKED_BATCH_SIZE,
+            parked_retry_interval: PARKED_RETRY_INTERVAL,
             backfill_bound: BACKFILL_OUTBOX_BOUND,
             workers: 1,
             new_index_settle: NEW_INDEX_SETTLE,
+            published_parked: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -124,6 +148,13 @@ impl Indexer {
     /// many event keys per step (at least one).
     pub fn with_batch_size(mut self, rows: i64) -> Self {
         self.batch_size = rows.max(1);
+        self
+    }
+
+    /// Wait at least `interval` before retrying parked rows, and between
+    /// parked retry passes.
+    pub fn with_parked_retry_interval(mut self, interval: Duration) -> Self {
+        self.parked_retry_interval = interval;
         self
     }
 
@@ -234,13 +265,43 @@ impl Indexer {
                 written = report.written,
                 removed = report.removed,
                 failed = report.failed,
+                parked = report.parked,
                 elapsed_ms = elapsed.as_millis() as u64,
                 documents_per_second =
                     (indexed as f64 / elapsed.as_secs_f64().max(1e-3)).round() as u64,
                 "search indexer drained the outbox"
             );
+            self.publish_parked_counts().await;
         }
         result.map(|()| report)
+    }
+
+    /// Retry at most one bounded batch of parked rows whose `parked_at` is
+    /// older than the configured retry interval. Re-reads each message's
+    /// current state from Postgres, so a cluster-side fix or a later edit or
+    /// delete clears the row without operator action.
+    pub async fn retry_parked(&self) -> Result<DrainReport, IndexerError> {
+        self.retry_parked_limit(self.parked_batch_size).await
+    }
+
+    async fn retry_parked_limit(&self, limit: i64) -> Result<DrainReport, IndexerError> {
+        let Some(batch) = search_outbox::claim_parked_batch(
+            self.db.pool(),
+            limit,
+            self.parked_retry_interval,
+            &[],
+        )
+        .await?
+        else {
+            return Ok(DrainReport::default());
+        };
+        let mut report = DrainReport::default();
+        let outcome = self.apply_batch(batch, &mut report, None).await;
+        self.publish_parked_counts().await;
+        match outcome? {
+            BatchOutcome::Continue | BatchOutcome::SkipCommunity => Ok(report),
+            BatchOutcome::Failed(error) => Err(error.into()),
+        }
     }
 
     /// One worker's share of a drain.
@@ -263,81 +324,143 @@ impl Indexer {
                 break;
             };
             let community = batch.community();
-            let outcome = match self
-                .index
-                .write(community, &batch.documents, &batch.removed, batch.version)
-                .await
-            {
-                Ok(outcome) => outcome,
-                Err(error @ SearchError::Rejected(_)) => {
-                    // The whole request was refused; its rows stay queued.
-                    warn!(%community, error = %error.kind(), "search index rejected a batch; its rows stay queued");
-                    metrics::counter!("buzz_search_index_rejected_total", "community" => community.to_string())
-                        .increment((batch.documents.len() + batch.removed.len()) as u64);
+            match self.apply_batch(batch, report, Some(stop)).await? {
+                BatchOutcome::Continue => {}
+                BatchOutcome::SkipCommunity => skipped.push(community),
+                BatchOutcome::Failed(error) => {
                     skipped.push(community);
-                    continue;
+                    failure.get_or_insert(error);
                 }
-                Err(error) => return Err(error.into()),
-            };
-            let items = (batch.documents.len() + batch.removed.len()) as u64;
-            let written = batch
-                .documents
-                .iter()
-                .filter(|document| !outcome.failed.contains(&document.event_id))
-                .count() as u64;
-            let removed = batch
-                .removed
-                .iter()
-                .filter(|event| !outcome.failed.contains(event))
-                .count() as u64;
-            batch.complete_except(&outcome.failed).await?;
-            let label = community.to_string();
-            metrics::counter!("buzz_search_indexed_documents_total", "community" => label.clone(), "op" => "write")
-                .increment(written);
-            metrics::counter!("buzz_search_indexed_documents_total", "community" => label.clone(), "op" => "remove")
-                .increment(removed);
-            report.batches += 1;
-            report.written += written;
-            report.removed += removed;
-            if outcome.failed.is_empty() {
-                continue;
-            }
-            report.failed += outcome.failed.len() as u64;
-            let reason = outcome.reason.as_deref().unwrap_or("unknown");
-            if outcome.throttled {
-                stop.store(true, Ordering::Relaxed);
-                return Err(IndexerError::Throttled);
-            }
-            if outcome.rejected > 0 {
-                metrics::counter!("buzz_search_index_rejected_total", "community" => label.clone())
-                    .increment(outcome.rejected as u64);
-            }
-            if outcome.conflicts > 0 {
-                // This batch is its events' newest writer, so the index can
-                // hold a newer version only if the version sequence handed
-                // out a value again, as after a Postgres crash or promoting
-                // an asynchronous replica. Keep the rows: the retry carries a later version
-                // once the sequence passes the one held.
-                error!(%community, items = outcome.conflicts, "search index holds a newer version than the batch writing it; the version sequence went back; its rows stay queued");
-                metrics::counter!("buzz_search_index_version_conflicts_total", "community" => label)
-                    .increment(outcome.conflicts as u64);
-            }
-            if outcome.rejected == outcome.failed.len() {
-                warn!(%community, items = outcome.rejected, reason, "search index rejected documents; their rows stay queued");
-                // Refused items are claimed again with the next batch; keep
-                // going while the rest of each batch succeeds.
-                if written + removed == 0 && items > 0 {
-                    skipped.push(community);
-                }
-            } else {
-                skipped.push(community);
-                failure.get_or_insert(SearchError::Engine(format!(
-                    "{} bulk items failed ({reason})",
-                    outcome.failed.len()
-                )));
             }
         }
         failure.map_or(Ok(()), |error| Err(error.into()))
+    }
+
+    /// Write one claimed batch to OpenSearch, settle its outbox rows
+    /// (deleting succeeded ones, parking permanently rejected ones, keeping
+    /// transiently failed ones), and update metrics.
+    async fn apply_batch(
+        &self,
+        batch: search_outbox::SearchOutboxBatch,
+        report: &mut DrainReport,
+        stop: Option<&AtomicBool>,
+    ) -> Result<BatchOutcome, IndexerError> {
+        let community = batch.community();
+        let label = community.to_string();
+        let total_items = batch.documents.len() + batch.removed.len();
+        let outcome = match self
+            .index
+            .write(community, &batch.documents, &batch.removed, batch.version)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error @ SearchError::Rejected(_)) => {
+                // A whole-request 400 usually reflects a cluster or request-level
+                // problem rather than bad documents. Leave rows queued (or
+                // parked, if already parked) and skip this community for the
+                // rest of the pass.
+                warn!(%community, items = total_items, error = %error.kind(), "search index rejected a batch; its rows stay queued");
+                metrics::counter!("buzz_search_index_rejected_total", "community" => label)
+                    .increment(total_items as u64);
+                return Ok(BatchOutcome::SkipCommunity);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let written = batch
+            .documents
+            .iter()
+            .filter(|document| {
+                !outcome.failed.contains(&document.event_id)
+                    && !outcome.rejected.contains(&document.event_id)
+            })
+            .count() as u64;
+        let removed = batch
+            .removed
+            .iter()
+            .filter(|event| !outcome.failed.contains(event) && !outcome.rejected.contains(event))
+            .count() as u64;
+        batch
+            .complete_with(&outcome.failed, &outcome.rejected)
+            .await?;
+        metrics::counter!("buzz_search_indexed_documents_total", "community" => label.clone(), "op" => "write")
+            .increment(written);
+        metrics::counter!("buzz_search_indexed_documents_total", "community" => label.clone(), "op" => "remove")
+            .increment(removed);
+        report.batches += 1;
+        report.written += written;
+        report.removed += removed;
+        report.failed += outcome.failed.len() as u64;
+        report.parked += outcome.rejected.len() as u64;
+
+        let reason = outcome.reason.as_deref().unwrap_or("unknown");
+        if !outcome.rejected.is_empty() {
+            warn!(%community, items = outcome.rejected.len(), reason, "search index rejected documents; their rows were parked");
+            metrics::counter!("buzz_search_index_rejected_total", "community" => label.clone())
+                .increment(outcome.rejected.len() as u64);
+        }
+        if outcome.conflicts > 0 {
+            // This batch is its events' newest writer, so the index can
+            // hold a newer version only if the version sequence handed
+            // out a value again, as after a Postgres crash or promoting
+            // an asynchronous replica. Keep the rows: the retry carries a later version
+            // once the sequence passes the one held.
+            error!(%community, items = outcome.conflicts, "search index holds a newer version than the batch writing it; the version sequence went back; its rows stay queued");
+            metrics::counter!("buzz_search_index_version_conflicts_total", "community" => label)
+                .increment(outcome.conflicts as u64);
+        }
+        if outcome.throttled {
+            if let Some(stop) = stop {
+                stop.store(true, Ordering::Relaxed);
+            }
+            return Err(IndexerError::Throttled);
+        }
+        if !outcome.failed.is_empty() {
+            return Ok(BatchOutcome::Failed(SearchError::Engine(format!(
+                "{} bulk items failed ({reason})",
+                outcome.failed.len()
+            ))));
+        }
+        Ok(BatchOutcome::Continue)
+    }
+
+    /// Set `buzz_search_outbox_parked` for communities with parked rows and
+    /// reset to 0 any community whose parked rows have cleared (including
+    /// deleted communities).
+    async fn publish_parked_counts(&self) {
+        match search_outbox::parked_counts(self.db.pool()).await {
+            Ok(counts) => {
+                let mut current = HashSet::with_capacity(counts.len());
+                for (community, count) in counts {
+                    metrics::gauge!("buzz_search_outbox_parked", "community" => community.to_string())
+                        .set(count as f64);
+                    current.insert(community);
+                }
+                let mut prev = self
+                    .published_parked
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                for gone in prev.difference(&current) {
+                    metrics::gauge!("buzz_search_outbox_parked", "community" => gone.to_string())
+                        .set(0.0);
+                }
+                *prev = current;
+            }
+            Err(error) => warn!(%error, "could not read parked search outbox counts"),
+        }
+    }
+
+    /// Reset previously published `buzz_search_outbox_parked` gauges to 0 when
+    /// this relay loses the indexer lease so it does not keep exporting stale
+    /// non-zero counts after handoff.
+    fn clear_published_parked(&self) {
+        let mut prev = self
+            .published_parked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for community in prev.drain() {
+            metrics::gauge!("buzz_search_outbox_parked", "community" => community.to_string())
+                .set(0.0);
+        }
     }
 
     /// Set `buzz_search_backfill_complete` for every community from stored
@@ -366,7 +489,12 @@ impl Indexer {
     ///
     /// `settled` is false until this lease holder has made sure the index is
     /// at least the settle time old.
-    async fn pass(&self, settled: &mut bool) -> Result<bool, IndexerError> {
+    async fn pass(
+        &self,
+        settled: &mut bool,
+        last_parked_retry: &mut Option<Instant>,
+        parked_recovering: &mut bool,
+    ) -> Result<bool, IndexerError> {
         let mut created = false;
         if self.index.missing().await? {
             // A new index is empty, whatever the stored progress says (the
@@ -398,7 +526,37 @@ impl Indexer {
         *settled = true;
         let backfilled = self.backfill().await?;
         self.drain().await?;
-        Ok(backfilled > 0)
+        let mut parked_cleared = false;
+        if last_parked_retry.is_none_or(|last| last.elapsed() >= self.parked_retry_interval) {
+            *last_parked_retry = Some(Instant::now());
+            let limit = if *parked_recovering {
+                self.batch_size
+            } else {
+                self.parked_batch_size
+            };
+            match self.retry_parked_limit(limit).await {
+                Ok(report) if report.written > 0 || report.removed > 0 => {
+                    // A cluster fix or message change cleared parked rows;
+                    // continue draining parked rows in full batches on the
+                    // next pass instead of waiting a full retry interval.
+                    *last_parked_retry = None;
+                    *parked_recovering = true;
+                    parked_cleared = true;
+                }
+                Ok(_) => {
+                    *parked_recovering = false;
+                }
+                Err(IndexerError::Throttled) => {
+                    *parked_recovering = false;
+                    return Err(IndexerError::Throttled);
+                }
+                Err(error) => {
+                    *parked_recovering = false;
+                    warn!(%error, "parked search outbox retry failed; rows stay parked");
+                }
+            }
+        }
+        Ok(backfilled > 0 || parked_cleared)
     }
 
     /// Hold the indexer lease and keep the index up to date, forever. Abort
@@ -413,6 +571,8 @@ impl Indexer {
         tokio::time::sleep(POLL_INTERVAL.mul_f64(rand::random::<f64>())).await;
         let mut leader: Option<buzz_db::SessionLeader> = None;
         let mut settled = false;
+        let mut last_parked_retry: Option<Instant> = None;
+        let mut parked_recovering = false;
         let mut failures = 0u32;
         let mut throttled = 0u32;
         loop {
@@ -420,6 +580,8 @@ impl Indexer {
                 if !guard.is_live().await {
                     warn!("search indexer lease session lost; re-electing");
                     leader = None;
+                    parked_recovering = false;
+                    self.clear_published_parked();
                 }
             }
             if leader.is_none() {
@@ -428,8 +590,11 @@ impl Indexer {
                         info!("acquired the search indexer lease");
                         leader = Some(acquired);
                         settled = false;
+                        last_parked_retry = None;
+                        parked_recovering = false;
                         failures = 0;
                         self.publish_backfill_progress().await;
+                        self.publish_parked_counts().await;
                     }
                     Ok(None) => failures = 0,
                     Err(error) => {
@@ -440,7 +605,10 @@ impl Indexer {
             }
             let mut backfilling = false;
             if leader.is_some() {
-                match self.pass(&mut settled).await {
+                match self
+                    .pass(&mut settled, &mut last_parked_retry, &mut parked_recovering)
+                    .await
+                {
                     Ok(more) => {
                         failures = 0;
                         throttled = 0;
