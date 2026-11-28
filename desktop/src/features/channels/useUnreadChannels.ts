@@ -57,6 +57,7 @@ import {
 } from "@/features/channels/unreadMembership";
 import { useThreadActivityPersistence } from "@/features/channels/useThreadActivityPersistence";
 import { unreadCatchUp } from "@/shared/api/tauriUnreadCatchUp";
+import { CatchUpClaims } from "@/features/channels/catchUpClaims";
 
 type UseUnreadChannelsOptions = UseLiveChannelUpdatesOptions & {
   pubkey?: string;
@@ -202,7 +203,8 @@ export function useUnreadChannels(
   // Tracks which channels we've already issued a catch-up REQ for this
   // session. Prevents re-fetching on every channels-list refetch, while still
   // letting newly-joined channels be caught up. Reset on identity change.
-  const caughtUpChannelsRef = React.useRef(new Set<string>());
+  // CatchUpClaims rather than a Set: see catchUpClaims.ts (inFlight vs done).
+  const caughtUpChannelsRef = React.useRef(new CatchUpClaims());
 
   const [latestVersion, bumpLatestVersion] = React.useReducer(
     (x: number) => x + 1,
@@ -226,7 +228,8 @@ export function useUnreadChannels(
     // Load persisted forced-unread map for the new pubkey (do NOT clear the
     // store — another device's data should survive identity switches here).
     forcedUnreadRef.current = pubkey ? forcedUnreadStore.read(pubkey) : {};
-    caughtUpChannelsRef.current = new Set();
+    // A new instance: in-flight results captured the old one and drop themselves.
+    caughtUpChannelsRef.current = new CatchUpClaims();
     participatedRootIdsRef.current = pubkey
       ? participationStore.read(pubkey)
       : new Set();
@@ -626,26 +629,30 @@ export function useUnreadChannels(
   // NIP-RS read marker?" If yes, advance latestByChannelRef so the unread
   // predicate fires. This is the only way historical unreads survive an
   // app restart now that we don't persist any client-side "latest" state.
+  // A latest-ref, because the in-flight request now outlives effect re-runs
+  // (see below): its merge step must read the current getters and recorder,
+  // not the ones captured when the request was issued.
+  const catchUpLatestRef = React.useRef({
+    observedPersistence,
+    recordUnreadEvent,
+    getEffectiveTimestamp,
+  });
+  catchUpLatestRef.current = {
+    observedPersistence,
+    recordUnreadEvent,
+    getEffectiveTimestamp,
+  };
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: options.followedRootIds intentionally omitted — it's a Set reference that changes identity every render; the catch-up is a one-shot per-channel operation controlled by caughtUpChannelsRef, not reactive to follow changes
   React.useEffect(() => {
     if (!isReadStateReady) return;
     if (!relayClient) return;
     if (channelIdsKey.length === 0) return;
 
-    const targetIds = channelIdsKey.split(",");
-    const toFetch = targetIds.filter(
-      (id) => !caughtUpChannelsRef.current.has(id),
-    );
+    // claim() = (absent -> inFlight); returns only channels nobody else owns.
+    const claims = caughtUpChannelsRef.current;
+    const toFetch = claims.claim(channelIdsKey.split(","));
     if (toFetch.length === 0) return;
-
-    // Claim optimistically so re-renders mid-flight don't kick off duplicate
-    // REQs. If the effect is cancelled (cleanup) we release the claims so
-    // the next run retries.
-    for (const id of toFetch) {
-      caughtUpChannelsRef.current.add(id);
-    }
-
-    let isCancelled = false;
 
     // Snapshot membership sizes so the `.then` can detect whether the catch-up
     // discovered new participated/authored/mentioned roots (pass 1 mutates the
@@ -675,10 +682,20 @@ export function useUnreadChannels(
       mutedChannelIds: [...mutedChannelIdsRef.current],
     })
       .then(({ channels: results }) => {
-        if (isCancelled) return;
+        // Identity/relay reset swapped the claims object: result is for a dead scope.
+        if (claims !== caughtUpChannelsRef.current) return;
+        const {
+          observedPersistence,
+          recordUnreadEvent,
+          getEffectiveTimestamp,
+        } = catchUpLatestRef.current;
         // The command rejects if relay/pubkey scope changes in flight. Keep the
-        // renderer fence too: it also covers effect cleanup before merge.
-        if (!observedPersistence.isScopeLoaded()) return;
+        // renderer fence too, and release here: nothing else would, so the
+        // claim would stay inFlight forever and these channels never catch up.
+        if (!observedPersistence.isScopeLoaded()) {
+          for (const id of toFetch) claims.release(id);
+          return;
+        }
 
         let didAdvance = false;
         let didDiscover = false;
@@ -687,9 +704,12 @@ export function useUnreadChannels(
           if (result.status === "error") {
             // The error arm carries only this identity; releasing its claim is
             // what lets a failed channel retry on the next effect run.
-            caughtUpChannelsRef.current.delete(result.channelId);
+            claims.release(result.channelId);
             continue;
           }
+          // inFlight -> done lets later effect runs skip this channel instead
+          // of replaying its 1000-event catch-up.
+          claims.complete(result.channelId);
           for (const rootId of result.discovered.participated) {
             const before = participatedRootIdsRef.current.size;
             participatedRootIdsRef.current.add(rootId);
@@ -738,6 +758,10 @@ export function useUnreadChannels(
           }
         }
 
+        // A channel the command omitted must not stay inFlight forever;
+        // release() is a no-op for the ones just completed.
+        for (const id of toFetch) claims.release(id);
+
         if (normalizedPubkey !== null && didDiscover) {
           participationStore.write(
             normalizedPubkey,
@@ -768,19 +792,13 @@ export function useUnreadChannels(
         }
       })
       .catch(() => {
-        if (isCancelled) return;
-        for (const id of toFetch) caughtUpChannelsRef.current.delete(id);
+        // release() only touches inFlight claims, so a stale instance is harmless.
+        for (const id of toFetch) claims.release(id);
       });
 
-    return () => {
-      isCancelled = true;
-      // Release the claims so the next effect run can retry these channels.
-      // The identity-reset effect replaces the Set entirely, so this is a
-      // no-op in that case (harmless).
-      for (const id of toFetch) {
-        caughtUpChannelsRef.current.delete(id);
-      }
-    };
+    // No cleanup on purpose: cleanup used to release in-flight claims on every
+    // dep change, discarding the result and re-fetching (the replay loop). The
+    // request now finishes on its own; scope changes are fenced by `claims`.
   }, [
     channelIdsKey,
     getEffectiveTimestamp,

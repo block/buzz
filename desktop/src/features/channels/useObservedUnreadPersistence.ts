@@ -24,6 +24,12 @@ import {
   type ObservedUnreadWireEvent,
 } from "@/shared/api/tauriObservedUnread";
 
+/**
+ * Window over which native observed-unread mutations are merged into one ingest.
+ * Each ingest is a full-scope native scan, so a burst should pay for it once.
+ */
+export const OBSERVED_UNREAD_COALESCE_MS = 250;
+
 export type ObservedUnreadPersistence = {
   scopeLoadedRef: React.MutableRefObject<string>;
   currentScope: string;
@@ -97,6 +103,10 @@ export function useObservedUnreadPersistence(
   );
   const nativeRef = React.useRef<NativeState | null>(null);
   const nativeFailedRef = React.useRef(false);
+  // Bumped on every scope reset. A reopen that started under an earlier epoch
+  // must not write its snapshot into the current one: the scope key alone
+  // cannot tell A -> B -> A apart from A.
+  const openEpochRef = React.useRef(0);
   const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const queueRef = React.useRef<QueuedObservedUnreadEvent[]>([]);
   const pendingMarkersRef = React.useRef(
@@ -115,6 +125,7 @@ export function useObservedUnreadPersistence(
 
   const reopen = React.useCallback(
     async (scope: { pubkey: string; relayUrl: string }) => {
+      const epoch = openEpochRef.current;
       const response = await openObservedUnreadScope({
         scope,
         legacyPayload: null,
@@ -124,11 +135,11 @@ export function useObservedUnreadPersistence(
         throw new Error(
           "native observed-unread reopen did not return snapshot",
         );
-      if (
-        activityScopeKey(scope.pubkey, scope.relayUrl) !==
-        scopeLoadedRef.current
-      )
-        return;
+      if (epoch !== openEpochRef.current) return;
+      // `apply` starts a reopen without awaiting it. If the ingest chain
+      // declared native unhealthy in the meantime, restoring the handle here
+      // would send later writes to native while readers stay on the fallback.
+      if (nativeFailedRef.current) return;
       nativeRef.current = {
         scope,
         generation: response.generation,
@@ -328,7 +339,10 @@ export function useObservedUnreadPersistence(
     optionsRef.current.onPruned?.();
   }, []);
 
-  const enqueueNative = React.useCallback(
+  // The unbuffered send path. The coalescing layer below decides when a
+  // (possibly merged) mutation reaches it, so retry and fallback behaviour
+  // stay in one place.
+  const dispatchNative = React.useCallback(
     (state: NativeState, mutation: NativeMutation, onSettled?: () => void) => {
       flushNative();
       chainRef.current = chainRef.current.then(async () => {
@@ -373,6 +387,79 @@ export function useObservedUnreadPersistence(
       });
     },
     [apply, flushNative, reopen, seedFallback],
+  );
+
+  // Additive mutations (membership, latest anchors, markers) are buffered for
+  // OBSERVED_UNREAD_COALESCE_MS and sent as ONE ingest: every native ingest
+  // costs a full-scope scan, so one-call-per-mutation bursts (catch-up loops,
+  // read-state churn) were a hot loop. Request arrays are concatenated in call
+  // order, which native applies in array order, so the result is identical to
+  // sending them one by one. Clears are order-sensitive against other kinds, so
+  // they flush the buffer first and are sent immediately, unmerged.
+  const coalesceRef = React.useRef<{
+    state: NativeState;
+    mutation: NativeMutation;
+    settlers: Array<() => void>;
+  } | null>(null);
+  const coalesceTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+
+  const flushCoalesced = React.useCallback(() => {
+    if (coalesceTimerRef.current !== null) {
+      clearTimeout(coalesceTimerRef.current);
+      coalesceTimerRef.current = null;
+    }
+    const pending = coalesceRef.current;
+    if (!pending) return;
+    coalesceRef.current = null;
+    dispatchNative(pending.state, pending.mutation, () => {
+      for (const settle of pending.settlers) settle();
+    });
+  }, [dispatchNative]);
+
+  const enqueueNative = React.useCallback(
+    (state: NativeState, mutation: NativeMutation, onSettled?: () => void) => {
+      const pending = coalesceRef.current;
+      const isClear = mutation.clearAll || mutation.clearChannels.length > 0;
+      if (
+        pending &&
+        (isClear ||
+          pending.state.scope.pubkey !== state.scope.pubkey ||
+          pending.state.scope.relayUrl !== state.scope.relayUrl)
+      )
+        flushCoalesced();
+      if (isClear) {
+        dispatchNative(state, mutation, onSettled);
+        return;
+      }
+      const buffered = coalesceRef.current;
+      if (buffered) {
+        buffered.mutation = {
+          ...buffered.mutation,
+          events: [...buffered.mutation.events, ...mutation.events],
+          channelLatest: [
+            ...buffered.mutation.channelLatest,
+            ...mutation.channelLatest,
+          ],
+          markers: [...buffered.mutation.markers, ...mutation.markers],
+          membership: [...buffered.mutation.membership, ...mutation.membership],
+        };
+        if (onSettled) buffered.settlers.push(onSettled);
+      } else {
+        coalesceRef.current = {
+          state,
+          mutation,
+          settlers: onSettled ? [onSettled] : [],
+        };
+      }
+      if (coalesceTimerRef.current === null)
+        coalesceTimerRef.current = setTimeout(
+          flushCoalesced,
+          OBSERVED_UNREAD_COALESCE_MS,
+        );
+    },
+    [dispatchNative, flushCoalesced],
   );
 
   const flushPendingMarkers = React.useCallback(
@@ -420,19 +507,26 @@ export function useObservedUnreadPersistence(
 
   React.useEffect(() => {
     const onPageHide = () => {
+      // A buffered mutation would be lost if the page went away before the
+      // coalescing timer fired.
+      flushCoalesced();
       flushNative();
       flushObservedUnreadWrite(persistRefs.current);
     };
     window.addEventListener("pagehide", onPageHide);
     return () => window.removeEventListener("pagehide", onPageHide);
-  }, [flushNative]);
+  }, [flushCoalesced, flushNative]);
 
   // Identity and relay are the intentional reset signals; refs and stable callbacks
   // are mutable containers/transport helpers rather than reset triggers.
   // biome-ignore lint/correctness/useExhaustiveDependencies: scope reset is keyed only by normalized identity and relay
   React.useEffect(() => {
+    // Hand buffered mutations to the chain before the scope is reset, so they
+    // are not left waiting on a timer that belongs to the old scope.
+    flushCoalesced();
     flushNative();
     flushObservedUnreadWrite(persistRefs.current);
+    openEpochRef.current += 1;
     nativeRef.current = null;
     nativeFailedRef.current = false;
     projectionsRef.current = new Map();
@@ -491,6 +585,9 @@ export function useObservedUnreadPersistence(
       });
     return () => {
       active = false;
+      // Unmount or a scope change must not strand a buffered mutation behind
+      // the coalescing timer.
+      flushCoalesced();
       flushNative();
       flushObservedUnreadWrite(persistRefs.current);
     };

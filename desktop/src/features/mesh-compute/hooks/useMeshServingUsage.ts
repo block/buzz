@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { meshServingUsage } from "@/shared/api/tauriMesh";
 import type { MeshServingUsage } from "@/shared/api/tauriMesh";
+import { useDocumentVisible } from "@/shared/lib/useDocumentVisible";
 
 /**
  * Polls host-side serving usage while this machine is sharing compute.
@@ -13,12 +14,15 @@ import type { MeshServingUsage } from "@/shared/api/tauriMesh";
  */
 export function useMeshServingUsage(enabled: boolean): MeshServingUsage | null {
   const [usage, setUsage] = React.useState<MeshServingUsage | null>(null);
+  const documentVisible = useDocumentVisible();
 
   React.useEffect(() => {
     if (!enabled) {
       setUsage(null);
       return;
     }
+    // Informational display only: pause polling while the window is hidden.
+    if (!documentVisible) return;
     let cancelled = false;
     const fetchOnce = () => {
       (async () => {
@@ -37,7 +41,7 @@ export function useMeshServingUsage(enabled: boolean): MeshServingUsage | null {
       cancelled = true;
       window.clearInterval(handle);
     };
-  }, [enabled]);
+  }, [enabled, documentVisible]);
 
   return usage;
 }

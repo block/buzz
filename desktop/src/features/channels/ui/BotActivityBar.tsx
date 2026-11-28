@@ -10,6 +10,7 @@ import {
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { useDocumentVisible } from "@/shared/lib/useDocumentVisible";
 import {
   DEFAULT_POPOVER_HOVER_OPEN_DELAY_MS,
   Popover,
@@ -128,8 +129,10 @@ export function BotActivityComposerAction({
     return () => clearHoverTimer();
   }, [clearHoverTimer]);
 
+  const documentVisible = useDocumentVisible();
   React.useEffect(() => {
-    if (activityHeadlines.length <= 1) {
+    // No point re-rendering a rotating headline nobody can see.
+    if (activityHeadlines.length <= 1 || !documentVisible) {
       return;
     }
 
@@ -138,7 +141,7 @@ export function BotActivityComposerAction({
     }, HEADLINE_ROTATION_MS);
 
     return () => window.clearInterval(interval);
-  }, [activityHeadlines.length]);
+  }, [activityHeadlines.length, documentVisible]);
 
   if (workingAgents.length === 0) {
     return null;
