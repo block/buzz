@@ -75,8 +75,17 @@ class PresetAgentAvatar extends HookWidget {
       [videoUrl, isAndroid],
     );
     final ready = useState<VideoPlayerController?>(null);
+    // A player error is terminal, and can arrive after the video is showing.
+    // Rebuild only when it does, not on every position poll.
+    final failed = useListenableSelector(
+      controller,
+      () => controller?.value.hasError ?? false,
+    );
     final videoShown =
-        showNativeVideo && controller != null && ready.value == controller;
+        showNativeVideo &&
+        controller != null &&
+        ready.value == controller &&
+        !failed;
     // A fresh AVPlayerLayer draws nothing until its first frame arrives, so
     // keep the poster under it until playback advances in this showing.
     final shownFrom = useState<(Duration, Duration)?>(null);
@@ -86,9 +95,7 @@ class PresetAgentAvatar extends HookWidget {
       if (!videoShown) {
         presented.value = false;
       } else if (shownFrom.value case (final fresh, final polled)
-          // A failed player resets its position to zero and stops polling.
-          when !controller.value.hasError &&
-              controller.value.position != fresh &&
+          when controller.value.position != fresh &&
               controller.value.position != polled) {
         presented.value = true;
       }
@@ -158,11 +165,7 @@ class PresetAgentAvatar extends HookWidget {
       return () => active = false;
     }, [videoShown, playing, controller]);
 
-    final nativeVideoVisible =
-        isIos &&
-        showNativeVideo &&
-        controller != null &&
-        ready.value == controller;
+    final nativeVideoVisible = isIos && videoShown;
     // HEVC artwork carries its own alpha silhouette. A Flutter path clip around
     // its platform view can also clip selection overlays above other native views.
     Widget clipArtwork(Widget child) =>
