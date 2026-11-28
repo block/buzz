@@ -17,6 +17,7 @@ test("the V3 harness catalog is visible in onboarding", () => {
   assert.equal(runtimeIsVisibleInOnboarding("codex"), true);
   assert.equal(runtimeIsVisibleInOnboarding("goose"), true);
   assert.equal(runtimeIsVisibleInOnboarding("buzz-agent"), true);
+  assert.equal(runtimeIsVisibleInOnboarding("meta"), true);
   assert.equal(runtimeIsVisibleInOnboarding("cursor"), true);
   assert.equal(runtimeIsVisibleInOnboarding("openclaw"), true);
   assert.equal(runtimeIsVisibleInOnboarding("custom"), false);
@@ -24,6 +25,7 @@ test("the V3 harness catalog is visible in onboarding", () => {
 
 test("visible onboarding runtimes use the product order", () => {
   const runtimes = [
+    runtime("meta", "available", "logged_in"),
     runtime("buzz-agent", "available", "not_applicable"),
     runtime("codex", "available", "logged_in"),
     runtime("goose", "available", "not_applicable"),
@@ -32,7 +34,7 @@ test("visible onboarding runtimes use the product order", () => {
 
   assert.deepEqual(
     getVisibleOnboardingRuntimes(runtimes).map(({ id }) => id),
-    ["claude", "codex", "goose", "buzz-agent"],
+    ["claude", "codex", "goose", "buzz-agent", "meta"],
   );
 });
 
