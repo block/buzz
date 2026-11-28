@@ -19,7 +19,7 @@ import { useInboxEditMessage } from "@/features/home/useInboxEditMessage";
 import { useOwnedAgentPubkeys } from "@/features/home/useOwnedAgentPubkeys";
 import {
   filterInboxItems,
-  matchesInboxFilter,
+  isInboxItemVisible,
 } from "@/features/home/lib/inboxViewHelpers";
 import { resolveInboxFilterSelection } from "@/features/home/lib/inboxSelection";
 import { useHomeInboxReadState } from "@/features/home/useHomeInboxReadState";
@@ -430,12 +430,15 @@ export function HomeView({
     selectedItemFromAll?.conversationId ?? latchedConversationId;
 
   const filteredItems = React.useMemo(() => {
-    return inboxItems.filter(
-      (item) =>
-        matchesInboxFilter(item, filter, ownedAgentPubkeys) &&
-        (!unreadOnly ||
-          !effectiveDoneSet.has(item.id) ||
-          item.conversationId === selectedConversationId),
+    return inboxItems.filter((item) =>
+      isInboxItemVisible(item, {
+        doneSet: effectiveDoneSet,
+        filter,
+        localUnreadSet: unreadSet,
+        ownedAgentPubkeys,
+        selectedConversationId,
+        unreadOnly,
+      }),
     );
   }, [
     effectiveDoneSet,
@@ -444,6 +447,7 @@ export function HomeView({
     ownedAgentPubkeys,
     selectedConversationId,
     unreadOnly,
+    unreadSet,
   ]);
   // A filter change may only retain detail for a conversation that remains
   // visible. The filter handler selects the next valid row in the same update,
@@ -545,12 +549,15 @@ export function HomeView({
 
   const handleFilterChange = React.useCallback(
     (nextFilter: InboxFilter) => {
-      const nextItems = inboxItems.filter(
-        (item) =>
-          matchesInboxFilter(item, nextFilter, ownedAgentPubkeys) &&
-          (!unreadOnly ||
-            !effectiveDoneSet.has(item.id) ||
-            item.conversationId === selectedConversationId),
+      const nextItems = inboxItems.filter((item) =>
+        isInboxItemVisible(item, {
+          doneSet: effectiveDoneSet,
+          filter: nextFilter,
+          localUnreadSet: unreadSet,
+          ownedAgentPubkeys,
+          selectedConversationId,
+          unreadOnly,
+        }),
       );
       const selection = resolveInboxFilterSelection({
         isNarrow: isNarrowHomeViewport,
@@ -588,6 +595,7 @@ export function HomeView({
       setSelectedDraftKey,
       setSelectedReminderId,
       unreadOnly,
+      unreadSet,
     ],
   );
 
