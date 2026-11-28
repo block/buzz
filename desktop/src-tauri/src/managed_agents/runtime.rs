@@ -335,7 +335,10 @@ pub fn build_managed_agent_summary<R: tauri::Runtime>(
         runtime: record.runtime.clone(),
         team_id: record.team_id.clone(),
         relay_url: record.relay_url.clone(),
-        acp_command: record.acp_command.clone(),
+        acp_command: crate::managed_agents::effective_config::resolve_effective_acp_command(
+            record, personas,
+        )
+        .unwrap_or_else(|| record.acp_command.clone()),
         agent_command: descriptor.command,
         agent_command_override: record.agent_command_override.clone(),
         agent_args: descriptor.args,
@@ -556,8 +559,9 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
     let stderr = stdout
         .try_clone()
         .map_err(|error| format!("failed to clone log handle: {error}"))?;
-    let resolved_acp_command = resolve_command(&record.acp_command)
-        .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
+    let acp_command = effective_cfg.acp_command.as_str();
+    let resolved_acp_command = resolve_command(acp_command)
+        .ok_or_else(|| missing_command_message(acp_command, "ACP harness command"))?;
     let effective_mcp_command = known_acp_runtime(effective_command)
         .and_then(|r| r.mcp_command)
         .unwrap_or("");
@@ -766,10 +770,10 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
     // buzz-acp owns Git identity, scoped credentials, signing and key cleanup.
     // An advanced custom ACP command bypasses that harness, so retain the
     // earlier Desktop credential setup for that supported override.
-    if record.acp_command != super::DEFAULT_ACP_COMMAND {
+    if acp_command != super::DEFAULT_ACP_COMMAND {
         apply_custom_acp_git_credentials(
             &mut command,
-            &record.acp_command,
+            acp_command,
             &record.private_key_nsec,
             &effective_relay_url,
             resolve_command("git-credential-nostr").as_deref(),
@@ -828,6 +832,7 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
         super::spawn_snapshot::SpawnConfigInputs {
             record,
             descriptor: &descriptor,
+            acp_command,
             relay_url: &effective_relay_url,
             team_instructions: team_instructions.as_deref(),
             system_prompt: effective_prompt.as_deref(),
