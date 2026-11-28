@@ -546,6 +546,54 @@ async fn test_send_event_and_receive_via_subscription() {
     client_b.disconnect().await.expect("disconnect B");
 }
 
+/// Live events keep a subscription id that needs JSON escaping.
+#[tokio::test]
+#[ignore]
+async fn test_live_event_keeps_escaped_sub_id() {
+    let url = relay_url();
+    let kind: u16 = 9;
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let sid = sub_id(r#"quote"back\slash"#);
+    let filter = Filter::new()
+        .kind(Kind::Custom(kind))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE");
+
+    let content = format!("live {}", Uuid::new_v4());
+    let ok = client
+        .send_text_message(&keys, &channel, &content, kind)
+        .await
+        .expect("send");
+    assert!(ok.accepted, "relay rejected event: {}", ok.message);
+
+    match client
+        .recv_event(Duration::from_secs(5))
+        .await
+        .expect("recv")
+    {
+        RelayMessage::Event {
+            subscription_id,
+            event,
+        } => {
+            assert_eq!(subscription_id, sid);
+            assert_eq!(event.content, content);
+        }
+        other => panic!("Expected Event, got {other:?}"),
+    }
+
+    client.disconnect().await.expect("disconnect");
+}
+
 #[tokio::test]
 #[ignore]
 async fn test_large_event_frame_below_configured_limit_is_accepted() {
