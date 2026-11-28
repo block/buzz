@@ -1341,9 +1341,30 @@ pub fn edit_target_id(event: &Event) -> Option<String> {
 ///
 /// Kind:40003 edits are auxiliary events that do not render as timeline rows,
 /// so their seen/working reactions and replies belong on the visible original
-/// message. This holds even when fetching the original failed.
+/// message. This holds even when fetching the original failed. Kind:7 reactions
+/// do not render as timeline rows either, so theirs belong on the reacted-to
+/// message.
 pub(crate) fn reaction_target_id(event: &Event) -> String {
-    edit_target_id(event).unwrap_or_else(|| event.id.to_hex())
+    edit_target_id(event)
+        .or_else(|| reacted_to_id(event))
+        .unwrap_or_else(|| event.id.to_hex())
+}
+
+/// The message a kind:7 reaction is on: its last `e` tag, per NIP-25.
+fn reacted_to_id(event: &Event) -> Option<String> {
+    if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_REACTION {
+        return None;
+    }
+    event.tags.iter().rev().find_map(|tag| {
+        let parts = tag.as_slice();
+        if parts.first().map(String::as_str) != Some("e") {
+            return None;
+        }
+        parts
+            .get(1)
+            .and_then(|target| nostr::EventId::from_hex(target).ok())
+            .map(|target| target.to_hex())
+    })
 }
 
 /// The thread that replies to `event` belong to: its routed thread root, or
@@ -6801,6 +6822,16 @@ mod tests {
     fn edit_reactions_target_visible_original_message() {
         let original_id = "66".repeat(32);
         assert_eq!(reaction_target_id(&edit_event(&original_id)), original_id);
+    }
+
+    #[test]
+    fn kind7_reactions_target_the_reacted_to_message() {
+        let target = "77".repeat(32);
+        let event = EventBuilder::new(Kind::Custom(7), "✅")
+            .tags([nostr::Tag::parse(["e", &target]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        assert_eq!(reaction_target_id(&event), target);
     }
 
     #[test]
