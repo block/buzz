@@ -7650,12 +7650,12 @@ pub(crate) mod postgres_tests {
         let now = chrono::Utc::now();
         let verified = rt
             .block_on(advertised.db.publish_verified_profile(
-                buzz_db::verified_profiles::ProfileAdmission {
+                buzz_db::verified_profiles::ProfileVerification {
                     community,
                     issuer: "https://issuer.test",
                     pubkey: &subject.public_key().to_hex(),
                     issued_at: now,
-                    admitted_at: now,
+                    verified_at: now,
                     display_name: "fname",
                     username: "fname",
                     full_name: Some("Fake Name"),

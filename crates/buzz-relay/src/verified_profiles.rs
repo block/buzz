@@ -3,13 +3,13 @@
 use crate::{nip_fi_config::CommunitySource, state::AppState};
 use buzz_auth::VerifiedAssertion;
 use buzz_core::{StoredEvent, TenantContext};
-use buzz_db::verified_profiles::{ProfileAdmission, ProfilePolicy};
+use buzz_db::verified_profiles::{ProfilePolicy, ProfileVerification};
 use std::sync::Arc;
 
 /// Policies that may publish: none without a stable relay key or NIP-FI
 /// enforcement, since a stale name is only harmless when every post needs a
 /// fresh issuer assertion.
-fn enabled_policies(state: &AppState) -> impl Iterator<Item = &ProfilePolicy> {
+pub(crate) fn enabled_policies(state: &AppState) -> impl Iterator<Item = &ProfilePolicy> {
     let enabled = state.config.relay_private_key.is_some() && state.config.nip_fi.mode.enforces();
     state
         .config
@@ -45,7 +45,7 @@ pub(crate) fn admitted(
     let evidence = evidence.clone();
     let policy = policy.clone();
     let pubkey = key.to_hex();
-    let admitted_at = chrono::Utc::now();
+    let verified_at = chrono::Utc::now();
     tokio::spawn(async move {
         let (Some(profile), Some(label)) = (evidence.profile.as_ref(), policy.label.as_deref())
         else {
@@ -54,12 +54,12 @@ pub(crate) fn admitted(
         let result = state
             .db
             .publish_verified_profile(
-                ProfileAdmission {
+                ProfileVerification {
                     community: tenant.community(),
                     issuer: &policy.issuer,
                     pubkey: &pubkey,
                     issued_at: evidence.issued_at,
-                    admitted_at,
+                    verified_at,
                     display_name: &profile.display_name,
                     username: &profile.username,
                     full_name: profile.full_name.as_deref(),
@@ -92,7 +92,7 @@ pub(crate) fn admitted(
 
 /// Deliver once to local subscribers and other pods. Clients that miss it
 /// read the stored event on their next fetch.
-async fn deliver(state: &AppState, tenant: &TenantContext, event: &nostr::Event) {
+pub(crate) async fn deliver(state: &AppState, tenant: &TenantContext, event: &nostr::Event) {
     let community = tenant.community();
     state.mark_local_event(community, &event.id);
     let outcome = if state
