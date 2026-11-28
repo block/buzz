@@ -58,10 +58,12 @@ test("mac: rejects extra modifiers", () => {
     { ctrlKey: true },
     { shiftKey: true },
   ]) {
-    assert.equal(
-      matchBackForwardChord(chord({ key: "[", metaKey: true, ...extra }), true),
-      null,
-    );
+    for (const key of ["[", "]", "ArrowLeft", "ArrowRight"]) {
+      assert.equal(
+        matchBackForwardChord(chord({ key, metaKey: true, ...extra }), true),
+        null,
+      );
+    }
   }
 });
 
@@ -72,16 +74,14 @@ test("mac: Alt+arrows do not match (that is the win/linux chord)", () => {
   );
 });
 
-test("mac: ⌘←/⌘→ never match — they are line start/end in text editing", () => {
-  // Deliberately unbound: editable targets must keep receiving ⌘←/⌘→ so
-  // line-start/line-end editing still works. Only ⌘[ / ⌘] navigate.
+test("mac: ⌘←/⌘→ match the history aliases", () => {
   assert.equal(
     matchBackForwardChord(chord({ key: "ArrowLeft", metaKey: true }), true),
-    null,
+    "back",
   );
   assert.equal(
     matchBackForwardChord(chord({ key: "ArrowRight", metaKey: true }), true),
-    null,
+    "forward",
   );
 });
 

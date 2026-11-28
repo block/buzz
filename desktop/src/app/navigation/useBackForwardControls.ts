@@ -72,7 +72,29 @@ export function useBackForwardControls() {
   }, [canGoForward, router.history]);
 
   const handleKeyDown = React.useEffectEvent((event: KeyboardEvent) => {
-    // Note: the chords deliberately fire even when focus is inside an
+    // Command-arrows also move to line boundaries on macOS. Keep that
+    // behavior in text fields and drafts, but allow navigation from an
+    // empty composer, which receives focus automatically on channel switches.
+    if (
+      event.metaKey &&
+      (event.key === "ArrowLeft" || event.key === "ArrowRight") &&
+      event.target instanceof HTMLElement
+    ) {
+      if (event.defaultPrevented || event.isComposing) return;
+      const target = event.target;
+      if (target.closest("input, textarea, select")) return;
+      if (target.isContentEditable) {
+        const editor = target.closest<HTMLElement>("[contenteditable]");
+        if (
+          !editor ||
+          editor.textContent ||
+          editor.querySelector("img, [contenteditable='false']")
+        )
+          return;
+      }
+    }
+
+    // The bracket/Alt chords deliberately fire even when focus is inside an
     // editable element. The composer autofocuses on every channel switch
     // (`useComposerAutofocus`), so in steady state focus almost always
     // lives in a contenteditable — an editable-target guard here made the
