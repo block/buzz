@@ -148,7 +148,7 @@ void main() {
   }
 
   test(
-    'voice discovery follows desktop add, runtime change and removal without reconnect',
+    'voice discovery follows desktop capability changes and removal without reconnect',
     () async {
       final relay = _Relay([
         [profile(agent, ownedBy: owner)],
@@ -157,12 +157,9 @@ void main() {
       int inventoryReads() => relay.requestedTags
           .where((filter) => (filter['kinds'] as List).contains(30177))
           .length;
-      final sub = container.listen(ownedCodexVoiceAgentsProvider, (_, _) {});
+      final sub = container.listen(ownedVoiceAgentsProvider, (_, _) {});
       addTearDown(sub.close);
-      expect(
-        await container.read(ownedCodexVoiceAgentsProvider.future),
-        isEmpty,
-      );
+      expect(await container.read(ownedVoiceAgentsProvider.future), isEmpty);
       // Voice shares the directory mentions already load for the DM.
       await container.read(ownedAgentDirectoryProvider.future);
       expect(inventoryReads(), 1);
@@ -170,19 +167,52 @@ void main() {
         listing(agent.public, runtime: 'buzz.codex/codex', time: 2),
         listing(agent.public, runtime: 'other/runtime', time: 3),
         listing(agent.public, runtime: 'buzz.codex/codex', time: 4),
-        listing(agent.public, content: '', time: 5),
+        listing(
+          agent.public,
+          runtime: 'example.agent/custom',
+          time: 5,
+          content: '{"name":"Voice","capabilities":["huddle-voice-v1"]}',
+        ),
+        listing(
+          agent.public,
+          runtime: 'buzz.codex/codex',
+          time: 6,
+          content: '{"name":"Voice","capabilities":[]}',
+        ),
+        listing(agent.public, content: '', time: 7),
       ]) {
         relay.inventory = [record];
         relay.onInventory!(record);
         await container.pump();
-        final keys = await container.read(ownedCodexVoiceAgentsProvider.future);
+        final keys = await container.read(ownedVoiceAgentsProvider.future);
         expect(
           keys.contains(agent.public),
-          record.createdAt == 2 || record.createdAt == 4,
+          [2, 4, 5].contains(record.createdAt),
         );
       }
     },
   );
+
+  test('voice-capable archived agents remain unavailable', () async {
+    final relay = _Relay(
+      [
+        [profile(agent, ownedBy: owner)],
+      ],
+      inventory: [
+        listing(
+          agent.public,
+          runtime: 'example.agent/custom',
+          content: '{"name":"Voice","capabilities":["huddle-voice-v1"]}',
+        ),
+      ],
+    );
+    final container = setup(
+      relay,
+      viewer: owner.public,
+      archived: {agent.public},
+    );
+    expect(await container.read(ownedVoiceAgentsProvider.future), isEmpty);
+  });
 
   test(
     'lists current inventory with verified ownership, name and artwork',

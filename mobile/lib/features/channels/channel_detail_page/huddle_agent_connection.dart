@@ -27,7 +27,7 @@ Future<void> _openMobileHuddle({
     if (ref.read(dmVoiceCandidateProvider(invite.parentChannelId)) != null) {
       ref.invalidate(ownedAgentDirectoryProvider);
       ref.invalidate(identityArchivesProvider);
-      final agents = await ref.read(ownedCodexVoiceAgentsProvider.future);
+      final agents = await ref.read(ownedVoiceAgentsProvider.future);
       if (!context.mounted) return;
       final agent = dmVoiceAgent(
         channel!,
@@ -47,15 +47,13 @@ Future<void> _openMobileHuddle({
             context: context,
             title: 'Invite your agent?',
             message:
-                'Your Codex agent is not invited to this Huddle. Invite it to hear this call? Keep Buzz open on the desktop running this agent.',
+                'Your agent is not invited to this Huddle. Invite it to hear this call? Keep Buzz open on the desktop running this agent.',
             confirmLabel: 'Invite and join',
           );
           if (!confirmed || !context.mounted) return;
           ref.invalidate(ownedAgentDirectoryProvider);
           ref.invalidate(identityArchivesProvider);
-          final currentAgents = await ref.read(
-            ownedCodexVoiceAgentsProvider.future,
-          );
+          final currentAgents = await ref.read(ownedVoiceAgentsProvider.future);
           if (!context.mounted) return;
           if (!currentAgents.contains(agent)) {
             throw StateError('This agent is no longer available for voice.');
@@ -130,7 +128,7 @@ class _HuddleAgentConnectionNotice extends ConsumerWidget {
         .map((member) => member.pubkey)
         .toSet();
     final eligible =
-        ref.watch(ownedCodexVoiceAgentsProvider).value ?? const <String>{};
+        ref.watch(ownedVoiceAgentsProvider).value ?? const <String>{};
     bots.addAll(channel.participantPubkeys.where(eligible.contains));
     if (bots.isEmpty || bots.every(session.participantPubkeys.contains)) {
       return const SizedBox.shrink();
