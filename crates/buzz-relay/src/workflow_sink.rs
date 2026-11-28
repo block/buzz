@@ -186,6 +186,27 @@ fn append_workflow_mention_tags(
     Ok(withheld)
 }
 
+/// The `["buzz:workflow-id", <id>]` tag naming the workflow that sent a message.
+///
+/// `<id>` is the workflow's stored UUID in hyphenated lowercase form. That is
+/// the `d` value of the workflow's kind:30620 definition as `buzz-sdk` writes
+/// it and as clients compare it, so a client pairs it with
+/// `buzz:workflow-owner` to form the coordinate `30620:<owner>:<id>`. It is
+/// also the only `d` the save handler accepts: a definition whose `d` spells
+/// the same UUID another way (uppercase, unhyphenated) is rejected, so that
+/// coordinate holds the workflow's one live definition.
+///
+/// Everyone who can read the message can read this tag, including people who
+/// cannot see the workflow. It is an opaque identifier and nothing more: every
+/// path that takes a workflow ID authorizes the caller on its own.
+fn workflow_id_tag(workflow_id: Uuid) -> Result<Tag, ActionSinkError> {
+    Tag::parse([
+        "buzz:workflow-id",
+        workflow_id.as_hyphenated().to_string().as_str(),
+    ])
+    .map_err(|e| ActionSinkError::EventBuild(format!("workflow id tag: {e}")))
+}
+
 /// Relay-side action sink — executes workflow side-effects directly.
 ///
 /// Holds a **weak** reference to `AppState` to avoid an `Arc` reference cycle:
@@ -211,6 +232,7 @@ impl ActionSink for RelayActionSink {
     fn send_dm(
         &self,
         community_id: CommunityId,
+        workflow_id: Uuid,
         recipient_pubkey: &str,
         text: &str,
         authored_text: &str,
@@ -320,6 +342,7 @@ impl ActionSink for RelayActionSink {
             }
             self.send_message(
                 community_id,
+                workflow_id,
                 &channel.id.to_string(),
                 &text,
                 &authored_text,
@@ -334,6 +357,7 @@ impl ActionSink for RelayActionSink {
     fn send_message(
         &self,
         community_id: CommunityId,
+        workflow_id: Uuid,
         channel_id: &str,
         text: &str,
         authored_text: &str,
@@ -439,6 +463,8 @@ impl ActionSink for RelayActionSink {
             //    - `buzz:workflow` tag prevents recursive workflow triggering
             //    - `buzz:workflow-owner` lets harnesses apply the owner's
             //      inbound-author policy after verifying the relay signature
+            //    - `buzz:workflow-id` names the sending workflow so a reader who
+            //      can see its definition can open it; see `workflow_id_tag`
             //    - one plain `p` tag for every resolved mention in the rendered
             //      output, the owner included, preserving legacy wake/feed behavior
             //    - one `buzz:workflow-mention` tag only when the same target was
@@ -457,6 +483,7 @@ impl ActionSink for RelayActionSink {
                     .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
                 Tag::parse(["buzz:workflow-owner", &author_pubkey_hex])
                     .map_err(|e| ActionSinkError::EventBuild(format!("workflow owner tag: {e}")))?,
+                workflow_id_tag(workflow_id)?,
             ];
 
             // Resolve thread ancestry when this is a threaded reply, so the
@@ -669,16 +696,58 @@ mod tests {
             (author.as_str(), author.as_str()),
         ] {
             assert!(matches!(
-                sink.send_dm(community, to, "hello", "hello", false, from)
+                sink.send_dm(community, Uuid::new_v4(), to, "hello", "hello", false, from)
                     .await,
                 Err(ActionSinkError::InvalidInput(_))
             ));
         }
         assert!(matches!(
-            sink.send_dm(community, &recipient, "  ", "  ", false, &author)
-                .await,
+            sink.send_dm(
+                community,
+                Uuid::new_v4(),
+                &recipient,
+                "  ",
+                "  ",
+                false,
+                &author
+            )
+            .await,
             Err(ActionSinkError::EmptyContent)
         ));
+    }
+
+    /// The tag value is the `d` that `buzz-sdk` writes on a workflow's
+    /// kind:30620 definition, which is the string a client compares it with.
+    ///
+    /// `Uuid::parse_str` reads other spellings of the same UUID, such as
+    /// uppercase, as the same workflow, and the tag does not equal them. The
+    /// save handler therefore rejects them (`e2e_workflow_deletion.rs` pins
+    /// that), so the tag's coordinate is the one a definition is stored at.
+    #[test]
+    fn workflow_id_tag_is_the_d_value_buzz_sdk_writes() {
+        const CANONICAL: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
+        let workflow_id = Uuid::parse_str(CANONICAL).expect("workflow UUID");
+        let tag = workflow_id_tag(workflow_id).expect("workflow id tag");
+        assert_eq!(tag.as_slice(), ["buzz:workflow-id", CANONICAL]);
+
+        let definition = buzz_sdk::build_workflow_def(Uuid::new_v4(), workflow_id, "name: wf")
+            .expect("build definition")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign definition");
+        let d_value = definition
+            .tags
+            .iter()
+            .find(|tag| tag.kind().to_string() == "d")
+            .and_then(|tag| tag.content());
+        assert_eq!(d_value, tag.content());
+
+        let uppercase_d = CANONICAL.to_uppercase();
+        assert_eq!(
+            Uuid::parse_str(&uppercase_d).ok(),
+            Some(workflow_id),
+            "test premise: an uppercase d names the same workflow"
+        );
+        assert_ne!(tag.content(), Some(uppercase_d.as_str()));
     }
 
     fn m(name: &str, pubkey: &str) -> (String, String) {
@@ -1013,6 +1082,19 @@ mod postgres_tests {
     use buzz_db::CreateCommunityWithOwnerResult;
     use std::sync::Arc;
 
+    /// Require exactly one `buzz:workflow-id` tag on `event`: two fields, the
+    /// second `workflow_id` in the hyphenated lowercase form clients compare.
+    fn assert_names_workflow(event: &nostr::Event, workflow_id: Uuid, case: &str) {
+        let tags: Vec<&[String]> = event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice())
+            .filter(|tag| tag.first().map(String::as_str) == Some("buzz:workflow-id"))
+            .collect();
+        let id = workflow_id.to_string();
+        assert_eq!(tags, [["buzz:workflow-id", id.as_str()]], "{case}");
+    }
+
     /// Real-PG state mirroring `handlers::event::tests::test_state_with_redis_url`.
     async fn test_state() -> Arc<AppState> {
         test_state_with_agent_mentions(buzz_workflow::AgentMentions::Any).await
@@ -1258,6 +1340,7 @@ mod postgres_tests {
         assert!(matches!(
             sink.send_dm(
                 community,
+                Uuid::new_v4(),
                 &unknown.to_hex(),
                 "hi",
                 "hi",
@@ -1281,6 +1364,7 @@ mod postgres_tests {
         assert!(matches!(
             sink.send_dm(
                 community,
+                Uuid::new_v4(),
                 &recipient.to_hex(),
                 "hi",
                 "hi",
@@ -1304,7 +1388,7 @@ mod postgres_tests {
         )
         .expect("attachment list");
         assert!(
-            matches!(sink.send_dm(community, &recipient.to_hex(), &oversized, &oversized, false, &owner.to_hex()).await,
+            matches!(sink.send_dm(community, Uuid::new_v4(), &recipient.to_hex(), &oversized, &oversized, false, &owner.to_hex()).await,
             Err(ActionSinkError::InvalidInput(message)) if message.contains("too many attachment"))
         );
         assert!(
@@ -1474,6 +1558,7 @@ mod postgres_tests {
                 .tags
                 .iter()
                 .any(|t| t.as_slice() == ["buzz:workflow-owner", &owner.to_hex()]));
+            assert_names_workflow(&stored.event, workflow_id, "DM");
         }
     }
 
@@ -1655,6 +1740,28 @@ mod postgres_tests {
             tag_values(&injected, "buzz:workflow-mention").is_empty(),
             "a mention introduced solely by trigger data must not receive owner-delegated authority"
         );
+
+        // Each message names the workflow that sent it by that workflow's
+        // stored ID, read back independently of the run that carried it.
+        let mut workflow_ids = Vec::new();
+        for (name, stored) in [
+            ("explicit-authored-mention", &explicit),
+            ("trigger-injected-mention", &injected),
+        ] {
+            let workflow_id = state
+                .db
+                .find_workflow_by_owner_and_name(community, &author_bytes, name)
+                .await
+                .expect("query workflow")
+                .expect("stored workflow")
+                .id;
+            assert_names_workflow(&stored.event, workflow_id, name);
+            workflow_ids.push(workflow_id);
+        }
+        assert_ne!(
+            workflow_ids[0], workflow_ids[1],
+            "test premise: the two messages come from different workflows"
+        );
     }
 
     #[tokio::test]
@@ -1692,11 +1799,15 @@ mod postgres_tests {
             .expect("create channel");
 
         let sink = RelayActionSink::new(&state);
+        // Two workflows post into one thread; each message names its own.
+        let root_workflow = Uuid::new_v4();
+        let reply_workflow = Uuid::new_v4();
 
         // 1. A top-level workflow message becomes the thread root.
         let root_hex = sink
             .send_message(
                 community,
+                root_workflow,
                 &channel.id.to_string(),
                 "root message",
                 "root message",
@@ -1712,6 +1823,7 @@ mod postgres_tests {
         let reply_hex = sink
             .send_message(
                 community,
+                reply_workflow,
                 &channel.id.to_string(),
                 "threaded reply",
                 "threaded reply",
@@ -1755,6 +1867,7 @@ mod postgres_tests {
             None,
             "direct reply omits the root marker (matches SDK thread_tags)"
         );
+        assert_names_workflow(&stored.event, reply_workflow, "threaded reply");
 
         // Thread metadata reflects a depth-1 reply parented on the root.
         let meta = state
@@ -1773,6 +1886,14 @@ mod postgres_tests {
             .to_vec();
         assert_eq!(meta.parent_event_id.as_deref(), Some(root_bytes.as_slice()));
         assert_eq!(meta.root_event_id.as_deref(), Some(root_bytes.as_slice()));
+
+        let root = state
+            .db
+            .get_event_by_id_for_event_write(community, &root_bytes)
+            .await
+            .expect("query root")
+            .expect("root persisted");
+        assert_names_workflow(&root.event, root_workflow, "thread root");
     }
 
     #[tokio::test]
@@ -1858,6 +1979,7 @@ mod postgres_tests {
         let reply_hex = RelayActionSink::new(&state)
             .send_message(
                 community,
+                Uuid::new_v4(),
                 &channel_hex,
                 "workflow reply",
                 "workflow reply",
@@ -1942,6 +2064,7 @@ mod postgres_tests {
         let root_only_reply_hex = RelayActionSink::new(&state)
             .send_message(
                 community,
+                Uuid::new_v4(),
                 &channel_hex,
                 "workflow reply to root-only parent",
                 "workflow reply to root-only parent",
@@ -2008,6 +2131,7 @@ mod postgres_tests {
         let err = RelayActionSink::new(&state)
             .send_message(
                 community,
+                Uuid::new_v4(),
                 &channel.id.to_string(),
                 "orphan reply",
                 "orphan reply",
@@ -2108,6 +2232,7 @@ mod postgres_tests {
             async move {
                 sink.send_message(
                     community,
+                    Uuid::new_v4(),
                     &channel,
                     "reply",
                     "reply",

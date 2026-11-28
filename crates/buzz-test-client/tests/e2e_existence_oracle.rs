@@ -8,6 +8,11 @@
 //! WS, and requires one identical HTTP status, HTTP error and WS `OK`
 //! message. A positive control shows the legitimate write still succeeds.
 //!
+//! One write is a documented exception: saving a workflow definition under an
+//! ID tells a held ID from a free one. Workflow messages publish that ID, so
+//! `workflow_id_tag_names_the_definition_and_grants_nothing` pins what the tag
+//! carries, that it opens no other door, and the exact shape of the exception.
+//!
 //! # Running
 //!
 //! Start the relay, then run:
@@ -21,7 +26,7 @@ use std::time::Duration;
 use buzz_test_client::BuzzTestClient;
 use nostr::{EventBuilder, EventId, Keys, Kind, Tag};
 use reqwest::Client;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 const KIND_EVENT_REMINDER: u16 = 30300;
 const MISSING: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -733,26 +738,43 @@ async fn workflow_read_does_not_reveal_workflow() {
     assert!(body["approvals"].is_array());
 }
 
-/// Save a webhook-triggered workflow `id` in `channel` and return its secret.
-async fn save_webhook_workflow(client: &Client, owner: &Keys, channel: &str, id: &str) -> String {
-    let definition = sign(
+/// A workflow step that does nothing visible.
+const PAUSE: &str = "  - id: pause\n    action: delay\n    duration: 1s\n";
+
+/// A webhook-triggered workflow definition `id` in `channel` that runs `steps`.
+fn webhook_definition(owner: &Keys, channel: &str, id: &str, steps: &str) -> nostr::Event {
+    sign(
         owner,
         30620,
-        "name: existence-oracle\ntrigger:\n  on: webhook\nsteps:\n  - id: pause\n    action: delay\n    duration: 1s\n",
+        &format!("name: existence-oracle\ntrigger:\n  on: webhook\nsteps:\n{steps}"),
         vec![tag(&["d", id]), tag(&["h", channel])],
-    );
-    let (accepted, message) = submit(client, owner, &definition).await;
-    assert!(accepted, "webhook workflow rejected: {message}");
-    let response: Value = serde_json::from_str(
-        message
-            .strip_prefix("response:")
-            .expect("workflow save response"),
     )
-    .expect("parse workflow save response");
-    response["webhook_secret"]
+}
+
+/// The JSON a command event answers with after `response:`.
+fn command_response(message: &str) -> Value {
+    serde_json::from_str(message.strip_prefix("response:").expect("command response"))
+        .expect("parse command response")
+}
+
+/// Save `definition`, which gains a webhook trigger, and return its secret.
+async fn save_for_secret(client: &Client, owner: &Keys, definition: &nostr::Event) -> String {
+    let (accepted, message) = submit(client, owner, definition).await;
+    assert!(accepted, "webhook workflow rejected: {message}");
+    command_response(&message)["webhook_secret"]
         .as_str()
         .expect("webhook secret")
         .to_string()
+}
+
+/// Save a webhook-triggered workflow `id` in `channel` and return its secret.
+async fn save_webhook_workflow(client: &Client, owner: &Keys, channel: &str, id: &str) -> String {
+    save_for_secret(
+        client,
+        owner,
+        &webhook_definition(owner, channel, id, PAUSE),
+    )
+    .await
 }
 
 /// Call webhook `id` with the right secret, assert it starts a run exactly as
@@ -820,4 +842,238 @@ async fn webhook_does_not_reveal_workflow() {
 
     // Positive control: the right secret starts a run.
     start_webhook_run(&client, &webhook, &secret).await;
+}
+
+/// Read `filter` as `reader` over `POST /query`.
+async fn query(client: &Client, reader: &Keys, filter: Value) -> Vec<nostr::Event> {
+    let resp = client
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", reader.public_key().to_hex())
+        .json(&[filter])
+        .send()
+        .await
+        .expect("query");
+    assert!(resp.status().is_success(), "query: {}", resp.status());
+    resp.json().await.expect("parse events")
+}
+
+/// Every tag of `event` named `name`, with all of its fields.
+fn tags_named<'a>(event: &'a nostr::Event, name: &str) -> Vec<&'a [String]> {
+    event
+        .tags
+        .iter()
+        .map(|t| t.as_slice())
+        .filter(|t| t.first().map(String::as_str) == Some(name))
+        .collect()
+}
+
+/// Poll `channel` as `reader` until a workflow message arrives.
+async fn workflow_message(client: &Client, reader: &Keys, channel: &str) -> nostr::Event {
+    for _ in 0..50 {
+        let messages = query(client, reader, json!({"kinds": [9], "#h": [channel]})).await;
+        if let Some(message) = messages
+            .into_iter()
+            .find(|m| !tags_named(m, "buzz:workflow").is_empty())
+        {
+            return message;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    panic!("no workflow message arrived in {channel}");
+}
+
+/// What a client does with a workflow message: read the definition at the
+/// coordinate its `buzz:workflow-owner` and `buzz:workflow-id` tags form.
+async fn definition_named_by(
+    client: &Client,
+    reader: &Keys,
+    message: &nostr::Event,
+) -> Vec<nostr::Event> {
+    let value = |name: &str| match tags_named(message, name).as_slice() {
+        [[_, value]] => value.clone(),
+        other => panic!("expected one two-field {name} tag, got {other:?}"),
+    };
+    let filter = json!({
+        "kinds": [30620],
+        "authors": [value("buzz:workflow-owner")],
+        "#d": [value("buzz:workflow-id")],
+    });
+    query(client, reader, filter).await
+}
+
+/// A workflow message names its workflow in a `buzz:workflow-id` tag that
+/// everyone who can read the message can read. This journey pins what
+/// NOSTR.md ("Workflow Identity") says about it: the value is the `d` of the
+/// definition saved through kind:30620, and it opens no door to a reader who
+/// cannot see the workflow, except that a save under the ID tells a held ID
+/// from a free one.
+#[tokio::test]
+#[ignore]
+async fn workflow_id_tag_names_the_definition_and_grants_nothing() {
+    let client = http_client();
+    let owner = Keys::generate();
+    let outsider = Keys::generate();
+    let (owner_hex, outsider_hex) = (owner.public_key().to_hex(), outsider.public_key().to_hex());
+    let home = create_channel(&client, &owner, "private").await;
+    let own = create_channel(&client, &outsider, "private").await;
+    let id = uuid::Uuid::new_v4().to_string();
+    let missing = uuid::Uuid::new_v4().to_string();
+
+    // A workflow in the owner's private channel DMs the outsider. Opening the
+    // DM first makes the outsider a community user that a workflow can reach,
+    // and tells them where the message arrives.
+    let dm_step = format!(
+        "  - id: dm\n    action: send_dm\n    to: \"{outsider_hex}\"\n    text: from a private workflow\n"
+    );
+    let saved = webhook_definition(&owner, &home, &id, &dm_step);
+    let secret = save_for_secret(&client, &owner, &saved).await;
+    let open_dm = sign(&outsider, 41010, "", vec![tag(&["p", &owner_hex])]);
+    let (accepted, opened) = submit(&client, &outsider, &open_dm).await;
+    assert!(accepted, "DM open rejected: {opened}");
+    let dm = command_response(&opened)["channel_id"]
+        .as_str()
+        .expect("DM channel")
+        .to_string();
+    let run = start_webhook_run(&client, &id, &secret).await;
+    let message = workflow_message(&client, &outsider, &dm).await;
+
+    // Wire contract: exactly one two-field tag whose value is the saved
+    // definition's `d`. With `buzz:workflow-owner` it forms the coordinate at
+    // which the owner reads that definition back.
+    assert_eq!(
+        tags_named(&message, "buzz:workflow-id"),
+        [["buzz:workflow-id", d_tag(&saved).as_str()]]
+    );
+    assert_eq!(
+        tags_named(&message, "buzz:workflow-owner"),
+        [["buzz:workflow-owner", owner_hex.as_str()]]
+    );
+    let ids = |events: Vec<nostr::Event>| events.iter().map(hex).collect::<Vec<_>>();
+    assert_eq!(
+        ids(definition_named_by(&client, &owner, &message).await),
+        [hex(&saved)],
+        "the tags must lead the owner to the saved definition"
+    );
+
+    // The outsider reads the same tags and cannot see the workflow. The
+    // definition, the run history, a manual trigger, the webhook and a delete
+    // each answer as they do for an ID that no workflow holds.
+    assert!(
+        definition_named_by(&client, &outsider, &message)
+            .await
+            .is_empty(),
+        "the outsider must not read the definition"
+    );
+    let runs = |id: &str| format!("/workflows/{id}/runs");
+    let no_runs = read_as(&client, &outsider, &runs(&missing)).await;
+    assert_eq!(no_runs.0, 404, "missing workflow runs: {:?}", no_runs.1);
+    assert_eq!(
+        read_as(&client, &outsider, &runs(&id)).await,
+        no_runs,
+        "runs must answer like a missing workflow"
+    );
+    let trigger = |id: &str| sign(&outsider, 46020, "{}", vec![tag(&["d", id])]);
+    assert_uniform(
+        &client,
+        &outsider,
+        "invalid: workflow not found or not triggerable by you",
+        vec![
+            ("missing", trigger(&missing)),
+            ("named by the tag", trigger(&id)),
+        ],
+    )
+    .await;
+    let no_hook = call_webhook(&client, &missing, None).await;
+    assert_eq!(no_hook.0, 404, "missing workflow hook: {:?}", no_hook.1);
+    for guess in [None, Some("wrong-secret")] {
+        assert_eq!(
+            call_webhook(&client, &id, guess).await,
+            no_hook,
+            "hook with secret {guess:?} must answer like a missing workflow"
+        );
+    }
+    let delete = |keys: &Keys, author: &str, id: &str| {
+        EventBuilder::new(Kind::EventDeletion, "")
+            .tags(vec![tag(&["a", &format!("30620:{author}:{id}")])])
+            .sign_with_keys(keys)
+            .unwrap()
+    };
+    assert_uniform(
+        &client,
+        &outsider,
+        "invalid: deletion target not found or not deletable by you",
+        vec![
+            ("missing", delete(&outsider, &owner_hex, &missing)),
+            ("named by the tags", delete(&outsider, &owner_hex, &id)),
+        ],
+    )
+    .await;
+    // A coordinate under the outsider's own key is theirs to delete, and
+    // deletes nothing: the ID alone does not select the owner's workflow.
+    submit_ok(&client, &outsider, &delete(&outsider, &outsider_hex, &id)).await;
+
+    // The documented residual: a save under a held ID is refused, with one
+    // fixed message that says nothing else about the workflow.
+    const HELD: &str = "forbidden: workflow belongs to a different owner or channel";
+    let save_under_id = |keys: &Keys, channel: &str, step: &str| {
+        let steps = format!("  - id: {step}\n    action: delay\n    duration: 1s\n");
+        webhook_definition(keys, channel, &id, &steps)
+    };
+    assert_uniform(
+        &client,
+        &outsider,
+        HELD,
+        vec![("held by the owner", save_under_id(&outsider, &own, "probe"))],
+    )
+    .await;
+
+    // Nothing the outsider sent reached the workflow: its definition is
+    // unchanged and its only run is the one the owner started.
+    assert_eq!(
+        ids(definition_named_by(&client, &owner, &message).await),
+        [hex(&saved)],
+        "the definition must be unchanged"
+    );
+    let (status, body) = read_as(&client, &owner, &runs(&id)).await;
+    assert_eq!(status, 200, "owner runs read failed: {body}");
+    let started: Vec<&str> = body["runs"]
+        .as_array()
+        .expect("runs")
+        .iter()
+        .filter_map(|r| r["id"].as_str())
+        .collect();
+    assert_eq!(started, [run.as_str()], "only the owner's run may exist");
+
+    // The probe is not passive. Once the owner deletes the workflow the same
+    // save succeeds, the outsider holds the ID, and the former owner's save
+    // under it is refused in turn.
+    submit_ok(&client, &owner, &delete(&owner, &owner_hex, &id)).await;
+    submit_ok(&client, &outsider, &save_under_id(&outsider, &own, "take")).await;
+    assert_uniform(
+        &client,
+        &owner,
+        HELD,
+        vec![(
+            "held by the outsider",
+            save_under_id(&owner, &home, "return"),
+        )],
+    )
+    .await;
+
+    // The ID brings nothing of the old workflow with it: no run history, and
+    // the old message's coordinate names no definition for either reader.
+    let (status, body) = read_as(&client, &outsider, &runs(&id)).await;
+    assert_eq!(
+        (status, &body["runs"]),
+        (200, &json!([])),
+        "the new holder must not inherit runs: {body}"
+    );
+    for reader in [&owner, &outsider] {
+        assert!(
+            definition_named_by(&client, reader, &message)
+                .await
+                .is_empty(),
+            "the old coordinate must name no definition"
+        );
+    }
 }

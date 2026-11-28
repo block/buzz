@@ -1377,6 +1377,7 @@ mod postgres_tests {
             let event_id = crate::workflow_sink::RelayActionSink::new(&state)
                 .send_message(
                     community,
+                    uuid::Uuid::new_v4(),
                     &channel.to_string(),
                     text,
                     text,

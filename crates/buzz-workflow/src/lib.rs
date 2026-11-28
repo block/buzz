@@ -167,9 +167,15 @@ impl WorkflowEngine {
     /// Drop the cached enabled-workflow list for a channel.
     ///
     /// Must be called after any write to a workflow's trigger eligibility or
-    /// channel binding (currently the relay's command upsert and NIP-09
-    /// deletion paths) so same-pod trigger matching sees the change
-    /// immediately instead of after the cache TTL.
+    /// channel binding (currently the relay's command upsert, NIP-09 deletion
+    /// and departed-member disable paths) so same-pod trigger matching does
+    /// not keep the old list for the cache TTL.
+    ///
+    /// Call it after the write has committed, never while its transaction is
+    /// open: a lookup that misses the cache in between reads the previously
+    /// committed rows and caches them, and nothing invalidates that entry.
+    /// A lookup already in flight when this runs can still cache its older
+    /// result afterwards; the TTL bounds that case.
     pub fn invalidate_channel_workflows(&self, community_id: CommunityId, channel_id: Uuid) {
         self.workflow_cache.invalidate(&(community_id, channel_id));
     }

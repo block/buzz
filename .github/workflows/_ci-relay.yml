@@ -130,6 +130,7 @@ jobs:
             --test e2e_author_only_deletion \
             --test e2e_existence_oracle \
             --test e2e_channel_pins \
+            --test e2e_workflow_deletion \
             --archive-file target/ci/backend-integration-tests.tar.zst
       - name: Build PostgreSQL test archive
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true' && matrix.artifact == 'postgres-tests'
@@ -676,6 +677,20 @@ jobs:
           RELAY_URL: ws://localhost:3000
           # schema/schema.sql (applied above) indexes kind:5 content.
           BUZZ_TEST_SEARCH_INDEXES_DELETIONS: "1"
+      - name: Workflow deletion e2e
+        # Workflow save, alias-convergence and deletion journeys against the
+        # live relay. They install failure triggers in the relay's own
+        # database, so they get their own step, after the parallel e2e step
+        # has finished, and run one at a time.
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'binary(e2e_workflow_deletion)' \
+            --run-ignored ignored-only \
+            --test-threads 1
+        env:
+          RELAY_URL: ws://localhost:3000
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
       - name: Upload relay log
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

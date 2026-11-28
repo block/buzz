@@ -7140,6 +7140,23 @@ mod workflow_owner_tests {
             effective_prompt_author(&event, Some(&relay.public_key().to_hex()), &agent),
             owner
         );
+
+        // A relay that also names the sending workflow changes nothing: the
+        // tag is not a second marker and carries no authority.
+        let names_workflow = workflow_event(
+            &relay,
+            Some(&owner),
+            &[
+                &["buzz:workflow", "true"],
+                &["buzz:workflow-id", "0f8fad5b-d9cb-469f-a165-70867728950e"],
+            ],
+            &[&["buzz:workflow-mention", agent.as_str()]],
+            &[owner.as_str(), agent.as_str()],
+        );
+        assert_eq!(
+            effective_prompt_author(&names_workflow, Some(&relay.public_key().to_hex()), &agent),
+            owner
+        );
     }
 
     #[test]

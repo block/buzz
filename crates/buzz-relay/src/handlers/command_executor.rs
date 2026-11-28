@@ -97,12 +97,13 @@ enum PersistResult {
 /// If the event is a duplicate (ON CONFLICT DO NOTHING), the transaction is
 /// rolled back and `PersistResult::Duplicate` is returned — no mutations needed.
 ///
-/// NOTE: Domain mutations (open_dm, upsert_workflow, etc.) execute on the
-/// connection pool, NOT inside this transaction. The pattern is idempotent but
-/// not strictly atomic: if a mutation succeeds but commit fails, the mutation
-/// persists without the event record. On retry, the event INSERT succeeds
-/// (no conflict), and the mutation re-executes — which is safe for idempotent
-/// operations (open_dm, hide_dm, update_approval, upsert_workflow).
+/// NOTE: Most domain mutations (open_dm, hide_dm, update_approval) execute on
+/// the connection pool, NOT inside this transaction. The pattern is idempotent
+/// but not strictly atomic: if a mutation succeeds but commit fails, the
+/// mutation persists without the event record. On retry, the event INSERT
+/// succeeds (no conflict), and the mutation re-executes — which is safe for
+/// those idempotent operations. A workflow definition save is the exception:
+/// its workflow upsert runs inside this transaction.
 #[datastore_span(name = "persist_command_event", system = "postgresql")]
 async fn persist_command_event(
     db: &buzz_db::Db,
@@ -934,6 +935,13 @@ async fn handle_workflow_def(
         .ok_or_else(|| IngestError::Rejected("invalid: missing d tag (workflow_id)".into()))?;
     let workflow_id = Uuid::parse_str(&workflow_id_str)
         .map_err(|_| IngestError::Rejected("invalid: bad workflow_id format".into()))?;
+    // One spelling per workflow: definitions are stored and read by the exact
+    // `d` string, while the executable workflow is keyed by the parsed UUID.
+    // Accepting another spelling would leave two live definitions for one
+    // workflow, and `buzz:workflow-id` always carries this form.
+    if workflow_id_str != workflow_id.to_string() {
+        return Err(IngestError::Rejected(NON_CANONICAL_WORKFLOW_ID.into()));
+    }
 
     // 2. Validate caller has channel access (minimum: is a member)
     let is_member = state
@@ -1031,7 +1039,7 @@ async fn handle_workflow_def(
     let hash = compute_definition_hash(&definition_json_final);
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
+    let mut tx = match persist_command_event(&state.db, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -1060,10 +1068,12 @@ async fn handle_workflow_def(
         .await
         .map_err(|_| IngestError::Rejected("invalid: workflow channel not found".into()))?;
 
+    // The upsert runs in the definition event's transaction: a failure in any
+    // later step rolls the executable workflow back with the definition.
     state
         .db
-        .upsert_workflow(
-            community_id,
+        .upsert_workflow_in_transaction(
+            &mut tx,
             workflow_id,
             Some(channel_id),
             &self_bytes,
@@ -1079,16 +1089,33 @@ async fn handle_workflow_def(
             other => IngestError::Internal(format!("error: db upsert_workflow: {other}")),
         })?;
 
-    // Drop the trigger-path cache entry so the new/updated definition fires on
-    // the next matching event instead of after the cache TTL.
+    // Relays before the canonical-`d` rule stored definitions under other
+    // spellings of this UUID. Retire them with this save, so the canonical
+    // coordinate is the workflow's only live definition.
+    state
+        .db
+        .retire_other_workflow_definition_spellings(&mut tx, &self_bytes, workflow_id)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: retire definitions: {}", e.kind())))?;
+
+    // One commit for the definition event, the workflow row and the retired
+    // spellings.
+    let committed = tx.commit().await;
+
+    // Drop the trigger-path cache entry only once the commit has returned. An
+    // event that missed the cache while this transaction was open read the
+    // previously committed workflow and cached it; invalidating before the
+    // commit would leave that entry in place for the cache TTL. A save that
+    // fails before the commit changes nothing and returns above without
+    // invalidating. A commit that reports an error may still have been applied,
+    // so the entry is dropped on either outcome. A trigger lookup whose SELECT
+    // is already in flight can still cache its result after this point; the
+    // TTL bounds that (see `WorkflowEngine::workflow_cache`).
     state
         .workflow_engine
         .invalidate_channel_workflows(community_id, channel_id);
 
-    // Commit the event transaction after the idempotent workflow upsert succeeds.
-    tx.commit()
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
+    committed.map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
 
     // 5. Return response
     let mut resp = serde_json::json!({
@@ -1104,6 +1131,9 @@ async fn handle_workflow_def(
         message: format!("response:{}", resp),
     })
 }
+
+/// Save rejection for a `d` that spells the workflow UUID non-canonically.
+const NON_CANONICAL_WORKFLOW_ID: &str = "invalid: workflow_id must be a lowercase hyphenated UUID";
 
 /// Trigger rejection for a missing workflow and for one the sender does not own.
 const WORKFLOW_NOT_FOUND: &str = "invalid: workflow not found or not triggerable by you";
@@ -1171,8 +1201,10 @@ async fn handle_workflow_trigger(
         })?;
 
     // Persist the command event under the workflow channel even though the
-    // trigger event itself only carries the workflow UUID. Storing channel
-    // triggers as global events leaks workflow IDs to unrelated relay members.
+    // trigger event itself only carries the workflow UUID. Stored as a global
+    // event, a trigger would show unrelated relay members when the owner ran
+    // the workflow and with what input. The ID itself is not secret: workflow
+    // messages publish it in `buzz:workflow-id`.
     let tx = match persist_command_event(&state.db, tenant, event, workflow.channel_id).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
