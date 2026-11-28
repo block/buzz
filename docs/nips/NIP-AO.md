@@ -123,7 +123,7 @@ so a client that ignores `batch` can miss the answer to a control frame.
 ### Control (`frame=control`)
 
 The `content` field decrypts to a JSON object whose `type` names the command.
-The defined types are `cancel_turn`, `switch_model` and
+The defined types are `cancel_turn`, `cancel_thread_turn`, `switch_model` and
 `publish_project_owner_announcements`. Implementations MUST ignore events with
 unrecognized `type` values, and SHOULD drop a frame whose required fields are
 missing or invalid without answering it.
@@ -137,33 +137,25 @@ out.
 
 #### `cancel_turn`
 
-Stops the agent's running turn in a conversation.
+Stops the agent's running turn in a channel.
 
 ```json
 {
-  "type":         "cancel_turn",
-  "channelId":    "<channel_uuid>",
-  "threadRootId": "<event_id_hex>",
-  "requestId":    "<opaque_id>"
+  "type":      "cancel_turn",
+  "channelId": "<channel_uuid>",
+  "requestId": "<opaque_id>"
 }
 ```
 
-| Field          | Required | Meaning                                                    |
-|----------------|----------|------------------------------------------------------------|
-| `channelId`    | yes      | Channel the turn runs in.                                  |
-| `threadRootId` | no       | Root event id (64 hex characters) of the thread to stop.   |
-| `requestId`    | no       | Opaque correlator, echoed in the result.                   |
+| Field       | Required | Meaning                                  |
+|-------------|----------|------------------------------------------|
+| `channelId` | yes      | Channel the turn runs in.                |
+| `requestId` | no       | Opaque correlator, echoed in the result. |
 
-With `threadRootId`, the agent stops the turn of the session that serves that
-thread. An agent that keeps one session for the whole channel (or a DM) stops
-that session's turn, since every thread of the channel runs in it. An agent
-that keeps a session per thread MUST NOT stop a session that may serve another
-thread, and answers `no_active_turn` when that thread has no running turn.
-Without
-`threadRootId`, the target is the whole channel; an agent with more than one
-session in the channel MUST NOT pick one and answers `ambiguous_target`. A
-sender SHOULD include `threadRootId` whenever the turn it stops belongs to a
-thread, and omit it for a conversation with no threads.
+The target is the whole channel. An agent with more than one session in the
+channel MUST NOT pick one and answers `ambiguous_target`. An agent MUST ignore
+any other field, such as a `threadRootId`, and MUST NOT narrow the target from
+it; a sender that stops one thread uses `cancel_thread_turn`.
 
 The result is a `control_result` telemetry frame with `channelId` set:
 
@@ -171,14 +163,56 @@ The result is a `control_result` telemetry frame with `channelId` set:
 { "type": "cancel_turn", "status": "sent", "requestId": "<opaque_id>" }
 ```
 
-| `status`           | Meaning                                                              |
-|--------------------|----------------------------------------------------------------------|
-| `sent`             | A running turn was signalled to stop. It may not have ended yet.     |
-| `no_active_turn`   | No turn was running there, or it was already stopping.               |
-| `ambiguous_target` | Without `threadRootId`, the channel has more than one session.       |
+| `status`           | Meaning                                                          |
+|--------------------|------------------------------------------------------------------|
+| `sent`             | A running turn was signalled to stop. It may not have ended yet. |
+| `no_active_turn`   | No turn was running there, or it was already stopping.           |
+| `ambiguous_target` | The channel has more than one session.                           |
 
 `sent` is not proof that the turn ended. A sender that needs that SHOULD watch
 the turn's own telemetry, or other evidence of activity, end.
+
+#### `cancel_thread_turn`
+
+Stops the agent's running turn in one thread of a channel.
+
+```json
+{
+  "type":         "cancel_thread_turn",
+  "channelId":    "<channel_uuid>",
+  "threadRootId": "<event_id_hex>",
+  "requestId":    "<opaque_id>"
+}
+```
+
+| Field          | Required | Meaning                                                  |
+|----------------|----------|----------------------------------------------------------|
+| `channelId`    | yes      | Channel the turn runs in.                                |
+| `threadRootId` | yes      | Root event id (64 hex characters) of the thread to stop. |
+| `requestId`    | no       | Opaque correlator, echoed in the result.                 |
+
+The agent stops the turn of the session that serves that thread. An agent that
+keeps one session for the whole channel (or a DM) stops that session's turn,
+since every thread of the channel runs in it. An agent that keeps a session per
+thread MUST NOT stop a session that may serve another thread. A frame without a
+valid `threadRootId` is dropped unanswered.
+
+An agent that predates this type ignores it, as it does any unrecognized
+`type`, so a sender gets no answer rather than a stop of another thread's turn,
+and SHOULD time out.
+
+The result is a `control_result` telemetry frame with `channelId` set:
+
+```json
+{ "type": "cancel_thread_turn", "status": "sent", "requestId": "<opaque_id>" }
+```
+
+| `status`         | Meaning                                                          |
+|------------------|------------------------------------------------------------------|
+| `sent`           | A running turn was signalled to stop. It may not have ended yet. |
+| `no_active_turn` | No turn was running in that thread, or it was already stopping.  |
+
+As with `cancel_turn`, `sent` is not proof that the turn ended.
 
 #### `switch_model`
 
@@ -196,8 +230,8 @@ Changes the model the agent uses in a channel.
 `channelId` and `modelId` are required; `requestId` is an optional string,
 echoed in every result for this command. If a turn is running, the agent stops
 it and runs its request again under the new model. If none is, the new model
-applies from the next turn. Like `cancel_turn` without a thread, the target is
-the whole channel.
+applies from the next turn. Like `cancel_turn`, the target is the whole
+channel.
 
 The first `control_result` frame, with `channelId` set, carries `type`,
 `status`, `modelId` and `requestId`:
@@ -399,7 +433,7 @@ of decrypted payloads and MUST NOT log it at INFO level or above.
 
 ---
 
-### 2. Control Event — `cancel_turn` frame
+### 2. Control Event — `cancel_thread_turn` frame
 
 **Wire event (encrypted):**
 
@@ -423,7 +457,7 @@ of decrypted payloads and MUST NOT log it at INFO level or above.
 
 ```json
 {
-  "type":         "cancel_turn",
+  "type":         "cancel_thread_turn",
   "channelId":    "52a85618-0f8f-4542-94ec-599e6e1c6f2e",
   "threadRootId": "9f2c4e1a7b3d5f6081a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708",
   "requestId":    "0b6f2d4e-8a1c-4f3e-9d2b-7c5a1e0f4b6d"
@@ -446,7 +480,7 @@ of decrypted payloads and MUST NOT log it at INFO level or above.
   "sessionId":  null,
   "turnId":     null,
   "payload": {
-    "type":      "cancel_turn",
+    "type":      "cancel_thread_turn",
     "status":    "sent",
     "requestId": "0b6f2d4e-8a1c-4f3e-9d2b-7c5a1e0f4b6d"
   }

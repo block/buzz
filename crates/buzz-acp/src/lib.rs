@@ -1920,7 +1920,10 @@ fn handle_relay_observer_control_event(
     let command_type = payload.get("type").and_then(|value| value.as_str());
     match command_type {
         Some("cancel_turn") => {
-            handle_cancel_turn_control(&payload, pool, observer, conversation_scoped);
+            handle_cancel_turn_control(&payload, pool, observer);
+        }
+        Some("cancel_thread_turn") => {
+            handle_cancel_thread_turn_control(&payload, pool, observer, conversation_scoped);
         }
         Some("switch_model") => {
             handle_switch_model_control(&payload, pool, observer);
@@ -2081,11 +2084,35 @@ fn emit_project_owner_control_result(
     );
 }
 
-/// Handle a `cancel_turn` control frame: signal the in-flight task to cancel.
+/// Handle a `cancel_turn` control frame: signal the channel's in-flight task to
+/// cancel, refusing a channel with several scopes.
 ///
-/// With a `threadRootId`, the stop targets that one thread, scope-exact, as an
-/// owner's `!cancel` in the thread does, so it can never be ambiguous. Without
-/// one, it targets the channel and refuses a channel with several scopes.
+/// Channel-only: a `threadRootId` on the frame is ignored. Thread-targeted stops
+/// use `cancel_thread_turn`, so a harness that predates it drops them instead
+/// of stopping another thread's turn.
+fn handle_cancel_turn_control(
+    payload: &serde_json::Value,
+    pool: &mut AgentPool,
+    observer: Option<&observer::ObserverHandle>,
+) {
+    let Some(channel_id) = control_channel_id(payload, "cancel_turn") else {
+        return;
+    };
+
+    let status = if pool.channel_control_is_ambiguous(channel_id) {
+        "ambiguous_target"
+    } else if signal_in_flight_task(pool, channel_id, ControlSignal::Cancel) {
+        "sent"
+    } else {
+        "no_active_turn"
+    };
+    emit_cancel_control_result(observer, channel_id, "cancel_turn", status, payload);
+}
+
+/// Handle a `cancel_thread_turn` control frame: signal the in-flight task for
+/// one thread to cancel, scope-exact, as an owner's `!cancel` in the thread
+/// does, so it can never be ambiguous. A frame without a valid `threadRootId`
+/// is dropped unanswered.
 ///
 /// `conversation_scoped` tells whether events in a channel are known to share
 /// the channel's one `Conversation` scope: the channel session policy, or a
@@ -2093,57 +2120,65 @@ fn emit_project_owner_control_result(
 /// a `Conversation` turn. Under the thread policy a `Conversation` scope can
 /// also come from a metadata miss (the DM check fails closed), and that turn
 /// may belong to another thread.
-fn handle_cancel_turn_control(
+fn handle_cancel_thread_turn_control(
     payload: &serde_json::Value,
     pool: &mut AgentPool,
     observer: Option<&observer::ObserverHandle>,
     conversation_scoped: &dyn Fn(Uuid) -> bool,
 ) {
-    let Some(channel_id) = payload
-        .get("channelId")
-        .and_then(|value| value.as_str())
-        .and_then(|value| value.parse::<Uuid>().ok())
-    else {
-        tracing::warn!("observer cancel_turn control frame missing valid channelId");
+    let Some(channel_id) = control_channel_id(payload, "cancel_thread_turn") else {
         return;
     };
-    let thread_root = match payload.get("threadRootId") {
-        None | Some(serde_json::Value::Null) => None,
-        // Lowercase hex, the form scope keys use.
-        Some(value) => match value
-            .as_str()
-            .and_then(|id| nostr::EventId::from_hex(id).ok())
-        {
-            Some(root) => Some(root.to_hex()),
-            None => {
-                tracing::warn!("observer cancel_turn control frame has invalid threadRootId");
-                return;
-            }
-        },
+    // Lowercase hex, the form scope keys use.
+    let Some(root_event_id) = payload
+        .get("threadRootId")
+        .and_then(|value| value.as_str())
+        .and_then(|id| nostr::EventId::from_hex(id).ok())
+        .map(|root| root.to_hex())
+    else {
+        tracing::warn!("observer cancel_thread_turn control frame missing valid threadRootId");
+        return;
     };
 
-    let status = if let Some(root_event_id) = thread_root {
-        // The scope `SessionScope::derive` gives an event in this thread.
-        let target = if conversation_scoped(channel_id) {
-            scope::SessionScope::Conversation { channel_id }
-        } else {
-            scope::SessionScope::Thread {
-                channel_id,
-                root_event_id,
-            }
-        };
-        if signal_in_flight_task_for_scope(pool, &target, ControlSignal::Cancel) {
-            "sent"
-        } else {
-            "no_active_turn"
+    // The scope `SessionScope::derive` gives an event in this thread.
+    let target = if conversation_scoped(channel_id) {
+        scope::SessionScope::Conversation { channel_id }
+    } else {
+        scope::SessionScope::Thread {
+            channel_id,
+            root_event_id,
         }
-    } else if pool.channel_control_is_ambiguous(channel_id) {
-        "ambiguous_target"
-    } else if signal_in_flight_task(pool, channel_id, ControlSignal::Cancel) {
+    };
+    let status = if signal_in_flight_task_for_scope(pool, &target, ControlSignal::Cancel) {
         "sent"
     } else {
         "no_active_turn"
     };
+    emit_cancel_control_result(observer, channel_id, "cancel_thread_turn", status, payload);
+}
+
+/// The `channelId` of a control frame, or `None` (logged) when it is missing
+/// or not a UUID.
+fn control_channel_id(payload: &serde_json::Value, command_type: &str) -> Option<Uuid> {
+    let channel_id = payload
+        .get("channelId")
+        .and_then(|value| value.as_str())
+        .and_then(|value| value.parse::<Uuid>().ok());
+    if channel_id.is_none() {
+        tracing::warn!("observer {command_type} control frame missing valid channelId");
+    }
+    channel_id
+}
+
+/// Answer a cancel control frame with a `control_result` echoing its
+/// `requestId`.
+fn emit_cancel_control_result(
+    observer: Option<&observer::ObserverHandle>,
+    channel_id: Uuid,
+    command_type: &str,
+    status: &str,
+    payload: &serde_json::Value,
+) {
     if let Some(observer) = observer {
         observer.emit(
             "control_result",
@@ -2155,7 +2190,7 @@ fn handle_cancel_turn_control(
                 started_at: None,
             },
             serde_json::json!({
-                "type": "cancel_turn",
+                "type": command_type,
                 "status": status,
                 "requestId": payload.get("requestId"),
             }),
@@ -4545,10 +4580,10 @@ fn mode_gate_signal(
 ///
 /// Channel-targeted: refuses channels with multiple session scopes. Used only
 /// by observer control frames that carry a bare `channelId` and no thread
-/// context (`switch_model`, and `cancel_turn` without `threadRootId`). Every
-/// thread-aware path — mid-turn steering/interruption, the owner `!cancel` /
-/// `!rotate` commands, whose triggering event carries NIP-10 thread tags, and
-/// a `cancel_turn` frame with `threadRootId` — uses
+/// context (`cancel_turn` and `switch_model`). Every thread-aware path —
+/// mid-turn steering/interruption, the owner `!cancel` / `!rotate` commands,
+/// whose triggering event carries NIP-10 thread tags, and the
+/// `cancel_thread_turn` frame — uses
 /// [`signal_in_flight_task_for_scope`], which targets one exact
 /// [`scope::SessionScope`] so a signal for thread A can never hit thread B
 /// running in the same channel.
@@ -6818,7 +6853,7 @@ mod owner_control_command_tests {
             "channelId": ch.to_string(), "modelId": "new-model", "requestId": "pick-1",
         });
 
-        handle_cancel_turn_control(&payload, &mut pool, Some(&observer), &|_| false);
+        handle_cancel_turn_control(&payload, &mut pool, Some(&observer));
         handle_switch_model_control(&payload, &mut pool, Some(&observer));
         let results = observer.snapshot();
         assert_eq!(results.len(), 2);
@@ -6870,7 +6905,7 @@ mod owner_control_command_tests {
             });
             match &signal {
                 ControlSignal::Cancel => {
-                    handle_cancel_turn_control(&payload, &mut pool, Some(&observer), &|_| false)
+                    handle_cancel_turn_control(&payload, &mut pool, Some(&observer))
                 }
                 _ => handle_switch_model_control(&payload, &mut pool, Some(&observer)),
             }
@@ -6880,7 +6915,7 @@ mod owner_control_command_tests {
     }
 
     #[tokio::test]
-    async fn cancel_turn_with_thread_root_stops_only_that_thread() {
+    async fn cancel_thread_turn_stops_only_that_thread() {
         let mut pool = AgentPool::from_slots(vec![]);
         let ch = Uuid::new_v4();
         let (root_a, root_b) = ("a".repeat(64), "b".repeat(64));
@@ -6891,13 +6926,13 @@ mod owner_control_command_tests {
         let observer = observer::ObserverHandle::in_process();
         let cancel = |root: serde_json::Value, request_id: &str| {
             serde_json::json!({
-                "type": "cancel_turn", "channelId": ch.to_string(),
+                "type": "cancel_thread_turn", "channelId": ch.to_string(),
                 "threadRootId": root, "requestId": request_id,
             })
         };
 
         // Thread A, spelled in uppercase as NIP-10 allows: only A is cancelled.
-        handle_cancel_turn_control(
+        handle_cancel_thread_turn_control(
             &cancel(root_a.to_uppercase().into(), "stop-a"),
             &mut pool,
             Some(&observer),
@@ -6910,21 +6945,29 @@ mod owner_control_command_tests {
         );
 
         // A thread with no turn, and A again once its signal is spent.
-        handle_cancel_turn_control(
+        handle_cancel_thread_turn_control(
             &cancel("c".repeat(64).into(), "stop-c"),
             &mut pool,
             Some(&observer),
             &|_| false,
         );
-        handle_cancel_turn_control(
+        handle_cancel_thread_turn_control(
             &cancel(root_a.into(), "stop-a2"),
             &mut pool,
             Some(&observer),
             &|_| false,
         );
-        // A malformed root is dropped without an answer or a signal.
-        handle_cancel_turn_control(
-            &cancel("zz".into(), "bad"),
+        // A malformed or missing root is dropped without an answer or a signal.
+        for root in ["zz".into(), serde_json::Value::Null] {
+            handle_cancel_thread_turn_control(
+                &cancel(root, "bad"),
+                &mut pool,
+                Some(&observer),
+                &|_| false,
+            );
+        }
+        handle_cancel_thread_turn_control(
+            &serde_json::json!({ "channelId": ch.to_string(), "requestId": "bad" }),
             &mut pool,
             Some(&observer),
             &|_| false,
@@ -6940,7 +6983,7 @@ mod owner_control_command_tests {
             .map(|result| {
                 assert_eq!(result.kind, "control_result");
                 assert_eq!(result.channel_id, Some(ch.to_string()));
-                assert_eq!(result.payload["type"], "cancel_turn");
+                assert_eq!(result.payload["type"], "cancel_thread_turn");
                 (
                     result.payload["requestId"].as_str().unwrap().to_string(),
                     result.payload["status"].as_str().unwrap().to_string(),
@@ -6955,13 +6998,15 @@ mod owner_control_command_tests {
         .map(|(id, status)| (id.to_string(), status.to_string()));
         assert_eq!(results, expected);
 
-        // Without a thread root the stop stays channel-wide, so the two
-        // threads make it ambiguous and B is still not signalled.
+        // `cancel_turn` stays channel-wide and ignores a thread root, so the
+        // two threads make it ambiguous and B is still not signalled.
         handle_cancel_turn_control(
-            &serde_json::json!({ "channelId": ch.to_string(), "requestId": "stop-all" }),
+            &serde_json::json!({
+                "type": "cancel_turn", "channelId": ch.to_string(),
+                "threadRootId": root_b, "requestId": "stop-all",
+            }),
             &mut pool,
             Some(&observer),
-            &|_| false,
         );
         assert_eq!(
             observer.snapshot().last().unwrap().payload["status"],
@@ -6974,11 +7019,12 @@ mod owner_control_command_tests {
     }
 
     #[tokio::test]
-    async fn cancel_turn_with_thread_root_reaches_a_conversation_only_when_the_channel_is_one() {
+    async fn cancel_thread_turn_reaches_a_conversation_only_when_the_channel_is_one() {
         let observer = observer::ObserverHandle::in_process();
         let stop = |ch: Uuid, root: &str| {
             serde_json::json!({
-                "channelId": ch.to_string(), "threadRootId": root, "requestId": "stop",
+                "type": "cancel_thread_turn", "channelId": ch.to_string(),
+                "threadRootId": root, "requestId": "stop",
             })
         };
         let last_status = || {
@@ -6999,7 +7045,7 @@ mod owner_control_command_tests {
             scope::SessionScope::Conversation { channel_id: ch },
             tx,
         );
-        handle_cancel_turn_control(
+        handle_cancel_thread_turn_control(
             &stop(ch, &"d".repeat(64)),
             &mut pool,
             Some(&observer),
@@ -7023,10 +7069,14 @@ mod owner_control_command_tests {
             tx_a,
         );
         insert_task_meta(&mut pool, 1, thread_scope(ch, &root_b), tx_b);
-        handle_cancel_turn_control(&stop(ch, &root_b), &mut pool, Some(&observer), &|_| false);
+        handle_cancel_thread_turn_control(&stop(ch, &root_b), &mut pool, Some(&observer), &|_| {
+            false
+        });
         assert_eq!(rx_b.try_recv(), Ok(ControlSignal::Cancel));
         assert_eq!(last_status(), "sent");
-        handle_cancel_turn_control(&stop(ch, &root_b), &mut pool, Some(&observer), &|_| false);
+        handle_cancel_thread_turn_control(&stop(ch, &root_b), &mut pool, Some(&observer), &|_| {
+            false
+        });
         assert_eq!(last_status(), "no_active_turn");
         assert_eq!(
             rx_a.try_recv(),
@@ -7039,7 +7089,9 @@ mod owner_control_command_tests {
         let (tx_c, rx_c) = tokio::sync::oneshot::channel();
         insert_task_meta(&mut pool, 2, thread_scope(ch, &root_c), tx_c);
         drop(rx_c);
-        handle_cancel_turn_control(&stop(ch, &root_c), &mut pool, Some(&observer), &|_| false);
+        handle_cancel_thread_turn_control(&stop(ch, &root_c), &mut pool, Some(&observer), &|_| {
+            false
+        });
         assert_eq!(last_status(), "no_active_turn");
     }
 
