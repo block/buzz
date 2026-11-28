@@ -78,6 +78,10 @@ ensure_infra() {
 run_unit_tests() {
   section "Unit Tests (no infra required)"
 
+  # Include doctests: the compile-fail examples guard the IFC public API.
+  run_test_step "IFC unit tests and doctests" \
+    cargo test -p ifc-core -p buzz-ifc -- --nocapture
+
   run_test_step "buzz-core tests" \
     cargo test -p buzz-core --lib -- --nocapture
 

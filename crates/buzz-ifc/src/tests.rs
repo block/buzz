@@ -1,0 +1,537 @@
+use std::collections::BTreeSet;
+
+use nostr::Keys;
+use uuid::Uuid;
+
+use super::*;
+use crate::domain::{DomainContext, DomainError};
+
+fn principal(value: u8) -> Principal {
+    let keys = Keys::parse(&format!("{value:064x}")).expect("test secret key");
+    Principal::from_public_key(&keys.public_key()).expect("valid test principal")
+}
+
+fn readers(values: &[u8]) -> BTreeSet<Principal> {
+    values.iter().copied().map(principal).collect()
+}
+
+fn community() -> CommunityId {
+    CommunityId::from_uuid(Uuid::from_u128(1))
+}
+
+fn other_community() -> CommunityId {
+    CommunityId::from_uuid(Uuid::from_u128(2))
+}
+
+fn label(values: &[u8]) -> ConfidentialityLabel {
+    ConfidentialityLabel::restricted(community(), readers(values)).expect("non-empty readers")
+}
+
+fn non_egressing<const N: usize>(names: [&str; N]) -> CapabilitySet {
+    CapabilitySet::from_operations(names.map(|name| (name, OperationEffect::NonEgressing)))
+}
+
+fn conversation_capabilities() -> CapabilitySet {
+    CapabilitySet::from_operations([
+        ("buzz.read.current", OperationEffect::NonEgressing),
+        ("buzz.post", OperationEffect::Publication),
+        ("buzz.reply", OperationEffect::Publication),
+    ])
+}
+
+fn conversation(values: &[u8], channel_id: Uuid) -> ExecutionDomain {
+    ExecutionDomain::new(
+        principal(9),
+        Some(principal(1)),
+        label(values),
+        DomainContext::Conversation {
+            community: community(),
+            channel_id,
+        },
+        conversation_capabilities(),
+    )
+    .expect("coherent conversation domain")
+}
+
+/// A correctly sized hex string is not necessarily a public key. Reject invalid
+/// curve points, and check that uppercase input returns the same lowercase key.
+#[test]
+fn principals_must_be_valid_x_only_secp256k1_points() {
+    for invalid in ["00".repeat(32), "ff".repeat(32), format!("{:064x}", 5)] {
+        assert_eq!(
+            Principal::from_hex(&invalid),
+            Err(PrincipalError::InvalidPublicKey)
+        );
+    }
+
+    let lowercase = principal(1).to_hex();
+    assert_eq!(
+        Principal::from_hex(&lowercase.to_ascii_uppercase())
+            .expect("uppercase hexadecimal principal")
+            .to_hex(),
+        lowercase
+    );
+}
+
+/// Combining data for readers {1, 2} with data for {1, 3} leaves only reader 1.
+/// Also check that even public data cannot flow into a different community.
+#[test]
+fn buzz_labels_intersect_readers_and_never_cross_communities() {
+    let combined = label(&[1, 2])
+        .join(&label(&[1, 3]))
+        .expect("same community");
+    assert!(combined.can_flow_to(&label(&[1])));
+    assert!(!combined.can_flow_to(&label(&[1, 2])));
+
+    let other = ConfidentialityLabel::public(other_community());
+    assert!(!ConfidentialityLabel::public(community()).can_flow_to(&other));
+    assert_eq!(
+        ConfidentialityLabel::public(community()).join(&other),
+        Err(LabelError::CrossUniverse)
+    );
+}
+
+/// Only `buzz.post` appears in all three policies. It must remain a publication
+/// even though one policy says otherwise, or the destination check could be lost.
+#[test]
+fn capability_intersection_keeps_the_most_restrictive_effect() {
+    let bot = CapabilitySet::from_operations([
+        ("buzz.post", OperationEffect::Publication),
+        ("email.read", OperationEffect::NonEgressing),
+    ]);
+    let requester = CapabilitySet::from_operations([("buzz.post", OperationEffect::Publication)]);
+    let domain = CapabilitySet::from_operations([
+        ("buzz.post", OperationEffect::NonEgressing),
+        ("drive.read", OperationEffect::NonEgressing),
+    ]);
+
+    assert_eq!(
+        CapabilitySet::effective(&bot, &requester, &domain),
+        CapabilitySet::from_operations([("buzz.post", OperationEffect::Publication)])
+    );
+}
+
+/// Duplicate entries cannot turn a publication into an unchecked call,
+/// regardless of which effect appeared first in the policy input.
+#[test]
+fn duplicate_capability_effects_always_require_publication_checks() {
+    for effects in [
+        [OperationEffect::Publication, OperationEffect::NonEgressing],
+        [OperationEffect::NonEgressing, OperationEffect::Publication],
+    ] {
+        let operations =
+            CapabilitySet::from_operations(effects.map(|effect| ("buzz.post", effect)));
+        let domain = derive_execution_domain(
+            DomainFacts {
+                community: community(),
+                channel_id: Uuid::from_u128(1),
+                kind: ConversationKind::Public,
+                members: BTreeSet::new(),
+                executing_agent: principal(9),
+                requesters: readers(&[1]),
+                system_principal: None,
+                owner: Some(principal(1)),
+            },
+            &CapabilityPolicy::new(operations.clone(), operations),
+        )
+        .expect("valid public domain");
+        assert_eq!(
+            IfcSession::enter(domain).call("buzz.post"),
+            Err(IfcError::PublicationRequiresPublish)
+        );
+    }
+}
+
+/// Relay and mixed-requester turns never gain the owner's personal capabilities.
+/// The relay may trigger a private conversation without becoming a reader.
+#[test]
+fn derivation_limits_relay_and_mixed_requester_turns_to_conversation_capabilities() {
+    let owner = principal(1);
+    let agent = principal(9);
+    let relay = principal(3);
+    let policy = CapabilityPolicy::new(
+        non_egressing(["buzz.read.current", "email.read"]),
+        non_egressing(["buzz.read.current"]),
+    );
+    for (kind, requesters) in [
+        (ConversationKind::DirectMessage, readers(&[3])),
+        (ConversationKind::DirectMessage, readers(&[1, 3])),
+        (ConversationKind::DirectMessage, readers(&[1, 9])),
+        (ConversationKind::Restricted, readers(&[3])),
+    ] {
+        let domain = derive_execution_domain(
+            DomainFacts {
+                community: community(),
+                channel_id: Uuid::from_u128(1),
+                kind,
+                members: BTreeSet::from([owner, agent]),
+                executing_agent: agent,
+                requesters,
+                system_principal: Some(relay),
+                owner: Some(owner),
+            },
+            &policy,
+        )
+        .expect("authenticated conversation turn");
+        assert_eq!(domain.audience(), &label(&[1]));
+        if kind == ConversationKind::DirectMessage {
+            assert!(matches!(
+                &domain.context,
+                DomainContext::OwnerPrivate { .. }
+            ));
+        } else {
+            assert_eq!(
+                domain.context,
+                DomainContext::Conversation {
+                    community: community(),
+                    channel_id: Uuid::from_u128(1),
+                }
+            );
+        }
+        let session = IfcSession::enter(domain);
+        assert_eq!(session.call("buzz.read.current"), Ok(()));
+        assert_eq!(session.call("email.read"), Err(IfcError::CapabilityDenied));
+    }
+}
+
+/// A relay trigger does not supply recipients for an agent-only channel.
+#[test]
+fn agent_only_restricted_conversations_have_no_output_audience() {
+    assert_eq!(
+        derive_execution_domain(
+            DomainFacts {
+                community: community(),
+                channel_id: Uuid::from_u128(1),
+                kind: ConversationKind::Restricted,
+                members: readers(&[9]),
+                executing_agent: principal(9),
+                requesters: readers(&[3]),
+                system_principal: Some(principal(3)),
+                owner: Some(principal(1)),
+            },
+            &CapabilityPolicy::new(CapabilitySet::default(), CapabilitySet::default()),
+        ),
+        Err(DerivationError::EmptyRestrictedAudience)
+    );
+}
+
+/// Both agents can read one source label, even when their configured owner is
+/// absent. Only each execution domain removes its own agent from the audience.
+#[test]
+fn conversation_resource_labels_keep_all_members_for_every_executing_agent() {
+    for kind in [
+        ConversationKind::Restricted,
+        ConversationKind::DirectMessage,
+    ] {
+        let resource = ResourceLabel::from_conversation(
+            community(),
+            Uuid::from_u128(1),
+            kind,
+            readers(&[2, 8, 9]),
+        )
+        .expect("valid conversation resource");
+        assert_eq!(resource.audience, label(&[2, 8, 9]));
+        assert_eq!(
+            resource.context,
+            DomainContext::Conversation {
+                community: community(),
+                channel_id: Uuid::from_u128(1),
+            }
+        );
+        for agent in [principal(8), principal(9)] {
+            let domain = derive_execution_domain(
+                DomainFacts {
+                    community: community(),
+                    channel_id: Uuid::from_u128(1),
+                    kind,
+                    members: readers(&[2, 8, 9]),
+                    executing_agent: agent,
+                    requesters: readers(&[2]),
+                    system_principal: None,
+                    owner: Some(principal(1)),
+                },
+                &CapabilityPolicy::new(CapabilitySet::default(), CapabilitySet::default()),
+            )
+            .expect("valid member invocation");
+            assert_eq!(IfcSession::enter(domain).read(&resource), Ok(()));
+        }
+    }
+}
+
+#[test]
+fn conversation_resource_labels_handle_public_and_empty_restricted_membership() {
+    let public = ResourceLabel::from_conversation(
+        community(),
+        Uuid::from_u128(1),
+        ConversationKind::Public,
+        [],
+    )
+    .expect("public resources need no member list");
+    assert!(public.audience.is_public());
+    assert_eq!(public.context, DomainContext::CommunityPublic(community()));
+    for kind in [
+        ConversationKind::Restricted,
+        ConversationKind::DirectMessage,
+    ] {
+        assert_eq!(
+            ResourceLabel::from_conversation(community(), Uuid::from_u128(1), kind, []),
+            Err(LabelError::EmptyReaderSet)
+        );
+    }
+}
+
+/// Owner-private execution is a property of the invocation. The original DM
+/// data retains both readers and the DM's conversation identity.
+#[test]
+fn owner_private_sessions_admit_their_full_dm_resource_label() {
+    let resource = ResourceLabel::from_conversation(
+        community(),
+        Uuid::from_u128(1),
+        ConversationKind::DirectMessage,
+        readers(&[1, 9]),
+    )
+    .expect("valid DM resource");
+    assert_eq!(resource.audience, label(&[1, 9]));
+    let domain = derive_execution_domain(
+        DomainFacts {
+            community: community(),
+            channel_id: Uuid::from_u128(1),
+            kind: ConversationKind::DirectMessage,
+            members: readers(&[1, 9]),
+            executing_agent: principal(9),
+            requesters: readers(&[1]),
+            system_principal: None,
+            owner: Some(principal(1)),
+        },
+        &CapabilityPolicy::new(CapabilitySet::default(), CapabilitySet::default()),
+    )
+    .expect("valid owner DM domain");
+    assert!(matches!(
+        &domain.context,
+        DomainContext::OwnerPrivate { .. }
+    ));
+    assert_eq!(IfcSession::enter(domain).read(&resource), Ok(()));
+}
+
+/// With this policy, an owner's DM can use `email.read`; a public-channel request
+/// from the same owner cannot. Check the audience and context too, so personal
+/// capabilities cannot be paired with public state.
+#[test]
+fn derivation_grants_personal_capabilities_only_to_owner_private_work() {
+    let owner = principal(1);
+    let agent = principal(9);
+    let policy = CapabilityPolicy::new(
+        non_egressing(["buzz.read.current", "email.read"]),
+        non_egressing(["buzz.read.current"]),
+    );
+    let owner_dm = derive_execution_domain(
+        DomainFacts {
+            community: community(),
+            channel_id: Uuid::from_u128(1),
+            kind: ConversationKind::DirectMessage,
+            members: BTreeSet::from([agent, owner]),
+            executing_agent: agent,
+            requesters: BTreeSet::from([owner]),
+            system_principal: None,
+            owner: Some(owner),
+        },
+        &policy,
+    )
+    .expect("owner DM domain");
+    assert!(matches!(
+        &owner_dm.context,
+        DomainContext::OwnerPrivate {
+            owner: candidate,
+            ..
+        } if candidate == &owner
+    ));
+    assert_eq!(
+        owner_dm.capabilities,
+        non_egressing(["buzz.read.current", "email.read"])
+    );
+    assert_eq!(owner_dm.audience, label(&[1]));
+
+    let public = derive_execution_domain(
+        DomainFacts {
+            community: community(),
+            channel_id: Uuid::from_u128(2),
+            kind: ConversationKind::Public,
+            members: BTreeSet::new(),
+            executing_agent: agent,
+            requesters: BTreeSet::from([owner]),
+            system_principal: None,
+            owner: Some(owner),
+        },
+        &policy,
+    )
+    .expect("public domain");
+    assert_eq!(
+        &public.context,
+        &DomainContext::CommunityPublic(community())
+    );
+    assert!(public.audience.is_public());
+    assert_eq!(public.capabilities, non_egressing(["buzz.read.current"]));
+}
+
+/// Reject a private-channel invocation with no requester, a missing agent, or
+/// an outside requester. Knowing the channel ID is not enough to act in it.
+#[test]
+fn restricted_derivation_requires_verified_membership() {
+    let owner = principal(1);
+    let agent = principal(9);
+    let outsider = principal(8);
+    let policy = CapabilityPolicy::new(
+        non_egressing(["buzz.read.current"]),
+        non_egressing(["buzz.read.current"]),
+    );
+    let facts = |members, requesters| DomainFacts {
+        community: community(),
+        channel_id: Uuid::from_u128(1),
+        kind: ConversationKind::Restricted,
+        members,
+        executing_agent: agent,
+        requesters,
+        system_principal: None,
+        owner: Some(owner),
+    };
+
+    assert_eq!(
+        derive_execution_domain(facts(BTreeSet::new(), BTreeSet::new()), &policy),
+        Err(DerivationError::EmptyRequesters)
+    );
+    assert_eq!(
+        derive_execution_domain(
+            facts(BTreeSet::from([owner]), BTreeSet::from([owner]),),
+            &policy,
+        ),
+        Err(DerivationError::AgentNotMember)
+    );
+    assert_eq!(
+        derive_execution_domain(
+            facts(BTreeSet::from([owner, agent]), BTreeSet::from([outsider]),),
+            &policy,
+        ),
+        Err(DerivationError::RequesterNotMember)
+    );
+}
+
+/// Change each domain component separately and require a different domain.
+/// Omitting one from equality could reuse history from a different agent, owner,
+/// audience, conversation, community, or capability set.
+#[test]
+fn structural_domain_equality_compares_every_component() {
+    let base = conversation(&[1, 2], Uuid::from_u128(1));
+    let build = |agent, owner, audience: ConfidentialityLabel, channel_id, capabilities| {
+        let community = *audience.universe();
+        ExecutionDomain::new(
+            agent,
+            owner,
+            audience,
+            DomainContext::Conversation {
+                community,
+                channel_id,
+            },
+            capabilities,
+        )
+        .expect("coherent domain")
+    };
+    let domains = [
+        base,
+        build(
+            principal(8),
+            Some(principal(1)),
+            label(&[1, 2]),
+            Uuid::from_u128(1),
+            conversation_capabilities(),
+        ),
+        build(
+            principal(9),
+            None,
+            label(&[1, 2]),
+            Uuid::from_u128(1),
+            conversation_capabilities(),
+        ),
+        build(
+            principal(9),
+            Some(principal(1)),
+            label(&[1, 3]),
+            Uuid::from_u128(1),
+            conversation_capabilities(),
+        ),
+        build(
+            principal(9),
+            Some(principal(1)),
+            label(&[1, 2]),
+            Uuid::from_u128(2),
+            conversation_capabilities(),
+        ),
+        build(
+            principal(9),
+            Some(principal(1)),
+            ConfidentialityLabel::restricted(other_community(), readers(&[1, 2]))
+                .expect("non-empty readers"),
+            Uuid::from_u128(1),
+            conversation_capabilities(),
+        ),
+        build(
+            principal(9),
+            Some(principal(1)),
+            label(&[1, 2]),
+            Uuid::from_u128(1),
+            non_egressing(["buzz.read.current"]),
+        ),
+    ];
+
+    for (index, domain) in domains.iter().enumerate() {
+        for previous in &domains[..index] {
+            assert_ne!(domain, previous);
+        }
+    }
+}
+
+/// Reader and operation ordering, and duplicate entries, do not change a domain.
+/// Equivalent structures must also select the same entry in a retained-state pool.
+#[test]
+fn equivalent_domains_ignore_reader_and_capability_ordering() {
+    let domain = conversation(&[1, 2], Uuid::from_u128(1));
+    let mut reordered = conversation(&[2, 1, 2], Uuid::from_u128(1));
+    reordered.capabilities = CapabilitySet::from_operations([
+        ("buzz.reply", OperationEffect::Publication),
+        ("buzz.post", OperationEffect::Publication),
+        ("buzz.read.current", OperationEffect::NonEgressing),
+        ("buzz.reply", OperationEffect::Publication),
+    ]);
+
+    assert_eq!(domain, reordered);
+    let pool = std::collections::HashMap::from([(domain, "retained state")]);
+    assert_eq!(pool.get(&reordered), Some(&"retained state"));
+}
+
+/// A public audience cannot be paired with another community's context or with
+/// private conversation state. Check both errors at the domain constructor.
+#[test]
+fn domains_reject_incoherent_audience_context_pairs() {
+    assert_eq!(
+        ExecutionDomain::new(
+            principal(9),
+            Some(principal(1)),
+            ConfidentialityLabel::public(community()),
+            DomainContext::CommunityPublic(other_community()),
+            CapabilitySet::default(),
+        ),
+        Err(DomainError::ContextCommunityMismatch)
+    );
+    assert_eq!(
+        ExecutionDomain::new(
+            principal(9),
+            Some(principal(1)),
+            ConfidentialityLabel::public(community()),
+            DomainContext::Conversation {
+                community: community(),
+                channel_id: Uuid::from_u128(2),
+            },
+            CapabilitySet::default(),
+        ),
+        Err(DomainError::AudienceContextMismatch)
+    );
+}
