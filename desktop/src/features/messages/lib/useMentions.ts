@@ -34,7 +34,11 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 import { useActiveAgentPubkeys } from "./useActiveAgentPubkeys";
 import { useDefaultAgentSuggestion } from "./useDefaultAgentSuggestion";
-import { flushMentionDebounce, isPlainSpace } from "./flushMentionDebounce";
+import {
+  flushMentionDebounce,
+  isMentionListStale,
+  isPlainSpace,
+} from "./flushMentionDebounce";
 import { useAgentMentionRevalidation } from "./agentMentionRevalidation";
 import type { MentionIdentity } from "./mentionClipboard";
 import {
@@ -872,7 +876,16 @@ export function useMentions(
           !event.altKey &&
           !event.shiftKey)
       ) {
-        if (debounceTimerRef.current !== null || exactMentionSpace) {
+        if (
+          exactMentionSpace ||
+          isMentionListStale({
+            debounceTimerRef,
+            latestValueRef,
+            latestCursorRef,
+            searchableNamesLowerRef,
+            renderedQuery: mentionQuery,
+          })
+        ) {
           const flushed = flushMentionDebounce({
             debounceTimerRef,
             latestValueRef,
@@ -918,6 +931,7 @@ export function useMentions(
       currentPubkey,
       isMentionOpen,
       mentionCandidatesWithTeams,
+      mentionQuery,
       mentionSelectedIndex,
       options?.channelType,
       ownerProfilesQuery.data?.profiles,
