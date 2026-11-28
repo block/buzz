@@ -176,15 +176,19 @@ Run `just test` for integration tests if you touched `buzz-relay`,
 formatting via `stage_fixed`. Pre-commit runs fix variants in parallel (Rust
 fmt, Tauri Rust fmt, desktop biome fix, web biome fix, mobile dart format).
 Auto-fixable issues are fixed and re-staged; unfixable lint issues block the
-commit. **Pre-push hooks** run the repository-wide differential file-size gate,
-clippy (workspace + Tauri), desktop TypeScript typechecking (`tsc --noEmit`),
-and fast unit tests in parallel (Rust, desktop JS, Tauri Rust, mobile Flutter)
-— no overlap with pre-commit. Builds are CI-only. Run `just fix-all` to auto-fix
-all formatting in one shot. Run `just ci` for the full local gate. Run `just
-hooks` to re-install hooks after env changes. Each globbed pre-push lane is
-scoped to the branch's merge-base diff against `origin/main` (`git diff
-origin/main...HEAD`), matching CI's paths-filter — so a lane only fires when this
-branch actually changed a file it covers, never because `origin/main` moved.
+commit. **Pre-push hooks** provide fast local feedback without running full suites:
+they run the repository-wide differential file-size gate, desktop lint and
+TypeScript typechecking (`tsc --noEmit`), unit tests scoped to the changed
+workspace crates (no reverse dependencies), Tauri clippy/tests scoped to
+`desktop/src-tauri/**`, and desktop/mobile checks in parallel — no overlap with
+pre-commit. Dependency, config, migration, schema, and cross-crate effects are
+left to CI, which runs the full suite on every PR. Builds are CI-only. Run
+`just fix-all` to auto-fix all formatting in one shot. Run `just ci` for the
+full local gate. Run `just hooks` to re-install hooks after env changes. Each
+globbed pre-push lane is scoped to the branch's merge-base diff against
+`origin/main` (`git diff origin/main...HEAD`), matching CI's paths-filter — so a
+lane only fires when this branch actually changed a file it covers, never
+because `origin/main` moved.
 These lanes validate the checked-out HEAD; pushing a non-HEAD ref (explicit
 refspec, `--all`) gets a non-fatal `push-head-scope` warning and relies on CI for
 its path-scoped checks.
