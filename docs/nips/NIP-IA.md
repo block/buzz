@@ -52,7 +52,7 @@ This document uses MUST, MUST NOT, SHOULD, SHOULD NOT, MAY, and RECOMMENDED as d
 - **target**: The pubkey being archived or unarchived.
 - **actor**: The pubkey that signed a `kind:9035` or `kind:9036` request.
 - **archived identity**: A target pubkey currently listed in the relay's latest valid `kind:13535` archive snapshot.
-- **archive delta**: A relay-signed `kind:8002` event announcing that a target became archived.
+- **archive delta**: A relay-signed `kind:8002` event announcing that a target became archived, or that an archived target gained a replacement.
 - **unarchive delta**: A relay-signed `kind:8003` event announcing that a target became unarchived.
 - **archive request**: A user-signed `kind:9035` event requesting that the relay archive a target.
 - **unarchive request**: A user-signed `kind:9036` event requesting that the relay unarchive a target.
@@ -200,7 +200,7 @@ The archive list is the relay's current-state snapshot.
   "tags": [
     ["-"],
     ["p", "<archived-pubkey-hex>"],
-    ["p", "<archived-pubkey-hex>"],
+    ["p", "<archived-pubkey-hex>", "<replacement-pubkey-hex>"],
     ...
   ]
 }
@@ -212,9 +212,9 @@ Required tags:
 
 The NIP-70 marker is intentional on the snapshot even though the snapshot is replaceable. It tells generic relays and clients not to rebroadcast relay-authoritative administrative state outside the relay context where the signing key is meaningful.
 
-Each archived identity is represented by a bare `p` tag whose second element is the archived pubkey. Additional elements on `p` tags are not defined by this NIP and MUST be ignored for archive-state construction. Metadata such as reason, replacement pubkey, actor, and consent path belongs on the `kind:8002`/`kind:8003` deltas, not on the list.
+Each archived identity is represented by a `p` tag whose second element is the archived pubkey. When the archive has a replacement, the third element is the replacement pubkey, so a client reads "archived" and "replaced by" from one state. A client MUST take the replacement from the latest valid list, not from deltas. A third element that is not a valid 64-character lowercase hex pubkey, or that equals the archived pubkey, MUST be ignored; the identity is still archived. Further elements are not defined by this NIP and MUST be ignored. Other metadata, such as reason, actor, and consent path, belongs on the `kind:8002`/`kind:8003` deltas, not on the list. A relay that does not list replacements publishes bare `p` tags, and its clients show no replacement.
 
-The relay SHOULD publish a new `kind:13535` list after every accepted archive or unarchive operation. Each list the relay publishes MUST have a `created_at` strictly greater than that of the relay's previous `kind:13535`, even when publications race or fall within one second, so that clients can ask only for a newer list (see [Snapshot and Delta Consistency](#snapshot-and-delta-consistency)). Clients MUST treat the latest valid list as authoritative current state. Deltas are useful for live updates and audit history, but if a delta history and the latest list disagree, the latest valid list wins.
+The relay SHOULD publish a new `kind:13535` list after every accepted archive or unarchive operation, including one that adds a replacement. Each list the relay publishes MUST have a `created_at` strictly greater than that of the relay's previous `kind:13535`, even when publications race or fall within one second, so that clients can ask only for a newer list (see [Snapshot and Delta Consistency](#snapshot-and-delta-consistency)). Clients MUST treat the latest valid list as authoritative current state. Deltas are useful for live updates and audit history, but if a delta history and the latest list disagree, the latest valid list wins.
 
 ## Request Authorization Policy
 
@@ -289,7 +289,8 @@ When a relay receives a `kind:9035` or `kind:9036` request, it MUST execute the 
 5. If `replaced-by` is present, require a valid 64-character lowercase hex pubkey that differs from the target.
 6. Enforce a relay-defined freshness window for request events. A ±120-second window is RECOMMENDED.
 7. Determine the consent path under local policy. If no policy path accepts the request, reject.
-8. Apply the state change idempotently. Archiving an already archived target and unarchiving a non-archived target SHOULD be treated as success, but relays MUST NOT emit a duplicate delta or new snapshot when no state changed.
+8. Apply the state change idempotently. Archiving an already archived target and unarchiving a non-archived target SHOULD be treated as success, but relays MUST NOT emit a duplicate delta when no state changed, and MUST NOT emit a new snapshot unless their newest `kind:13535` list differs from the current archive state. A repeat request thus repairs a list that a failed publish left behind.
+   An archive request that carries `replaced-by` for a target that is archived without a replacement is a state change: the relay records the replacement, with the request's consent path and actor, and its reason when it has one (otherwise the earlier reason stays), and publishes a delta and a fresh `kind:13535` list for it. This covers key rotation where the new key does not exist yet when the old key is archived. A request that would change or remove an existing replacement is treated as archiving an already archived target; to correct a replacement, unarchive and archive again.
 9. If state changed, publish the corresponding `kind:8002` or `kind:8003` delta and a fresh `kind:13535` list.
 
 When a relay rejects a request received via `EVENT`, it MUST respond with an `OK` message. Syntax and signature failures SHOULD use the `invalid:` prefix. Authorization failures SHOULD use the `restricted:` prefix. Relays MAY store rejected requests for audit, but rejected requests MUST NOT change archive state and MUST NOT produce `kind:8002`, `kind:8003`, or `kind:13535` updates.
@@ -304,7 +305,7 @@ Clients SHOULD hide archived identities from active-member lists, mention autoco
 
 Clients MUST NOT hide or rewrite historical events solely because their author is archived. Historical messages, reactions, files, and audit events remain authored by the archived pubkey.
 
-Clients SHOULD surface archive metadata where relevant. For example, a profile view for an archived identity may show "Archived on this relay" plus reason, replacement pubkey, and consent path from the latest applicable delta.
+Clients SHOULD surface archive metadata where relevant. For example, a profile view for an archived identity may show "Archived on this relay" plus its replacement pubkey from the latest valid `kind:13535` list, and reason and consent path from the latest applicable delta.
 
 Clients MUST scope archive state to the relay that signed it. If a user participates on multiple relays, a pubkey archived on relay A is not archived on relay B unless relay B signs its own NIP-IA state.
 
@@ -495,7 +496,7 @@ The relay verifies `actor == target`, archives `alice_old`, emits:
 }
 ```
 
-and republishes `kind:13535` with `alice_old` included.
+and republishes `kind:13535` with `["p", "<alice_old>", "<alice_new>"]` included.
 
 ### Owner archives a zombie agent
 
@@ -565,6 +566,7 @@ Clients MUST ignore each of the following relay events for archive-state purpose
 | Delta missing `p` tag | no target |
 | Delta missing `consent` tag | unauditable decision |
 | Snapshot `p` tag with invalid pubkey | invalid entry; clients SHOULD ignore that entry |
+| Snapshot `p` tag with an invalid third element | invalid replacement; clients SHOULD ignore the replacement and keep the entry |
 
 ## Relation to Other NIPs
 
