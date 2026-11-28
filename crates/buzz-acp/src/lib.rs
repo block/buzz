@@ -1879,6 +1879,7 @@ fn handle_relay_observer_control_event(
     observer: Option<&observer::ObserverHandle>,
     owner_pubkey_hex: &str,
     event_publisher: RelayEventPublisher,
+    conversation_scoped: &dyn Fn(Uuid) -> bool,
 ) {
     // Defense-in-depth: verify signature even though the relay already checked.
     if let Err(e) = buzz_core::verify_event(&event) {
@@ -1919,7 +1920,7 @@ fn handle_relay_observer_control_event(
     let command_type = payload.get("type").and_then(|value| value.as_str());
     match command_type {
         Some("cancel_turn") => {
-            handle_cancel_turn_control(&payload, pool, observer);
+            handle_cancel_turn_control(&payload, pool, observer, conversation_scoped);
         }
         Some("switch_model") => {
             handle_switch_model_control(&payload, pool, observer);
@@ -2085,10 +2086,18 @@ fn emit_project_owner_control_result(
 /// With a `threadRootId`, the stop targets that one thread, scope-exact, as an
 /// owner's `!cancel` in the thread does, so it can never be ambiguous. Without
 /// one, it targets the channel and refuses a channel with several scopes.
+///
+/// `conversation_scoped` tells whether events in a channel are known to share
+/// the channel's one `Conversation` scope: the channel session policy, or a
+/// channel whose metadata says it is a DM. Only then may a threaded stop reach
+/// a `Conversation` turn. Under the thread policy a `Conversation` scope can
+/// also come from a metadata miss (the DM check fails closed), and that turn
+/// may belong to another thread.
 fn handle_cancel_turn_control(
     payload: &serde_json::Value,
     pool: &mut AgentPool,
     observer: Option<&observer::ObserverHandle>,
+    conversation_scoped: &dyn Fn(Uuid) -> bool,
 ) {
     let Some(channel_id) = payload
         .get("channelId")
@@ -2114,19 +2123,16 @@ fn handle_cancel_turn_control(
     };
 
     let status = if let Some(root_event_id) = thread_root {
-        // The scope `SessionScope::derive` gives an event in this thread: the
-        // thread itself under the thread policy, or the channel's one
-        // conversation under the channel policy and in DMs. Only one of the
-        // two can exist for a channel, so trying both needs neither the
-        // policy nor a DM lookup.
-        let thread = scope::SessionScope::Thread {
-            channel_id,
-            root_event_id,
+        // The scope `SessionScope::derive` gives an event in this thread.
+        let target = if conversation_scoped(channel_id) {
+            scope::SessionScope::Conversation { channel_id }
+        } else {
+            scope::SessionScope::Thread {
+                channel_id,
+                root_event_id,
+            }
         };
-        let conversation = scope::SessionScope::Conversation { channel_id };
-        if signal_in_flight_task_for_scope(pool, &thread, ControlSignal::Cancel)
-            || signal_in_flight_task_for_scope(pool, &conversation, ControlSignal::Cancel)
-        {
+        if signal_in_flight_task_for_scope(pool, &target, ControlSignal::Cancel) {
             "sent"
         } else {
             "no_active_turn"
@@ -3498,6 +3504,11 @@ async fn run_harness(
                                     observer.as_ref(),
                                     owner_hex,
                                     relay.event_publisher(),
+                                    &|channel_id| {
+                                        config.session_policy == scope::SessionPolicy::Channel
+                                            || ctx.channel_info.cached_channel_type(channel_id).as_deref()
+                                                == Some("dm")
+                                    },
                                 );
                             } else {
                                 tracing::warn!("observer control frame received but no owner resolved — dropping");
@@ -4542,7 +4553,8 @@ fn mode_gate_signal(
 /// [`scope::SessionScope`] so a signal for thread A can never hit thread B
 /// running in the same channel.
 ///
-/// Returns `true` if a signal was sent, `false` if no in-flight task was found.
+/// Returns `true` if the task received a signal, `false` if no in-flight task
+/// was found or it had already stopped listening.
 fn signal_in_flight_task(
     pool: &mut AgentPool,
     channel_id: uuid::Uuid,
@@ -4559,8 +4571,8 @@ fn signal_in_flight_task(
     if let Some(meta) = entry {
         if let Some(tx) = meta.control_tx.take() {
             tracing::info!(channel = %channel_id, ?mode, "control signal sent to in-flight task");
-            let _ = tx.send(mode);
-            return true;
+            // A finishing task may already have dropped its receiver.
+            return tx.send(mode).is_ok();
         }
     }
     false
@@ -4573,7 +4585,8 @@ fn signal_in_flight_task(
 /// “whichever task the channel happens to have first” — otherwise two threads
 /// running concurrently in one channel could steer each other.
 ///
-/// Returns `true` if a signal was sent, `false` if no in-flight task matched.
+/// Returns `true` if the task received a signal, `false` if no in-flight task
+/// matched or it had already stopped listening.
 fn signal_in_flight_task_for_scope(
     pool: &mut AgentPool,
     scope: &scope::SessionScope,
@@ -4592,8 +4605,8 @@ fn signal_in_flight_task_for_scope(
                 ?mode,
                 "control signal sent to in-flight task (scope-exact)"
             );
-            let _ = tx.send(mode);
-            return true;
+            // A finishing task may already have dropped its receiver.
+            return tx.send(mode).is_ok();
         }
     }
     false
@@ -6805,7 +6818,7 @@ mod owner_control_command_tests {
             "channelId": ch.to_string(), "modelId": "new-model", "requestId": "pick-1",
         });
 
-        handle_cancel_turn_control(&payload, &mut pool, Some(&observer));
+        handle_cancel_turn_control(&payload, &mut pool, Some(&observer), &|_| false);
         handle_switch_model_control(&payload, &mut pool, Some(&observer));
         let results = observer.snapshot();
         assert_eq!(results.len(), 2);
@@ -6857,7 +6870,7 @@ mod owner_control_command_tests {
             });
             match &signal {
                 ControlSignal::Cancel => {
-                    handle_cancel_turn_control(&payload, &mut pool, Some(&observer))
+                    handle_cancel_turn_control(&payload, &mut pool, Some(&observer), &|_| false)
                 }
                 _ => handle_switch_model_control(&payload, &mut pool, Some(&observer)),
             }
@@ -6888,6 +6901,7 @@ mod owner_control_command_tests {
             &cancel(root_a.to_uppercase().into(), "stop-a"),
             &mut pool,
             Some(&observer),
+            &|_| false,
         );
         assert_eq!(rx_a.try_recv(), Ok(ControlSignal::Cancel));
         assert_eq!(
@@ -6900,14 +6914,21 @@ mod owner_control_command_tests {
             &cancel("c".repeat(64).into(), "stop-c"),
             &mut pool,
             Some(&observer),
+            &|_| false,
         );
         handle_cancel_turn_control(
             &cancel(root_a.into(), "stop-a2"),
             &mut pool,
             Some(&observer),
+            &|_| false,
         );
         // A malformed root is dropped without an answer or a signal.
-        handle_cancel_turn_control(&cancel("zz".into(), "bad"), &mut pool, Some(&observer));
+        handle_cancel_turn_control(
+            &cancel("zz".into(), "bad"),
+            &mut pool,
+            Some(&observer),
+            &|_| false,
+        );
         assert_eq!(
             rx_b.try_recv(),
             Err(tokio::sync::oneshot::error::TryRecvError::Empty)
@@ -6940,6 +6961,7 @@ mod owner_control_command_tests {
             &serde_json::json!({ "channelId": ch.to_string(), "requestId": "stop-all" }),
             &mut pool,
             Some(&observer),
+            &|_| false,
         );
         assert_eq!(
             observer.snapshot().last().unwrap().payload["status"],
@@ -6952,10 +6974,22 @@ mod owner_control_command_tests {
     }
 
     #[tokio::test]
-    async fn cancel_turn_with_thread_root_stops_a_conversation_scoped_turn() {
-        // Under the channel session policy, and in DMs, every thread of the
-        // channel runs in its one conversation, which `!cancel` from any
-        // thread would stop too.
+    async fn cancel_turn_with_thread_root_reaches_a_conversation_only_when_the_channel_is_one() {
+        let observer = observer::ObserverHandle::in_process();
+        let stop = |ch: Uuid, root: &str| {
+            serde_json::json!({
+                "channelId": ch.to_string(), "threadRootId": root, "requestId": "stop",
+            })
+        };
+        let last_status = || {
+            observer.snapshot().last().unwrap().payload["status"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+
+        // Channel policy or a known DM: every thread runs in the channel's one
+        // conversation, which `!cancel` from any thread would stop too.
         let mut pool = AgentPool::from_slots(vec![]);
         let ch = Uuid::new_v4();
         let (tx, mut rx) = tokio::sync::oneshot::channel();
@@ -6965,16 +6999,48 @@ mod owner_control_command_tests {
             scope::SessionScope::Conversation { channel_id: ch },
             tx,
         );
-        let observer = observer::ObserverHandle::in_process();
         handle_cancel_turn_control(
-            &serde_json::json!({
-                "channelId": ch.to_string(), "threadRootId": "d".repeat(64), "requestId": "stop",
-            }),
+            &stop(ch, &"d".repeat(64)),
             &mut pool,
             Some(&observer),
+            &|c| c == ch,
         );
         assert_eq!(rx.try_recv(), Ok(ControlSignal::Cancel));
-        assert_eq!(observer.snapshot()[0].payload["status"], "sent");
+        assert_eq!(last_status(), "sent");
+
+        // Thread policy after a metadata miss: thread A was admitted as the
+        // channel's conversation, and thread B runs in its own scope. Stops
+        // for B never fall through to A, even once B's signal is spent.
+        let mut pool = AgentPool::from_slots(vec![]);
+        let ch = Uuid::new_v4();
+        let root_b = "b".repeat(64);
+        let (tx_a, mut rx_a) = tokio::sync::oneshot::channel();
+        let (tx_b, mut rx_b) = tokio::sync::oneshot::channel();
+        insert_task_meta(
+            &mut pool,
+            0,
+            scope::SessionScope::Conversation { channel_id: ch },
+            tx_a,
+        );
+        insert_task_meta(&mut pool, 1, thread_scope(ch, &root_b), tx_b);
+        handle_cancel_turn_control(&stop(ch, &root_b), &mut pool, Some(&observer), &|_| false);
+        assert_eq!(rx_b.try_recv(), Ok(ControlSignal::Cancel));
+        assert_eq!(last_status(), "sent");
+        handle_cancel_turn_control(&stop(ch, &root_b), &mut pool, Some(&observer), &|_| false);
+        assert_eq!(last_status(), "no_active_turn");
+        assert_eq!(
+            rx_a.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        );
+
+        // A task that already dropped its receiver while finishing got no
+        // signal, so the stop is not reported as sent.
+        let root_c = "c".repeat(64);
+        let (tx_c, rx_c) = tokio::sync::oneshot::channel();
+        insert_task_meta(&mut pool, 2, thread_scope(ch, &root_c), tx_c);
+        drop(rx_c);
+        handle_cancel_turn_control(&stop(ch, &root_c), &mut pool, Some(&observer), &|_| false);
+        assert_eq!(last_status(), "no_active_turn");
     }
 
     // Fix #2: mid-turn steer/interrupt must target the exact thread scope, not

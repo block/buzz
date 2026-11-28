@@ -787,6 +787,16 @@ impl ChannelInfoResolver {
         }
     }
 
+    /// The channel's type (`"dm"`, `"stream"`, ...) if its metadata is
+    /// already known, without fetching it.
+    pub fn cached_channel_type(&self, channel_id: Uuid) -> Option<String> {
+        self.cache
+            .read()
+            .ok()?
+            .get(&channel_id)
+            .map(|info| info.channel_type.clone())
+    }
+
     pub async fn resolve_channel_metadata(&self, channel_id: Uuid) -> Option<PromptChannelInfo> {
         if let Some(info) = self
             .cache

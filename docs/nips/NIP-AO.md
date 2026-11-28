@@ -111,6 +111,14 @@ Unknown `kind` values MUST be ignored.
 | `turn_started`     | A new agent turn has begun                               |
 | `session_resolved` | Session completed or terminated                          |
 | `control_result`   | The agent's answer to a control frame (see below)        |
+| `batch`            | Several frames of one channel, sent together (see below) |
+
+A `batch` frame's `payload` is `{ "events": [ ... ] }`, a list of complete
+`ObserverEvent` objects for the same channel, each with its own `seq`,
+`timestamp`, `kind` and `payload`. Its own metadata mirrors the last inner
+event. Clients MUST process each inner event as if it had arrived on its own,
+in list order. An agent MAY batch any frame kind, including `control_result`,
+so a client that ignores `batch` can miss the answer to a control frame.
 
 ### Control (`frame=control`)
 
@@ -148,7 +156,10 @@ Stops the agent's running turn in a conversation.
 
 With `threadRootId`, the agent stops the turn of the session that serves that
 thread. An agent that keeps one session for the whole channel (or a DM) stops
-that session's turn, since every thread of the channel runs in it. Without
+that session's turn, since every thread of the channel runs in it. An agent
+that keeps a session per thread MUST NOT stop a session that may serve another
+thread, and answers `no_active_turn` when that thread has no running turn.
+Without
 `threadRootId`, the target is the whole channel; an agent with more than one
 session in the channel MUST NOT pick one and answers `ambiguous_target`. A
 sender SHOULD include `threadRootId` whenever the turn it stops belongs to a
