@@ -446,6 +446,12 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
              NIP-43 events signed with an ephemeral key become unverifiable after restart."
         ));
     }
+    if !config.provisioned_system_channels.is_empty() && config.relay_private_key.is_none() {
+        return Err(anyhow::anyhow!(
+            "BUZZ_RELAY_PRIVATE_KEY is required when BUZZ_PROVISIONED_SYSTEM_CHANNELS is set: \
+             an ephemeral key would create a new set of channels after every restart."
+        ));
+    }
 
     // NIP-43 / multi-tenant: seed the deployment's *own* community before any
     // membership backfill or owner bootstrap, so those writes are scoped to a
@@ -1043,6 +1049,8 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // Start the cron loop AFTER the action sink is wired.
     let wf_cron = Arc::clone(&workflow_engine);
     tokio::spawn(async move { wf_cron.run().await });
+
+    buzz_relay::handlers::provisioned_channels::spawn_reconciler(Arc::clone(&state));
 
     // Ephemeral channel reaper — archives channels whose TTL deadline has passed.
     // Runs every 60s, matching the workflow cron loop pattern. The SQL UPDATE

@@ -97,7 +97,7 @@ impl Fixture {
     async fn accept(&self, e: &Event, source: Option<Uuid>) -> ArtifactOutcome {
         let env = artifact::validate(e).unwrap();
         self.db
-            .accept_artifact(self.community, e, &env, source, &self.relay)
+            .accept_artifact(self.community, e, &env, source, &self.relay, &[])
             .await
             .unwrap()
     }
@@ -563,7 +563,7 @@ async fn quiescing_community_rejects_artifact_at_admission_before_coordinate_loc
         .unwrap();
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        f.db.accept_artifact(f.community, &create, &env, None, &f.relay),
+        f.db.accept_artifact(f.community, &create, &env, None, &f.relay, &[]),
     )
     .await
     .expect("admission must reject before waiting on the coordinate lock")
@@ -822,4 +822,113 @@ async fn sync_snapshot_pages_are_one_cut_and_head_includes_deletions() {
         .await
         .unwrap()
         .is_none());
+}
+
+/// In a system channel the relay key created with a provisioned label, only
+/// the head's author may revise or delete an artifact; elsewhere any writer
+/// with the head may. Mutation: drop the author check in `accept_artifact` →
+/// RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn provisioned_channel_artifacts_change_only_by_their_author() {
+    let f = Fixture::new().await;
+    let labels = ["example-records".to_string()];
+    let provisioned =
+        f.db.ensure_provisioned_system_channel(
+            f.community,
+            &labels[0],
+            f.relay.public_key().to_bytes().as_slice(),
+        )
+        .await
+        .unwrap()
+        .channel
+        .id;
+    let accept = |e: Event| {
+        let labels = labels.clone();
+        let f = &f;
+        async move {
+            let env = artifact::validate(&e).unwrap();
+            f.db.accept_artifact(f.community, &e, &env, None, &f.relay, &labels)
+                .await
+                .unwrap()
+        }
+    };
+
+    let create = f.revision(
+        Uuid::new_v4(),
+        "create",
+        provisioned,
+        None,
+        &f.owner,
+        vec![],
+    );
+    assert!(matches!(
+        accept(create.clone()).await,
+        ArtifactOutcome::Accepted(_)
+    ));
+    for op in ["update", "delete"] {
+        let other = f.revision(
+            Uuid::parse_str(&d_of(&create)).unwrap(),
+            op,
+            provisioned,
+            Some(&create),
+            &f.peer,
+            vec![],
+        );
+        assert!(
+            matches!(
+                accept(other).await,
+                ArtifactOutcome::Restricted(super::artifact::AUTHOR_ONLY)
+            ),
+            "another member's {op}"
+        );
+    }
+    let update = f.revision(
+        Uuid::parse_str(&d_of(&create)).unwrap(),
+        "update",
+        provisioned,
+        Some(&create),
+        &f.owner,
+        vec![],
+    );
+    assert!(matches!(
+        accept(update.clone()).await,
+        ArtifactOutcome::Accepted(_)
+    ));
+    let delete = f.revision(
+        Uuid::parse_str(&d_of(&create)).unwrap(),
+        "delete",
+        provisioned,
+        Some(&update),
+        &f.owner,
+        vec![],
+    );
+    assert!(matches!(accept(delete).await, ArtifactOutcome::Accepted(_)));
+
+    let ordinary = f.revision(Uuid::new_v4(), "create", f.a, None, &f.owner, vec![]);
+    assert!(matches!(
+        accept(ordinary.clone()).await,
+        ArtifactOutcome::Accepted(_)
+    ));
+    let peer_update = f.revision(
+        Uuid::parse_str(&d_of(&ordinary)).unwrap(),
+        "update",
+        f.a,
+        Some(&ordinary),
+        &f.peer,
+        vec![],
+    );
+    assert!(
+        matches!(accept(peer_update).await, ArtifactOutcome::Accepted(_)),
+        "an ordinary channel keeps NIP-AR's shared editing"
+    );
+}
+
+fn d_of(event: &Event) -> String {
+    event
+        .tags
+        .iter()
+        .find(|t| t.as_slice()[0] == "d")
+        .map(|t| t.as_slice()[1].clone())
+        .unwrap()
 }

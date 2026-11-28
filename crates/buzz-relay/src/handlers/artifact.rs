@@ -44,6 +44,7 @@ pub(crate) async fn accept(
             &env,
             source,
             &state.relay_keypair,
+            &state.config.provisioned_system_channels,
         )
         .await
         .map_err(|e| IngestError::Internal(format!("artifact storage: {e}")))?;
@@ -59,6 +60,9 @@ pub(crate) async fn accept(
         }
         ArtifactOutcome::Rejected(message) => {
             return Err(IngestError::Rejected(format!("invalid: {message}")))
+        }
+        ArtifactOutcome::Restricted(message) => {
+            return Err(IngestError::Rejected(format!("restricted: {message}")))
         }
     }
     Ok(IngestResult {
