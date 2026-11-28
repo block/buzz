@@ -560,22 +560,17 @@ async fn find_managed_agent_channel_message_by_marker(
         .filter(|pubkey| !pubkey.is_empty())
         .map(str::to_ascii_lowercase);
 
-    let mut until: Option<u64> = None;
+    let mut filter = serde_json::json!({
+        "kinds": [buzz_core_pkg::kind::KIND_STREAM_MESSAGE],
+        "#h": [channel_id],
+        "limit": 500,
+    });
+    if let Some(author) = author.as_deref() {
+        filter["authors"] = serde_json::json!([author]);
+    }
 
     for _ in 0..10 {
-        let mut filter = serde_json::json!({
-            "kinds": [buzz_core_pkg::kind::KIND_STREAM_MESSAGE],
-            "#h": [channel_id],
-            "limit": 500,
-        });
-        if let Some(author) = author.as_deref() {
-            filter["authors"] = serde_json::json!([author]);
-        }
-        if let Some(until) = until {
-            filter["until"] = serde_json::json!(until);
-        }
-
-        let events = query_relay(state, &[filter]).await?;
+        let events = query_relay(state, &[filter.clone()]).await?;
         if let Some(existing) = events
             .iter()
             .find(|event| event_has_client_marker(event, marker))
@@ -586,14 +581,13 @@ async fn find_managed_agent_channel_message_by_marker(
         if events.len() < 500 {
             break;
         }
-        until = events
-            .iter()
-            .map(|event| event.created_at.as_secs())
-            .min()
-            .map(|timestamp| timestamp.saturating_sub(1));
-        if until.is_none() {
+        let Some(last) = events.last() else {
             break;
-        }
+        };
+        // Composite cursor: a seconds-only `until` would skip the rest of the
+        // page's last second when more events share it.
+        filter["until"] = serde_json::json!(last.created_at.as_secs());
+        filter["before_id"] = serde_json::json!(last.id.to_hex());
     }
 
     Ok(None)
