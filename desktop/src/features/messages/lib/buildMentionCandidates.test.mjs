@@ -168,3 +168,59 @@ for (const locallyManaged of [true, false]) {
     assert.equal(Boolean(candidate.isManagedAgent), locallyManaged);
   });
 }
+
+test("in a channel, agents outside its roster are not offered", () => {
+  const ownedElsewhere = "e".repeat(64);
+  const managedElsewhere = "f".repeat(64);
+  const candidates = buildMentionCandidates(
+    input({
+      activePersonas: [
+        { id: "builtin:scout", displayName: "Scout", avatarUrl: null },
+      ],
+      managedAgents: [
+        { pubkey: managedElsewhere, name: "Fizz", status: "stopped" },
+      ],
+      memberPubkeys: new Set([AGENT_PUBKEY, MEMBER_PUBKEY]),
+      members: [
+        { pubkey: AGENT_PUBKEY, displayName: "Xenophon", role: "bot" },
+        { pubkey: MEMBER_PUBKEY, displayName: "Ada", role: "owner" },
+      ],
+      mentionChannelId: "channel-1",
+      mentionableAgentPubkeys: new Set([
+        AGENT_PUBKEY,
+        ownedElsewhere,
+        managedElsewhere,
+      ]),
+      relayAgents: [
+        {
+          pubkey: ownedElsewhere,
+          name: "Argus",
+          ownerPubkey: MEMBER_PUBKEY,
+          status: "online",
+          channelIds: ["channel-2"],
+        },
+      ],
+    }),
+  );
+
+  assert.deepEqual(
+    candidates.map((candidate) => candidate.displayName).sort(),
+    ["Ada", "Xenophon"],
+  );
+});
+
+test("outside a channel, non-member agents stay available", () => {
+  const candidates = buildMentionCandidates(
+    input({
+      managedAgents: [
+        { pubkey: AGENT_PUBKEY, name: "Fizz", status: "stopped" },
+      ],
+      mentionableAgentPubkeys: new Set([AGENT_PUBKEY]),
+    }),
+  );
+
+  assert.deepEqual(
+    candidates.map((candidate) => candidate.displayName),
+    ["Fizz"],
+  );
+});
