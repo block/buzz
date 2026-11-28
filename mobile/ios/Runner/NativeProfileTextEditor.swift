@@ -677,28 +677,8 @@ final class NativeProfileTextEditorViewController:
       ])
       placeholderLabel.isHidden = !textView.text.isEmpty
     } else if originalSectionIcon != nil {
-      cell.backgroundColor = .clear
-      cell.clipsToBounds = false
-      let fieldContainer = UIView()
-      fieldContainer.layer.cornerRadius = containerCornerRadius
-      fieldContainer.layer.cornerCurve = .continuous
-      fieldContainer.backgroundColor = containerBackgroundColor
-      fieldContainer.addSubview(textField)
-      let row = UIStackView(arrangedSubviews: [emojiButton, fieldContainer])
-      row.spacing = 8
-      row.translatesAutoresizingMaskIntoConstraints = false
-      cell.contentView.addSubview(row)
-      NSLayoutConstraint.activate([
-        row.leadingAnchor.constraint(equalTo: cell.contentView.leadingAnchor),
-        row.trailingAnchor.constraint(equalTo: cell.contentView.trailingAnchor),
-        row.topAnchor.constraint(equalTo: cell.contentView.topAnchor),
-        row.bottomAnchor.constraint(equalTo: cell.contentView.bottomAnchor),
-        emojiButton.widthAnchor.constraint(equalTo: row.heightAnchor),
-        textField.leadingAnchor.constraint(equalTo: fieldContainer.leadingAnchor, constant: 16),
-        textField.trailingAnchor.constraint(equalTo: fieldContainer.trailingAnchor, constant: -16),
-        textField.topAnchor.constraint(equalTo: fieldContainer.topAnchor),
-        textField.bottomAnchor.constraint(equalTo: fieldContainer.bottomAnchor),
-      ])
+      installEmojiEditorRow(in: cell, button: emojiButton, field: textField,
+                            background: containerBackgroundColor, radius: containerCornerRadius)
     } else {
       cell.contentView.addSubview(textField)
       NSLayoutConstraint.activate([
@@ -721,4 +701,33 @@ private extension UIColor {
       alpha: CGFloat((argb >> 24) & 0xff) / 255
     )
   }
+}
+
+/// Lay out the emoji control and text input used by the section and status editors.
+@MainActor
+func installEmojiEditorRow(in cell: UITableViewCell, button: UIButton, field: UITextField,
+                           background: UIColor, radius: CGFloat) {
+  cell.backgroundColor = .clear
+  cell.clipsToBounds = false
+  let fieldContainer = UIView()
+  fieldContainer.layer.cornerRadius = radius
+  fieldContainer.layer.cornerCurve = .continuous
+  fieldContainer.backgroundColor = background
+  field.translatesAutoresizingMaskIntoConstraints = false
+  fieldContainer.addSubview(field)
+  let row = UIStackView(arrangedSubviews: [button, fieldContainer])
+  row.spacing = 8
+  row.translatesAutoresizingMaskIntoConstraints = false
+  cell.contentView.addSubview(row)
+  NSLayoutConstraint.activate([
+    row.leadingAnchor.constraint(equalTo: cell.contentView.leadingAnchor),
+    row.trailingAnchor.constraint(equalTo: cell.contentView.trailingAnchor),
+    row.topAnchor.constraint(equalTo: cell.contentView.topAnchor),
+    row.bottomAnchor.constraint(equalTo: cell.contentView.bottomAnchor),
+    button.widthAnchor.constraint(equalTo: row.heightAnchor),
+    field.leadingAnchor.constraint(equalTo: fieldContainer.leadingAnchor, constant: 16),
+    field.trailingAnchor.constraint(equalTo: fieldContainer.trailingAnchor, constant: -16),
+    field.topAnchor.constraint(equalTo: fieldContainer.topAnchor),
+    field.bottomAnchor.constraint(equalTo: fieldContainer.bottomAnchor),
+  ])
 }

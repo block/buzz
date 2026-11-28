@@ -6,7 +6,8 @@ import UIKit
 /// Status uses the same navigation-controller sheet as the profile text forms.
 final class NativeStatusEditorViewController: UITableViewController, UITextFieldDelegate {
   let statusField = UITextField()
-  let emojiField = StatusEmojiTextField()
+  private let emojiButton = UIButton(type: .system)
+  private var emoji = ""
   let datePicker = UIDatePicker()
   private let configuration: [String: Any]
   private let onChooseEmoji: (@escaping (String?) -> Void) -> Void
@@ -57,17 +58,16 @@ final class NativeStatusEditorViewController: UITableViewController, UITextField
     statusField.accessibilityLabel = "Status"
     statusField.returnKeyType = .done
     statusField.delegate = self
-    emojiField.text = configuration["emoji"] as? String ?? ""
-    emojiField.placeholder = "Emoji"
-    emojiField.accessibilityLabel = "Status emoji"
-    emojiField.autocorrectionType = .no
-    emojiField.autocapitalizationType = .none
-    emojiField.clearButtonMode = .whileEditing
-    for field in [statusField, emojiField] {
-      field.font = .preferredFont(forTextStyle: .body)
-      field.adjustsFontForContentSizeCategory = true
-      field.addTarget(self, action: #selector(changed), for: .editingChanged)
-    }
+    emoji = configuration["emoji"] as? String ?? ""
+    emojiButton.backgroundColor = color("containerBackgroundArgb", fallback: .secondarySystemGroupedBackground)
+    emojiButton.layer.cornerRadius = 26
+    emojiButton.titleLabel?.font = .systemFont(ofSize: 24)
+    emojiButton.titleLabel?.adjustsFontSizeToFitWidth = true
+    emojiButton.accessibilityLabel = "Choose status emoji"
+    emojiButton.addTarget(self, action: #selector(chooseEmoji), for: .touchUpInside)
+    statusField.font = .preferredFont(forTextStyle: .body)
+    statusField.adjustsFontForContentSizeCategory = true
+    statusField.addTarget(self, action: #selector(changed), for: .editingChanged)
     datePicker.tintColor = .label
     datePicker.datePickerMode = .dateAndTime
     datePicker.preferredDatePickerStyle = .compact
@@ -98,7 +98,7 @@ final class NativeStatusEditorViewController: UITableViewController, UITextField
 
   override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
     switch section {
-    case 0: return 2
+    case 0: return 1
     case 1: return duration == 0 ? 2 : 1
     case 2: return presets.count
     default: return 1
@@ -135,29 +135,9 @@ final class NativeStatusEditorViewController: UITableViewController, UITextField
     cell.selectionStyle = .none
     switch indexPath.section {
     case 0:
-      if indexPath.row == 0 {
-        embed(statusField, in: cell)
-      } else {
-        let choose = UIButton(type: .system)
-        choose.setTitle("Choose emoji", for: .normal)
-        choose.addAction(UIAction { [weak self, weak choose] _ in
-          guard let self else { return }
-          self.view.endEditing(true)
-          choose?.isEnabled = false
-          choose?.setTitle("Loading…", for: .normal)
-          self.onChooseEmoji { [weak self, weak choose] value in
-            choose?.isEnabled = true
-            choose?.setTitle("Choose emoji", for: .normal)
-            guard let self, let value else { return }
-            self.emojiField.text = value
-            self.changed()
-          }
-        }, for: .touchUpInside)
-        let row = UIStackView(arrangedSubviews: [emojiField, choose])
-        row.spacing = 12
-        choose.setContentHuggingPriority(.required, for: .horizontal)
-        embed(row, in: cell)
-      }
+      installEmojiEditorRow(in: cell, button: emojiButton, field: statusField,
+                            background: color("containerBackgroundArgb", fallback: .secondarySystemGroupedBackground),
+                            radius: CGFloat(configuration["containerCornerRadius"] as? Double ?? 16))
     case 1:
       if indexPath.row == 1 {
         embed(datePicker, in: cell)
@@ -194,7 +174,7 @@ final class NativeStatusEditorViewController: UITableViewController, UITextField
   override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     tableView.deselectRow(at: indexPath, animated: true)
     if indexPath.section == 2 {
-      emojiField.text = presets[indexPath.row].0
+      emoji = presets[indexPath.row].0
       statusField.text = presets[indexPath.row].1
       changed()
     } else if indexPath.section == 3 {
@@ -202,10 +182,38 @@ final class NativeStatusEditorViewController: UITableViewController, UITextField
     }
   }
 
+  override func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
+    indexPath.section == 0 ? 52 : UITableView.automaticDimension
+  }
+
+  @objc private func chooseEmoji() {
+    view.endEditing(true)
+    emojiButton.isEnabled = false
+    onChooseEmoji { [weak self] value in
+      guard let self else { return }
+      self.emojiButton.isEnabled = true
+      guard let value else { return }
+      self.emoji = value
+      self.changed()
+    }
+  }
+
   @objc private func changed() {
+    // The color emoji font draws below the center of UIKit’s title line.
+    emojiButton.titleLabel?.transform = CGAffineTransform(
+      translationX: 0, y: emoji.count == 1 ? -3 : 0)
+    emojiButton.setTitle(emoji.isEmpty ? nil : emoji, for: .normal)
+    emojiButton.setImage(emoji.isEmpty ? UIImage(systemName: "face.smiling") : nil, for: .normal)
+    emojiButton.accessibilityValue = emoji.isEmpty ? nil : emoji
+    emojiButton.menu = emoji.isEmpty ? nil : UIMenu(children: [
+      UIAction(title: "Remove emoji") { [weak self] _ in
+        self?.emoji = ""
+        self?.changed()
+      }
+    ])
     navigationItem.rightBarButtonItem?.isEnabled =
       !(statusField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-      || !(emojiField.text ?? "").isEmpty
+      || !emoji.isEmpty
   }
 
   @objc private func cancel() { onCancel() }
@@ -216,7 +224,7 @@ final class NativeStatusEditorViewController: UITableViewController, UITextField
 
   private func submit(clear: Bool) {
     onSet([
-      "text": statusField.text ?? "", "emoji": emojiField.text ?? "",
+      "text": statusField.text ?? "", "emoji": emoji,
       "duration": duration, "clear": clear,
       "expiresAt": duration == 0 ? datePicker.date.timeIntervalSince1970
         : Date().addingTimeInterval(TimeInterval(duration)).timeIntervalSince1970,
@@ -226,13 +234,5 @@ final class NativeStatusEditorViewController: UITableViewController, UITextField
   func textFieldShouldReturn(_ textField: UITextField) -> Bool {
     save()
     return true
-  }
-}
-
-/// Open the system's complete emoji keyboard when it is enabled.
-final class StatusEmojiTextField: UITextField {
-  override var textInputContextIdentifier: String? { "buzz.status.emoji" }
-  override var textInputMode: UITextInputMode? {
-    UITextInputMode.activeInputModes.first { $0.primaryLanguage == "emoji" } ?? super.textInputMode
   }
 }

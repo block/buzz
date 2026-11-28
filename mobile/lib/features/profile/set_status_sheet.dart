@@ -94,6 +94,7 @@ Future<void> _showNativeStatusEditor(
         ? null
         : currentExpiration.millisecondsSinceEpoch / 1000,
     'hasExistingStatus': currentStatus != null && !currentStatus.isEmpty,
+    'containerCornerRadius': Radii.container,
     'brightness': sheetTheme.brightness.name,
     'pageBackgroundArgb': sheetTheme.colorScheme.surface.toARGB32(),
     'containerBackgroundArgb': sheetTheme.colorScheme.surfaceContainerHighest
