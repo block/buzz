@@ -1184,6 +1184,86 @@ test("video replies in threads open the review comments view", async ({
   await expect(page.getByTestId("video-review-dialog")).toBeVisible();
 });
 
+test("video review composer keeps focus when thread replies arrive", async ({
+  page,
+}) => {
+  await installVideoReviewHarness(page);
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  const root = (await emitMockMessage(
+    page,
+    "general",
+    "Can you review this cut?",
+  )) as MockFeedMessage;
+  const videoReply = (await emitMockMessage(
+    page,
+    "general",
+    `![video](${EXTENSIONLESS_VIDEO_URL})`,
+    {
+      extraTags: [
+        [
+          "imeta",
+          `url ${EXTENSIONLESS_VIDEO_URL}`,
+          "m video/mp4",
+          `x ${VIDEO_SHA}`,
+          "size 987654",
+          "dim 160x80",
+          "duration 12.5",
+          `image ${POSTER_DATA_URL}`,
+          "filename launch-demo.mp4",
+        ],
+      ],
+      parentEventId: root.id,
+    },
+  )) as { id: string };
+
+  await page.locator(`[data-thread-head-id="${root.id}"]`).click();
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadComposerInput = threadPanel
+    .getByTestId("message-composer")
+    .getByTestId("message-input");
+  const videoRow = threadPanel
+    .getByTestId("message-thread-replies")
+    .locator(`[data-message-id="${videoReply.id}"]`)
+    .first();
+  await expect(videoRow).toBeVisible();
+
+  // Replying to the nested video message gives the thread composer a reply
+  // target, which it re-derives on every thread render.
+  await videoRow.hover();
+  await videoRow.getByRole("button", { name: "Reply" }).first().click();
+  await expect(threadPanel.getByTestId("reply-target")).toBeVisible();
+
+  await videoRow
+    .getByRole("button", { name: "Open video review" })
+    .evaluate((button) => (button as HTMLButtonElement).click());
+  const reviewDialog = page.getByTestId("video-review-dialog");
+  await expect(reviewDialog).toBeVisible();
+  const reviewInput = reviewDialog.getByTestId("message-input");
+  await reviewInput.click();
+  await page.keyboard.type("Tighten the cut");
+  await expect(reviewInput).toBeFocused();
+
+  // A bot reply lands in the same thread while the reviewer is typing.
+  await emitMockMessage(page, "general", "Agent status update", {
+    parentEventId: root.id,
+  });
+  await expect(
+    threadPanel
+      .getByTestId("message-thread-replies")
+      .getByText("Agent status update"),
+  ).toBeVisible();
+
+  await expect(reviewInput).toBeFocused();
+  await page.keyboard.type(" at 00:04");
+  await expect(reviewInput).toHaveText("Tighten the cut at 00:04");
+  await expect(threadComposerInput).toHaveText("");
+});
+
 test("Inbox preserves bracketed timestamps without video evidence", async ({
   page,
 }) => {
