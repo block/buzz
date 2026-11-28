@@ -5394,3 +5394,104 @@ test("canceling channel deletion keeps the owned stream", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);
   await expect(page.getByTestId("stream-list")).toContainText(channelName);
 });
+
+test("add agents dialog search narrows agents and teams", async ({ page }) => {
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: "custom:scout",
+        displayName: "Scout",
+        isActive: true,
+        systemPrompt: "Research the codebase and summarize findings.",
+      },
+      {
+        id: "custom:ralph",
+        displayName: "Ralph",
+        isActive: true,
+        systemPrompt: "Review pull requests for regressions.",
+      },
+    ],
+    teams: [
+      { id: "team:eng", name: "Engineering", personaIds: ["custom:scout"] },
+      { id: "team:docs", name: "Docs", personaIds: ["custom:ralph"] },
+    ],
+  });
+  // First paint occasionally stalls in mock mode; retry once like the
+  // agents spec's gotoApp does.
+  for (const attempt of [0, 1]) {
+    await page.goto("/");
+    try {
+      await expect(page.getByTestId("channel-random")).toBeVisible({
+        timeout: 10_000,
+      });
+      break;
+    } catch (error) {
+      if (attempt === 1) throw error;
+    }
+  }
+  await page.getByTestId("channel-random").click();
+  await page.getByTestId("channel-intro-action-create-agent").click();
+
+  const dialog = page.getByTestId("add-channel-bot-dialog");
+  await expect(dialog).toBeVisible();
+  const search = dialog.getByRole("textbox", { name: "Search your agents" });
+  await expect(search).toHaveAttribute("data-testid", "add-channel-bot-search");
+  await expect(search).toBeFocused();
+  const scout = dialog.getByRole("button", { name: "Scout" });
+  const ralph = dialog.getByRole("button", { name: "Ralph" });
+  const engineering = dialog.getByRole("button", { name: /^Engineering/ });
+  const docs = dialog.getByRole("button", { name: /^Docs/ });
+  await expect(scout).toBeVisible();
+  await expect(ralph).toBeVisible();
+  await expect(engineering).toBeVisible();
+  await expect(docs).toBeVisible();
+
+  // System-prompt text matches the agent and, through it, its team.
+  await search.fill("regressions");
+  await expect(ralph).toBeVisible();
+  await expect(scout).toHaveCount(0);
+  await expect(docs).toBeVisible();
+  await expect(engineering).toHaveCount(0);
+
+  // A selection made before searching survives the narrowing.
+  await ralph.click();
+  await expect(ralph).toHaveAttribute("aria-pressed", "true");
+  await search.fill("scout");
+  await expect(ralph).toHaveCount(0);
+  await expect(
+    dialog.getByRole("button", { name: "Add agent", exact: true }),
+  ).toBeEnabled();
+
+  // A team-name hit with no agent hit is not "no matches": the chip is
+  // still there to add its agents.
+  await search.fill("engineering");
+  await expect(engineering).toBeVisible();
+  await expect(dialog.getByTestId("add-channel-bot-search-empty")).toHaveCount(
+    0,
+  );
+
+  await search.fill("nothing matches this");
+  await expect(dialog.getByTestId("add-channel-bot-search-empty")).toHaveText(
+    "No agents match your search.",
+  );
+  await expect(dialog.getByTestId("add-channel-create-agent")).toBeVisible();
+
+  // Escape clears the box first and leaves the dialog open; the next Escape
+  // closes it.
+  await search.press("Escape");
+  await expect(search).toHaveValue("");
+  await expect(dialog).toBeVisible();
+  await expect(scout).toBeVisible();
+  await search.press("Escape");
+  await expect(dialog).toHaveCount(0);
+
+  // Closing with a query still in the box resets it for the next open.
+  await page.getByTestId("channel-intro-action-create-agent").click();
+  await search.fill("ralph");
+  await expect(scout).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.getByTestId("channel-intro-action-create-agent").click();
+  await expect(search).toHaveValue("");
+  await expect(dialog.getByRole("button", { name: "Scout" })).toBeVisible();
+});
