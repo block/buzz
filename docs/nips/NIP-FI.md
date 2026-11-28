@@ -20,7 +20,8 @@ of possession of that key.  No relay-side identity state is required.  The
 relay verifies the assertion offline against configured per-issuer JWKS
 snapshots and enforces the resolved community's audience and issuer
 authorization policy; other identity decisions remain the assertion issuer's
-responsibility.
+responsibility.  A relay that executes deferred actions also keeps durable
+disconnect records (see Deferred actions).
 
 This NIP defines the assertion contract, the offline verification procedure,
 session lifetime policy, and an authenticated issuer→relay disconnect API.
@@ -520,6 +521,65 @@ specified below is the recovery path for lost propagation, exactly as for relay
 restart.  A success response from the receiving process does not imply
 cluster-wide application.
 
+### Deferred actions
+
+A **deferred action** is something a relay accepts from an admitted session or
+request and carries out later, when the acting key may have no session at all.
+A pending send (NIP-SL) is one.  Closing sessions and denying admission do not
+stop it.  So a relay with deferred actions also records each disconnect in the
+durable storage that holds those actions, which all of its processes share.
+The deny set itself is unchanged.
+
+A relay that executes deferred actions MUST apply this section.  Every other
+relay version and process that runs against storage holding a pending deferred
+action with a recorded issuer MUST apply it too.  If one of them ignored a
+disconnect command, the action would still be there for a later version to
+execute.
+
+With each deferred action it accepts, the relay MUST record the admission that
+carried it: the admitting issuer, the owner recorded for the admission, if any,
+and the verified `iat` of the admitting assertion.
+
+A **disconnect record** holds a command's `iss`, `target_pubkey`, `until` and
+scope (see Deny scope), and `recorded_at`, the time the relay wrote it.  The
+record **fences** an admission when all of these hold:
+
+- The record's issuer made the admission.
+- The admission's proven key or recorded owner is the record's target pubkey.
+- The record's scope covers the admitting assertion.
+- The admission happened at or before `recorded_at`, or before `until`.
+
+When a command passes step 7 of `VerifyCommandJwt`, the relay MUST commit one
+atomic change to that storage before it closes a connection or answers `200`.
+The change:
+
+1. Writes the command's disconnect record.
+2. Cancels every pending deferred action, in every community, whose admission
+   the record fences.
+
+If the change does not commit, or would exceed a bound below, the relay MUST
+reject the command `503` and close no session.  An issuer that gets this `503`,
+or no answer, retries with a freshly signed command (new `jti`), because the
+`jti` and the deny entry of step 7 may already be recorded.  The retry is a
+command like any other and writes its own record, with its own `recorded_at`.
+A command has taken full effect only when the relay answers `200`.
+
+The relay MUST bound the disconnect records it keeps per issuer, independently
+of the deny set bound and of other issuers.  With a maximum connection lifetime
+`L`, it MUST keep a record until `max(recorded_at, until) + L`, unless a
+record it keeps fences every admission this one fences.
+
+While it keeps a record, the relay MUST refuse a deferred action from an
+admission the record fences with `authorization_denied`.  Every relay process
+MUST make that decision against the durable records, in the same atomic change
+that stores the action, and MUST serialize that change against the change of
+every disconnect command whose record fences the admission.  An acceptance
+therefore either commits first, and the command cancels it, or commits second,
+and finds the record.
+
+A cancelled deferred action stays cancelled: a later assertion for the same key
+does not restore it.  [FI-TRACE-DEFERRED-ACTIONS]
+
 ### Transport
 
 The disconnect endpoint is an authenticated issuer→relay API, not a public
@@ -653,7 +713,10 @@ performs all pure authorization checks and then, as its single atomic admission
 mutation (step 7), simultaneously reserves the `(iss, jti)` replay identity and
 inserts the deny entry — both or neither.  A capacity failure at that step rejects
 `503`; neither the jti nor the deny entry is recorded, and the caller may safely
-retry the same signed command.  A relay that keeps the deny set in shared storage and cannot learn whether its write applied MUST reject `503` `authorization_unavailable` and close no sessions. The `jti` and deny entry may already be recorded, so the caller retries with a freshly signed command (new `jti`), not the same one.  On success, the relay MUST close every live connection
+retry the same signed command.  A relay that keeps the deny set in shared storage and cannot learn whether its write applied MUST reject `503` `authorization_unavailable` and close no sessions. The `jti` and deny entry may already be recorded, so the caller retries with a freshly signed command (new `jti`), not the same one.
+After step 7 succeeds, a relay that executes deferred actions commits the
+change "Deferred actions" specifies before it closes any connection.  On
+success, the relay MUST close every live connection
 registered under the command's issuer (`claims.iss`) whose proven key equals
 `CommandResult.target_pubkey` or whose recorded owner equals
 `CommandResult.target_pubkey`, and whose admitting assertion falls in the
@@ -679,6 +742,7 @@ under the merge rule.
 | Malformed request body or `until` exceeds ceiling | `400` | `bad request\n` |
 | Deny set at capacity | `503` | `deny set full\n` |
 | Shared deny storage outcome unknown | `503` | `authorization unavailable\n` |
+| Disconnect record not committed or at capacity (Deferred actions) | `503` | `disconnect not recorded\n` |
 
 ## HTTP ingress
 
@@ -1020,6 +1084,7 @@ deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
 | `FI-TRACE-DEPENDENCY-FAIL-CLOSED` | An unreadable JWKS snapshot denies `authorization_unavailable`; no degraded Nostr-only access. |
 | `FI-TRACE-LEASE-BOUND` | A session closes at its earliest deadline; equality at any deadline is expired. |
 | `FI-TRACE-DENY-SET` | A pubkey in the deny set is denied `authorization_denied` on admission until `now >= until` when the entry covers the assertion — a whole-key entry covers every assertion, a cutoff entry only those with verified `iat <= C`, so `iat = C` denies and `iat = C + 0.5` admits; an expired or absent entry does not deny; a disconnect with C closes only sessions with `iat <= C`, and a session with `iat > C` survives every redelivery unless a stronger active merged entry widens the close scope (see Deny scope); a whole-key entry beats a same-deadline cutoff and the later of two cutoffs wins, in either order; an entry that expires before a merge is applied contributes nothing to it; a past-`until` command performs its scoped close — absent an active same-key entry it creates no future denial, while an active entry remains unchanged under the merge rule; a deny-set-full command is rejected `503` without closing sessions and without removing any existing entry; capacity is evaluated per issuer — one issuer's capacity exhaustion MUST NOT reject another issuer's command; a connection within the effective close scope that passes the deny-set check before a concurrent deny-entry insertion but completes admission after MUST still be terminated (the session's proven `k` and admitting issuer are registered before the deny-set check, ensuring the close scan catches it); a registered-but-not-admitted connection caught by the close scan MUST be cancelled terminally and MUST NOT later be admitted; a disconnect command from one issuer MUST NOT close a same-key connection registered under a different issuer, whether or not admission has completed; two overlapping commands for the same `(iss, pubkey)` in either delivery order result in `until = max(until_A, until_B)` — delivery order does not shorten the longer deny; a past-`until` command arriving over an active entry leaves the active entry's `until` unchanged; a successful disconnect responds `{"disconnected": true}` regardless of how many sessions were closed; the deny entry applies across all communities served by the relay under that issuer. |
+| `FI-TRACE-DEFERRED-ACTIONS` | A relay that executes deferred actions commits a disconnect record and the cancellation of every pending deferred action whose admission the record fences, across all communities, before it closes a connection or answers `200`; a command whose change does not commit, or that would exceed the per-issuer bound on disconnect records, is rejected `503` with no connection closed and nothing cancelled, and a freshly signed command then succeeds; a freshly signed retry of a command whose change committed on a relay that stopped before its answer writes its own record, closes the matching connections and is answered `200`; a version or process that executes no deferred action still commits the change while its storage holds a pending one with a recorded issuer; a deferred action of an agent whose recorded owner is the target is cancelled; a deferred action accepted under another issuer is not cancelled; under a cutoff C, a deferred action whose admitting assertion has `iat = C` is cancelled and refused, and one with `iat = C + 0.5` is neither; a deferred action is refused `authorization_denied` when its admission is fenced, including on a process that never received the session close and after a relay restart; an admission after both `recorded_at` and `until` is not fenced; an acceptance that races a command is either cancelled by it or refused, never left pending; a record is retained until `max(recorded_at, until)` plus the maximum connection lifetime, unless a record the relay keeps fences every admission it fences; a cancelled deferred action is not restored by a later assertion. |
 | `FI-TRACE-HTTP-INGRESS` | A protected HTTP request with both valid headers and matching pubkeys is admitted; absent, mismatched, or invalid assertion or NIP-98 event denies; a request presenting only one of the two denies; an active deny-set entry that covers the assertion denies; a route that cannot be classified as exempt is treated as protected; repeated, comma-combined, wrong-scheme, or alternative-credential `Authorization` fields deny `evidence_rejected`; a missing `Authorization` field denies `missing_evidence`; an authorization-relevant body without exactly one matching `payload` tag denies; the NIP-FI administrative API is not a protected surface.  For kind-24242 (Blossom) proofs on media routes: a `t=upload` proof with valid `x`, `server`, `expiration`, and freshness is admitted on `PUT /upload`; a `t=get` proof with valid `server`, `expiration`, and freshness is admitted on `GET\|HEAD /media/{hash…}`; a kind-24242 proof on any other route denies; an upload proof with absent or mismatched `server` tag denies; a read proof with absent or mismatched `server` tag denies; a proof with a duplicate, missing, or out-of-range `expiration` tag denies; a proof dated more than 120 seconds in the future denies; a proof older than 120 seconds denies; key mismatch between assertion `nostr_pubkey` and the kind-24242 event pubkey denies; an active deny-set entry that covers the assertion denies. |
 | `FI-TRACE-DENIAL-ORACLE` | Each public-class row produces its exact fixed bytes; all private-state rows compare byte-identical. |
 | `FI-TRACE-DISCOVERY-PRIVATE` | Complete discovery bytes do not expose issuer, audience, or deployment-private state. |
@@ -1080,6 +1145,16 @@ attempt, the residual exposure after restart is bounded by
 `max(0, min(exp, iat + maximum_assertion_age) - now)`.  If the issuer
 continues issuing or re-push does not complete in time, that formula does
 not apply and access may continue beyond it.
+
+**Deferred actions.** A deferred action executes with no live session, so
+session expiry never stops it.  Under this NIP only a disconnect command does:
+the durable record cancels the matching actions and fences the admissions the
+command covers, in every relay process and across restarts.  An issuer that
+only stops issuing assertions leaves every accepted deferred action in place
+for as long as it can stay pending.  A deployment that enables deferred actions
+in a community that requires NIP-FI MUST have each authorized issuer send a
+disconnect command when an identity loses access.  A community ban of the key
+remains available to the relay operator.
 
 **HTTP ingress bypass.** Without the pairing rule, a principal holding an
 active key can mint fresh NIP-98 events indefinitely and retain HTTP access
