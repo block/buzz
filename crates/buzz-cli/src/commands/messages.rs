@@ -171,9 +171,11 @@ async fn resolve_content_mentions(
         "limit": 1,
     });
     let member_pubkeys = fetch_member_pubkeys(client, &members_filter)
-        .await
+        .await?
         .ok_or_else(|| {
-            CliError::Other("could not load channel membership for mention preflight".into())
+            CliError::NotFound(format!(
+                "channel {channel_id} has no membership list: it does not exist or you cannot read it"
+            ))
         })?;
 
     if !stripped.contains('@') {
@@ -185,11 +187,7 @@ async fn resolve_content_mentions(
         "authors": member_pubkeys,
         "limit": member_pubkeys.len(),
     });
-    let profile_events = fetch_events(client, &profiles_filter)
-        .await
-        .ok_or_else(|| {
-            CliError::Other("could not load member profiles for mention resolution".into())
-        })?;
+    let profile_events = fetch_events(client, &profiles_filter).await?;
 
     let mut name_to_pubkeys: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
@@ -289,23 +287,26 @@ fn event_mention_pubkeys(event: &nostr::Event) -> Vec<String> {
 }
 
 /// Fetch raw events for `filter` via the relay's `/query` endpoint.
-/// Returns `None` on any I/O or parse failure.
+///
+/// Query errors keep their own type, so an unreachable relay stays a
+/// retryable network error.
 async fn fetch_events(
     client: &BuzzClient,
     filter: &serde_json::Value,
-) -> Option<Vec<serde_json::Value>> {
-    let raw = client.query(filter).await.ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    parsed.as_array().cloned()
+) -> Result<Vec<serde_json::Value>, CliError> {
+    let raw = client.query(filter).await?;
+    serde_json::from_str(&raw).map_err(|e| CliError::Other(format!("invalid query response: {e}")))
 }
 
 /// Extract member pubkeys (the `p` tag values) from a single 39002 event.
+///
+/// `Ok(None)` means the relay answered but returned no membership event.
 async fn fetch_member_pubkeys(
     client: &BuzzClient,
     filter: &serde_json::Value,
-) -> Option<Vec<String>> {
+) -> Result<Option<Vec<String>>, CliError> {
     let events = fetch_events(client, filter).await?;
-    Some(parse_member_pubkeys(events.first()?))
+    Ok(events.first().map(parse_member_pubkeys))
 }
 
 /// Parse member pubkeys from a kind 39002 event JSON value.
@@ -1915,6 +1916,54 @@ mod tests {
             files: vec![],
             mentions: vec![],
             from_thread: None,
+        }
+    }
+
+    /// #6555: when the mention preflight cannot reach the relay, the send
+    /// must fail as the retryable network error it is, not as a permanent
+    /// membership fault.
+    #[tokio::test]
+    async fn mention_preflight_keeps_network_errors_retryable() {
+        let client = BuzzClient::new(
+            "http://127.0.0.1:1".into(),
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
+        let mut explicit = send_params("no at sign here");
+        explicit.mentions = vec![PK_VALID_A.to_string()];
+        for params in [send_params("hello @alice"), explicit] {
+            let error = cmd_send_message(&client, params).await.unwrap_err();
+            assert!(matches!(error, CliError::Network(_)), "{error:?}");
+            assert!(crate::error::is_retryable_error(&error));
+            assert_eq!(crate::error::exit_code(&error), 2);
+        }
+    }
+
+    /// A relay that answers without the channel's membership event, or with
+    /// a body that is not an event list, is reported as such before sending.
+    #[tokio::test]
+    async fn mention_preflight_reports_missing_membership_and_bad_responses() {
+        for (body, expect_not_found) in [("[]", true), (r#"{"error":"nope"}"#, false)] {
+            let (url, _, captured_event) = fake_send_relay(body.to_string()).await;
+            let client = BuzzClient::new(
+                url,
+                crate::credentials::Credentials::from_keys(Keys::generate()),
+            )
+            .unwrap();
+            let error = cmd_send_message(&client, send_params("hello @alice"))
+                .await
+                .unwrap_err();
+            if expect_not_found {
+                assert!(matches!(error, CliError::NotFound(_)), "{error:?}");
+                assert!(error.to_string().contains(SEND_TEST_CHANNEL), "{error}");
+            } else {
+                assert!(matches!(error, CliError::Other(_)), "{error:?}");
+                assert!(
+                    error.to_string().contains("invalid query response"),
+                    "{error}"
+                );
+            }
+            assert!(captured_event.lock().unwrap().is_none(), "must not publish");
         }
     }
 
