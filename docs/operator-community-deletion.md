@@ -48,7 +48,10 @@ operatorJobs:
 Set `s3.endpoint`, `s3.bucket`, `s3.region`, and `s3.addressingStyle` in chart
 values. The selected Secret must contain `DATABASE_URL` and `REDIS_URL`; it may
 contain `BUZZ_S3_ACCESS_KEY` and `BUZZ_S3_SECRET_KEY` when the object store uses
-static credentials. The pod receives only those connection values and the four
+static credentials. Deployments with OpenSearch message indexing enabled must
+also provide `BUZZ_OPENSEARCH_URL` (and its basic-auth or AWS SigV4 settings)
+to `buzz-admin deletions`; the executor fails closed if the database has a
+maintained search index and `BUZZ_OPENSEARCH_URL` is unset. The pod receives only those connection values and the four
 non-secret S3 settings. It does not receive `BUZZ_RELAY_PRIVATE_KEY`,
 `BUZZ_GIT_HOOK_HMAC_SECRET`, `RELAY_URL`, or the full Secret through `envFrom`.
 The pod also disables service-account token automounting and Kubernetes service

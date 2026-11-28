@@ -11,7 +11,7 @@ messages stored before it was set. Searches still run on Postgres.
 | `BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE` | Optional AWS SigV4 request signing, for Amazon OpenSearch Service: `es` for a managed domain, `aoss` for a Serverless collection. Unset turns signing off. Not combined with basic auth. |
 | `BUZZ_OPENSEARCH_AWS_REGION` | Region to sign for. Defaults to `AWS_REGION`, then `AWS_DEFAULT_REGION`. Signing needs one of them. |
 | `BUZZ_SEARCH_INDEXER_WORKERS` | Indexer workers on the relay that holds the lease: 1 to 32, default 1. Each holds one connection from `BUZZ_DB_POOL_SIZE` for the length of a bulk request, so leave the pool room for them. |
-| `BUZZ_OPENSEARCH_PREVIEW` | Required with the URL for now, because deleting a community leaves its messages in the index. Use it only on relays without real data. |
+| `BUZZ_OPENSEARCH_PREVIEW` | Required with the URL while OpenSearch indexing is in preview (see known gaps below for late writes and Postgres failover). |
 
 ## AWS request signing
 
@@ -100,9 +100,6 @@ across communities. After the fix, verify that the queue drains.
 
 ## Known gaps
 
-- **Deleted communities.** Deleting a community does not remove its
-  documents from the index. No search can return them, but their words stay
-  in the index.
 - **Postgres crash or failover.** The version sequence can hand out values
   again after a Postgres crash or the promotion of an asynchronous replica.
   Rows then stay queued until the sequence passes the versions the index
@@ -119,6 +116,18 @@ across communities. After the fix, verify that the queue drains.
 In the two cases before this one, a search can match text a message no longer has. Every
 hit is re-read from Postgres before it is returned, so that text is never
 shown.
+
+## Community deletion
+
+When OpenSearch indexing is enabled, pass the same `BUZZ_OPENSEARCH_URL`
+(and basic-auth or AWS SigV4) environment variables to `buzz-admin deletions
+drain` / `run`. Community deletion fails closed if the database has a
+maintained search index and `BUZZ_OPENSEARCH_URL` is unset. During deletion,
+the executor scans and bulk-deletes the community's documents with monotonic
+versions, then verifies that zero documents remain (on Serverless, after a
+90-second settle window and a second purge pass so late writes become
+searchable before counting). If any documents remain, the executor logs a
+warning, records the error on the deletion request, and retries.
 
 ## Local run
 

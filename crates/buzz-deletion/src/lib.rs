@@ -26,6 +26,7 @@ use buzz_media::{
     ObjectVersionRef,
 };
 use buzz_pubsub::{redis_connection, RedisConnection};
+use buzz_search::opensearch::{OpenSearchConfig, SearchIndex};
 use clap::Subcommand;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -39,6 +40,13 @@ const DEFAULT_MANIFEST_CHUNK_KEYS: usize = 10_000;
 const SWEEP_UNKNOWN_KEY_SAMPLE: usize = 100;
 /// One S3 LIST page.
 const LIST_PAGE_SIZE: usize = 1000;
+/// Documents deleted per OpenSearch scan/bulk page during community purge.
+const SEARCH_PURGE_PAGE_SIZE: usize = 500;
+/// Settle window on OpenSearch Serverless (`aoss`), which has no `_refresh`:
+/// covers a lost-lease bulk write still in flight (`BULK_TIMEOUT` = 60s) plus
+/// Serverless write-to-searchable visibility lag (measured 0.7-19s) before
+/// accepting a zero count.
+const SERVERLESS_VERIFICATION_SETTLE_DELAY: Duration = Duration::from_secs(90);
 const RETRY_DELAY: Duration = Duration::from_secs(30);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -342,6 +350,7 @@ struct Services {
     store: DeletionStore,
     media: Arc<MediaStorage>,
     redis: RedisConnection,
+    search: Option<SearchIndex>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -614,10 +623,15 @@ async fn connect_services_with_store(store: DeletionStore) -> Result<Services> {
     let media = Arc::new(MediaStorage::new(&media_config)?);
     let redis_url = required_env("REDIS_URL")?;
     let redis = redis_connection(&redis_url).context("create deletion Redis connection")?;
+    let search = match OpenSearchConfig::from_env().map_err(anyhow::Error::msg)? {
+        Some(config) => Some(SearchIndex::new(&config).context("create deletion search client")?),
+        None => None,
+    };
     Ok(Services {
         store,
         media,
         redis,
+        search,
     })
 }
 
@@ -1500,6 +1514,25 @@ async fn execute_stage(
             )
             .await?;
 
+            // Fail closed before fencing if this database maintains a search
+            // index but the executor has no OpenSearch configuration or cannot
+            // reach the cluster.
+            if let Some(search) = require_search_index_if_maintained(services).await? {
+                run_guarded_external_step(
+                    services,
+                    &token,
+                    DeletionStage::Approved,
+                    heartbeat_lost,
+                    || async {
+                        search
+                            .preflight()
+                            .await
+                            .context("OpenSearch preflight failed before fencing")
+                    },
+                )
+                .await?;
+            }
+
             // Approval binds immutable catalog + community-prefix ownership.
             // Live row counts and tenant binding keys are deliberately not
             // equality-bound until the durable fence closes all writers.
@@ -1632,13 +1665,32 @@ async fn execute_stage(
                 .verify_execution_token(&token, DeletionStage::PostgresPurged)
                 .await?;
             let deleted = purge_redis_namespace(&services.redis, request.community_id).await?;
+            let search_deleted = match require_search_index_if_maintained(services).await? {
+                Some(search) => {
+                    purge_search_index(
+                        services,
+                        search,
+                        &token,
+                        DeletionStage::PostgresPurged,
+                        heartbeat_lost,
+                    )
+                    .await?
+                }
+                None => 0,
+            };
             services
                 .store
                 .verify_execution_token(&token, DeletionStage::PostgresPurged)
                 .await?;
             services
                 .store
-                .mark_cache_purged(&token, serde_json::json!({"deleted_keys": deleted}))
+                .mark_cache_purged(
+                    &token,
+                    serde_json::json!({
+                        "deleted_keys": deleted,
+                        "deleted_search_documents": search_deleted,
+                    }),
+                )
                 .await?;
         }
         DeletionStage::CachePurged => {
@@ -1648,11 +1700,23 @@ async fn execute_stage(
                 .await?;
             verify_storage_absence(services, request).await?;
             verify_redis_absence(&services.redis, request.community_id).await?;
+            let search_verified = match require_search_index_if_maintained(services).await? {
+                Some(search) => {
+                    verify_search_index_absence(services, search, &token, heartbeat_lost).await?;
+                    true
+                }
+                None => false,
+            };
             services
                 .store
                 .mark_logically_verified(
                     &token,
-                    serde_json::json!({"postgres": true, "object_store": true, "redis": true}),
+                    serde_json::json!({
+                        "postgres": true,
+                        "object_store": true,
+                        "redis": true,
+                        "search_index": search_verified,
+                    }),
                 )
                 .await?;
         }
@@ -1794,6 +1858,190 @@ async fn verify_redis_absence(
             "logical verification found a Redis namespace key",
         ))
     }
+}
+
+async fn require_search_index_if_maintained(services: &Services) -> Result<Option<&SearchIndex>> {
+    if let Some(search) = services.search.as_ref() {
+        return Ok(Some(search));
+    }
+    if services.store.search_index_maintained().await? {
+        anyhow::bail!(
+            "this database has a maintained OpenSearch index; configure BUZZ_OPENSEARCH_URL \
+             on the community deletion executor before purging"
+        );
+    }
+    Ok(None)
+}
+
+async fn purge_search_index(
+    services: &Services,
+    search: &SearchIndex,
+    token: &LeaseToken,
+    expected_stage: DeletionStage,
+    heartbeat_lost: &CancellationToken,
+) -> Result<u64> {
+    let missing =
+        run_guarded_external_step(services, token, expected_stage, heartbeat_lost, || async {
+            search.missing().await.map_err(anyhow::Error::from)
+        })
+        .await?;
+    if missing {
+        return Ok(0);
+    }
+    if !search.is_serverless() {
+        run_guarded_external_step(services, token, expected_stage, heartbeat_lost, || async {
+            search.refresh().await.map_err(anyhow::Error::from)
+        })
+        .await?;
+    }
+    let community = token.community_id;
+    let mut after: Option<[u8; 32]> = None;
+    let mut deleted: u64 = 0;
+    loop {
+        let event_ids =
+            run_guarded_external_step(services, token, expected_stage, heartbeat_lost, || async {
+                search
+                    .list_community_event_ids(community, after, SEARCH_PURGE_PAGE_SIZE)
+                    .await
+                    .map_err(anyhow::Error::from)
+            })
+            .await?;
+        if event_ids.is_empty() {
+            break;
+        }
+        let next_cursor = event_ids.last().copied();
+        let version = services.store.next_search_index_version().await?;
+        let outcome =
+            run_guarded_external_step(services, token, expected_stage, heartbeat_lost, || async {
+                search
+                    .write(community, &[], &event_ids, version)
+                    .await
+                    .map_err(anyhow::Error::from)
+            })
+            .await?;
+        if outcome.throttled {
+            return Err(transient(
+                "search index throttled community purge bulk delete",
+            ));
+        }
+        if !outcome.failed.is_empty() {
+            return Err(transient(format!(
+                "search index failed to delete {} documents for community {} ({})",
+                outcome.failed.len(),
+                community,
+                outcome.reason.as_deref().unwrap_or("unknown"),
+            )));
+        }
+        deleted += event_ids.len() as u64;
+        if event_ids.len() < SEARCH_PURGE_PAGE_SIZE {
+            break;
+        }
+        after = next_cursor;
+    }
+    if deleted > 0 && !search.is_serverless() {
+        run_guarded_external_step(services, token, expected_stage, heartbeat_lost, || async {
+            search.refresh().await.map_err(anyhow::Error::from)
+        })
+        .await?;
+    }
+    Ok(deleted)
+}
+
+async fn sleep_while_leased(delay: Duration, heartbeat_lost: &CancellationToken) -> Result<()> {
+    if delay.is_zero() {
+        return Ok(());
+    }
+    tokio::select! {
+        biased;
+        _ = heartbeat_lost.cancelled() => Err(DeletionLeaseLost.into()),
+        () = tokio::time::sleep(delay) => Ok(()),
+    }
+}
+
+async fn verify_search_index_absence(
+    services: &Services,
+    search: &SearchIndex,
+    token: &LeaseToken,
+    heartbeat_lost: &CancellationToken,
+) -> Result<()> {
+    let missing = run_guarded_external_step(
+        services,
+        token,
+        DeletionStage::CachePurged,
+        heartbeat_lost,
+        || async { search.missing().await.map_err(anyhow::Error::from) },
+    )
+    .await?;
+    if missing {
+        return Ok(());
+    }
+    let community = token.community_id;
+    if search.is_serverless() {
+        // Serverless has no `_refresh`: an in-flight indexer batch or late bulk
+        // write can become searchable well after `PostgresPurged` scanned. Wait
+        // out the settle window, purge again, and retry if anything was found
+        // so a zero count is only accepted after a full quiet window.
+        sleep_while_leased(SERVERLESS_VERIFICATION_SETTLE_DELAY, heartbeat_lost).await?;
+        let stragglers = purge_search_index(
+            services,
+            search,
+            token,
+            DeletionStage::CachePurged,
+            heartbeat_lost,
+        )
+        .await?;
+        if stragglers > 0 {
+            tracing::warn!(
+                %community,
+                deleted = stragglers,
+                "search index verification purged straggler documents on Serverless; retrying after settle window"
+            );
+            return Err(transient(format!(
+                "logical verification purged {stragglers} late search documents for community {community}"
+            )));
+        }
+    } else {
+        run_guarded_external_step(
+            services,
+            token,
+            DeletionStage::CachePurged,
+            heartbeat_lost,
+            || async { search.refresh().await.map_err(anyhow::Error::from) },
+        )
+        .await?;
+    }
+    let remaining = run_guarded_external_step(
+        services,
+        token,
+        DeletionStage::CachePurged,
+        heartbeat_lost,
+        || async {
+            search
+                .count_community_documents(community)
+                .await
+                .map_err(anyhow::Error::from)
+        },
+    )
+    .await?;
+    if remaining == 0 {
+        return Ok(());
+    }
+    tracing::warn!(
+        %community,
+        remaining,
+        "search index verification found documents remaining after community purge"
+    );
+    let _ = purge_search_index(
+        services,
+        search,
+        token,
+        DeletionStage::CachePurged,
+        heartbeat_lost,
+    )
+    .await;
+    Err(transient(format!(
+        "logical verification found {remaining} retained search documents for community {community}"
+    )))
 }
 
 fn sweep_object_cap() -> u64 {
@@ -2080,6 +2328,7 @@ mod postgres_tests {
             ),
             redis: redis_connection("redis://127.0.0.1:1")
                 .expect("construct unused Redis connection"),
+            search: None,
         };
         (db, services, claim)
     }
@@ -2150,6 +2399,7 @@ mod postgres_tests {
             ),
             redis: redis_connection("redis://127.0.0.1:1")
                 .expect("construct unused Redis connection"),
+            search: None,
         };
         (db, services, *request, inventory)
     }
@@ -3360,5 +3610,209 @@ mod postgres_tests {
                 panic!("preexisting heartbeat loss must win")
             }
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and OpenSearch"]
+    async fn community_purge_deletes_and_verifies_opensearch_documents() {
+        let opensearch_url = std::env::var("BUZZ_TEST_OPENSEARCH_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:9200".to_string());
+        let (db, mut services, claim) = claimed_test_deletion("deletion-search-purge").await;
+        buzz_db::search_outbox::enable(db.pool())
+            .await
+            .expect("enable search outbox");
+
+        // Fail closed: with a maintained search index and no OpenSearch client,
+        // community deletion refuses to proceed.
+        let missing_client_err = require_search_index_if_maintained(&services)
+            .await
+            .expect_err("maintained index without OpenSearch config must fail closed");
+        assert!(
+            missing_client_err
+                .to_string()
+                .contains("BUZZ_OPENSEARCH_URL"),
+            "unexpected error: {missing_client_err}"
+        );
+
+        let prefix = format!("buzz-test-{}-", Uuid::new_v4().simple());
+        let index = SearchIndex::new(&OpenSearchConfig {
+            url: opensearch_url,
+            basic_auth: None,
+            aws_sigv4: None,
+            index_prefix: prefix,
+        })
+        .expect("create OpenSearch test client");
+        index.ensure().await.expect("ensure test index");
+
+        let target = claim.request.community_id;
+        let bystander = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        let make_doc = |id_byte: u8, text: &str| buzz_db::search_outbox::SearchDocument {
+            event_id: [id_byte; 32],
+            kind: 9,
+            pubkey: [0xaa; 32],
+            channel_id: None,
+            channel_type: None,
+            author_is_agent: false,
+            thread_root: None,
+            mentions: Vec::new(),
+            created_at: chrono::Utc::now(),
+            content: text.to_string(),
+        };
+        let version = services
+            .store
+            .next_search_index_version()
+            .await
+            .expect("version");
+        let target_docs = [
+            make_doc(1, "purgedeletealpha first"),
+            make_doc(2, "purgedeletealpha second"),
+            make_doc(3, "purgedeletealpha third"),
+        ];
+        let bystander_docs = [make_doc(4, "purgedeletealpha bystander")];
+        let outcome = index
+            .write(target, &target_docs, &[], version)
+            .await
+            .expect("index target docs");
+        assert!(outcome.failed.is_empty());
+        let outcome = index
+            .write(bystander, &bystander_docs, &[], version)
+            .await
+            .expect("index bystander doc");
+        assert!(outcome.failed.is_empty());
+        index.refresh().await.expect("refresh");
+        assert_eq!(
+            index
+                .count_community_documents(target)
+                .await
+                .expect("count target"),
+            3
+        );
+        assert_eq!(
+            index
+                .count_community_documents(bystander)
+                .await
+                .expect("count bystander"),
+            1
+        );
+
+        // Advance the request through PostgresPurged using the store directly
+        // (no S3/Redis side effects needed to exercise the OpenSearch purge &
+        // verification helpers under the real deletion lease/stage contract).
+        let heartbeat_lost = CancellationToken::new();
+        services
+            .store
+            .begin_quiescing(&claim.lease)
+            .await
+            .expect("quiesce");
+        let generation = services.store.fence(&claim.lease).await.expect("fence");
+        let token = LeaseToken {
+            fence_generation: Some(generation),
+            ..claim.lease.clone()
+        };
+        let manifest = empty_storage_manifest(target);
+        services
+            .store
+            .freeze_destructive_storage_manifest(&token, &manifest)
+            .await
+            .expect("freeze manifest");
+        services.store.mark_drained(&token).await.expect("drained");
+        services
+            .store
+            .mark_bindings_removed(&token, serde_json::json!({"deleted_keys": 0}))
+            .await
+            .expect("bindings removed");
+        services
+            .store
+            .purge_postgres(&token)
+            .await
+            .expect("purge postgres");
+
+        services.search = Some(index.clone());
+        let deleted = purge_search_index(
+            &services,
+            &index,
+            &token,
+            DeletionStage::PostgresPurged,
+            &heartbeat_lost,
+        )
+        .await
+        .expect("purge search index");
+        assert_eq!(deleted, 3);
+        assert_eq!(
+            index
+                .count_community_documents(target)
+                .await
+                .expect("count after purge"),
+            0
+        );
+        assert_eq!(
+            index
+                .count_community_documents(bystander)
+                .await
+                .expect("bystander intact"),
+            1
+        );
+
+        services
+            .store
+            .mark_cache_purged(
+                &token,
+                serde_json::json!({"deleted_keys": 0, "deleted_search_documents": deleted}),
+            )
+            .await
+            .expect("mark cache purged");
+
+        // Verification passes when zero documents remain.
+        verify_search_index_absence(&services, &index, &token, &heartbeat_lost)
+            .await
+            .expect("verify absence succeeds with zero remaining");
+
+        // If a straggler document appears (for example after an async refresh),
+        // verification fails with a transient error naming the remaining count,
+        // cleans up the straggler, and the subsequent verification passes.
+        let straggler_version = services
+            .store
+            .next_search_index_version()
+            .await
+            .expect("straggler version");
+        let outcome = index
+            .write(target, &[make_doc(9, "straggler")], &[], straggler_version)
+            .await
+            .expect("write straggler");
+        assert!(outcome.failed.is_empty());
+        index.refresh().await.expect("refresh straggler");
+
+        let err = verify_search_index_absence(&services, &index, &token, &heartbeat_lost)
+            .await
+            .expect_err("verification must fail when a document remains");
+        assert!(
+            err.to_string().contains("1 retained search documents"),
+            "unexpected verification error: {err}"
+        );
+        assert!(
+            !is_permanent_error(&err),
+            "verification failure must be retryable"
+        );
+
+        // Next pass sees zero documents and succeeds.
+        verify_search_index_absence(&services, &index, &token, &heartbeat_lost)
+            .await
+            .expect("verification passes after straggler cleanup");
+        assert_eq!(
+            index
+                .count_community_documents(target)
+                .await
+                .expect("final target count"),
+            0
+        );
+        assert_eq!(
+            index
+                .count_community_documents(bystander)
+                .await
+                .expect("final bystander count"),
+            1
+        );
+
+        index.delete().await.expect("cleanup test index");
     }
 }

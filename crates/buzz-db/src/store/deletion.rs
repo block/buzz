@@ -920,6 +920,18 @@ impl DeletionStore {
         .unwrap_or(false)
     }
 
+    /// Whether an indexing relay has ever maintained a search index against
+    /// this database.
+    pub async fn search_index_maintained(&self) -> Result<bool> {
+        crate::search_outbox::is_index_maintained(&self.pool).await
+    }
+
+    /// Take the next monotonic external version for OpenSearch document
+    /// deletes during community purge.
+    pub async fn next_search_index_version(&self) -> Result<i64> {
+        crate::search_outbox::next_index_version(&self.pool).await
+    }
+
     /// Persist a request. Only active non-tombstone communities may be submitted.
     ///
     /// `requested_by` is recorded on a new row and is also the convergence key

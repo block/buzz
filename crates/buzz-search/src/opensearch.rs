@@ -21,9 +21,9 @@ use opensearch::auth::Credentials;
 use opensearch::http::response::Response;
 use opensearch::http::transport::{SingleNodeConnectionPool, TransportBuilder};
 use opensearch::http::Url;
-use opensearch::indices::IndicesRefreshParts;
 use opensearch::indices::{
     IndicesCreateParts, IndicesDeleteParts, IndicesExistsParts, IndicesGetSettingsParts,
+    IndicesRefreshParts,
 };
 use opensearch::params::VersionType;
 use opensearch::{BulkOperation, BulkParts, OpenSearch, SearchParts};
@@ -129,12 +129,133 @@ pub struct AwsSigV4 {
     pub region: String,
 }
 
+impl OpenSearchConfig {
+    /// Parse the OpenSearch URL and optional basic credentials: an HTTP(S) URL
+    /// without credentials, query, or fragment, and basic credentials given
+    /// both or neither. Empty values count as unset.
+    pub fn parse_parts(
+        url: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> Result<Option<Self>, String> {
+        let set = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
+        let (username, password) = (set(username), set(password));
+        let Some(raw) = set(url) else {
+            if username.is_some() || password.is_some() {
+                return Err(
+                    "BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD need BUZZ_OPENSEARCH_URL"
+                        .into(),
+                );
+            }
+            return Ok(None);
+        };
+        let parsed = Url::parse(raw.trim())
+            .map_err(|e| format!("BUZZ_OPENSEARCH_URL is not a valid URL: {e}"))?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err("BUZZ_OPENSEARCH_URL must be an HTTP(S) URL without credentials, query, or fragment; set BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD for basic auth".into());
+        }
+        let basic_auth = match (username, password) {
+            (Some(username), Some(password)) => Some((username, password)),
+            (None, None) => None,
+            _ => {
+                return Err(
+                    "set both BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD, or neither"
+                        .into(),
+                );
+            }
+        };
+        Ok(Some(Self {
+            url: parsed.to_string(),
+            basic_auth,
+            aws_sigv4: None,
+            index_prefix: DEFAULT_INDEX_PREFIX.to_string(),
+        }))
+    }
+
+    /// Add AWS SigV4 request signing to the OpenSearch settings.
+    /// `BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE` turns it on and names the signing
+    /// service: `es` for a managed domain, `aoss` for a Serverless collection.
+    /// The region is `BUZZ_OPENSEARCH_AWS_REGION`, or else the AWS
+    /// environment's own (`aws_region`). Empty values count as unset.
+    ///
+    /// Signing replaces basic auth, so the two together are refused, as is
+    /// signing without a region.
+    pub fn with_aws_sigv4(
+        opensearch: Option<Self>,
+        service: Option<String>,
+        region: Option<String>,
+        aws_region: Option<String>,
+    ) -> Result<Option<Self>, String> {
+        let set = |value: Option<String>| {
+            value
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+        let (service, region) = (set(service), set(region));
+        let Some(service) = service else {
+            if region.is_some() {
+                return Err(
+                    "BUZZ_OPENSEARCH_AWS_REGION needs BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE".into(),
+                );
+            }
+            return Ok(opensearch);
+        };
+        let Some(mut opensearch) = opensearch else {
+            return Err("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE needs BUZZ_OPENSEARCH_URL".into());
+        };
+        if !matches!(service.as_str(), "es" | "aoss") {
+            return Err("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE must be es (a managed domain) or aoss (a Serverless collection)".into());
+        }
+        if opensearch.basic_auth.is_some() {
+            return Err("set BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE or BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD, not both".into());
+        }
+        let Some(region) = region.or(set(aws_region)) else {
+            return Err("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE needs a region: set BUZZ_OPENSEARCH_AWS_REGION or AWS_REGION".into());
+        };
+        opensearch.aws_sigv4 = Some(AwsSigV4 { service, region });
+        Ok(Some(opensearch))
+    }
+
+    /// Parse OpenSearch connection settings from process environment variables.
+    ///
+    /// Reads `BUZZ_OPENSEARCH_URL`, `BUZZ_OPENSEARCH_USERNAME`,
+    /// `BUZZ_OPENSEARCH_PASSWORD`, `BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE`, and
+    /// `BUZZ_OPENSEARCH_AWS_REGION` (falling back to `AWS_REGION`, then
+    /// `AWS_DEFAULT_REGION`). Returns `Ok(None)` when `BUZZ_OPENSEARCH_URL` is
+    /// unset or empty.
+    pub fn from_env() -> Result<Option<Self>, String> {
+        let env = |name: &str| std::env::var(name).ok();
+        let opensearch = Self::parse_parts(
+            env("BUZZ_OPENSEARCH_URL"),
+            env("BUZZ_OPENSEARCH_USERNAME"),
+            env("BUZZ_OPENSEARCH_PASSWORD"),
+        )?;
+        let aws_region = match env("AWS_REGION") {
+            Some(region) if !region.trim().is_empty() => Some(region),
+            _ => env("AWS_DEFAULT_REGION"),
+        };
+        Self::with_aws_sigv4(
+            opensearch,
+            env("BUZZ_OPENSEARCH_AWS_SIGV4_SERVICE"),
+            env("BUZZ_OPENSEARCH_AWS_REGION"),
+            aws_region,
+        )
+    }
+}
+
 /// The message index on one OpenSearch cluster.
 #[derive(Clone)]
 pub struct SearchIndex {
     client: OpenSearch,
     alias: String,
     index: String,
+    is_serverless: bool,
 }
 
 impl std::fmt::Debug for SearchIndex {
@@ -142,6 +263,7 @@ impl std::fmt::Debug for SearchIndex {
         f.debug_struct("SearchIndex")
             .field("alias", &self.alias)
             .field("index", &self.index)
+            .field("is_serverless", &self.is_serverless)
             .finish_non_exhaustive()
     }
 }
@@ -156,6 +278,10 @@ impl SearchIndex {
         if let Some((user, password)) = &config.basic_auth {
             transport = transport.auth(Credentials::Basic(user.clone(), password.clone()));
         }
+        let is_serverless = config
+            .aws_sigv4
+            .as_ref()
+            .is_some_and(|sigv4| sigv4.service == "aoss");
         if let Some(sigv4) = &config.aws_sigv4 {
             if config.basic_auth.is_some() {
                 return Err(SearchError::Engine(
@@ -178,7 +304,22 @@ impl SearchIndex {
             client: OpenSearch::new(transport),
             alias: format!("{}messages", config.index_prefix),
             index: format!("{}messages-v{MAPPING_VERSION}", config.index_prefix),
+            is_serverless,
         })
+    }
+
+    /// Whether this client targets an Amazon OpenSearch Serverless (`aoss`)
+    /// collection, which does not expose `_refresh` or `_forcemerge`.
+    pub fn is_serverless(&self) -> bool {
+        self.is_serverless
+    }
+
+    /// Verify the cluster is reachable and accepts our credentials before a
+    /// destructive community deletion fences the tenant. Both 200 (alias
+    /// exists) and 404 (not yet created) pass; auth and transport errors fail.
+    pub async fn preflight(&self) -> Result<(), SearchError> {
+        let _ = self.missing().await?;
+        Ok(())
     }
 
     /// Create the versioned index behind the alias unless the alias exists.
@@ -194,7 +335,7 @@ impl SearchIndex {
     /// Whether the cluster answers that neither the alias nor the versioned
     /// index exists. Any other answer is an error, so a cluster that fails
     /// or throttles a lookup is never taken for one that lost the index.
-    pub(crate) async fn missing(&self) -> Result<bool, SearchError> {
+    pub async fn missing(&self) -> Result<bool, SearchError> {
         if self.exists(&self.alias).await? {
             return Ok(false);
         }
@@ -511,6 +652,93 @@ impl SearchIndex {
             .map(parse_hit)
             .collect::<Result<_, _>>()?;
         Ok(SearchResult { hits, page })
+    }
+
+    /// Return up to `page_size` event IDs indexed for `community`, ordered
+    /// ascending by hex `event_id` and paginated via `search_after`.
+    ///
+    /// Uses `_search` + `search_after` instead of `_delete_by_query` so the
+    /// same purge path works on both self-hosted OpenSearch and Amazon
+    /// OpenSearch Serverless (`aoss`).
+    pub async fn list_community_event_ids(
+        &self,
+        community: CommunityId,
+        after: Option<[u8; 32]>,
+        page_size: usize,
+    ) -> Result<Vec<[u8; 32]>, SearchError> {
+        let mut body = json!({
+            "size": page_size.max(1),
+            "track_total_hits": false,
+            "_source": ["event_id"],
+            "query": { "term": { "community": community.as_uuid().to_string() } },
+            "sort": [{ "event_id": "asc" }]
+        });
+        if let Some(cursor) = after {
+            body["search_after"] = json!([hex::encode(cursor)]);
+        }
+        let response = self
+            .client
+            .search(SearchParts::Index(&[&self.alias]))
+            .body(body)
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let body = checked(response).await?;
+        if body["timed_out"] == true {
+            return Err(SearchError::Engine("community purge scan timed out".into()));
+        }
+        if body["_shards"]["failed"].as_u64().unwrap_or(0) > 0 {
+            return Err(SearchError::Engine(
+                "community purge scan shards failed".into(),
+            ));
+        }
+        let invalid = || SearchError::Engine("unexpected community purge hit shape".into());
+        body["hits"]["hits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|hit| {
+                let raw = hit["_source"]["event_id"].as_str().ok_or_else(invalid)?;
+                let bytes = hex::decode(raw).map_err(|_| invalid())?;
+                bytes.try_into().map_err(|_| invalid())
+            })
+            .collect()
+    }
+
+    /// Count indexed documents remaining for `community`. Returns `0` when
+    /// neither the alias nor the versioned index exists.
+    pub async fn count_community_documents(
+        &self,
+        community: CommunityId,
+    ) -> Result<u64, SearchError> {
+        if self.missing().await? {
+            return Ok(0);
+        }
+        let response = self
+            .client
+            .search(SearchParts::Index(&[&self.alias]))
+            .body(json!({
+                "size": 0,
+                "track_total_hits": true,
+                "query": { "term": { "community": community.as_uuid().to_string() } }
+            }))
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let body = checked(response).await?;
+        if body["timed_out"] == true {
+            return Err(SearchError::Engine(
+                "community purge count timed out".into(),
+            ));
+        }
+        if body["_shards"]["failed"].as_u64().unwrap_or(0) > 0 {
+            return Err(SearchError::Engine(
+                "community purge count shards failed".into(),
+            ));
+        }
+        body["hits"]["total"]["value"]
+            .as_u64()
+            .ok_or_else(|| SearchError::Engine("missing hit total in purge count".into()))
     }
 }
 
