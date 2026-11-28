@@ -3840,7 +3840,10 @@ pub(crate) mod tests {
         build_test_state(config, pool).await
     }
 
-    async fn build_test_state(config: crate::config::Config, pool: sqlx::PgPool) -> Arc<AppState> {
+    pub(crate) async fn build_test_state(
+        config: crate::config::Config,
+        pool: sqlx::PgPool,
+    ) -> Arc<AppState> {
         let db = buzz_db::Db::from_pool(pool.clone());
         let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(

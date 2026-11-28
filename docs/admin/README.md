@@ -132,6 +132,7 @@ can be a break-glass root, silently discarding it would be a lockout.
 | Resolve reports (dismiss, escalate, delete, kick, ban, timeout) | ✓ | ✓ |
 | Update feedback status | ✓ | ✓ |
 | Manage operator roster (`GET/PUT/DELETE /operators`) | ✓ | ✗ |
+| Read or change the deployment migration write limit | ✓ | ✗ |
 
 Capability checks are server-authoritative; the desktop console hides Staffing
 tab controls for Moderators as a UX convenience only.
@@ -175,6 +176,7 @@ Only the exact value `disabled` is accepted.
 | Moderation reads | signed, any staff role | served to anyone who can reach the relay |
 | Writes (resolve, ban, timeout, delete, lift, feedback status) | signed, role-checked | refused (`403`) |
 | Staffing (`/operators`) | signed Operator | refused (`403`) |
+| Migration write limit (`/migration-write-limit`) | signed Operator | refused (`403`) |
 
 **What disabled mode exposes**, in every community the relay hosts, to anyone
 who can send it an HTTP request:
@@ -228,6 +230,69 @@ other variables:
 | `BUZZ_ADMIN_AUTH=nip98` with a malformed `RELAY_OWNER_PUBKEY` | startup error |
 | `BUZZ_ADMIN_AUTH` junk value | startup error |
 | `BUZZ_ADMIN_AUTH` without `BUZZ_ADMIN_HOST` | warn + ignore |
+
+## Pause or throttle migration writes
+
+Use `GET /api/admin/v1/migration-write-limit` on the admin host to read the
+deployment's limit. Set it with `PUT` and a body such as
+`{"eventsPerMinute": 12}`. Both return the same JSON shape. Both require a
+NIP-98 signature from a relay Operator. Sign the exact PUT body with the
+NIP-98 payload tag.
+
+The limit is a whole number from 0 to 60,000 signed events per minute. It
+defaults to 12, which refills one permit every five seconds. Idle time can
+accumulate at most two permits. This lets an importer create a channel and send
+its first membership batch back-to-back. The relay checks the signature and
+write authorization before taking a permit. A channel create or a batch of
+membership changes uses one permit. An authorized attempt can spend a permit
+even if a storage conflict later prevents the write. The relay queues no writes.
+
+Importers label every event they send with a signed tag of the form
+`["migration","example-import"]`. Channel creation (kind 9007) and each
+membership batch (kind 9000) with this exact two-element tag and a nonempty
+source label share the budget. The relay rejects the tag on other event kinds.
+WebSocket `EVENT` and HTTP
+`POST /events` share the budget across communities, channels, senders,
+and relay replicas. The tag classifies workload. Usual signature,
+membership, and scope rules still apply. Unsigned API bodies, relay-generated
+side effects, and legacy clients that send untagged events use their
+existing paths.
+
+Set the limit to zero to block new tagged admissions. Writes that already
+received a permit can finish, including their side effects. An authorized retry
+of the same signed event returns `duplicate:` if the event is still stored.
+Raise the limit to resume admission. The relay calculates refill since the last
+grant using the new rate. The two-permit cap still applies. No restart is needed.
+
+All replicas must use the same Redis database. Redis orders changes and
+admissions atomically and supplies the clock. A successful update applies
+to every later check. The override has no expiry. Preserve the Redis key
+`buzz:ratelimit:migration_writes` across Redis restarts and failovers if the
+limit must survive them. A missing override uses the default. Give each
+independent relay deployment its own Redis database.
+
+The migration limit returns HTTP `429` for throttled or paused writes and `503`
+if it cannot check the budget. Both responses carry `Retry-After`. WebSocket
+sends a negative `OK` with the same message as the HTTP error body. The quota
+message has the form `rate-limited: quota exceeded; retry in 5s`. A pause uses
+a five-second delay. If the migration budget is unavailable, the message is
+`rate-limited: shared admission unavailable`. That `503` includes `"sent": false`
+and a five-second retry delay. When a Redis outage also prevents the earlier
+per-sender admission check on `POST /events`, that check returns `503` with the
+same error message and omits `Retry-After` and `"sent"`.
+Preserve pending work and add jitter before retrying. Sign a fresh NIP-98
+proof for each HTTP attempt.
+
+A Redis error or invalid stored value fails admission closed for tagged
+writes. GET and PUT return `503` for limit storage errors after authentication.
+If the shared Redis outage also prevents NIP-98 replay checking, the admin
+API refuses authentication through its usual path. When a PUT times out, read
+the current limit with a fresh signed GET before retrying because Redis may
+have applied the update.
+
+Roll this relay version out to all replicas before relying on this control.
+Every importer version that should respond to the pause must emit the signed
+tag on each write.
 
 ## Content Security Policy
 

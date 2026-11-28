@@ -2,6 +2,8 @@ use buzz_auth::{LimitType, RateLimiter};
 use buzz_core::TenantContext;
 use nostr::PublicKey;
 
+pub(crate) mod migration;
+
 // Desktop startup establishes several independent live subscriptions at once.
 // Preserve the configured average rate while allowing that bounded burst. This
 // is still a fixed-window limiter, so a Redis-backed token bucket would be a

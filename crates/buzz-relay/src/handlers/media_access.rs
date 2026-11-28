@@ -9,9 +9,18 @@ pub(crate) async fn validate_media_references(
     state: &AppState,
     event: &Event,
 ) -> Result<(), IngestError> {
+    let hashes = authorize_media_references(tenant, state, event).await?;
+    record_media_publications(tenant, state, hashes).await
+}
+
+pub(crate) async fn authorize_media_references(
+    tenant: &TenantContext,
+    state: &AppState,
+    event: &Event,
+) -> Result<Vec<String>, IngestError> {
     let mode = state.config.media_read_mode;
     if mode == MediaReadMode::Off {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let base = crate::api::media::media_base_url_for_tenant(&state.config.relay_url, tenant.host());
     let hashes = buzz_core::media::publication_hashes(event, &base);
@@ -32,17 +41,9 @@ pub(crate) async fn validate_media_references(
                 "restricted: too many attachment references".into(),
             ))
         } else {
-            // Skip per-reference fan-out, but retain a single best-effort
-            // publication boundary batch for accepted shadow events.
-            if state
-                .db
-                .record_media_publications(tenant.community(), hashes.into_iter().collect())
-                .await
-                .is_err()
-            {
-                metrics::counter!("buzz_media_publication_access_total", "mode" => mode.label(), "reason" => "record_error").increment(1);
-            }
-            Ok(())
+            // Skip per-reference fan-out, while keeping the hashes for a
+            // single best-effort publication batch in shadow mode.
+            Ok(hashes.into_iter().collect())
         };
     }
     let author = super::ingest::effective_message_author(event, &state.relay_keypair.public_key());
@@ -113,12 +114,21 @@ pub(crate) async fn validate_media_references(
             }
         }
     }
+    Ok(hashes.into_iter().collect())
+}
+
+pub(crate) async fn record_media_publications(
+    tenant: &TenantContext,
+    state: &AppState,
+    hashes: Vec<String>,
+) -> Result<(), IngestError> {
+    let mode = state.config.media_read_mode;
     // A marker consumes previews but never grants download access. Shadow
     // recording is best effort and cannot change event acceptance on failure.
     if !hashes.is_empty()
         && state
             .db
-            .record_media_publications(tenant.community(), hashes.into_iter().collect())
+            .record_media_publications(tenant.community(), hashes)
             .await
             .is_err()
     {

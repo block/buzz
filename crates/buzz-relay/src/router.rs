@@ -1296,6 +1296,9 @@ fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
 }
 
 #[cfg(test)]
+mod migration_postgres_tests;
+
+#[cfg(test)]
 mod tests {
     mod single_community_tests {
         include!("single_community_tests.rs");

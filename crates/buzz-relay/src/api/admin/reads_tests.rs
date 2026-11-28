@@ -896,6 +896,8 @@ fn every_route() -> Vec<(&'static str, String, Check)> {
         ("GET", "/operators".into(), Operator),
         ("PUT", format!("/operators/{PK}"), Operator),
         ("DELETE", format!("/operators/{PK}"), Operator),
+        ("GET", "/migration-write-limit".into(), Operator),
+        ("PUT", "/migration-write-limit".into(), Operator),
         ("GET", "/communities".into(), View),
         ("GET", format!("/members/search?{host}&q=a"), View),
         ("GET", format!("/members/{PK}?{host}"), View),

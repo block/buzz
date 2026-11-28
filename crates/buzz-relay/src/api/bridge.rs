@@ -1505,6 +1505,12 @@ async fn submit_event_authed(
         };
     }
 
+    if let Err(message) = crate::admission::migration::validate_kind(&event) {
+        return SubmitOutcome::Err {
+            response: api_error(StatusCode::BAD_REQUEST, message).into_response(),
+        };
+    }
+
     let auth = IngestAuth::Http {
         pubkey,
         scopes: buzz_auth::Scope::all_known(), // Pure Nostr: full scopes, channel access via membership
@@ -1600,6 +1606,9 @@ async fn submit_event_authed(
                 response: e.into_response(),
             }
         }
+        Err(IngestError::Migration(refusal)) => SubmitOutcome::Err {
+            response: migration_refusal_response(refusal),
+        },
         // `into_legacy` never returns `Ban`; it would fail closed here.
         Err(IngestError::Ban { .. }) => {
             crate::handlers::ingest::reject_with_transport("http", "error");
@@ -1616,6 +1625,29 @@ async fn submit_event_authed(
             }
         }
     }
+}
+
+fn migration_refusal_response(refusal: crate::admission::migration::Refusal) -> Response {
+    use crate::admission::migration::Refusal;
+
+    let message = refusal.message();
+    let mut response = match refusal {
+        // Admission always runs before event application. Make the refusal
+        // definitive for publishers that treat other HTTP 503s as ambiguous.
+        Refusal::Unavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": message, "sent": false})),
+        )
+            .into_response(),
+        Refusal::Throttled(_) | Refusal::Paused => {
+            api_error(StatusCode::TOO_MANY_REQUESTS, &message).into_response()
+        }
+    };
+    response.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from(refusal.retry_after()),
+    );
+    response
 }
 
 /// Query events via HTTP bridge (NIP-98 auth). Returns JSON array of events.

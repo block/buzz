@@ -497,6 +497,8 @@ pub enum IngestError {
     AuthFailed(String),
     /// Server error — WS: OK false, HTTP: 500.
     Internal(String),
+    /// Shared migration admission refusal. HTTP returns 429 or 503 with Retry-After.
+    Migration(crate::admission::migration::Refusal),
     /// A durable community-ban refusal, or the failed lookup that decides
     /// one. This is an admission refusal, so HTTP answers a verified agent
     /// token with NIP-FI's fixed denial. WS and token-less HTTP get `legacy`
@@ -2747,7 +2749,11 @@ async fn ingest_event_inner(
     // (commands, feedback, reports, moderation) so no write returns ahead of it.
     enforce_write_restriction(state, tenant, kind_u32, auth.pubkey()).await?;
 
-    super::media_access::validate_media_references(tenant, state, &event).await?;
+    let migration_write = matches!(kind_u32, KIND_NIP29_CREATE_GROUP | KIND_NIP29_PUT_USER)
+        && crate::admission::migration::is_labeled(&event);
+    if !migration_write {
+        super::media_access::validate_media_references(tenant, state, &event).await?;
+    }
 
     // Command kinds are routed AFTER signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
@@ -3355,6 +3361,11 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
 
         if let Some(client_uuid) = channel_id {
+            if migration_write && client_uuid.is_nil() {
+                return Err(IngestError::Rejected(
+                    "invalid: channel ID is reserved".into(),
+                ));
+            }
             let members = super::side_effects::initial_members(&event)
                 .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
             channel_create = Some(ChannelCreateRequest {
@@ -3460,6 +3471,11 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    let migration_media = if migration_write {
+        Some(super::media_access::authorize_media_references(tenant, state, &event).await?)
+    } else {
+        None
+    };
     validate_event_imeta(tenant, state, &event, &tenant_media_base).await?;
 
     // A pin command's `e` tag names its target, not a thread parent.
@@ -3477,6 +3493,41 @@ async fn ingest_event_inner(
     } else {
         None
     };
+
+    if let Some(hashes) = migration_media {
+        // Confirm a committed retry even when the migration budget is paused.
+        // The storage transactions still deduplicate concurrent arrivals.
+        if state
+            .db
+            .live_event_exists_for_event_write(tenant.community(), &event)
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?
+        {
+            if let Some(ch) = channel_id {
+                emit(
+                    tracer,
+                    TraceAction::WriteDuplicate {
+                        msg_id: msg_id_label(event.id.as_bytes()),
+                        channel: channel_label(ch),
+                        claimed_community: claimed_community_from_event(&event),
+                    },
+                    state_for_request(tenant, auth.pubkey()),
+                );
+            }
+            return Ok(IngestResult {
+                event_id: event_id_hex,
+                accepted: true,
+                message: "duplicate:".into(),
+            });
+        }
+        // Publication markers consume previews. Keep the authorization reads
+        // above and take a shared permit before writing any markers.
+        let transport = if auth.is_http() { "http" } else { "websocket" };
+        crate::admission::migration::admit_authorized_write(&state.redis_pool, transport)
+            .await
+            .map_err(IngestError::Migration)?;
+        super::media_access::record_media_publications(tenant, state, hashes).await?;
+    }
 
     // Pre-validate kind:0 content before storage so we don't store an event
     // whose profile sync will silently fail in the side-effect handler.

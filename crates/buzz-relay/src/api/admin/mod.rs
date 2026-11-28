@@ -1,7 +1,7 @@
 //! Private deployment moderation API.
 //!
 //! Every route is a view (moderation read), act (mutation) or operator
-//! (`/operators`) route; see [`auth`] for the rule. In `nip98` mode every route
+//! route; see [`auth`] for the rule. In `nip98` mode every route
 //! needs a signed, rostered staff member. In `disabled` mode every moderation
 //! read is served to whoever can reach the relay, and act and operator routes
 //! answer 403.
@@ -9,6 +9,7 @@
 mod auth;
 mod direct;
 mod error;
+mod migration;
 mod reads;
 
 use std::sync::Arc;
@@ -45,7 +46,7 @@ pub(crate) use auth::is_relay_operator;
 /// Build the deployment-admin routes.
 ///
 /// Moderation reads (GET) are served in both auth modes. Mutations and the
-/// staffing routes (/operators) require an authenticated `nip98` principal.
+/// operator routes require an authenticated `nip98` principal.
 pub fn router(state: Arc<crate::state::AppState>) -> Router {
     Router::new()
         .route("/probe", get(probe))
@@ -64,6 +65,8 @@ pub fn router(state: Arc<crate::state::AppState>) -> Router {
         .route("/operators", get(list_operators))
         .route("/operators/{pubkey}", put(upsert_operator))
         .route("/operators/{pubkey}", delete(delete_operator))
+        .route("/migration-write-limit", get(migration::get))
+        .route("/migration-write-limit", put(migration::put))
         .route("/communities", get(reads::communities))
         .route("/members/search", get(reads::search_members))
         .route("/members/{pubkey}", get(reads::lookup_member))
