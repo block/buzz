@@ -39,6 +39,7 @@ part 'relay_session_auth.dart';
 part 'relay_session_background.dart';
 part 'relay_session_delivery.dart';
 part 'relay_session_diagnostics.dart';
+part 'relay_session_liveness.dart';
 part 'relay_session_test_hooks.dart';
 part 'relay_session_subscriptions.dart';
 part 'relay_session_snapshot.dart';
@@ -102,6 +103,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Timer? _reconnectTimer;
   Timer? _flushTimer;
   Timer? _backgroundGraceTimer;
+  final _liveness = _LivenessProbe();
   DateTime? _backgroundedAt;
   int _pauses = 0;
   DateTime? _connectedAt;
@@ -347,6 +349,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         sub.timedOut(timeout);
       }
       if (sub?.heldFilter == null) _sendClose(subId);
+      if (_socketConnected) _checkConnection(state.status, ref);
     });
 
     final subscription = _HistorySubscription(
@@ -478,6 +481,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         );
         pending.timedOut(event.id, timeout);
       }
+      if (_socketConnected) _checkConnection(state.status, ref);
     });
 
     _pendingEvents[event.id] = _PendingEvent(
@@ -551,6 +555,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _pauseNow() {
     _paused = true;
     _socketConnected = false;
+    _resetLiveness();
+    _endNetworkReconnect();
     _reconnectTimer?.cancel();
     _cancelAllHistory(Exception('App moved to background'));
     _rejectAllPending(Exception('App moved to background'));
@@ -567,36 +573,19 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       _connectForBackgroundWork(timeout, state.status, ref);
 
   /// Called by the app lifecycle provider when the app returns to foreground.
-  void onAppResumed() {
-    _paused = false;
-    final backgroundedAt = _backgroundedAt;
-    _backgroundedAt = null;
-    _backgroundGraceTimer?.cancel();
-    _backgroundGraceTimer = null;
+  void onAppResumed() => _resumeFromBackground(state.status, ref);
 
-    final backgroundedLongEnoughToRequireReconnect =
-        backgroundedAt != null &&
-        _now().difference(backgroundedAt) >= _backgroundGraceDuration;
-    // Keep a socket held open for background work: an OK may still come.
-    final heldOpen = _backgroundWorkHolds > 0 && _socketConnected;
-    if ((heldOpen || !backgroundedLongEnoughToRequireReconnect) &&
-        state.status == SessionStatus.connected) {
-      return;
-    }
-
-    // Cancel any in-flight reconnect backoff timer so we reconnect immediately
-    // instead of waiting for the (possibly large) exponential delay.
-    _reconnectTimer?.cancel();
-    _reconnectDelayMs = _baseReconnectDelayMs;
-    final config = ref.read(relayConfigProvider);
-    _connect(config);
-  }
+  /// Called when the device's network changes while the app is in the
+  /// foreground. See [_RelaySessionLiveness._checkConnection].
+  void onNetworkChanged() =>
+      _checkConnection(state.status, ref, networkChanged: true);
 
   Future<void> _connect(RelayConfig config, {bool renewed = false}) async {
     if (_disposed || _ageRestricted) return;
 
     // Whatever connection came before ends here, capped at its last frame.
     _markLiveSubscriptionsClosed();
+    _resetLiveness();
     _connectedAt = null;
     _connectStartedAt = _now();
     _authorizationDenied = false;
@@ -660,6 +649,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   Future<void> _handleConnected(int generation) async {
     if (_disposed || generation != _connectionGeneration) return;
+    _endNetworkReconnect();
     _socketConnected = true;
     ref.read(hostedRelayAuthProvider).connected(ref.read(relayConfigProvider));
     _hasConnectedOnce = true;
@@ -678,6 +668,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _handleDisconnected(int generation, Object? error, {int? closeCode}) {
     if (_disposed || generation != _connectionGeneration) return;
     _socketConnected = false;
+    _resetLiveness();
+    _endNetworkReconnect();
     final connectedAt = _connectedAt;
     _noteDisconnected(error, denied: _authorizationDenied);
     _noteLostOperations();
@@ -864,6 +856,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _handleEose(List<dynamic> data) {
     if (data.length < 2) return;
     final subId = data[1] as String;
+    if (_answerLivenessProbe(subId)) return;
 
     // History subscription: resolve with collected events.
     final historySub = _historySubscriptions.remove(subId);
@@ -901,6 +894,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _handleClosed(List<dynamic> data) {
     if (data.length < 2) return;
     final subId = data[1] as String;
+    if (_answerLivenessProbe(subId, closed: true)) return;
     final message = data.length >= 3 && data[2] is String
         ? data[2] as String
         : 'subscription closed by relay';
@@ -1170,6 +1164,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _beforePauseCallbacks.clear();
     _connectionGeneration++;
     _reconnectTimer?.cancel();
+    _resetLiveness();
+    _endNetworkReconnect();
     _flushTimer?.cancel();
     _backgroundGraceTimer?.cancel();
     _backgroundedAt = null;

@@ -43,6 +43,9 @@ class FakeRelay {
   final reqs = <List<dynamic>>[];
   final queries = <List<Map<String, dynamic>>>[];
   final sockets = <FakeRelaySocket>[];
+
+  /// The subscription ids clients closed, in order.
+  final closes = <String>[];
   final unanswerable = <String>[];
   final _rejections = <({bool Function(NostrEvent) match, String message})>[];
   final _refusals =
@@ -230,6 +233,7 @@ class FakeRelay {
         final hold = _reqHold;
         hold == null ? admit() : hold.future.then((_) => admit());
       case 'CLOSE':
+        closes.add(message[1] as String);
         socket._live.remove(message[1]);
       case 'EVENT':
         _publish(
@@ -512,6 +516,13 @@ class FakeRelaySocket extends RelaySocket {
     _authenticated = false;
     _live.clear();
   }
+
+  /// Whether the session still holds this socket open.
+  bool get isOpen => _open;
+
+  /// Reports a close that arrives after the session let go of the socket, as
+  /// a real socket's can.
+  void closeLate([Object? error]) => _onDisconnected(error);
 
   void drop(Object? error) {
     if (!_open) return;

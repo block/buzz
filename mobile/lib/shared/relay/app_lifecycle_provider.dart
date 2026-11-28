@@ -16,11 +16,15 @@ class AppLifecycleNotifier extends Notifier<AppLifecycleState> {
   AppLifecycleState build() {
     _listener = AppLifecycleListener(onStateChange: _onStateChange);
 
-    // Watch connectivity changes to trigger reconnect on network restore.
+    // A network change can strand an open socket on the old network, and a
+    // restored network should not wait out the reconnect backoff. Toggling
+    // Wi-Fi in Control Center leaves the app `inactive` but in the foreground.
     _connectivitySub = Connectivity().onConnectivityChanged.listen((results) {
       final hasNetwork = results.any((r) => r != ConnectivityResult.none);
-      if (hasNetwork && state == AppLifecycleState.resumed) {
-        ref.read(relaySessionProvider.notifier).onAppResumed();
+      if (hasNetwork &&
+          (state == AppLifecycleState.resumed ||
+              state == AppLifecycleState.inactive)) {
+        ref.read(relaySessionProvider.notifier).onNetworkChanged();
       }
     });
 

@@ -1,6 +1,42 @@
 part of 'relay_session.dart';
 
 extension _RelaySessionBackgroundWork on RelaySessionNotifier {
+  /// Reconnects on returning to the foreground, unless the socket stayed open
+  /// through a short absence or for background work.
+  void _resumeFromBackground(SessionStatus status, Ref ref) {
+    _paused = false;
+    final backgroundedAt = _backgroundedAt;
+    _backgroundedAt = null;
+    _backgroundGraceTimer?.cancel();
+    _backgroundGraceTimer = null;
+
+    final backgroundedLongEnoughToRequireReconnect =
+        backgroundedAt != null &&
+        _now().difference(backgroundedAt) >=
+            RelaySessionNotifier._backgroundGraceDuration;
+    // Keep a socket held open for background work: an OK may still come.
+    final heldOpen = _backgroundWorkHolds > 0 && _socketConnected;
+    if ((heldOpen || !backgroundedLongEnoughToRequireReconnect) &&
+        status == SessionStatus.connected) {
+      return;
+    }
+    // A return from a brief inactive spell (Control Center) keeps an attempt
+    // a network change just started, or its spread-out wait.
+    if (backgroundedAt == null &&
+        (_liveness.networkAttempt || _liveness.spreadReconnect)) {
+      return;
+    }
+
+    // Cancel any in-flight reconnect backoff timer so we reconnect immediately
+    // instead of waiting for the (possibly large) exponential delay. This
+    // attempt replaces any a network change started.
+    _endNetworkReconnect();
+    _reconnectTimer?.cancel();
+    _reconnectDelayMs = RelaySessionNotifier._baseReconnectDelayMs;
+    final config = ref.read(relayConfigProvider);
+    _connect(config);
+  }
+
   /// Keeps the background grace period from disconnecting the session while
   /// the app does work in the background, such as sending a notification
   /// reply. Returns a callback that ends the hold; it also ends by itself
@@ -41,6 +77,7 @@ extension _RelaySessionBackgroundWork on RelaySessionNotifier {
         _reconnectTimer?.isActive == true ||
         status == SessionStatus.disconnected) {
       _paused = false;
+      _endNetworkReconnect();
       _reconnectTimer?.cancel();
       _reconnectDelayMs = RelaySessionNotifier._baseReconnectDelayMs;
       unawaited(_connect(ref.read(relayConfigProvider)));
