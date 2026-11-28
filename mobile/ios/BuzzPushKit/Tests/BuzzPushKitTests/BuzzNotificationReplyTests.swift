@@ -37,8 +37,8 @@ private func event(kind: Int, tags: [[String]] = []) -> VerifiedNostrEvent {
 func `Reply context carries the sender and NIP-10 thread root`(
   tags: [[String]], expectedRoot: String?
 ) throws {
-  let context = try #require(
-    BuzzNotificationReplyContext.make(for: event(kind: 9, tags: tags), recipientPubkey: recipient))
+  let context = BuzzNotificationReplyContext.make(
+    for: event(kind: 9, tags: tags), recipientPubkey: recipient)
   #expect(context.senderPubkey == sender.lowercased())
   #expect(context.recipientPubkey == recipient.lowercased())
   #expect(context.threadRootID == expectedRoot)
@@ -49,9 +49,15 @@ func `Reply context carries the sender and NIP-10 thread root`(
 }
 
 @Test(arguments: [45001, 45003, 7])
-func `Forum posts and other kinds offer no reply`(kind: Int) {
-  #expect(
-    BuzzNotificationReplyContext.make(for: event(kind: kind), recipientPubkey: recipient) == nil)
+func `Forum posts and other kinds offer no reply but say when they were`(kind: Int) {
+  let community = PushLeaseCommunity(
+    id: "community", name: "Community", relayUrl: "https://relay.example.org",
+    pubkey: recipient, policies: [])
+  let resolution = BuzzPushNotificationResolver.makeResolution(
+    event: event(kind: kind, tags: [["h", "channel"]]), community: community, profile: nil,
+    channel: nil)
+  #expect(resolution?.offersReply == false)
+  #expect(resolution?.replyContext?.messageCreatedAt == 1_000)
 }
 
 @Test func `Reply context rejects unexpected or malformed fields`() {
@@ -84,10 +90,12 @@ func `Forum posts and other kinds offer no reply`(kind: Int) {
   #expect(inChannel?.replyContext?.senderPubkey == sender.lowercased())
   // The reply is bound to the account the notification was for.
   #expect(inChannel?.replyContext?.recipientPubkey == recipient.lowercased())
+  #expect(inChannel?.offersReply == true)
   let noChannel = BuzzPushNotificationResolver.makeResolution(
     event: event(kind: 9), community: community, profile: nil, channel: nil)
   #expect(noChannel != nil)
   #expect(noChannel?.replyContext == nil)
+  #expect(noChannel?.offersReply == false)
 }
 
 @Test func `Reply request needs text, a target and a reply context`() {

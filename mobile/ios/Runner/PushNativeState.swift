@@ -284,6 +284,30 @@ final class BuzzNotificationReplyBridge {
     case "setSelectedCommunity":
       BuzzSelectedCommunity.set(call.arguments as? String, in: selectedCommunityDefaults)
       result(nil)
+    case "deliveredMessageNotifications":
+      // Where and when each delivered message notification's message was, so
+      // the app can tell which ones its read state covers.
+      UNUserNotificationCenter.current().getDeliveredNotifications { delivered in
+        let messages = delivered.compactMap { notification -> [String: String]? in
+          let userInfo = notification.request.content.userInfo
+          guard let target = BuzzPushNavigationTarget.decodeIfPresent(from: userInfo),
+            let context = BuzzNotificationReplyContext.decodeIfPresent(from: userInfo)
+          else { return nil }
+          var arguments = target.flutterArguments
+          arguments["id"] = notification.request.identifier
+          arguments["replyRootId"] = context.threadRootID
+          arguments["messageCreatedAt"] = String(context.messageCreatedAt)
+          return arguments
+        }
+        DispatchQueue.main.async { result(messages) }
+      }
+    case "removeDeliveredNotifications":
+      guard let ids = call.arguments as? [String] else {
+        result(FlutterError(code: "invalid_arguments", message: "Expected ids.", details: nil))
+        return true
+      }
+      UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids)
+      result(nil)
     default:
       return false
     }

@@ -1,9 +1,10 @@
 import Foundation
 
-/// What a notification needs so the app can send a reply typed into it.
+/// Where and when a notification's message was: what the app needs to send a
+/// reply typed into it, and to clear it once the message is read.
 ///
-/// Only a notification that shows a resolved channel or DM message carries
-/// one. See docs/adr/0004-notification-reply.md.
+/// Only a notification that shows a resolved channel, DM or forum message
+/// carries one. See docs/adr/0004-notification-reply.md.
 public struct BuzzNotificationReplyContext: Codable, Equatable, Sendable {
   /// The notification category that offers the Reply action.
   public static let categoryIdentifier = "buzz.message"
@@ -42,9 +43,8 @@ public struct BuzzNotificationReplyContext: Codable, Equatable, Sendable {
 
   static func make(
     for event: VerifiedNostrEvent, recipientPubkey: String, inSolo: Bool? = nil
-  ) -> BuzzNotificationReplyContext? {
-    guard replyableKinds.contains(event.kind) else { return nil }
-    return BuzzNotificationReplyContext(
+  ) -> BuzzNotificationReplyContext {
+    BuzzNotificationReplyContext(
       senderPubkey: event.pubkey.lowercased(),
       threadRootID: nip10RootID(in: event.tags),
       messageCreatedAt: event.createdAt,
@@ -163,8 +163,8 @@ public struct BuzzNotificationReplyRequest: Equatable, Sendable {
   /// Whether a sent reply clears a delivered notification, matching the
   /// read marker the app writes: a reply in a thread reads that thread up to
   /// the notified message, and a top-level reply reads the whole conversation
-  /// up to it, its threads included. Only notifications that offer Reply
-  /// know where and when their message was.
+  /// up to it, its threads included. Only notifications that show a resolved
+  /// message know where and when it was.
   public func clears(threadIdentifier other: String, userInfo: [AnyHashable: Any]) -> Bool {
     guard !threadIdentifier.isEmpty, other == threadIdentifier,
       let notified = BuzzNotificationReplyContext.decodeIfPresent(from: userInfo),

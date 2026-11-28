@@ -39,6 +39,7 @@ import 'features/pairing/pairing_provider.dart';
 import 'features/channels/agent_activity/observer_subscription.dart';
 import 'features/channels/channel_detail_page.dart';
 import 'features/channels/notification_reply.dart';
+import 'features/channels/read_notification_clearing.dart';
 import 'shared/widgets/app_route_observer.dart';
 import 'shared/widgets/root_page_route.dart';
 import 'features/profile/profile_provider.dart';
@@ -416,6 +417,7 @@ class App extends HookConsumerWidget {
     // Unconditional: iOS may launch the app in the background only to send a
     // notification reply, and no later frame may come to rebuild this.
     ref.listen(notificationReplySenderProvider, (_, _) {});
+    ref.listen(readNotificationClearerProvider, (_, _) {});
 
     void applyBadge(UnreadBadgeState state) {
       if (state.highPriorityCount > 0) {

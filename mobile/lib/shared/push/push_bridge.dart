@@ -253,6 +253,61 @@ Future<void> shareSelectedCommunityWithNotifications(
   }
 }
 
+/// A delivered iOS notification for a message: [id] identifies the
+/// notification, [replyRootId] is the message's NIP-10 thread root.
+typedef DeliveredMessageNotification = ({
+  String id,
+  MessageDeepLink link,
+  String? replyRootId,
+  int messageCreatedAt,
+});
+
+/// The message notifications iOS is showing, with where and when each
+/// message was.
+Future<List<DeliveredMessageNotification>>
+deliveredMessageNotifications() async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return const [];
+  try {
+    final raw = await _channel.invokeListMethod<dynamic>(
+      'deliveredMessageNotifications',
+    );
+    return [
+      for (final value in raw ?? const [])
+        if (value is Map)
+          if ((
+                value['id'],
+                _pushNotificationLink(value),
+                value['replyRootId'],
+                int.tryParse('${value['messageCreatedAt']}'),
+              )
+              case (
+                final String id,
+                final MessageDeepLink link,
+                final String? replyRootId,
+                final int messageCreatedAt,
+              ))
+            (
+              id: id,
+              link: link,
+              replyRootId: replyRootId,
+              messageCreatedAt: messageCreatedAt,
+            ),
+    ];
+  } on MissingPluginException {
+    return const [];
+  }
+}
+
+/// Removes delivered iOS notifications by [ids].
+Future<void> removeDeliveredNotifications(List<String> ids) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    await _channel.invokeMethod<void>('removeDeliveredNotifications', ids);
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}
+
 /// Pulls a notification response that arrived before the Flutter method
 /// handler was installed.
 Future<void> syncPendingBuzzPushNotificationResponse() async {
