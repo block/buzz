@@ -2472,7 +2472,11 @@ pub enum MediaCmd {
 /// Subcommands for `buzz mem`.
 #[derive(Subcommand)]
 pub enum MemCmd {
-    /// List non-tombstoned memory entries
+    /// List non-tombstoned memory entries.
+    ///
+    /// The listing excludes the `core` profile by specification — `core` is
+    /// the agent identity surface, not a listed entry. Pass `--include-core`
+    /// to see it in the listing anyway.
     Ls {
         /// Owner pubkey (hex). Overrides BUZZ_AUTH_TAG.
         #[arg(long)]
@@ -2483,6 +2487,9 @@ pub enum MemCmd {
         /// Emit JSON instead of tab-delimited lines.
         #[arg(long, default_value_t = false)]
         json: bool,
+        /// Include the `core` profile in the listing (excluded by default).
+        #[arg(long, default_value_t = false)]
+        include_core: bool,
     },
     /// Print the value of a slug to stdout (no trailing newline)
     Get {
@@ -2492,6 +2499,10 @@ pub enum MemCmd {
         /// Agent pubkey (hex) to read as this key's owner.
         #[arg(long)]
         agent: Option<String>,
+        /// Emit JSON with the value and the provenance of the copy returned
+        /// (event id, author, owner, write time).
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     /// Print sha256(value) in hex (use as `--base-hash` for `mem patch`).
     Hash {
