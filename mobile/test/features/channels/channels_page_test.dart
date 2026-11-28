@@ -17,6 +17,8 @@ import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/agents/agents_page.dart';
 
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:buzz/shared/read_state/read_state_storage.dart';
 import 'package:buzz/features/home/home_page.dart';
@@ -2458,6 +2460,8 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
+    FlutterSecureStorage.setMockInitialValues({});
+    final bravoKeys = nostr.Keys.generate();
 
     final communities = [
       Community(
@@ -2472,6 +2476,8 @@ void main() {
         name: 'bravo.communities.buzz.xyz',
         relayUrl: 'wss://bravo.communities.buzz.xyz',
         addedAt: DateTime(2025),
+        pubkey: bravoKeys.public,
+        nsec: bravoKeys.nsec,
       ),
     ];
     final communityNotifier = _FakeCommunityListNotifier(communities);
@@ -2601,7 +2607,8 @@ void main() {
     expect(
       find.text(
         'Are you sure you want to remove “bravo”? '
-        'You can pair with it again later.',
+        'Its identity stays saved on this device, so you can use it again '
+        'when you rejoin.',
       ),
       findsOneWidget,
     );
@@ -2610,6 +2617,10 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(communityNotifier.removedIds, ['bravo']);
+    expect(
+      (await AccountIdentityStore().identities()).map((saved) => saved.pubkey),
+      [bravoKeys.public],
+    );
     expect(find.text('Switch Community'), findsOneWidget);
     expect(find.text('bravo'), findsNothing);
     expect(find.text('Done'), findsOneWidget);
@@ -2621,6 +2632,75 @@ void main() {
     expect(
       find.byKey(const Key('community-switcher-selection-alpha')),
       findsOneWidget,
+    );
+  });
+
+  testWidgets('a confirmed removal finishes after the switcher closes', (
+    tester,
+  ) async {
+    FlutterSecureStorage.setMockInitialValues({});
+    final keys = nostr.Keys.generate();
+    final communities = [
+      Community(
+        id: 'alpha',
+        name: 'Alpha',
+        relayUrl: 'wss://alpha.example.com',
+        addedAt: DateTime(2025),
+      ),
+      Community(
+        id: 'bravo',
+        name: 'Bravo',
+        relayUrl: 'wss://bravo.example.com',
+        addedAt: DateTime(2025),
+        pubkey: keys.public,
+        nsec: keys.nsec,
+      ),
+    ];
+    final communityNotifier = _FakeCommunityListNotifier(communities);
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          communityListProvider.overrideWith(() => communityNotifier),
+          activeCommunityProvider.overrideWith(
+            (ref) async => communities.first,
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('community-menu-switch')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Remove Bravo'));
+    await tester.pumpAndSettle();
+    // Hold saved-identity writes so the switcher closes mid-save.
+    final gate = Completer<void>();
+    final held = AccountIdentityStore(
+      storage: _HeldReadAllStorage(gate.future),
+    ).identities();
+    await tester.tap(find.widgetWithText(FilledButton, 'Remove'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Close community switcher'));
+    await tester.pumpAndSettle();
+    expect(find.text('Switch Community'), findsNothing);
+    expect(communityNotifier.removedIds, isEmpty);
+    gate.complete();
+    await held;
+    await tester.pumpAndSettle();
+    expect(communityNotifier.removedIds, ['bravo']);
+    expect(
+      (await AccountIdentityStore().identities()).map((saved) => saved.pubkey),
+      [keys.public],
     );
   });
 
@@ -5432,4 +5512,22 @@ class _RefusingCreateActions implements ChannelActions {
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _HeldReadAllStorage extends FlutterSecureStorage {
+  _HeldReadAllStorage(this.gate);
+  final Future<void> gate;
+
+  @override
+  Future<Map<String, String>> readAll({
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    await gate;
+    return {};
+  }
 }

@@ -274,15 +274,15 @@ void main() {
     expect(find.byType(SelfHostedEntrySheet), findsOneWidget);
     expect(find.text('Saved identity').hitTestable(), findsOneWidget);
     expect(find.text('Import a Nostr key').hitTestable(), findsOneWidget);
+    expect(find.text('Create a new identity and join'), findsOneWidget);
     Navigator.of(tester.element(find.byType(SelfHostedEntrySheet))).pop();
     await tester.pumpAndSettle();
-    // A failed bulk read must keep explicit import available, but not offer
-    // generation on the strength of a falsely empty inventory.
+    // A failed bulk read keeps import and a new identity available.
     inventoryStorage.failEnumeration = true;
     await tester.tap(find.text('Continue').hitTestable());
     await tester.pumpAndSettle();
     expect(find.text('Import a Nostr key').hitTestable(), findsOneWidget);
-    expect(find.text('Create an identity and join'), findsNothing);
+    expect(find.text('Create a new identity and join'), findsOneWidget);
     Navigator.of(tester.element(find.byType(SelfHostedEntrySheet))).pop();
     await tester.pumpAndSettle();
     await const FlutterSecureStorage().write(

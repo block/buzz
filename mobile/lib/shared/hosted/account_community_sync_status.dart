@@ -10,6 +10,7 @@ import 'hosted_flow_provider.dart';
 import 'hosted_relay_auth.dart';
 import 'known_community_sync_provider.dart';
 import 'known_community_address.dart';
+import 'sign_out.dart' show keepCommunityKey;
 
 /// Durable removals stay visible until the account service acknowledges them.
 final pendingAccountRemovalsProvider =
@@ -79,7 +80,7 @@ class AccountCommunitySyncStatus extends HookConsumerWidget {
                     context: context,
                     title: 'Finish removal?',
                     message:
-                        'Remove the remaining identities for ${Uri.parse(url).authority} from this device and sync account removal?',
+                        'Remove ${Uri.parse(url).authority} from this device and sync account removal? Its identities stay saved here.',
                     confirmLabel: 'Remove',
                   );
                   if (!confirmed ||
@@ -87,17 +88,18 @@ class AccountCommunitySyncStatus extends HookConsumerWidget {
                       account.account?.subject != subject) {
                     return;
                   }
+                  // The status may close while keys save; removal still runs.
+                  final communities = ref.read(communityListProvider.notifier);
                   try {
                     for (final item in local.where(
                       (c) => knownCommunityAddress(c.relayUrl) == url,
                     )) {
-                      await ref
-                          .read(communityListProvider.notifier)
-                          .removeCommunity(
-                            item.id,
-                            confirmedSubject: subject,
-                            accountConfirmed: true,
-                          );
+                      await keepCommunityKey(item);
+                      await communities.removeCommunity(
+                        item.id,
+                        confirmedSubject: subject,
+                        accountConfirmed: true,
+                      );
                     }
                     sync?.retry();
                   } catch (_) {

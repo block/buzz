@@ -100,6 +100,33 @@ void main() {
     },
   );
 
+  test('native create is accepted beside saved identities', () async {
+    var created = 0;
+    final shown = NativeCommunityEntry.show(
+      name: 'Preview',
+      dark: false,
+      primaryArgb: 0xFF007AFF,
+      choices: [DeviceIdentityChoice('a' * 64, 'Saved identity')],
+      connect: (pubkey, nsec, create, _) async {
+        expect(pubkey, isNull);
+        expect(nsec, isNull);
+        expect(create, true);
+        created++;
+      },
+    );
+    final config = await presented.future;
+    final args = <String, dynamic>{'session': config['session']};
+    expect((await action('join', {...args, 'create': true}))?['joined'], true);
+    expect(created, 1);
+    // A pubkey that is not among the choices is still refused.
+    expect(
+      (await action('join', {...args, 'pubkey': 'b' * 64}))?['error'],
+      'Choose an identity to continue.',
+    );
+    dismissed.complete(true);
+    expect(await shown, true);
+  });
+
   test(
     'native import requires preview and confirmation before connecting',
     () async {
