@@ -175,9 +175,46 @@ void iosControlsTests() {
         );
   });
   testWidgets(
+    'unavailable dictation hides mic but preserves send and voice notes',
+    (tester) async {
+      final available = Completer<bool>();
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('buzz/transcription'),
+        (call) => available.future,
+      );
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _FakeVoiceNoteUploadService(),
+          onSend: (_, _, {mediaTags = const []}) async {},
+        ),
+      );
+      await tester.pump();
+      expect(find.byTooltip('Dictate'), findsNothing);
+      available.complete(false);
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Dictate'), findsNothing);
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'Hello');
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Send'), findsOneWidget);
+      await tester.enterText(find.byType(TextField), '');
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Dictate'), findsNothing);
+      await _tapComposerControl(tester, 'Attachments');
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('attachment-menu-item-voice note')),
+        findsOneWidget,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  testWidgets(
     'microphone keeps recording controls and inserts a retryable transcript',
     (tester) async {
-      final speech = _ComposerSpeech()..available = false;
+      final speech = _ComposerSpeech();
       final files = _ComposerSpeechFiles();
       final prefs = _ComposerSpeechPrefs(_testPrefs);
       _testPrefs = prefs;
@@ -201,6 +238,8 @@ void iosControlsTests() {
       );
       await tester.pumpWidget(composer());
       await tester.pumpAndSettle();
+      // Availability can change after the control is presented.
+      speech.available = false;
       await _tapComposerControl(tester, 'Dictate');
       await tester.pumpAndSettle();
       expect(captures, 0);

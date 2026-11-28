@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -104,6 +105,9 @@ class DefaultAgentLauncher extends HookConsumerWidget {
 
     Widget withTranscription(Widget child) {
       if (scope.config.nsec?.isNotEmpty != true) return child;
+      if (defaultTargetPlatform == TargetPlatform.android) {
+        return NavigationButtonSurface(child: child);
+      }
       return BestieTranscriptionControl(
         key: ValueKey('transcription:${scope.cacheKey}'),
         scope: scope.cacheKey,

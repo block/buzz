@@ -296,7 +296,7 @@ class BestieTranscriptionSurface extends HookWidget {
                                                     height: 32,
                                                   ),
                                           ),
-                                          if (recording)
+                                          if (preparing || recording)
                                             const SizedBox(width: 48),
                                         ],
                                       ),
@@ -305,7 +305,8 @@ class BestieTranscriptionSurface extends HookWidget {
                                 ),
                         ),
                         // The avatar can itself own an iOS video platform view.
-                        // Keep it mounted at the same location throughout the hold.
+                        // Keep that view painted during preparation as well as recording.
+                        // Hiding it cancels the in-flight UIKit touch.
                         Positioned(
                           right: 0,
                           top: 0,
@@ -315,24 +316,21 @@ class BestieTranscriptionSurface extends HookWidget {
                             excluding: active,
                             child: IgnorePointer(
                               ignoring: active,
-                              child: Opacity(
-                                opacity: !active || recording ? 1 : 0,
-                                child: TooltipTheme(
-                                  data: TooltipTheme.of(context).copyWith(
-                                    triggerMode: TooltipTriggerMode.manual,
-                                  ),
-                                  child: finalizing || sending
-                                      ? Center(
-                                          child:
-                                              BestieTranscriptionLoadingIndicator(
-                                                semanticLabel: processingLabel,
-                                                size: 28,
-                                              ),
-                                        )
-                                      : recovering
-                                      ? const SizedBox.shrink()
-                                      : child,
+                              child: TooltipTheme(
+                                data: TooltipTheme.of(context).copyWith(
+                                  triggerMode: TooltipTriggerMode.manual,
                                 ),
+                                child: finalizing || sending
+                                    ? Center(
+                                        child:
+                                            BestieTranscriptionLoadingIndicator(
+                                              semanticLabel: processingLabel,
+                                              size: 28,
+                                            ),
+                                      )
+                                    : recovering
+                                    ? const SizedBox.shrink()
+                                    : child,
                               ),
                             ),
                           ),

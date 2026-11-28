@@ -1,7 +1,7 @@
 part of '../compose_bar.dart';
 
 /// Separate attachment and send circles flank the iOS text capsule.
-class _IosComposerControls extends StatelessWidget {
+class _IosComposerControls extends HookConsumerWidget {
   const _IosComposerControls({
     required this.child,
     required this.showSend,
@@ -20,45 +20,56 @@ class _IosComposerControls extends StatelessWidget {
   final VoidCallback onSend, onVoiceNote;
 
   @override
-  Widget build(BuildContext context) => TextFieldTapRegion(
-    child: Row(
-      key: const ValueKey('ios-composer-controls'),
-      crossAxisAlignment: CrossAxisAlignment.end,
-      children: [
-        _AttachmentTrigger(
-          key: const ValueKey('ios-composer-plus'),
-          size: 40,
-          enabled: enabled,
-          surface: attachmentSurface,
-          formattingOpen: false,
-          onTap: onAttachments,
-        ),
-        const SizedBox(width: 8),
-        Expanded(child: child),
-        ...[
-          const SizedBox(width: 8),
-          IosGlassNavigationButton(
-            icon: showSend
-                ? IosGlassNavigationIcon.send
-                : IosGlassNavigationIcon.microphone,
-            semanticLabel: showSend ? 'Send' : 'Dictate',
-            width: 40,
-            height: 40,
-            controlSize: 40,
-            iconSize: showSend ? 18 : 20,
-            isBusy: isSending,
-            backgroundColor: showSend ? context.colors.primary : null,
-            foregroundColor: showSend
-                ? context.colors.onPrimary
-                : context.colors.onSurface,
-            onPressed: showSend
-                ? (canSend && !isSending ? onSend : null)
-                : (enabled ? onVoiceNote : null),
+  Widget build(BuildContext context, WidgetRef ref) {
+    final factory = ref.watch(deviceTranscriptionProvider);
+    final availability = useMemoized(() async {
+      try {
+        return await factory().isAvailable();
+      } catch (_) {
+        return false;
+      }
+    }, [factory]);
+    final canDictate = useFuture(availability).data == true;
+    return TextFieldTapRegion(
+      child: Row(
+        key: const ValueKey('ios-composer-controls'),
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          _AttachmentTrigger(
+            key: const ValueKey('ios-composer-plus'),
+            size: 40,
+            enabled: enabled,
+            surface: attachmentSurface,
+            formattingOpen: false,
+            onTap: onAttachments,
           ),
+          const SizedBox(width: 8),
+          Expanded(child: child),
+          if (showSend || canDictate) ...[
+            const SizedBox(width: 8),
+            IosGlassNavigationButton(
+              icon: showSend
+                  ? IosGlassNavigationIcon.send
+                  : IosGlassNavigationIcon.microphone,
+              semanticLabel: showSend ? 'Send' : 'Dictate',
+              width: 40,
+              height: 40,
+              controlSize: 40,
+              iconSize: showSend ? 18 : 20,
+              isBusy: isSending,
+              backgroundColor: showSend ? context.colors.primary : null,
+              foregroundColor: showSend
+                  ? context.colors.onPrimary
+                  : context.colors.onSurface,
+              onPressed: showSend
+                  ? (canSend && !isSending ? onSend : null)
+                  : (enabled ? onVoiceNote : null),
+            ),
+          ],
         ],
-      ],
-    ),
-  );
+      ),
+    );
+  }
 }
 
 class _IosEmptyComposerActions extends StatelessWidget {

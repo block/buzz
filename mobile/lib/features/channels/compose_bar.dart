@@ -1,3 +1,4 @@
+import '../../shared/transcription/device_transcription.dart';
 import 'composer_geometry.dart';
 import 'composer_transcription.dart';
 
