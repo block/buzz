@@ -60,24 +60,23 @@ extension on _MessageList {
           if (current.isLoading || !identical(current.value, saved)) return;
         }
         opened.value = true;
-        final route = MaterialPageRoute<void>(
-          builder: (_) => ThreadDetailPage(
-            threadHead: head,
-            headFromSavedPage: channelHead == null,
-            allMessages: allMessages,
-            channelId: channelId,
-            currentPubkey: currentPubkey,
-            isMember: isMember,
-            isArchived: isArchived,
-            initialMessageId: initialMessageId,
-          ),
+        Widget thread(BuildContext _) => ThreadDetailPage(
+          threadHead: head,
+          headFromSavedPage: channelHead == null,
+          allMessages: allMessages,
+          channelId: channelId,
+          currentPubkey: currentPubkey,
+          isMember: isMember,
+          isArchived: isArchived,
+          initialMessageId: initialMessageId,
         );
-        final navigator = Navigator.of(context);
         switch (initialThreadRouteBehavior) {
           case InitialThreadRouteBehavior.push:
-            navigator.push(route);
+            openThreadPane(context, thread);
           case InitialThreadRouteBehavior.replaceCurrentRoute:
-            navigator.pushReplacement(route);
+            Navigator.of(
+              context,
+            ).pushReplacement(MaterialPageRoute<void>(builder: thread));
         }
       });
       return () => cancelled = true;

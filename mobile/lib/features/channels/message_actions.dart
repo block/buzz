@@ -21,6 +21,7 @@ import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/emoji/native_emoji_glyph.dart';
 import '../../shared/emoji/emoji_data_provider.dart';
+import '../../shared/widgets/adaptive_conversation_pane.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/modal_scroll_handoff.dart';
@@ -742,16 +743,15 @@ class _MessageQuickActionsRow extends ConsumerWidget {
               onReply!();
               return;
             }
-            Navigator.of(pageContext).push(
-              MaterialPageRoute<void>(
-                builder: (_) => ThreadDetailPage(
-                  threadHead: message,
-                  allMessages: messages,
-                  channelId: channelId,
-                  currentPubkey: currentPubkey,
-                  isMember: isMember,
-                  isArchived: isArchived,
-                ),
+            openThreadPane(
+              pageContext,
+              (_) => ThreadDetailPage(
+                threadHead: message,
+                allMessages: messages,
+                channelId: channelId,
+                currentPubkey: currentPubkey,
+                isMember: isMember,
+                isArchived: isArchived,
               ),
             );
           },

@@ -13,6 +13,7 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../theme/theme.dart';
 import 'buzz_navigation_metrics.dart';
+import 'conversation_sidebar.dart';
 import 'directional_transition_scope.dart';
 import 'frosted_scroll_under_scope.dart';
 import 'ios_glass_navigation_button.dart';
@@ -321,7 +322,6 @@ class FrostedAppBar extends StatelessWidget {
       final strip = toolbarScope == null
           ? FoldGeometry.of(context).strip
           : toolbarScope.strip;
-      final leadingAction = nativeLeading ?? _nativeAction(leading);
       final onBack =
           automaticallyImplyLeading &&
               leading == null &&
@@ -330,6 +330,13 @@ class FrostedAppBar extends StatelessWidget {
               Navigator.of(context).maybePop();
             }
           : null;
+      final sidebar = onBack == null && leading == null
+          ? conversationSidebarToggleOf(context)
+          : null;
+      final leadingAction =
+          nativeLeading ??
+          _nativeAction(leading) ??
+          (sidebar == null ? null : conversationSidebarAction(sidebar));
       final trailingActions =
           nativeActions ??
           actions.map(_nativeAction).whereType<IosNavigationAction>().toList();
@@ -624,7 +631,10 @@ class FrostedAppBar extends StatelessWidget {
                         tooltip: 'Back',
                       ),
                     )
-            : null);
+            : switch (conversationSidebarToggleOf(context)) {
+                final sidebar? => conversationSidebarButton(sidebar),
+                null => null,
+              });
 
     final titleRow = SizedBox(
       height: barContentHeight,

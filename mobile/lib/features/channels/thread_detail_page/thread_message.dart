@@ -54,16 +54,15 @@ class _ThreadMessage extends HookConsumerWidget {
         : onReply ??
               () {
                 if (!context.mounted) return;
-                Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => ThreadDetailPage(
-                      threadHead: message,
-                      allMessages: replyMessages,
-                      channelId: channelId,
-                      currentPubkey: currentPubkey,
-                      isMember: isMember,
-                      isArchived: isArchived,
-                    ),
+                openThreadPane(
+                  context,
+                  (_) => ThreadDetailPage(
+                    threadHead: message,
+                    allMessages: replyMessages,
+                    channelId: channelId,
+                    currentPubkey: currentPubkey,
+                    isMember: isMember,
+                    isArchived: isArchived,
                   ),
                 );
               };
