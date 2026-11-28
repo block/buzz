@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:characters/characters.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -39,14 +40,19 @@ class ReminderTarget {
   };
 }
 
-/// Build the NIP-ER reminder plaintext for a new pending reminder.
+/// Longest reminder note, in characters, matching the desktop editor.
+const maxReminderNoteLength = 4096;
+
+/// Build the NIP-ER reminder plaintext for a pending reminder.
 ///
 /// Matches the JSON desktop writes in `reminderService.ts#createReminder`:
 /// `{"target": {...}, "note": <optional>, "status": "pending"}`. `note` is
 /// omitted entirely when absent so both clients parse each other's payloads.
-String buildReminderPlaintext({required ReminderTarget target, String? note}) {
+/// A written reminder has no [target] and so no `target` key at all; its
+/// [note] is then the whole reminder.
+String buildReminderPlaintext({ReminderTarget? target, String? note}) {
   return jsonEncode({
-    'target': target.toJson(),
+    if (target != null) 'target': target.toJson(),
     if (note != null && note.isNotEmpty) 'note': note,
     'status': 'pending',
   });
@@ -93,7 +99,7 @@ class ReminderCrypto {
       nip44Decrypt(_conversationKey, ciphertext);
 }
 
-/// Creates author-private kind-30300 reminders on the relay.
+/// Writes author-private kind-30300 reminders on the relay.
 class ReminderService {
   final SignedEventRelay _signedEventRelay;
   final ReminderCrypto _crypto;
@@ -114,16 +120,68 @@ class ReminderService {
     required int notBefore,
     String? note,
     String? replacingDTag,
+  }) async => _publish(
+    plaintext: buildReminderPlaintext(target: target, note: note),
+    dTag: replacingDTag ?? randomReminderDTag(),
+    notBefore: notBefore,
+  );
+
+  /// Publish a written reminder that points at no message: [text] becomes the
+  /// reminder's `note`, trimmed, and the content carries no `target` key.
+  /// Throws [ArgumentError] for blank or over-long text.
+  Future<void> createTextReminder({
+    required String text,
+    required int notBefore,
+  }) async => _publish(
+    plaintext: buildReminderPlaintext(note: _checkedNote(text, required: true)),
+    dTag: randomReminderDTag(),
+    notBefore: notBefore,
+  );
+
+  /// Replace a pending reminder's note, keeping its [dTag], [target] and
+  /// [notBefore] as they are. A blank [note] removes the note key; that is
+  /// only allowed while a [target] remains, because a written reminder is
+  /// its note. Throws [ArgumentError] for blank text on a written reminder or
+  /// text over [maxReminderNoteLength].
+  Future<void> updateReminderNote({
+    required String dTag,
+    required int notBefore,
+    required String? note,
+    ReminderTarget? target,
+  }) async => _publish(
+    plaintext: buildReminderPlaintext(
+      target: target,
+      note: _checkedNote(note ?? '', required: target == null),
+    ),
+    dTag: dTag,
+    notBefore: notBefore,
+  );
+
+  /// The trimmed note, or null when blank and not [required].
+  String? _checkedNote(String raw, {required bool required}) {
+    final note = raw.trim();
+    if (note.isEmpty) {
+      if (required) throw ArgumentError('A written reminder needs text');
+      return null;
+    }
+    if (note.characters.length > maxReminderNoteLength) {
+      throw ArgumentError(
+        'Reminder text is over $maxReminderNoteLength characters',
+      );
+    }
+    return note;
+  }
+
+  Future<void> _publish({
+    required String plaintext,
+    required String dTag,
+    required int notBefore,
   }) async {
-    final plaintext = buildReminderPlaintext(target: target, note: note);
     final ciphertext = _crypto.encrypt(plaintext);
     await _signedEventRelay.submit(
       kind: EventKind.eventReminder,
       content: ciphertext,
-      tags: buildReminderTags(
-        dTag: replacingDTag ?? randomReminderDTag(),
-        notBefore: notBefore,
-      ),
+      tags: buildReminderTags(dTag: dTag, notBefore: notBefore),
     );
   }
 }

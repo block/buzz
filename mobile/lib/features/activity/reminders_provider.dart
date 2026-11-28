@@ -6,25 +6,13 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/crypto/nip44.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/reminders/reminder_service.dart' show ReminderTarget;
+
+// One reminder-target shape, shared with the service that writes it.
+export '../../shared/reminders/reminder_service.dart' show ReminderTarget;
 
 /// NIP-ER event reminder kind — matches desktop's `KIND_EVENT_REMINDER`.
 const kindEventReminder = 30300;
-
-/// Message a reminder points at. Mirrors desktop's `ReminderTarget`.
-@immutable
-class ReminderTarget {
-  final String eventId;
-  final String channelId;
-  final String preview;
-  final String authorPubkey;
-
-  const ReminderTarget({
-    required this.eventId,
-    required this.channelId,
-    required this.preview,
-    required this.authorPubkey,
-  });
-}
 
 /// A decrypted NIP-ER reminder. Mirrors desktop's `Reminder`.
 @immutable

@@ -48,6 +48,7 @@ import '../../shared/read_state/read_state_format.dart';
 import '../../shared/reminders/remind_me_later_sheet.dart';
 import '../../shared/reminders/reminder_service.dart'
     show ReminderTarget, reminderServiceProvider;
+import '../../shared/reminders/reminder_text_sheet.dart';
 import '../channels/thread_follows/thread_follows_provider.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
@@ -59,7 +60,7 @@ import 'feed_item.dart';
 import 'inbox_item.dart';
 import 'inbox_local_state_provider.dart';
 import 'inbox_read_state.dart';
-import 'reminders_provider.dart' hide ReminderTarget;
+import 'reminders_provider.dart';
 
 part 'activity_page/header_actions.dart';
 part 'activity_page/inbox_row.dart';
@@ -514,6 +515,31 @@ class ActivityPage extends HookConsumerWidget {
       );
     }
 
+    void refreshReminders() =>
+        unawaited(ref.read(remindersProvider.notifier).refresh());
+
+    void newReminder() => showNewReminderSheet(
+      context: context,
+      ref: ref,
+      onSaved: refreshReminders,
+    );
+
+    void editReminder(Reminder reminder) {
+      final notBefore = reminder.notBefore;
+      if (notBefore == null) return;
+      showEditReminderSheet(
+        context: context,
+        ref: ref,
+        reminder: (
+          dTag: reminder.id,
+          notBefore: notBefore,
+          target: reminder.target,
+          note: reminder.note,
+        ),
+        onSaved: refreshReminders,
+      );
+    }
+
     Future<void> refresh() async {
       await Future.wait([
         ref.read(activityProvider.notifier).refresh(),
@@ -526,6 +552,8 @@ class ActivityPage extends HookConsumerWidget {
       body = _RemindersList(
         scrollController: scrollController,
         onOpen: openReminder,
+        onEdit: editReminder,
+        onNew: newReminder,
         onRefresh: refresh,
       );
     } else if (filter.value == InboxFilter.drafts) {
@@ -710,6 +738,23 @@ class ActivityPage extends HookConsumerWidget {
                             Expanded(
                               child: Text('Activity', style: headerTitleStyle),
                             ),
+                            if (filter.value == InboxFilter.reminders)
+                              defaultTargetPlatform == TargetPlatform.iOS
+                                  ? IosGlassNavigationButton(
+                                      icon: IosGlassNavigationIcon.plus,
+                                      semanticLabel: 'New reminder',
+                                      width: 44,
+                                      height: 44,
+                                      controlSize: 44,
+                                      foregroundColor:
+                                          navigationPrimaryForeground(context),
+                                      onPressed: newReminder,
+                                    )
+                                  : IconButton(
+                                      tooltip: 'New reminder',
+                                      icon: const Icon(BuzzIcons.plus),
+                                      onPressed: newReminder,
+                                    ),
                           ],
                         ),
                       ),
