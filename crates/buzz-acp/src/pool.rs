@@ -63,6 +63,22 @@ const MAX_HYDRATED_THREAD_ROOTS_PER_SCOPE: usize = 1024;
 pub struct SuccessfulSteerDelivery {
     pub event_id: String,
     pub session_id: String,
+    /// Message carrying the steered event's 👀 (the original, for an edit).
+    /// A steered event never joins a batch, so no `ReactionGuard` owns this;
+    /// the main loop clears it when the turn that took the steer ends.
+    pub reaction_target_id: String,
+}
+
+/// Where [`AgentPool::record_successful_steer`] recorded a delivery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SteerRecord {
+    /// Staged on the in-flight turn; it settles when that turn returns.
+    InFlightTurn,
+    /// The turn had already returned; recorded on the idle agent's matching
+    /// live session.
+    IdleSession,
+    /// Neither an in-flight turn nor a matching live session owns it.
+    Lost,
 }
 
 pub struct TaskMeta {
@@ -1261,7 +1277,8 @@ impl AgentPool {
         scope: &SessionScope,
         event_id: String,
         session_id: String,
-    ) -> bool {
+        reaction_target_id: String,
+    ) -> SteerRecord {
         if let Some(meta) = self
             .task_map
             .values_mut()
@@ -1271,19 +1288,20 @@ impl AgentPool {
                 .insert(SuccessfulSteerDelivery {
                     event_id,
                     session_id,
+                    reaction_target_id,
                 });
-            return true;
+            return SteerRecord::InFlightTurn;
         }
 
         let Some(agent) = self.agents.iter_mut().flatten().find(|agent| {
             agent.state.sessions.get(scope).map(String::as_str) == Some(session_id.as_str())
         }) else {
-            return false;
+            return SteerRecord::Lost;
         };
         agent
             .state
             .mark_scope_delivery_success(scope.clone(), false, [event_id], []);
-        true
+        SteerRecord::IdleSession
     }
 
     pub fn result_tx(&self) -> mpsc::UnboundedSender<PromptResult> {
@@ -5663,6 +5681,27 @@ async fn react_working(rest: &crate::relay::RestClient, event_ids: &[String]) {
     }
 }
 
+/// Fire-and-forget [`clear_reactions`] for messages that no `ReactionGuard`
+/// owns: natively steered events, which never join a batch.
+pub(crate) fn spawn_clear_reactions(
+    rest: Option<&crate::relay::RestClient>,
+    event_ids: impl IntoIterator<Item = String>,
+) {
+    let Some(rest) = rest else {
+        return;
+    };
+    // Two steered edits of one message share its id; clear it once.
+    let event_ids: Vec<String> = event_ids
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if event_ids.is_empty() {
+        return;
+    }
+    tokio::spawn(clear_reactions(rest.clone(), event_ids));
+}
+
 /// Fire-and-forget: remove both 👀 and 💬 from all events. Spawned on turn complete.
 /// Capped at `REACTION_CONCURRENCY` concurrent requests per chunk to avoid
 /// unbounded HTTP fan-out on large batches.
@@ -7906,11 +7945,15 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         // Model the adversarial ordering: the task result has already retired
         // its TaskMeta and returned the agent before the successful ack arrives.
         let mut pool = AgentPool::from_slots(vec![Some(agent)]);
-        assert!(pool.record_successful_steer(
-            &conv(channel_id),
-            steered_event_id.clone(),
-            "live-session".into(),
-        ));
+        assert_eq!(
+            pool.record_successful_steer(
+                &conv(channel_id),
+                steered_event_id.clone(),
+                "live-session".into(),
+                steered_event_id.clone(),
+            ),
+            SteerRecord::IdleSession
+        );
         let agent = pool
             .try_claim(Some(&conv(channel_id)))
             .expect("claim returned agent");
